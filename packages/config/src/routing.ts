@@ -1,3 +1,4 @@
+const nn = <T>(v: T): NonNullable<T> => v as NonNullable<T>;
 /**
  * Port of `ferrogate-config`'s `config/routing.rs` (inventory §5.4, "Routing"):
  * upstream-endpoint parsing and route-rule path rewriting / target-URI building.
@@ -171,14 +172,14 @@ function parseTargetPathQuery(pathQuery: string): string | null {
   let index = 0;
   // --- path: runs until `?` (query) or `#` (fragment) ---
   for (; index < bytes.length; index += 1) {
-    const byte = bytes[index]!;
+    const byte = nn(bytes[index]);
     if (byte === 0x3f /* ? */ || byte === 0x23 /* # */) break;
     if (!isUriPathByte(byte)) return null;
   }
   if (index < bytes.length && bytes[index] !== 0x23) {
     // `?` — the query runs to a `#` under the wider query byte set.
     for (index += 1; index < bytes.length; index += 1) {
-      const byte = bytes[index]!;
+      const byte = nn(bytes[index]);
       if (byte === 0x23 /* # */) break;
       if (!isUriQueryByte(byte)) return null;
     }

@@ -10,7 +10,12 @@
  * always returns `true`.
  */
 import { describe, expect, test } from "vitest";
-import { evaluateSchema, isValidSchema, jsonPointerExists, resolveJsonPointer } from "../src/index.js";
+import {
+  evaluateSchema,
+  isValidSchema,
+  jsonPointerExists,
+  resolveJsonPointer,
+} from "../src/index.js";
 
 describe("RFC 6901 pointers", () => {
   const doc = { a: { "b/c": [1, { "~x": true }] }, "": "empty-key" };
@@ -274,6 +279,7 @@ describe("evaluateSchema — boolean applicators", () => {
   test("if/then/else picks a branch", () => {
     const schema = {
       if: { properties: { kind: { const: "a" } }, required: ["kind"] },
+      // biome-ignore lint/suspicious/noThenProperty: `then` is a JSON Schema if/then/else keyword here, not a thenable — this plain data object is never awaited
       then: { required: ["a_field"] },
       else: { required: ["other_field"] },
     };

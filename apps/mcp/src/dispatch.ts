@@ -23,36 +23,37 @@
  * That absence is the "unjoinable action" signal, counted per authenticated
  * tenant and surface.
  */
-import type { JsonValue } from "@ferrogate/core";
+
 import { assetEgressTargetId } from "@ferrogate/billing";
+import type { JsonValue } from "@ferrogate/core";
 
 import { mcpJsonRpcMethodScopes } from "./contract.js";
 import {
+  JsonRpcErrorCode,
+  type JsonRpcResponse,
+  type McpIngressRequest,
   decodeMcpRequest,
   jsonRpcError,
   jsonRpcResult,
-  JsonRpcErrorCode,
   mcpErrorCode,
   renderJsonRpcResponse,
-  type JsonRpcResponse,
-  type McpIngressRequest,
 } from "./jsonrpc.js";
+import { type DispatchContext, type McpPorts, hasScope, isJsonObjectValue } from "./ports.js";
 import {
-  completeModernResult,
   FERROGATE_SERVER_INFO,
+  MCP_PROTOCOL_VERSION,
+  SERVER_INFO_META,
+  SUPPORTED_MCP_PROTOCOL_VERSIONS,
+  completeModernResult,
   ingressErrorCode,
   ingressErrorData,
   ingressErrorDisplay,
   ingressErrorMessage,
   ingressMode,
   isSupportedModernMethod,
-  MCP_PROTOCOL_VERSION,
   negotiateProtocolVersion,
-  SERVER_INFO_META,
-  SUPPORTED_MCP_PROTOCOL_VERSIONS,
   validateIngress,
 } from "./protocol.js";
-import { hasScope, isJsonObjectValue, type DispatchContext, type McpPorts } from "./ports.js";
 import {
   assetContentEntry,
   assetUri,
@@ -252,7 +253,7 @@ export async function handleRequest(
   switch (rpc.method) {
     case "initialize": {
       const params = isJsonObjectValue(rpc.params) ? rpc.params : {};
-      const rawRequested = params["protocolVersion"];
+      const rawRequested = params.protocolVersion;
       const requested = typeof rawRequested === "string" ? rawRequested : undefined;
       const negotiated = negotiateProtocolVersion(requested);
       const downgraded = requested !== undefined && requested !== negotiated;
@@ -380,7 +381,7 @@ async function resourcesList(
       "assets require a tenant-attributed API key",
     );
   }
-  let assets;
+  let assets: Awaited<ReturnType<typeof ports.assets.list>>;
   try {
     assets = await ports.assets.list(tenantId);
   } catch (cause) {
@@ -424,7 +425,7 @@ async function resourcesRead(
   rpc: McpIngressRequest,
 ): Promise<JsonRpcResponse> {
   const params = isJsonObjectValue(rpc.params) ? rpc.params : {};
-  const uri = params["uri"];
+  const uri = params.uri;
   if (typeof uri !== "string") {
     return jsonRpcError(
       rpc.id,
@@ -448,13 +449,7 @@ async function resourcesRead(
       "assets require a tenant-attributed API key",
     );
   }
-  const read = await readAssetForMcp(
-    ports,
-    context,
-    parsed.assetType,
-    parsed.name,
-    parsed.version,
-  );
+  const read = await readAssetForMcp(ports, context, parsed.assetType, parsed.name, parsed.version);
   if (!read.ok) {
     if (read.kind === "quota") {
       return jsonRpcError(rpc.id, mcpErrorCode(read.error.code), read.error.message);

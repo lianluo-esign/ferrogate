@@ -1,17 +1,4 @@
-// Payment-methods ops surface (issue #319): list a tenant's stored payment
-// methods (/admin/v1/payment-methods?tenant_id=…), register a new one (POST),
-// and remove one (DELETE /admin/v1/payment-methods/{id}).
-//
-// Contract wrinkle: the gateway's list endpoint REQUIRES a `tenant_id` query
-// parameter at runtime (a payment method's id alone doesn't reveal its tenant),
-// but the generated OpenAPI contract omits that query param — so this one call
-// widens the typed options to carry it. Every other call is fully typed.
-import { useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { toast } from "sonner";
 import { EntityReferencePicker } from "@/components/resource/entity-reference-picker";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -22,6 +9,8 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
@@ -43,11 +32,22 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { useAuth } from "@/hooks/use-auth";
-import { useI18n } from "@/i18n";
 import { useFormatUnix } from "@/hooks/use-format-unix";
 import { useOperatorError } from "@/hooks/use-operator-error";
-import { adminDelete, adminGet, adminPost, type AdminSchema } from "@/lib/gateway-client";
+import { useI18n } from "@/i18n";
+import { type AdminSchema, adminDelete, adminGet, adminPost } from "@/lib/gateway-client";
 import { DISABLED_WHEN_STATUS_NOT_ACTIVE } from "@/lib/resource-config";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+// Payment-methods ops surface (issue #319): list a tenant's stored payment
+// methods (/admin/v1/payment-methods?tenant_id=…), register a new one (POST),
+// and remove one (DELETE /admin/v1/payment-methods/{id}).
+//
+// Contract wrinkle: the gateway's list endpoint REQUIRES a `tenant_id` query
+// parameter at runtime (a payment method's id alone doesn't reveal its tenant),
+// but the generated OpenAPI contract omits that query param — so this one call
+// widens the typed options to carry it. Every other call is fully typed.
+import { useState } from "react";
+import { toast } from "sonner";
 
 type AdminPaymentMethod = AdminSchema<"AdminPaymentMethod">;
 
@@ -55,7 +55,7 @@ function CreatePaymentMethodDialog({ tenantId }: { tenantId: string }) {
   const { session } = useAuth();
   const { t } = useI18n();
   const { toastError } = useOperatorError();
-  const apiKey = session!.gatewayApiKey;
+  const apiKey = (session as NonNullable<typeof session>).gatewayApiKey;
   const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
   const [provider, setProvider] = useState("");
@@ -64,8 +64,7 @@ function CreatePaymentMethodDialog({ tenantId }: { tenantId: string }) {
   const [isDefault, setIsDefault] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const invalid =
-    provider.trim() === "" || customerId.trim() === "" || methodId.trim() === "";
+  const invalid = provider.trim() === "" || customerId.trim() === "" || methodId.trim() === "";
 
   const mutation = useMutation({
     mutationFn: () =>
@@ -106,9 +105,7 @@ function CreatePaymentMethodDialog({ tenantId }: { tenantId: string }) {
         </DialogHeader>
         <div className="grid gap-4">
           <div className="grid gap-2">
-            <Label htmlFor="pm-provider">
-              {t("page.billingPaymentMethods.field.provider")}
-            </Label>
+            <Label htmlFor="pm-provider">{t("page.billingPaymentMethods.field.provider")}</Label>
             <Input
               id="pm-provider"
               placeholder={t("page.billingPaymentMethods.placeholder.provider")}
@@ -117,9 +114,7 @@ function CreatePaymentMethodDialog({ tenantId }: { tenantId: string }) {
             />
           </div>
           <div className="grid gap-2">
-            <Label htmlFor="pm-customer">
-              {t("page.billingPaymentMethods.field.customer")}
-            </Label>
+            <Label htmlFor="pm-customer">{t("page.billingPaymentMethods.field.customer")}</Label>
             <Input
               id="pm-customer"
               placeholder={t("page.billingPaymentMethods.placeholder.customer")}
@@ -128,9 +123,7 @@ function CreatePaymentMethodDialog({ tenantId }: { tenantId: string }) {
             />
           </div>
           <div className="grid gap-2">
-            <Label htmlFor="pm-method">
-              {t("page.billingPaymentMethods.field.method")}
-            </Label>
+            <Label htmlFor="pm-method">{t("page.billingPaymentMethods.field.method")}</Label>
             <Input
               id="pm-method"
               placeholder={t("page.billingPaymentMethods.placeholder.method")}
@@ -144,12 +137,13 @@ function CreatePaymentMethodDialog({ tenantId }: { tenantId: string }) {
               checked={isDefault}
               onCheckedChange={(checked) => setIsDefault(checked === true)}
             />
-            <Label htmlFor="pm-default">
-              {t("page.billingPaymentMethods.field.default")}
-            </Label>
+            <Label htmlFor="pm-default">{t("page.billingPaymentMethods.field.default")}</Label>
           </div>
           {error ? (
-            <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+            <p
+              role="alert"
+              className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+            >
               {error}
             </p>
           ) : null}
@@ -178,7 +172,7 @@ export default function BillingPaymentMethodsPage() {
   const { t } = useI18n();
   const formatUnix = useFormatUnix("—");
   const { toastError } = useOperatorError();
-  const apiKey = session!.gatewayApiKey;
+  const apiKey = (session as NonNullable<typeof session>).gatewayApiKey;
   const queryClient = useQueryClient();
 
   const [tenantId, setTenantId] = useState<string | null>(null);
@@ -215,9 +209,7 @@ export default function BillingPaymentMethodsPage() {
   return (
     <div className="flex flex-col gap-4">
       <div>
-        <h1 className="text-lg font-semibold">
-          {t("page.billingPaymentMethods.title")}
-        </h1>
+        <h1 className="text-lg font-semibold">{t("page.billingPaymentMethods.title")}</h1>
         <p className="text-sm text-muted-foreground">
           {t("page.billingPaymentMethods.description")}
         </p>
@@ -244,16 +236,17 @@ export default function BillingPaymentMethodsPage() {
             value={tenantId ?? ""}
             dependencyValues={{}}
             placeholder={t("page.billingPaymentMethods.tenantIdPlaceholder")}
-            onChange={(value) =>
-              setTenantId(typeof value === "string" && value ? value : null)
-            }
+            onChange={(value) => setTenantId(typeof value === "string" && value ? value : null)}
           />
         </div>
         {tenantId ? <CreatePaymentMethodDialog tenantId={tenantId} /> : null}
       </div>
 
       {error ? (
-        <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <p
+          role="alert"
+          className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+        >
           {t("page.billingPaymentMethods.loadError", {
             message: (error as Error).message,
           })}
@@ -261,9 +254,7 @@ export default function BillingPaymentMethodsPage() {
       ) : null}
 
       {tenantId === null ? (
-        <p className="text-sm text-muted-foreground">
-          {t("page.billingPaymentMethods.prompt")}
-        </p>
+        <p className="text-sm text-muted-foreground">{t("page.billingPaymentMethods.prompt")}</p>
       ) : (
         <div className="rounded-md border">
           <Table>
@@ -311,9 +302,7 @@ export default function BillingPaymentMethodsPage() {
                         <span className="text-muted-foreground">—</span>
                       )}
                     </TableCell>
-                    <TableCell className="text-xs">
-                      {formatUnix(method.created_at_unix)}
-                    </TableCell>
+                    <TableCell className="text-xs">{formatUnix(method.created_at_unix)}</TableCell>
                     <TableCell>
                       <Button
                         variant="destructive"
@@ -337,9 +326,7 @@ export default function BillingPaymentMethodsPage() {
       >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>
-              {t("page.billingPaymentMethods.deleteTitle")}
-            </AlertDialogTitle>
+            <AlertDialogTitle>{t("page.billingPaymentMethods.deleteTitle")}</AlertDialogTitle>
             <AlertDialogDescription>
               {t("page.billingPaymentMethods.deleteDescription", {
                 id: pendingDelete?.id ?? "",

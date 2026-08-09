@@ -102,9 +102,10 @@ interface PolicyOverrides {
 let nextRevision = 1;
 
 function revisionDocument(overrides: PolicyOverrides = {}): Record<string, unknown> {
+  nextRevision += 1;
   return {
     policy_id: "policy-a2a-fleet",
-    revision: (nextRevision += 1),
+    revision: nextRevision,
     name: "fleet-exfiltration",
     description: null,
     enforced: true,

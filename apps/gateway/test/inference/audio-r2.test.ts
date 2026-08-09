@@ -133,7 +133,7 @@ async function seedRecording(options: SeedOptions = {}): Promise<StoredAsset> {
     version,
     content_type: "audio/wav",
     content_hash: "0".repeat(64),
-    size_bytes: options.declaredSize ?? (bytes?.byteLength ?? 0),
+    size_bytes: options.declaredSize ?? bytes?.byteLength ?? 0,
     storage_uri: key,
     variant: "",
     yanked: options.yanked ?? false,
@@ -199,7 +199,7 @@ let ai: RecordingAi;
 
 beforeEach(async () => {
   ai = new RecordingAi();
-  (env as unknown as Record<string, unknown>)["AI"] = ai;
+  (env as unknown as Record<string, unknown>).AI = ai;
   await bindings.DB.exec("DELETE FROM stored_assets");
   for (const tenantId of [TENANT, OTHER_TENANT]) {
     const tenant = tenantObjectDb(tenantId);
@@ -242,8 +242,8 @@ describe("an upload ABOVE the inline ceiling is transcribed by reference", () =>
     expect(served.status).toBe(200);
     expect(await served.json()).toEqual({ text: "the transcript" });
     // The provider really saw the recording's bytes, not an empty part.
-    expect(typeof ai.runs.at(-1)?.input["audio"]).toBe("string");
-    expect((ai.runs.at(-1)?.input["audio"] as string).length).toBeGreaterThan(0);
+    expect(typeof ai.runs.at(-1)?.input.audio).toBe("string");
+    expect((ai.runs.at(-1)?.input.audio as string).length).toBeGreaterThan(0);
   });
 
   it("meters the reference upload on the same rail as an inline one", async () => {
@@ -267,7 +267,7 @@ describe("an upload ABOVE the inline ceiling is transcribed by reference", () =>
       "/v1/audio/translations",
     );
     expect(res.status).toBe(200);
-    expect(ai.runs.at(-1)?.input["task"]).toBe("translate");
+    expect(ai.runs.at(-1)?.input.task).toBe("translate");
   });
 });
 
@@ -316,7 +316,13 @@ describe("a reference cannot cross a tenant boundary", () => {
     // reachable through a corrupted registry, an operator's manual edit, or any
     // future write path that derives a key from something other than the
     // caller. Without the guard the id check alone would happily read it.
-    const victim = { tenantId: OTHER_TENANT, assetType: "recording", name: "secret", version: "1.0.0", variant: "" };
+    const victim = {
+      tenantId: OTHER_TENANT,
+      assetType: "recording",
+      name: "secret",
+      version: "1.0.0",
+      variant: "",
+    };
     const foreignKey = newAssetObjectKey(victim);
     await objects.put(foreignKey, audioBytes(64) as unknown as ArrayBuffer, {
       httpMetadata: { contentType: "audio/wav" },
@@ -507,7 +513,7 @@ describe("the deployed Worker resolves a file_ref from its own bindings", () => 
     expect(await res.json()).toEqual({ text: "the transcript" });
     // The bytes came out of R2, not out of the request: the request carried two
     // short text fields and nothing else.
-    expect(typeof ai.runs.at(-1)?.input["audio"]).toBe("string");
+    expect(typeof ai.runs.at(-1)?.input.audio).toBe("string");
   });
 
   it("refuses another tenant's recording through the deployed guard too", async () => {

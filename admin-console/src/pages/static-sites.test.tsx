@@ -1,10 +1,3 @@
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
-import { QueryClientProvider } from "@tanstack/react-query";
-import { HttpResponse, http } from "msw";
-import { MemoryRouter, useLocation } from "react-router-dom";
-import { toast } from "sonner";
-import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthProvider } from "@/hooks/use-auth";
 import { I18nProvider, type Locale } from "@/i18n";
 import { en } from "@/i18n/locales/en";
@@ -13,6 +6,14 @@ import type { AdminSchema } from "@/lib/gateway-client";
 import StaticSitesPage from "@/pages/static-sites";
 import { gatewayUrl, server } from "@/test/msw";
 import { createTestQueryClient, renderWithProviders, seedSession } from "@/test/test-utils";
+import { QueryClientProvider } from "@tanstack/react-query";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { http, HttpResponse } from "msw";
+import { MemoryRouter, useLocation } from "react-router-dom";
+import { toast } from "sonner";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+const nn = <T,>(v: T): NonNullable<T> => v as NonNullable<T>;
 
 // Surfaces the live location so URL-state assertions can read the query the
 // page writes as the operator picks a tenant/site/version or opens a site.
@@ -53,11 +54,7 @@ function siteFileVersion(bundleVersion: string, path: string): string {
   return `${SITE_FILE_VERSION_PREFIX}:${bundleVersion}:${path}`;
 }
 
-function siteAsset(
-  name: string,
-  version: string,
-  createdAtUnix = 1000,
-): AssetSummary {
+function siteAsset(name: string, version: string, createdAtUnix = 1000): AssetSummary {
   return {
     id: `tenant-1:static_site:${name}:${version}`,
     asset_type: "static_site",
@@ -94,8 +91,18 @@ function manifest(overrides: Partial<SiteManifestBody> = {}): SiteManifestBody {
     spa_fallback: true,
     cache_control: "public, max-age=600",
     files: [
-      { path: "index.html", content_type: "text/html", content_hash: "b".repeat(64), size_bytes: 2048 },
-      { path: "app.js", content_type: "text/javascript", content_hash: "c".repeat(64), size_bytes: 4096 },
+      {
+        path: "index.html",
+        content_type: "text/html",
+        content_hash: "b".repeat(64),
+        size_bytes: 2048,
+      },
+      {
+        path: "app.js",
+        content_type: "text/javascript",
+        content_hash: "c".repeat(64),
+        size_bytes: 4096,
+      },
     ],
     created_at_unix: 1000,
     updated_at_unix: 1_700_000_000,
@@ -153,11 +160,7 @@ function assetRowsFor(fixture: SiteFixture): AssetSummary[] {
     ),
   ]);
   rows.push(
-    siteAsset(
-      fixture.site,
-      SITE_MANIFEST_VERSION,
-      fixture.bundles[0]?.createdAtUnix ?? 1000,
-    ),
+    siteAsset(fixture.site, SITE_MANIFEST_VERSION, fixture.bundles[0]?.createdAtUnix ?? 1000),
   );
   return rows;
 }
@@ -240,8 +243,7 @@ function marketingFixture(overrides: Partial<SiteFixture> = {}): SiteFixture {
  * model a gateway that reports neither still overrides them to `undefined`
  * explicitly, which is a visible choice rather than an omission.
  */
-type WireSiteDomain = SiteDomain &
-  Required<Pick<SiteDomain, "verification_state" | "serving">>;
+type WireSiteDomain = SiteDomain & Required<Pick<SiteDomain, "verification_state" | "serving">>;
 
 const BOUND_DOMAIN: WireSiteDomain = {
   object: "site_domain",
@@ -263,9 +265,7 @@ function domain(overrides: Partial<SiteDomain> = {}): SiteDomain {
 /** The #488 ownership-proof block `GET /admin/v1/site-domains/{hostname}`
  * returns alongside a binding: the exact `_ferrogate-challenge.{hostname}` TXT
  * record still to be published, plus when its token expires. */
-function pendingVerification(
-  binding: SiteDomain,
-): AdminSchema<"AdminSiteDomainVerification"> {
+function pendingVerification(binding: SiteDomain): AdminSchema<"AdminSiteDomainVerification"> {
   return {
     object: "site_domain_verification",
     state: "pending_verification",
@@ -325,28 +325,28 @@ function withheldAsset(
   };
 }
 
-function mockBase(options: {
-  sites?: SiteFixture[];
-  domains?: SiteDomain[];
-  /** ACME posture returned by `GET /admin/v1/site-domains/{hostname}`. */
-  acmeEnabled?: boolean;
-  /** Rows the withheld listing returns. Empty by default — the ordinary case,
-   * where nothing the tenant pushed was withheld by screening. */
-  withheld?: AdminSchema<"WithheldAssetSummary">[];
-} = {}) {
+function mockBase(
+  options: {
+    sites?: SiteFixture[];
+    domains?: SiteDomain[];
+    /** ACME posture returned by `GET /admin/v1/site-domains/{hostname}`. */
+    acmeEnabled?: boolean;
+    /** Rows the withheld listing returns. Empty by default — the ordinary case,
+     * where nothing the tenant pushed was withheld by screening. */
+    withheld?: AdminSchema<"WithheldAssetSummary">[];
+  } = {},
+) {
   const sites = options.sites ?? [];
   const siteHandlers = sites.flatMap((fixture) => [
     http.get(gatewayUrl(`/v1/assets/static_site/${fixture.site}/manifest`), () =>
       HttpResponse.json(registryFor(fixture)),
     ),
-    http.get(
-      gatewayUrl(`/v1/assets/static_site/${fixture.site}/${SITE_MANIFEST_VERSION}`),
-      () => HttpResponse.json(fixture.marker ?? fixture.bundles[0].manifest),
+    http.get(gatewayUrl(`/v1/assets/static_site/${fixture.site}/${SITE_MANIFEST_VERSION}`), () =>
+      HttpResponse.json(fixture.marker ?? fixture.bundles[0].manifest),
     ),
     ...fixture.bundles.map((bundle) =>
-      http.get(
-        gatewayUrl(`/v1/assets/static_site/${fixture.site}/${bundle.version}`),
-        () => HttpResponse.json(bundle.manifest),
+      http.get(gatewayUrl(`/v1/assets/static_site/${fixture.site}/${bundle.version}`), () =>
+        HttpResponse.json(bundle.manifest),
       ),
     ),
   ]);
@@ -398,7 +398,10 @@ function mockBase(options: {
       });
     }),
     http.get(gatewayUrl("/admin/v1/tenant-accounts/tenant-1"), () =>
-      HttpResponse.json({ object: "tenant", tenant: { id: "tenant-1", name: "Acme", slug: "acme" } }),
+      HttpResponse.json({
+        object: "tenant",
+        tenant: { id: "tenant-1", name: "Acme", slug: "acme" },
+      }),
     ),
   );
 }
@@ -558,8 +561,7 @@ describe("StaticSitesPage", () => {
 
   it("surfaces a gateway rejection verbatim", async () => {
     mockBase();
-    const gatewayMessage =
-      "index.html: rejected by scan (EICAR test signature detected)";
+    const gatewayMessage = "index.html: rejected by scan (EICAR test signature detected)";
     server.use(
       http.put(gatewayUrl("/v1/assets/static_site/tainted/1.0.0"), () =>
         HttpResponse.json(
@@ -626,18 +628,14 @@ describe("StaticSitesPage served-bundle fidelity", () => {
 
     const row = await screen.findByTestId("static-site-marketing");
     await within(row).findByText("2.0.0");
-    await user.click(
-      within(row).getByRole("button", { name: en["resource.table.moreDetails"] }),
-    );
+    await user.click(within(row).getByRole("button", { name: en["resource.table.moreDetails"] }));
     const drawer = await screen.findByRole("dialog");
 
     // Header describes the SERVED bundle (2.0.0, its single file)…
     expect(within(drawer).getByText(/Bundle 2\.0\.0/)).toBeInTheDocument();
     // …and the history badges that very same version Active.
     const activeRow = within(drawer).getByTestId("static-site-version-2.0.0");
-    expect(
-      within(activeRow).getByText(en["page.staticSites.history.active"]),
-    ).toBeInTheDocument();
+    expect(within(activeRow).getByText(en["page.staticSites.history.active"])).toBeInTheDocument();
     // The file tree is the served bundle's, so a per-file download's bytes match
     // the hash beside it: 2.1.0's app.js is not listed at all.
     expect(within(drawer).getByText("index.html")).toBeInTheDocument();
@@ -663,24 +661,17 @@ describe("StaticSitesPage served-bundle fidelity", () => {
     // exists but knows NOTHING about its policy.
     server.use(
       http.get(gatewayUrl("/v1/assets/static_site/marketing/2.1.0"), () =>
-        HttpResponse.json(
-          { error: { code: "asset_not_found", message: "gone" } },
-          { status: 404 },
-        ),
+        HttpResponse.json({ error: { code: "asset_not_found", message: "gone" } }, { status: 404 }),
       ),
     );
     renderWithProviders(<StaticSitesPage />);
 
     const row = await screen.findByTestId("static-site-marketing");
     // Access honestly reports the manifest is unavailable…
-    expect(
-      await within(row).findByText(en["page.staticSites.manifestError"]),
-    ).toBeInTheDocument();
+    expect(await within(row).findByText(en["page.staticSites.manifestError"])).toBeInTheDocument();
     // …so the Cache cell must NOT assert the `default` policy — it prints the
     // same em dash the files/bytes/published siblings do (#458/#464/#473).
-    expect(
-      within(row).queryByText(en["page.staticSites.cache.default"]),
-    ).toBeNull();
+    expect(within(row).queryByText(en["page.staticSites.cache.default"])).toBeNull();
     expect(within(row).getAllByText("—").length).toBeGreaterThanOrEqual(4);
   });
 
@@ -688,10 +679,7 @@ describe("StaticSitesPage served-bundle fidelity", () => {
     mockBase({ sites: [marketingFixture()] });
     server.use(
       http.get(gatewayUrl("/v1/assets/static_site/marketing/2.1.0"), () =>
-        HttpResponse.json(
-          { error: { code: "asset_not_found", message: "gone" } },
-          { status: 404 },
-        ),
+        HttpResponse.json({ error: { code: "asset_not_found", message: "gone" } }, { status: 404 }),
       ),
     );
     const user = userEvent.setup();
@@ -702,17 +690,11 @@ describe("StaticSitesPage served-bundle fidelity", () => {
     // The registry read succeeded, so the site's retained versions ARE known —
     // the drawer must open (a site stranded behind a disabled action could
     // never be purged, which is how retained bytes end up billed forever).
-    await user.click(
-      within(row).getByRole("button", { name: en["resource.table.moreDetails"] }),
-    );
+    await user.click(within(row).getByRole("button", { name: en["resource.table.moreDetails"] }));
     const drawer = await screen.findByRole("dialog");
     // Version history still renders from the registry…
-    expect(
-      within(drawer).getByTestId("static-site-version-2.1.0"),
-    ).toBeInTheDocument();
-    expect(
-      within(drawer).queryByText(en["page.staticSites.history.unavailable"]),
-    ).toBeNull();
+    expect(within(drawer).getByTestId("static-site-version-2.1.0")).toBeInTheDocument();
+    expect(within(drawer).queryByText(en["page.staticSites.history.unavailable"])).toBeNull();
     // …and Unpublish is armed, because the purge walks the registry.
     expect(
       within(drawer).getByRole("button", {
@@ -759,9 +741,7 @@ describe("StaticSitesPage publish target", () => {
     // (it stays an input so a FIRST publish can still name a new slug).
     const input = screen.getByLabelText("Site");
     expect(input).toHaveAttribute("list", "site-slug-options");
-    const options = document
-      .getElementById("site-slug-options")!
-      .querySelectorAll("option");
+    const options = nn(document.getElementById("site-slug-options")).querySelectorAll("option");
     // One option per SITE (not per asset row), alphabetically ordered.
     expect([...options].map((option) => option.getAttribute("value"))).toEqual([
       "blog",
@@ -836,9 +816,7 @@ describe("StaticSitesPage serve-URL affordance", () => {
 
     const row = await screen.findByTestId("static-site-marketing");
     await within(row).findByText("2.1.0");
-    await user.click(
-      within(row).getByRole("button", { name: en["resource.table.moreDetails"] }),
-    );
+    await user.click(within(row).getByRole("button", { name: en["resource.table.moreDetails"] }));
     const drawer = await screen.findByRole("dialog");
     const openLink = within(drawer).getByRole("link", {
       name: new RegExp(en["page.staticSites.serveUrl.open"]),
@@ -862,9 +840,7 @@ function stubDownloadPlumbing() {
   const originalRevoke = urlWithBlob.revokeObjectURL;
   urlWithBlob.createObjectURL = createObjectURL;
   urlWithBlob.revokeObjectURL = revokeObjectURL;
-  const clickSpy = vi
-    .spyOn(HTMLAnchorElement.prototype, "click")
-    .mockImplementation(() => {});
+  const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
   return {
     createObjectURL,
     clickSpy,
@@ -879,9 +855,7 @@ function stubDownloadPlumbing() {
 async function openMarketingDrawer(user: ReturnType<typeof userEvent.setup>) {
   const row = await screen.findByTestId("static-site-marketing");
   await within(row).findByText("2.1.0");
-  await user.click(
-    within(row).getByRole("button", { name: en["resource.table.moreDetails"] }),
-  );
+  await user.click(within(row).getByRole("button", { name: en["resource.table.moreDetails"] }));
   return screen.findByRole("dialog");
 }
 
@@ -911,9 +885,7 @@ describe("StaticSitesPage per-file download", () => {
         }),
       );
 
-      await waitFor(() =>
-        expect(requestedPath).toBe("/v1/assets/static_site/marketing/app.js"),
-      );
+      await waitFor(() => expect(requestedPath).toBe("/v1/assets/static_site/marketing/app.js"));
       // A blob URL was minted and a synthetic anchor click fired the save.
       expect(plumbing.createObjectURL).toHaveBeenCalledTimes(1);
       expect(plumbing.clickSpy).toHaveBeenCalledTimes(1);
@@ -964,9 +936,7 @@ describe("StaticSitesPage per-file download", () => {
 
     const row = await screen.findByTestId("static-site-marketing");
     await within(row).findByText("2.1.0");
-    await user.click(
-      within(row).getByRole("button", { name: zhCN["resource.table.moreDetails"] }),
-    );
+    await user.click(within(row).getByRole("button", { name: zhCN["resource.table.moreDetails"] }));
     const drawer = await screen.findByRole("dialog");
     expect(
       within(drawer).getByRole("link", {
@@ -1012,9 +982,7 @@ function installStatefulMarketing(
     /** Every delete, in the order the server received it. */
     order: [] as string[],
   };
-  const rowsByVersion = new Map(
-    assetRowsFor(fixture).map((row) => [row.version, row]),
-  );
+  const rowsByVersion = new Map(assetRowsFor(fixture).map((row) => [row.version, row]));
   server.use(
     http.get(gatewayUrl("/v1/assets"), () =>
       HttpResponse.json({
@@ -1041,9 +1009,7 @@ function installStatefulMarketing(
       ({ params }) => {
         const channel = params.channel as string;
         state.order.push(`channel:${channel}`);
-        state.channels = state.channels.filter(
-          (entry) => entry.channel !== channel,
-        );
+        state.channels = state.channels.filter((entry) => entry.channel !== channel);
         return HttpResponse.json({
           object: "asset_channel",
           id: `static_site/${fixture.site}/channels/${channel}`,
@@ -1051,47 +1017,44 @@ function installStatefulMarketing(
         });
       },
     ),
-    http.delete(
-      gatewayUrl(`/v1/assets/static_site/${fixture.site}/:version`),
-      ({ params }) => {
-        const version = params.version as string;
-        state.order.push(`version:${version}`);
-        const injected = options.failVersions?.[version];
-        if (injected !== undefined) {
-          return HttpResponse.json(
-            {
-              error: {
-                type: "ferrogate_error",
-                code: "storage_unavailable",
-                message: injected,
-                request_id: "req-down",
-              },
+    http.delete(gatewayUrl(`/v1/assets/static_site/${fixture.site}/:version`), ({ params }) => {
+      const version = params.version as string;
+      state.order.push(`version:${version}`);
+      const injected = options.failVersions?.[version];
+      if (injected !== undefined) {
+        return HttpResponse.json(
+          {
+            error: {
+              type: "ferrogate_error",
+              code: "storage_unavailable",
+              message: injected,
+              request_id: "req-down",
             },
-            { status: 503 },
-          );
-        }
-        // The gateway's refusal, verbatim in shape and code.
-        if (state.channels.some((entry) => entry.version === version)) {
-          return HttpResponse.json(
-            {
-              error: {
-                type: "ferrogate_error",
-                code: "asset_version_referenced",
-                message: `version ${version} is the last resolvable variant of a channel-referenced version; move or delete the channel first`,
-                request_id: "req-ref",
-              },
+          },
+          { status: 503 },
+        );
+      }
+      // The gateway's refusal, verbatim in shape and code.
+      if (state.channels.some((entry) => entry.version === version)) {
+        return HttpResponse.json(
+          {
+            error: {
+              type: "ferrogate_error",
+              code: "asset_version_referenced",
+              message: `version ${version} is the last resolvable variant of a channel-referenced version; move or delete the channel first`,
+              request_id: "req-ref",
             },
-            { status: 409 },
-          );
-        }
-        state.versions = state.versions.filter((entry) => entry !== version);
-        return HttpResponse.json({
-          object: "asset",
-          id: `static_site/${fixture.site}/${version}`,
-          deleted: true,
-        });
-      },
-    ),
+          },
+          { status: 409 },
+        );
+      }
+      state.versions = state.versions.filter((entry) => entry !== version);
+      return HttpResponse.json({
+        object: "asset",
+        id: `static_site/${fixture.site}/${version}`,
+        deleted: true,
+      });
+    }),
   );
   return state;
 }
@@ -1108,13 +1071,13 @@ describe("StaticSitesPage unpublish flow", () => {
     await within(row).findByText("2.1.0");
     await user.click(within(row).getByRole("button", { name: en["resource.table.moreDetails"] }));
     const drawer = await screen.findByRole("dialog");
-    await user.click(within(drawer).getByRole("button", { name: en["page.staticSites.unpublish.action"] }));
+    await user.click(
+      within(drawer).getByRole("button", { name: en["page.staticSites.unpublish.action"] }),
+    );
 
     // The confirm dialog names the site and stays disarmed until it is retyped.
     const confirmDialog = (
-      await screen.findByText(
-        en["page.staticSites.unpublish.title"].replace("{site}", "marketing"),
-      )
+      await screen.findByText(en["page.staticSites.unpublish.title"].replace("{site}", "marketing"))
     ).closest("[role='dialog']") as HTMLElement;
     const confirmButton = within(confirmDialog).getByRole("button", {
       name: en["page.staticSites.unpublish.action"],
@@ -1139,9 +1102,7 @@ describe("StaticSitesPage unpublish flow", () => {
     // toast a lie — and that is precisely what happens when the purge deletes
     // versions before the channel that references them: the served bundle's row
     // 409s and the channel + marker deletes never run.
-    await waitFor(() =>
-      expect(screen.queryByTestId("static-site-marketing")).toBeNull(),
-    );
+    await waitFor(() => expect(screen.queryByTestId("static-site-marketing")).toBeNull());
     expect(await screen.findByText("No published static sites.")).toBeInTheDocument();
 
     // Nothing survives server-side: no version rows, no channel pointer (a
@@ -1191,9 +1152,7 @@ describe("StaticSitesPage unpublish flow", () => {
 
     const row = await screen.findByTestId("static-site-marketing");
     await within(row).findByText("2.1.0");
-    await user.click(
-      within(row).getByRole("button", { name: en["resource.table.moreDetails"] }),
-    );
+    await user.click(within(row).getByRole("button", { name: en["resource.table.moreDetails"] }));
     const drawer = await screen.findByRole("dialog");
     await user.click(
       within(drawer).getByRole("button", {
@@ -1201,9 +1160,7 @@ describe("StaticSitesPage unpublish flow", () => {
       }),
     );
     const confirmDialog = (
-      await screen.findByText(
-        en["page.staticSites.unpublish.title"].replace("{site}", "marketing"),
-      )
+      await screen.findByText(en["page.staticSites.unpublish.title"].replace("{site}", "marketing"))
     ).closest("[role='dialog']") as HTMLElement;
     await user.type(
       within(confirmDialog).getByLabelText(
@@ -1320,10 +1277,7 @@ describe("StaticSitesPage upload progress", () => {
   });
 });
 
-async function openHistoryDrawer(
-  user: ReturnType<typeof userEvent.setup>,
-  moreDetails: string,
-) {
+async function openHistoryDrawer(user: ReturnType<typeof userEvent.setup>, moreDetails: string) {
   const row = await screen.findByTestId("static-site-marketing");
   await within(row).findByText("2.1.0");
   await user.click(within(row).getByRole("button", { name: moreDetails }));
@@ -1338,20 +1292,14 @@ describe("StaticSitesPage version history", () => {
     renderWithProviders(<StaticSitesPage />);
     const drawer = await openHistoryDrawer(user, en["resource.table.moreDetails"]);
 
-    expect(
-      within(drawer).getByText(en["page.staticSites.history.title"]),
-    ).toBeInTheDocument();
+    expect(within(drawer).getByText(en["page.staticSites.history.title"])).toBeInTheDocument();
 
     // Both retained bundle versions render as history rows.
     const activeRow = within(drawer).getByTestId("static-site-version-2.1.0");
     const priorRow = within(drawer).getByTestId("static-site-version-2.0.0");
     // The served version carries the Active badge; the prior version does not.
-    expect(
-      within(activeRow).getByText(en["page.staticSites.history.active"]),
-    ).toBeInTheDocument();
-    expect(
-      within(priorRow).queryByText(en["page.staticSites.history.active"]),
-    ).toBeNull();
+    expect(within(activeRow).getByText(en["page.staticSites.history.active"])).toBeInTheDocument();
+    expect(within(priorRow).queryByText(en["page.staticSites.history.active"])).toBeNull();
     // Only the non-active version offers a rollback button.
     expect(
       within(priorRow).getByRole("button", {
@@ -1386,16 +1334,10 @@ describe("StaticSitesPage version history", () => {
     renderWithProviders(<StaticSitesPage />);
     const drawer = await openHistoryDrawer(user, en["resource.table.moreDetails"]);
 
-    expect(
-      within(drawer).getByTestId("static-site-version-2.1.0"),
-    ).toBeInTheDocument();
+    expect(within(drawer).getByTestId("static-site-version-2.1.0")).toBeInTheDocument();
     // Neither the reserved marker nor the legacy bare file path is a bundle row.
-    expect(
-      within(drawer).queryByTestId("static-site-version-__site_manifest__"),
-    ).toBeNull();
-    expect(
-      within(drawer).queryByTestId("static-site-version-index.html"),
-    ).toBeNull();
+    expect(within(drawer).queryByTestId("static-site-version-__site_manifest__")).toBeNull();
+    expect(within(drawer).queryByTestId("static-site-version-index.html")).toBeNull();
   });
 
   it("renders version history in Simplified Chinese", async () => {
@@ -1404,9 +1346,7 @@ describe("StaticSitesPage version history", () => {
     renderWithProviders(<StaticSitesPage />, { locale: "zh-CN" });
     const drawer = await openHistoryDrawer(user, zhCN["resource.table.moreDetails"]);
 
-    expect(
-      within(drawer).getByText(zhCN["page.staticSites.history.title"]),
-    ).toBeInTheDocument();
+    expect(within(drawer).getByText(zhCN["page.staticSites.history.title"])).toBeInTheDocument();
     const activeRow = within(drawer).getByTestId("static-site-version-2.1.0");
     expect(
       within(activeRow).getByText(zhCN["page.staticSites.history.active"]),
@@ -1426,19 +1366,16 @@ describe("StaticSitesPage rollback", () => {
         registryReads += 1;
         return HttpResponse.json(registry);
       }),
-      http.put(
-        gatewayUrl("/v1/assets/static_site/marketing/channels/serving"),
-        ({ request }) => {
-          channelUrl = request.url;
-          channelMethod = request.method;
-          return HttpResponse.json({
-            object: "asset_channel",
-            asset_type: "static_site",
-            name: "marketing",
-            channel: { channel: "serving", version: "2.0.0", updated_at_unix: 3000 },
-          });
-        },
-      ),
+      http.put(gatewayUrl("/v1/assets/static_site/marketing/channels/serving"), ({ request }) => {
+        channelUrl = request.url;
+        channelMethod = request.method;
+        return HttpResponse.json({
+          object: "asset_channel",
+          asset_type: "static_site",
+          name: "marketing",
+          channel: { channel: "serving", version: "2.0.0", updated_at_unix: 3000 },
+        });
+      }),
     );
     const successToast = vi.spyOn(toast, "success");
     try {
@@ -1459,9 +1396,7 @@ describe("StaticSitesPage rollback", () => {
 
       // The confirm dialog names the exact target version + consequence.
       const confirmDialog = (
-        await screen.findByText(
-          en["page.staticSites.rollback.title"].replace("{version}", "2.0.0"),
-        )
+        await screen.findByText(en["page.staticSites.rollback.title"].replace("{version}", "2.0.0"))
       ).closest("[role='dialog']") as HTMLElement;
       await user.click(
         within(confirmDialog).getByRole("button", {
@@ -1472,7 +1407,7 @@ describe("StaticSitesPage rollback", () => {
       // A PUT moved the `serving` channel to 2.0.0 via the version= query.
       await waitFor(() => expect(channelUrl).not.toBeNull());
       expect(channelMethod).toBe("PUT");
-      const url = new URL(channelUrl!);
+      const url = new URL(channelUrl as NonNullable<typeof channelUrl>);
       expect(url.pathname).toBe("/v1/assets/static_site/marketing/channels/serving");
       expect(url.searchParams.get("version")).toBe("2.0.0");
       // Success toast + a re-read of the registry (the served version changed).
@@ -1486,20 +1421,18 @@ describe("StaticSitesPage rollback", () => {
   it("maps a 409 unresolvable target to a localized message, leaving serving unchanged", async () => {
     mockBase({ sites: [marketingFixture()] });
     server.use(
-      http.put(
-        gatewayUrl("/v1/assets/static_site/marketing/channels/serving"),
-        () =>
-          HttpResponse.json(
-            {
-              error: {
-                type: "ferrogate_error",
-                code: "asset_channel_unresolvable",
-                message: "target version could not be resolved",
-                request_id: "req-9",
-              },
+      http.put(gatewayUrl("/v1/assets/static_site/marketing/channels/serving"), () =>
+        HttpResponse.json(
+          {
+            error: {
+              type: "ferrogate_error",
+              code: "asset_channel_unresolvable",
+              message: "target version could not be resolved",
+              request_id: "req-9",
             },
-            { status: 409 },
-          ),
+          },
+          { status: 409 },
+        ),
       ),
     );
     const errorToast = vi.spyOn(toast, "error");
@@ -1515,9 +1448,7 @@ describe("StaticSitesPage rollback", () => {
         }),
       );
       const confirmDialog = (
-        await screen.findByText(
-          en["page.staticSites.rollback.title"].replace("{version}", "2.0.0"),
-        )
+        await screen.findByText(en["page.staticSites.rollback.title"].replace("{version}", "2.0.0"))
       ).closest("[role='dialog']") as HTMLElement;
       await user.click(
         within(confirmDialog).getByRole("button", {
@@ -1968,10 +1899,7 @@ describe("StaticSitesPage publish error states", () => {
 });
 
 /** A POST /admin/v1/site-domains bind response with a chosen ACME posture. */
-function bindResponse(
-  hostname: string,
-  acme: { enabled: boolean; reload_triggered: boolean },
-) {
+function bindResponse(hostname: string, acme: { enabled: boolean; reload_triggered: boolean }) {
   return {
     object: "site_domain",
     site_domain: domain({ hostname }),
@@ -1995,13 +1923,8 @@ describe("StaticSitesPage domain binding (site context)", () => {
     renderWithProviders(<StaticSitesPage />);
     const drawer = await openMarketingDrawer(user);
 
-    await user.type(
-      within(drawer).getByLabelText("Hostname (FQDN)"),
-      "app.example.com",
-    );
-    await user.click(
-      within(drawer).getByRole("button", { name: "Bind hostname" }),
-    );
+    await user.type(within(drawer).getByLabelText("Hostname (FQDN)"), "app.example.com");
+    await user.click(within(drawer).getByRole("button", { name: "Bind hostname" }));
 
     // The bind is scoped to the site context: tenant_id + site come from the
     // drawer's row, never free input, so it can't cross tenants or target an
@@ -2047,13 +1970,8 @@ describe("StaticSitesPage domain binding (site context)", () => {
     renderWithProviders(<StaticSitesPage />);
     const drawer = await openMarketingDrawer(user);
 
-    await user.type(
-      within(drawer).getByLabelText("Hostname (FQDN)"),
-      "app.example.com",
-    );
-    await user.click(
-      within(drawer).getByRole("button", { name: "Bind hostname" }),
-    );
+    await user.type(within(drawer).getByLabelText("Hostname (FQDN)"), "app.example.com");
+    await user.click(within(drawer).getByRole("button", { name: "Bind hostname" }));
 
     const status = await within(drawer).findByRole("status");
     expect(status).toHaveTextContent(/Not enrolled for ACME/);
@@ -2082,13 +2000,8 @@ describe("StaticSitesPage domain binding (site context)", () => {
     renderWithProviders(<StaticSitesPage />);
     const drawer = await openMarketingDrawer(user);
 
-    await user.type(
-      within(drawer).getByLabelText("Hostname (FQDN)"),
-      "app.example.com",
-    );
-    await user.click(
-      within(drawer).getByRole("button", { name: "Bind hostname" }),
-    );
+    await user.type(within(drawer).getByLabelText("Hostname (FQDN)"), "app.example.com");
+    await user.click(within(drawer).getByRole("button", { name: "Bind hostname" }));
 
     const status = await within(drawer).findByRole("status");
     expect(status).toHaveTextContent(/whether this hostname was enrolled is unknown/);
@@ -2101,9 +2014,7 @@ describe("StaticSitesPage domain binding (site context)", () => {
     server.use(
       http.post(gatewayUrl("/admin/v1/site-domains"), () => {
         posted = true;
-        return HttpResponse.json(
-          bindResponse("bad", { enabled: false, reload_triggered: false }),
-        );
+        return HttpResponse.json(bindResponse("bad", { enabled: false, reload_triggered: false }));
       }),
     );
     const user = userEvent.setup();
@@ -2113,12 +2024,8 @@ describe("StaticSitesPage domain binding (site context)", () => {
     // A single-label hostname is rejected by the client mirror of the gateway
     // rule; the Bind button stays disarmed and no POST is issued.
     await user.type(within(drawer).getByLabelText("Hostname (FQDN)"), "localhost");
-    expect(
-      within(drawer).getByRole("button", { name: "Bind hostname" }),
-    ).toBeDisabled();
-    expect(
-      within(drawer).getByText(/fully qualified domain name/),
-    ).toBeInTheDocument();
+    expect(within(drawer).getByRole("button", { name: "Bind hostname" })).toBeDisabled();
+    expect(within(drawer).getByText(/fully qualified domain name/)).toBeInTheDocument();
     expect(posted).toBe(false);
   });
 
@@ -2126,27 +2033,22 @@ describe("StaticSitesPage domain binding (site context)", () => {
     mockBase({ sites: [marketingFixture()], domains: [domain()] });
     let unbound: string | null = null;
     server.use(
-      http.delete(
-        gatewayUrl("/admin/v1/site-domains/:hostname"),
-        ({ params }) => {
-          unbound = params.hostname as string;
-          // The contract is DeleteResponse: object + id + deleted.
-          return HttpResponse.json({
-            object: "site_domain",
-            id: unbound,
-            deleted: true,
-          });
-        },
-      ),
+      http.delete(gatewayUrl("/admin/v1/site-domains/:hostname"), ({ params }) => {
+        unbound = params.hostname as string;
+        // The contract is DeleteResponse: object + id + deleted.
+        return HttpResponse.json({
+          object: "site_domain",
+          id: unbound,
+          deleted: true,
+        });
+      }),
     );
     const user = userEvent.setup();
     renderWithProviders(<StaticSitesPage />);
     const drawer = await openMarketingDrawer(user);
 
     // The bound hostname is listed in the site context with an Unbind action.
-    const domainRow = within(drawer).getByTestId(
-      "static-site-domain-app.example.com",
-    );
+    const domainRow = within(drawer).getByTestId("static-site-domain-app.example.com");
     await user.click(within(domainRow).getByRole("button", { name: "Unbind" }));
 
     // Unbind is confirmed before it fires (an alertdialog).
@@ -2168,9 +2070,7 @@ describe("StaticSitesPage domain binding (site context)", () => {
     renderWithProviders(<StaticSitesPage />);
     const drawer = await openMarketingDrawer(user);
 
-    const domainRow = within(drawer).getByTestId(
-      "static-site-domain-app.example.com",
-    );
+    const domainRow = within(drawer).getByTestId("static-site-domain-app.example.com");
     expect(
       await within(domainRow).findByText(en["page.staticSites.acme.enabled"]),
     ).toBeInTheDocument();
@@ -2186,9 +2086,7 @@ describe("StaticSitesPage domain binding (site context)", () => {
     renderWithProviders(<StaticSitesPage />);
     const drawer = await openMarketingDrawer(user);
 
-    const domainRow = within(drawer).getByTestId(
-      "static-site-domain-app.example.com",
-    );
+    const domainRow = within(drawer).getByTestId("static-site-domain-app.example.com");
     expect(
       await within(domainRow).findByText(en["page.staticSites.acme.disabled"]),
     ).toBeInTheDocument();
@@ -2200,21 +2098,13 @@ describe("StaticSitesPage domain binding (site context)", () => {
     renderWithProviders(<StaticSitesPage />);
     const drawer = await openMarketingDrawer(user);
 
-    const domainRow = within(drawer).getByTestId(
-      "static-site-domain-app.example.com",
-    );
-    expect(
-      await within(domainRow).findByText(en["page.siteDomains.serving"]),
-    ).toBeInTheDocument();
+    const domainRow = within(drawer).getByTestId("static-site-domain-app.example.com");
+    expect(await within(domainRow).findByText(en["page.siteDomains.serving"])).toBeInTheDocument();
     expect(
       within(domainRow).getByText(en["page.siteDomains.verification.verified"]),
     ).toBeInTheDocument();
     // A live binding has no outstanding challenge to publish.
-    expect(
-      within(drawer).queryByTestId(
-        "site-domain-challenge-app.example.com",
-      ),
-    ).toBeNull();
+    expect(within(drawer).queryByTestId("site-domain-challenge-app.example.com")).toBeNull();
   });
 
   it("shows a bound hostname the gateway REFUSES as not serving, with the record to publish", async () => {
@@ -2224,30 +2114,22 @@ describe("StaticSitesPage domain binding (site context)", () => {
     // hostname whose requests are refused exactly like a live one.
     mockBase({
       sites: [marketingFixture()],
-      domains: [
-        domain({ verification_state: "pending_verification", serving: false }),
-      ],
+      domains: [domain({ verification_state: "pending_verification", serving: false })],
     });
     const user = userEvent.setup();
     renderWithProviders(<StaticSitesPage />);
     const drawer = await openMarketingDrawer(user);
 
-    const domainRow = within(drawer).getByTestId(
-      "static-site-domain-app.example.com",
-    );
+    const domainRow = within(drawer).getByTestId("static-site-domain-app.example.com");
     expect(
       await within(domainRow).findByText(en["page.siteDomains.notServing"]),
     ).toBeInTheDocument();
     expect(
       within(domainRow).getByText(en["page.siteDomains.verification.pending"]),
     ).toBeInTheDocument();
-    expect(
-      within(domainRow).queryByText(en["page.siteDomains.serving"]),
-    ).toBeNull();
+    expect(within(domainRow).queryByText(en["page.siteDomains.serving"])).toBeNull();
     // …and the remedy: the exact TXT record the gateway is waiting for.
-    const challenge = await within(drawer).findByTestId(
-      "site-domain-challenge-app.example.com",
-    );
+    const challenge = await within(drawer).findByTestId("site-domain-challenge-app.example.com");
     expect(challenge).toHaveTextContent("_ferrogate-challenge.app.example.com");
     expect(challenge).toHaveTextContent("TXT");
     expect(challenge).toHaveTextContent("ferrogate-site-verify=cafebabe");
@@ -2273,22 +2155,14 @@ describe("StaticSitesPage domain binding (site context)", () => {
     renderWithProviders(<StaticSitesPage />);
     const drawer = await openMarketingDrawer(user);
 
-    const domainRow = within(drawer).getByTestId(
-      "static-site-domain-app.example.com",
-    );
+    const domainRow = within(drawer).getByTestId("static-site-domain-app.example.com");
     // Serving badge, verification state and ACME all read Unknown — no posture
     // is asserted anywhere in the row.
     await waitFor(() =>
-      expect(
-        within(domainRow).getAllByText(en["common.unknown"]).length,
-      ).toBe(3),
+      expect(within(domainRow).getAllByText(en["common.unknown"]).length).toBe(3),
     );
-    expect(
-      within(domainRow).queryByText(en["page.siteDomains.serving"]),
-    ).toBeNull();
-    expect(
-      within(domainRow).queryByText(en["page.siteDomains.notServing"]),
-    ).toBeNull();
+    expect(within(domainRow).queryByText(en["page.siteDomains.serving"])).toBeNull();
+    expect(within(domainRow).queryByText(en["page.siteDomains.notServing"])).toBeNull();
   });
 
   it("says Unknown rather than guessing when the ACME read fails", async () => {
@@ -2305,14 +2179,8 @@ describe("StaticSitesPage domain binding (site context)", () => {
     renderWithProviders(<StaticSitesPage />);
     const drawer = await openMarketingDrawer(user);
 
-    const domainRow = within(drawer).getByTestId(
-      "static-site-domain-app.example.com",
-    );
-    expect(
-      await within(domainRow).findByText(en["common.unknown"]),
-    ).toBeInTheDocument();
-    expect(
-      within(domainRow).queryByText(en["page.staticSites.acme.enabled"]),
-    ).toBeNull();
+    const domainRow = within(drawer).getByTestId("static-site-domain-app.example.com");
+    expect(await within(domainRow).findByText(en["common.unknown"])).toBeInTheDocument();
+    expect(within(domainRow).queryByText(en["page.staticSites.acme.enabled"])).toBeNull();
   });
 });

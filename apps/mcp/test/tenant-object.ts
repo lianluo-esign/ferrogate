@@ -1,7 +1,5 @@
 import { env } from "cloudflare:test";
-import {
-  DurableObjectTenantDatabaseRouter,
-} from "@ferrogate/storage";
+import { DurableObjectTenantDatabaseRouter } from "@ferrogate/storage";
 import type { TenantDataNamespace } from "@ferrogate/storage/durable-objects";
 
 interface TenantObjectBindings {

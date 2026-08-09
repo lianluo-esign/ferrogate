@@ -370,10 +370,7 @@ export class InMemoryProviderCircuit implements ProviderCircuit {
   }
 
   async recordFailure(provider: string): Promise<void> {
-    this.#circuit(provider).recordFailure(
-      this.#settings.circuitFailureThreshold,
-      this.#clock(),
-    );
+    this.#circuit(provider).recordFailure(this.#settings.circuitFailureThreshold, this.#clock());
   }
 
   /** Inspection seam for the tests; never read by the request path. */
@@ -516,9 +513,7 @@ function discard(response: Response): void {
  * provider's own answer and the handler relays it verbatim, exactly as the Rust
  * `ReturnError` arm falls through to `write_json_response`.
  */
-export async function dispatchWithFailover(
-  options: FailoverOptions,
-): Promise<FailoverOutcome> {
+export async function dispatchWithFailover(options: FailoverOptions): Promise<FailoverOutcome> {
   const { candidates, circuit, settings, providerAllowed, attempt, isRejection } = options;
   let attempts = 0;
   let lastRejection: InferenceRejection | null = null;

@@ -38,8 +38,8 @@
  */
 import { SELF, env } from "cloudflare:test";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ControlPlaneBindings } from "../src/ports.js";
 import { resolveTenantDatabases } from "../src/adapters.js";
+import type { ControlPlaneBindings } from "../src/ports.js";
 import { runScheduledTick } from "../src/schedule/scheduled.js";
 import { SIEM_EXPORT_SINKS_VAR, parseSiemSinks } from "../src/siem/config.js";
 import { advanceSiemCursor, readSiemCursor } from "../src/siem/cursor.js";
@@ -162,7 +162,10 @@ function rows(tenant: string, prefix: string, count: number, from = OLD) {
 type RequestLogSeed = ReturnType<typeof rows>[number];
 
 /** Register the tenant and mirror the SIEM fixture into its authoritative object. */
-async function seedTenantRequestLogs(tenantId: string, records: readonly RequestLogSeed[]): Promise<void> {
+async function seedTenantRequestLogs(
+  tenantId: string,
+  records: readonly RequestLogSeed[],
+): Promise<void> {
   await db()
     .prepare(
       `INSERT INTO tenant_databases
@@ -174,7 +177,9 @@ async function seedTenantRequestLogs(tenantId: string, records: readonly Request
     )
     .bind(tenantId)
     .run();
-  const tenant = (await resolveTenantDatabases(env as unknown as ControlPlaneBindings).forTenant(tenantId)).db;
+  const tenant = (
+    await resolveTenantDatabases(env as unknown as ControlPlaneBindings).forTenant(tenantId)
+  ).db;
   await tenant.prepare("DELETE FROM request_logs").run();
   await tenant.batch(
     records.map((record) =>

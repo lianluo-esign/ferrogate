@@ -1,12 +1,12 @@
 import { applyD1Migrations, env } from "cloudflare:test";
-import { beforeAll, beforeEach, describe, expect, test } from "vitest";
 import {
   DurableObjectTenantDatabaseRouter,
   type TenantDataStatement,
   type TenantDatabaseRouter,
   type TenantMigrationMode,
 } from "@ferrogate/storage";
-import { runTenantStorageMigration, TenantBackfillError } from "../src/store/tenant-backfill.js";
+import { beforeAll, beforeEach, describe, expect, test } from "vitest";
+import { TenantBackfillError, runTenantStorageMigration } from "../src/store/tenant-backfill.js";
 import { db } from "./d1.js";
 
 let TENANT = "";
@@ -51,30 +51,30 @@ async function reset(): Promise<void> {
     )
     .bind(TENANT)
     .run();
-  await bindings.LEGACY_TENANT_DB
-    .prepare(
-      `INSERT INTO projects (id, tenant_id, name, slug, status, created_at_unix, updated_at_unix)
+  await bindings.LEGACY_TENANT_DB.prepare(
+    `INSERT INTO projects (id, tenant_id, name, slug, status, created_at_unix, updated_at_unix)
        VALUES (?, ?, ?, ?, 'active', ?, ?)`,
-    )
+  )
     .bind("project_a", TENANT, "Project A", "project-a", NOW, NOW)
     .run();
-  await bindings.LEGACY_TENANT_DB
-    .prepare(
-      `INSERT INTO projects (id, tenant_id, name, slug, status, created_at_unix, updated_at_unix)
+  await bindings.LEGACY_TENANT_DB.prepare(
+    `INSERT INTO projects (id, tenant_id, name, slug, status, created_at_unix, updated_at_unix)
        VALUES (?, ?, ?, ?, 'active', ?, ?)`,
-    )
+  )
     .bind("project_b", TENANT, "Project B", "project-b", NOW, NOW)
     .run();
-  await bindings.LEGACY_TENANT_DB
-    .prepare(
-      `INSERT INTO wallets (id, tenant_id, balance_credits, created_at_unix, updated_at_unix)
+  await bindings.LEGACY_TENANT_DB.prepare(
+    `INSERT INTO wallets (id, tenant_id, balance_credits, created_at_unix, updated_at_unix)
        VALUES (?, ?, ?, ?, ?)`,
-    )
+  )
     .bind(TENANT, TENANT, "1000000000000010000", NOW, NOW)
     .run();
 }
 
-async function migration(action: "start" | "resume" | "verify" | "cutover" | "rollback", router: TenantDatabaseRouter = objectRouter()) {
+async function migration(
+  action: "start" | "resume" | "verify" | "cutover" | "rollback",
+  router: TenantDatabaseRouter = objectRouter(),
+) {
   return runTenantStorageMigration({
     controlDatabase: db(),
     legacyTenantDatabase: bindings.LEGACY_TENANT_DB,
@@ -135,11 +135,10 @@ describe("tenant storage backfill", () => {
   });
 
   test("freezes the source, resumes a page interruption, verifies all owned rows, and cuts over", async () => {
-    await bindings.LEGACY_TENANT_DB
-      .prepare(
-        `INSERT INTO projects (id, tenant_id, name, slug, status, created_at_unix, updated_at_unix)
+    await bindings.LEGACY_TENANT_DB.prepare(
+      `INSERT INTO projects (id, tenant_id, name, slug, status, created_at_unix, updated_at_unix)
          VALUES (?, ?, ?, ?, 'active', ?, ?)`,
-      )
+    )
       .bind("project_other", "tenant_other", "Other", "other", NOW, NOW)
       .run();
     const started = await migration("start");
@@ -159,31 +158,40 @@ describe("tenant storage backfill", () => {
       jurisdiction: null,
     });
     expect(
-      await bindings.LEGACY_TENANT_DB
-        .prepare("SELECT mode FROM tenant_write_fences WHERE tenant_id = ?")
+      await bindings.LEGACY_TENANT_DB.prepare(
+        "SELECT mode FROM tenant_write_fences WHERE tenant_id = ?",
+      )
         .bind(TENANT)
         .first<{ mode: string }>(),
     ).toEqual({ mode: "frozen" });
     await expect(
-      bindings.LEGACY_TENANT_DB
-        .prepare("INSERT INTO projects (id, tenant_id, name, slug) VALUES (?, ?, ?, ?)")
+      bindings.LEGACY_TENANT_DB.prepare(
+        "INSERT INTO projects (id, tenant_id, name, slug) VALUES (?, ?, ?, ?)",
+      )
         .bind("late", TENANT, "Late", "late")
         .run(),
     ).rejects.toThrow(/frozen/);
     await expect(
-      bindings.LEGACY_TENANT_DB
-        .prepare("UPDATE projects SET tenant_id = ? WHERE id = ?")
+      bindings.LEGACY_TENANT_DB.prepare("UPDATE projects SET tenant_id = ? WHERE id = ?")
         .bind(TENANT, "project_other")
         .run(),
     ).rejects.toThrow(/frozen/);
     await expect(
-      bindings.LEGACY_TENANT_DB
-        .prepare(
-          `INSERT INTO asset_bundle_files
+      bindings.LEGACY_TENANT_DB.prepare(
+        `INSERT INTO asset_bundle_files
              (asset_id, tenant_id, path, storage_uri, content_type, content_hash, size_bytes, created_at_unix)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+        .bind(
+          "asset_without_owner",
+          TENANT,
+          "index.html",
+          "r2://asset",
+          "text/html",
+          "hash",
+          1,
+          NOW,
         )
-        .bind("asset_without_owner", TENANT, "index.html", "r2://asset", "text/html", "hash", 1, NOW)
         .run(),
     ).rejects.toThrow(/frozen/);
 
@@ -212,7 +220,9 @@ describe("tenant storage backfill", () => {
         .forTenant(TENANT)
         .then((handle) =>
           handle.db
-            .prepare("SELECT CAST(balance_credits AS TEXT) AS credits FROM wallets WHERE tenant_id = ?")
+            .prepare(
+              "SELECT CAST(balance_credits AS TEXT) AS credits FROM wallets WHERE tenant_id = ?",
+            )
             .bind(TENANT)
             .first<{ credits: string }>(),
         ),
@@ -232,8 +242,9 @@ describe("tenant storage backfill", () => {
     expect(rolledBack.migration_state).toBe("shared");
     expect(rolledBack.object_status?.mode).toBe("shared");
     expect(
-      await bindings.LEGACY_TENANT_DB
-        .prepare("SELECT mode FROM tenant_write_fences WHERE tenant_id = ?")
+      await bindings.LEGACY_TENANT_DB.prepare(
+        "SELECT mode FROM tenant_write_fences WHERE tenant_id = ?",
+      )
         .bind(TENANT)
         .first<{ mode: string }>(),
     ).toEqual({ mode: "open" });

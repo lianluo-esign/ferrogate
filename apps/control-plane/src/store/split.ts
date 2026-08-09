@@ -144,7 +144,11 @@ export class SplitControlPlaneStore implements ControlPlaneStore {
   }
 
   /** The un-attributed control-D1 row under this id, or `null`. */
-  async #platformRow(collection: string, scope: CallerScope, id: string): Promise<StoreRecord | null> {
+  async #platformRow(
+    collection: string,
+    scope: CallerScope,
+    id: string,
+  ): Promise<StoreRecord | null> {
     const record = await this.#control.get(collection, scope, id);
     if (record === null) return null;
     return this.#isPlatformRow(collection, record) ? record : null;
@@ -238,7 +242,11 @@ export class SplitControlPlaneStore implements ControlPlaneStore {
         records.push(record);
       }
     }
-    for (const record of await this.#platformRows(collection, { kind: "platform_operator" }, query)) {
+    for (const record of await this.#platformRows(
+      collection,
+      { kind: "platform_operator" },
+      query,
+    )) {
       if (seen.has(String(record.id))) continue;
       seen.add(String(record.id));
       records.push(record);

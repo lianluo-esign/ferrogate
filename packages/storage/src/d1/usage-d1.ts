@@ -221,12 +221,11 @@ export class D1UsageLedger {
       //    write amplification with no effect.
       this.db
         .prepare(
-          "INSERT INTO tenant_contexts " +
-            "(id, organization_id, team_id, project_id, workspace_id, user_id, api_key_id) " +
-            (sourceId === undefined
+          `INSERT INTO tenant_contexts (id, organization_id, team_id, project_id, workspace_id, user_id, api_key_id) ${
+            sourceId === undefined
               ? "VALUES (?, ?, ?, ?, ?, ?, ?)"
-              : "SELECT ?, ?, ?, ?, ?, ?, ?" + claimGuard) +
-            " ON CONFLICT (id) DO NOTHING",
+              : `SELECT ?, ?, ?, ?, ?, ?, ?${claimGuard}`
+          } ON CONFLICT (id) DO NOTHING`,
         )
         .bind(
           write.context.id,
@@ -241,27 +240,11 @@ export class D1UsageLedger {
       // 2. Cumulative token totals for this (context, model, provider).
       this.db
         .prepare(
-          "INSERT INTO usage_aggregate_rollups " +
-            "(id, tenant_context_id, logical_model, provider, prompt_tokens, " +
-            " completion_tokens, total_tokens, cached_input_tokens, cache_write_tokens, " +
-            " reasoning_tokens, updated_at_unix) " +
-            (sourceId === undefined
+          `INSERT INTO usage_aggregate_rollups (id, tenant_context_id, logical_model, provider, prompt_tokens,  completion_tokens, total_tokens, cached_input_tokens, cache_write_tokens,  reasoning_tokens, updated_at_unix) ${
+            sourceId === undefined
               ? "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-              : "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?" + claimGuard) +
-            " " +
-            "ON CONFLICT (id) DO UPDATE SET " +
-            "prompt_tokens = usage_aggregate_rollups.prompt_tokens + excluded.prompt_tokens, " +
-            "completion_tokens = usage_aggregate_rollups.completion_tokens + " +
-            "                    excluded.completion_tokens, " +
-            "total_tokens = usage_aggregate_rollups.total_tokens + excluded.total_tokens, " +
-            "cached_input_tokens = usage_aggregate_rollups.cached_input_tokens + " +
-            "                      excluded.cached_input_tokens, " +
-            "cache_write_tokens = usage_aggregate_rollups.cache_write_tokens + " +
-            "                     excluded.cache_write_tokens, " +
-            "reasoning_tokens = usage_aggregate_rollups.reasoning_tokens + " +
-            "                   excluded.reasoning_tokens, " +
-            "updated_at_unix = max(usage_aggregate_rollups.updated_at_unix, " +
-            "                      excluded.updated_at_unix)",
+              : `SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?${claimGuard}`
+          } ON CONFLICT (id) DO UPDATE SET prompt_tokens = usage_aggregate_rollups.prompt_tokens + excluded.prompt_tokens, completion_tokens = usage_aggregate_rollups.completion_tokens +                     excluded.completion_tokens, total_tokens = usage_aggregate_rollups.total_tokens + excluded.total_tokens, cached_input_tokens = usage_aggregate_rollups.cached_input_tokens +                       excluded.cached_input_tokens, cache_write_tokens = usage_aggregate_rollups.cache_write_tokens +                      excluded.cache_write_tokens, reasoning_tokens = usage_aggregate_rollups.reasoning_tokens +                    excluded.reasoning_tokens, updated_at_unix = max(usage_aggregate_rollups.updated_at_unix,                       excluded.updated_at_unix)`,
         )
         .bind(
           aggregateId,
@@ -284,30 +267,11 @@ export class D1UsageLedger {
       statements.push(
         this.db
           .prepare(
-            "INSERT INTO usage_monthly_rollups " +
-              "(id, period_month, scope_type, scope_id, prompt_tokens, completion_tokens, " +
-              " total_tokens, cached_input_tokens, cache_write_tokens, reasoning_tokens, " +
-              " cost_usd, request_count, error_count, updated_at_unix) " +
-              (sourceId === undefined
+            `INSERT INTO usage_monthly_rollups (id, period_month, scope_type, scope_id, prompt_tokens, completion_tokens,  total_tokens, cached_input_tokens, cache_write_tokens, reasoning_tokens,  cost_usd, request_count, error_count, updated_at_unix) ${
+              sourceId === undefined
                 ? "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)"
-                : "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?" + claimGuard) +
-              " " +
-              "ON CONFLICT (id) DO UPDATE SET " +
-              "prompt_tokens = usage_monthly_rollups.prompt_tokens + excluded.prompt_tokens, " +
-              "completion_tokens = usage_monthly_rollups.completion_tokens + " +
-              "                    excluded.completion_tokens, " +
-              "total_tokens = usage_monthly_rollups.total_tokens + excluded.total_tokens, " +
-              "cached_input_tokens = usage_monthly_rollups.cached_input_tokens + " +
-              "                      excluded.cached_input_tokens, " +
-              "cache_write_tokens = usage_monthly_rollups.cache_write_tokens + " +
-              "                     excluded.cache_write_tokens, " +
-              "reasoning_tokens = usage_monthly_rollups.reasoning_tokens + " +
-              "                   excluded.reasoning_tokens, " +
-              "cost_usd = usage_monthly_rollups.cost_usd + excluded.cost_usd, " +
-              "request_count = usage_monthly_rollups.request_count + excluded.request_count, " +
-              "error_count = usage_monthly_rollups.error_count + excluded.error_count, " +
-              "updated_at_unix = max(usage_monthly_rollups.updated_at_unix, " +
-              "                      excluded.updated_at_unix)",
+                : `SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?${claimGuard}`
+            } ON CONFLICT (id) DO UPDATE SET prompt_tokens = usage_monthly_rollups.prompt_tokens + excluded.prompt_tokens, completion_tokens = usage_monthly_rollups.completion_tokens +                     excluded.completion_tokens, total_tokens = usage_monthly_rollups.total_tokens + excluded.total_tokens, cached_input_tokens = usage_monthly_rollups.cached_input_tokens +                       excluded.cached_input_tokens, cache_write_tokens = usage_monthly_rollups.cache_write_tokens +                      excluded.cache_write_tokens, reasoning_tokens = usage_monthly_rollups.reasoning_tokens +                    excluded.reasoning_tokens, cost_usd = usage_monthly_rollups.cost_usd + excluded.cost_usd, request_count = usage_monthly_rollups.request_count + excluded.request_count, error_count = usage_monthly_rollups.error_count + excluded.error_count, updated_at_unix = max(usage_monthly_rollups.updated_at_unix,                       excluded.updated_at_unix)`,
           )
           .bind(
             usageMonthlyRollupId(periodMonth, scope.scopeType, scope.scopeId),
@@ -337,24 +301,11 @@ export class D1UsageLedger {
       statements.push(
         this.db
           .prepare(
-            "INSERT INTO usage_metadata_rollups " +
-              "(id, period_month, organization_id, metadata_key, metadata_value, prompt_tokens, " +
-              " completion_tokens, total_tokens, cost_usd, request_count, error_count, " +
-              " updated_at_unix) " +
-              (sourceId === undefined
+            `INSERT INTO usage_metadata_rollups (id, period_month, organization_id, metadata_key, metadata_value, prompt_tokens,  completion_tokens, total_tokens, cost_usd, request_count, error_count,  updated_at_unix) ${
+              sourceId === undefined
                 ? "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)"
-                : "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?" + claimGuard) +
-              " " +
-              "ON CONFLICT (id) DO UPDATE SET " +
-              "prompt_tokens = usage_metadata_rollups.prompt_tokens + excluded.prompt_tokens, " +
-              "completion_tokens = usage_metadata_rollups.completion_tokens + " +
-              "                    excluded.completion_tokens, " +
-              "total_tokens = usage_metadata_rollups.total_tokens + excluded.total_tokens, " +
-              "cost_usd = usage_metadata_rollups.cost_usd + excluded.cost_usd, " +
-              "request_count = usage_metadata_rollups.request_count + excluded.request_count, " +
-              "error_count = usage_metadata_rollups.error_count + excluded.error_count, " +
-              "updated_at_unix = max(usage_metadata_rollups.updated_at_unix, " +
-              "                      excluded.updated_at_unix)",
+                : `SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?${claimGuard}`
+            } ON CONFLICT (id) DO UPDATE SET prompt_tokens = usage_metadata_rollups.prompt_tokens + excluded.prompt_tokens, completion_tokens = usage_metadata_rollups.completion_tokens +                     excluded.completion_tokens, total_tokens = usage_metadata_rollups.total_tokens + excluded.total_tokens, cost_usd = usage_metadata_rollups.cost_usd + excluded.cost_usd, request_count = usage_metadata_rollups.request_count + excluded.request_count, error_count = usage_metadata_rollups.error_count + excluded.error_count, updated_at_unix = max(usage_metadata_rollups.updated_at_unix,                       excluded.updated_at_unix)`,
           )
           .bind(
             usageMetadataRollupId(periodMonth, organizationId, metadataKey, metadataValue),
@@ -377,20 +328,11 @@ export class D1UsageLedger {
       statements.push(
         this.db
           .prepare(
-            "INSERT INTO observed_agent_presence " +
-              "(tenant_id, api_key_id, first_seen_at_unix, last_seen_at_unix, request_count, " +
-              (sourceId === undefined
+            `INSERT INTO observed_agent_presence (tenant_id, api_key_id, first_seen_at_unix, last_seen_at_unix, request_count, ${
+              sourceId === undefined
                 ? " updated_at_unix) VALUES (?, ?, ?, ?, 1, ?)"
-                : " updated_at_unix) SELECT ?, ?, ?, ?, 1, ?" + claimGuard) +
-              " " +
-              "ON CONFLICT (tenant_id, api_key_id) DO UPDATE SET " +
-              "last_seen_at_unix = max(observed_agent_presence.last_seen_at_unix, " +
-              "                        excluded.last_seen_at_unix), " +
-              "first_seen_at_unix = min(observed_agent_presence.first_seen_at_unix, " +
-              "                         excluded.first_seen_at_unix), " +
-              "request_count = observed_agent_presence.request_count + excluded.request_count, " +
-              "updated_at_unix = max(observed_agent_presence.updated_at_unix, " +
-              "                      excluded.updated_at_unix)",
+                : ` updated_at_unix) SELECT ?, ?, ?, ?, 1, ?${claimGuard}`
+            } ON CONFLICT (tenant_id, api_key_id) DO UPDATE SET last_seen_at_unix = max(observed_agent_presence.last_seen_at_unix,                         excluded.last_seen_at_unix), first_seen_at_unix = min(observed_agent_presence.first_seen_at_unix,                          excluded.first_seen_at_unix), request_count = observed_agent_presence.request_count + excluded.request_count, updated_at_unix = max(observed_agent_presence.updated_at_unix,                       excluded.updated_at_unix)`,
           )
           .bind(
             write.presenceTouch.tenantId,
@@ -407,16 +349,11 @@ export class D1UsageLedger {
       statements.push(
         this.db
           .prepare(
-            "INSERT INTO agent_cost_burn " +
-              "(tenant_id, agent_key, period, accumulated_usd, first_seen_unix, updated_at_unix) " +
-              (sourceId === undefined
+            `INSERT INTO agent_cost_burn (tenant_id, agent_key, period, accumulated_usd, first_seen_unix, updated_at_unix) ${
+              sourceId === undefined
                 ? "VALUES (?, ?, ?, ?, ?, ?)"
-                : "SELECT ?, ?, ?, ?, ?, ?" + claimGuard) +
-              " " +
-              "ON CONFLICT (tenant_id, agent_key, period) DO UPDATE SET " +
-              "accumulated_usd = agent_cost_burn.accumulated_usd + excluded.accumulated_usd, " +
-              "first_seen_unix = min(agent_cost_burn.first_seen_unix, excluded.first_seen_unix), " +
-              "updated_at_unix = max(agent_cost_burn.updated_at_unix, excluded.updated_at_unix)",
+                : `SELECT ?, ?, ?, ?, ?, ?${claimGuard}`
+            } ON CONFLICT (tenant_id, agent_key, period) DO UPDATE SET accumulated_usd = agent_cost_burn.accumulated_usd + excluded.accumulated_usd, first_seen_unix = min(agent_cost_burn.first_seen_unix, excluded.first_seen_unix), updated_at_unix = max(agent_cost_burn.updated_at_unix, excluded.updated_at_unix)`,
           )
           .bind(
             write.agentCostBurn.tenantId,
@@ -434,18 +371,11 @@ export class D1UsageLedger {
       statements.push(
         this.db
           .prepare(
-            "INSERT INTO usage_projection_retries " +
-              "(source_id, tenant_id, occurred_at_unix, payload_json, attempts, " +
-              " next_attempt_unix, created_at_unix, updated_at_unix) " +
-              (sourceId === undefined
+            `INSERT INTO usage_projection_retries (source_id, tenant_id, occurred_at_unix, payload_json, attempts,  next_attempt_unix, created_at_unix, updated_at_unix) ${
+              sourceId === undefined
                 ? "VALUES (?, ?, ?, ?, 0, 0, unixepoch(), unixepoch())"
-                : "SELECT ?, ?, ?, ?, 0, 0, unixepoch(), unixepoch()" + claimGuard) +
-              " " +
-              "ON CONFLICT (source_id) DO UPDATE SET " +
-              "tenant_id = excluded.tenant_id, " +
-              "occurred_at_unix = excluded.occurred_at_unix, " +
-              "payload_json = excluded.payload_json, " +
-              "updated_at_unix = unixepoch()",
+                : `SELECT ?, ?, ?, ?, 0, 0, unixepoch(), unixepoch()${claimGuard}`
+            } ON CONFLICT (source_id) DO UPDATE SET tenant_id = excluded.tenant_id, occurred_at_unix = excluded.occurred_at_unix, payload_json = excluded.payload_json, updated_at_unix = unixepoch()`,
           )
           .bind(
             write.projectionRetry.sourceId,

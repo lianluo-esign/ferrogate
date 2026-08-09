@@ -144,6 +144,7 @@ beforeEach(async () => {
 
 afterEach(() => {
   const saved = SAVED_VARS.get("GATEWAY_BUDGET_HOLD_USD");
+  // biome-ignore lint/performance/noDelete: removes the own-property key entirely; assigning undefined would leave an enumerable undefined-valued key and change JSON serialization, the 'in' operator, and Object.keys semantics
   if (saved === undefined) delete vars.GATEWAY_BUDGET_HOLD_USD;
   else vars.GATEWAY_BUDGET_HOLD_USD = saved;
 });

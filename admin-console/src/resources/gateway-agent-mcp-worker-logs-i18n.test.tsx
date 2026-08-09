@@ -1,3 +1,17 @@
+import { ResourceForm } from "@/components/resource/resource-form";
+import { ResourcePage } from "@/components/resource/resource-page";
+import { ResourceTable } from "@/components/resource/resource-table";
+import { en } from "@/i18n/locales/en";
+import { zhCN } from "@/i18n/locales/zh-CN";
+import { defaultFieldValues } from "@/lib/resource-config";
+import { agentUpstreamsConfig } from "@/resources/agent-upstreams";
+import { auditEventsConfig } from "@/resources/audit-events";
+import { promptTemplatesConfig } from "@/resources/prompt-templates";
+import { providersConfig } from "@/resources/providers";
+import { requestLogsConfig } from "@/resources/request-logs";
+import { skillPackagesConfig } from "@/resources/skill-packages";
+import { mockAdminList } from "@/test/msw";
+import { renderWithProviders, seedSession } from "@/test/test-utils";
 // Dual-locale coverage for the gateway-setup / agent / MCP / worker per-resource
 // copy + read-only logs (#348).
 //
@@ -15,20 +29,6 @@
 import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { ResourceForm } from "@/components/resource/resource-form";
-import { ResourcePage } from "@/components/resource/resource-page";
-import { ResourceTable } from "@/components/resource/resource-table";
-import { en } from "@/i18n/locales/en";
-import { zhCN } from "@/i18n/locales/zh-CN";
-import { defaultFieldValues } from "@/lib/resource-config";
-import { agentUpstreamsConfig } from "@/resources/agent-upstreams";
-import { auditEventsConfig } from "@/resources/audit-events";
-import { promptTemplatesConfig } from "@/resources/prompt-templates";
-import { providersConfig } from "@/resources/providers";
-import { requestLogsConfig } from "@/resources/request-logs";
-import { skillPackagesConfig } from "@/resources/skill-packages";
-import { mockAdminList } from "@/test/msw";
-import { renderWithProviders, seedSession } from "@/test/test-utils";
 
 function setDesktopViewport(matches: boolean) {
   Object.defineProperty(window, "matchMedia", {
@@ -143,9 +143,7 @@ describe("skill-packages form localizes field labels per locale", () => {
     expect(
       screen.getByLabelText(`${en["resource.skillPackages.field.name"]} *`),
     ).toBeInTheDocument();
-    expect(
-      screen.getByLabelText(en["resource.skillPackages.field.apiKeyIds"]),
-    ).toBeInTheDocument();
+    expect(screen.getByLabelText(en["resource.skillPackages.field.apiKeyIds"])).toBeInTheDocument();
   });
 
   it("renders Simplified Chinese field labels", () => {

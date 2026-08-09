@@ -153,7 +153,7 @@ function checkFromWire(raw: unknown, evaluationId: string): GuardrailCheckEviden
   const id = str(wire, "id");
   const checkId = str(wire, "check_id");
   if (id === undefined || checkId === undefined) return undefined;
-  const findingsRaw = Array.isArray(wire["findings"]) ? (wire["findings"] as unknown[]) : [];
+  const findingsRaw = Array.isArray(wire.findings) ? (wire.findings as unknown[]) : [];
   return {
     id,
     evaluationId,
@@ -190,8 +190,8 @@ function checkFromWire(raw: unknown, evaluationId: string): GuardrailCheckEviden
         },
       ];
     }),
-    transformed: wire["transformed"] === true,
-    usedFallback: wire["used_fallback"] === true,
+    transformed: wire.transformed === true,
+    usedFallback: wire.used_fallback === true,
     ...(str(wire, "error_kind") !== undefined
       ? { errorKind: str(wire, "error_kind") as string }
       : {}),
@@ -215,7 +215,7 @@ function checkFromWire(raw: unknown, evaluationId: string): GuardrailCheckEviden
 export function guardrailEvidenceFromWire(body: unknown): GuardrailEvidenceEnvelope | undefined {
   if (typeof body !== "object" || body === null) return undefined;
   const wire = body as GuardrailEvidenceWire;
-  if (wire["object"] !== GUARDRAIL_EVALUATION_OBJECT) return undefined;
+  if (wire.object !== GUARDRAIL_EVALUATION_OBJECT) return undefined;
 
   const id = str(wire, "id");
   const requestId = str(wire, "request_id");
@@ -264,13 +264,13 @@ export function guardrailEvidenceFromWire(body: unknown): GuardrailEvidenceEnvel
     latencyMs: num(wire, "latency_ms") ?? 0,
     findingCategoryCounts: counts(wire, "finding_category_counts"),
     findingCount: num(wire, "finding_count") ?? 0,
-    transformed: wire["transformed"] === true,
+    transformed: wire.transformed === true,
     inputFingerprint: str(wire, "input_fingerprint") ?? "hmac-sha256:unavailable",
     occurredAtUnix,
     ...(actionFingerprint !== undefined ? { actionFingerprint } : {}),
   };
 
-  const rawChecks = Array.isArray(wire["checks"]) ? (wire["checks"] as unknown[]) : [];
+  const rawChecks = Array.isArray(wire.checks) ? (wire.checks as unknown[]) : [];
   const checks = rawChecks.flatMap((entry) => {
     const check = checkFromWire(entry, id);
     return check === undefined ? [] : [check];

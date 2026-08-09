@@ -5,6 +5,21 @@
  * `:predict` (embeddings) REST endpoints, authenticating with a pre-minted GCP
  * OAuth2 Bearer token. Reuses the Gemini request-shaping/normalization helpers.
  */
+
+import { extractHost } from "./bedrock.js";
+import { assertPromptCacheForAutomaticFamily } from "./caching.js";
+import {
+  GeminiAdapter,
+  embeddingsTextInputs,
+  ensureObjectBody,
+  openaiEmbeddingsResponse,
+  openaiMessagesToGeminiContents,
+  parseEmbeddingsResponseBody,
+  structuredGenerationConfig,
+  systemInstruction,
+} from "./gemini.js";
+import { asU64, getField, isArray, parseJson } from "./json.js";
+import type { Json, JsonObject } from "./json.js";
 import { AdapterError, BaseProviderAdapter, SecretValue } from "./types.js";
 import type {
   ChatCompletionPlan,
@@ -16,20 +31,6 @@ import type {
   ProviderHttpRequest,
   ProviderUsage,
 } from "./types.js";
-import { extractHost } from "./bedrock.js";
-import {
-  ensureObjectBody,
-  embeddingsTextInputs,
-  GeminiAdapter,
-  openaiEmbeddingsResponse,
-  openaiMessagesToGeminiContents,
-  parseEmbeddingsResponseBody,
-  structuredGenerationConfig,
-  systemInstruction,
-} from "./gemini.js";
-import { assertPromptCacheForAutomaticFamily } from "./caching.js";
-import { asU64, getField, isArray, parseJson } from "./json.js";
-import type { Json, JsonObject } from "./json.js";
 
 const gemini = new GeminiAdapter();
 
@@ -54,11 +55,11 @@ export class VertexAiAdapter extends BaseProviderAdapter {
 
     const vertexBody: JsonObject = { contents: openaiMessagesToGeminiContents(body) };
     const instruction = systemInstruction(body);
-    if (instruction !== undefined) vertexBody["systemInstruction"] = instruction;
+    if (instruction !== undefined) vertexBody.systemInstruction = instruction;
     // Gemini-on-Vertex speaks the same body, so it inherits the structured
     // output translation (`responseMimeType`/`responseSchema`) unchanged (#674).
     const config = structuredGenerationConfig(body, provider.kind);
-    if (config !== undefined) vertexBody["generationConfig"] = config;
+    if (config !== undefined) vertexBody.generationConfig = config;
 
     const endpoint = generateContentEndpoint(
       provider.baseUrl,
@@ -103,7 +104,9 @@ export class VertexAiAdapter extends BaseProviderAdapter {
     const value = parseEmbeddingsResponseBody(body);
     const predictions = getField(value, "predictions");
     if (!isArray(predictions)) {
-      throw AdapterError.invalidRequest("Vertex embeddings response is missing a predictions array");
+      throw AdapterError.invalidRequest(
+        "Vertex embeddings response is missing a predictions array",
+      );
     }
     const vectors: Json[] = [];
     let tokenTotal = 0;
@@ -170,10 +173,7 @@ const trimStartMatches = (value: string, prefix: string): string =>
   value.startsWith(prefix) ? value.slice(prefix.length) : value;
 
 const stripModelPrefixes = (providerModel: string): string =>
-  trimStartMatches(
-    trimStartMatches(providerModel, "publishers/google/models/"),
-    "models/",
-  );
+  trimStartMatches(trimStartMatches(providerModel, "publishers/google/models/"), "models/");
 
 function generateContentEndpoint(
   baseUrl: string,

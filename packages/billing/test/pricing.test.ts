@@ -2,11 +2,12 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_CREDITS_PER_USD,
   DEFAULT_EGRESS_PRICE_PER_GB,
+  PriceBook,
   egressCostUsd,
   modelPriceUsd,
-  PriceBook,
   priceEntry,
 } from "../src/index.js";
+const nn = <T>(v: T): NonNullable<T> => v as NonNullable<T>;
 
 function book(): PriceBook {
   return PriceBook.new([
@@ -40,8 +41,8 @@ describe("credits + egress", () => {
   it("egress is undefined when unpriced and $/GB when priced (#262)", () => {
     expect(PriceBook.default().egressCostUsd(1_000_000_000)).toBeUndefined();
     const b = PriceBook.default().withEgressPricePerGb(0.09);
-    expect(b.egressCostUsd(1_000_000_000)!).toBeCloseTo(0.09, 9);
-    const half = b.egressCostUsd(500_000_000)!;
+    expect(nn(b.egressCostUsd(1_000_000_000))).toBeCloseTo(0.09, 9);
+    const half = nn(b.egressCostUsd(500_000_000));
     expect(half).toBeCloseTo(0.045, 9);
     expect(half).toBeCloseTo(egressCostUsd(0.09, 500_000_000), 12);
   });
@@ -49,7 +50,7 @@ describe("credits + egress", () => {
   it("default rate card seeds an egress rate (#262)", () => {
     const b = PriceBook.withDefaultRateCard();
     expect(b.egress_price_per_gb).toBe(DEFAULT_EGRESS_PRICE_PER_GB);
-    expect(b.egressCostUsd(2_000_000_000)!).toBeGreaterThan(0);
+    expect(nn(b.egressCostUsd(2_000_000_000))).toBeGreaterThan(0);
     // CHANGED BY #667. This was `toEqual(modelPriceUsd(0.15, 0.6))` — a
     // whole-object equality that also asserted the entry carries NO other
     // fields, which is exactly the assertion that had to move once the default

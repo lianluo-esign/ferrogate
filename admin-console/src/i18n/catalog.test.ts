@@ -1,14 +1,14 @@
 import { beforeAll, describe, expect, it } from "vitest";
-import { en } from "./locales/en";
 import {
   BOOTSTRAP_CATALOG,
   LOCALES,
   LOCALE_META,
-  isLocale,
-  loadCatalog,
   type Locale,
   type Messages,
+  isLocale,
+  loadCatalog,
 } from "./catalog";
+import { en } from "./locales/en";
 
 // Compile-time consistency is already enforced (English derives `TranslationKey`
 // and zh-CN is pinned `satisfies Messages`). These runtime checks give a

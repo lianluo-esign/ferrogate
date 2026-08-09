@@ -1,17 +1,18 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
-import type { ReactNode } from "react";
-import userEvent from "@testing-library/user-event";
-import { HttpResponse, http } from "msw";
-import { MemoryRouter } from "react-router-dom";
-import { QueryClientProvider } from "@tanstack/react-query";
-import { toast } from "sonner";
-import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthProvider } from "@/hooks/use-auth";
 import { I18nProvider, type Locale } from "@/i18n";
-import SiteDomainsPage from "@/pages/site-domains";
 import type { AdminSchema } from "@/lib/gateway-client";
+import SiteDomainsPage from "@/pages/site-domains";
 import { gatewayUrl, server } from "@/test/msw";
 import { createTestQueryClient, seedSession } from "@/test/test-utils";
+import { QueryClientProvider } from "@tanstack/react-query";
+import { render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { http, HttpResponse } from "msw";
+import type { ReactNode } from "react";
+import { MemoryRouter } from "react-router-dom";
+import { toast } from "sonner";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+const nn = <T,>(v: T): NonNullable<T> => v as NonNullable<T>;
 
 type SiteDomain = AdminSchema<"AdminSiteDomain">;
 
@@ -23,8 +24,7 @@ type SiteDomain = AdminSchema<"AdminSiteDomain">;
  * and hide the fact that a bound hostname may not be serving at all. Typing the
  * base fixture `Required` makes dropping either a compile error.
  */
-type WireSiteDomain = SiteDomain &
-  Required<Pick<SiteDomain, "verification_state" | "serving">>;
+type WireSiteDomain = SiteDomain & Required<Pick<SiteDomain, "verification_state" | "serving">>;
 
 const BOUND_DOMAIN: WireSiteDomain = {
   object: "site_domain",
@@ -151,14 +151,10 @@ describe("SiteDomainsPage", () => {
     expect(within(pending).queryByText("Serving")).toBeNull();
 
     // The remedy is offered for the pending hostname only.
-    const challenge = await screen.findByTestId(
-      "site-domain-challenge-pending.example.com",
-    );
+    const challenge = await screen.findByTestId("site-domain-challenge-pending.example.com");
     expect(challenge).toHaveTextContent("_ferrogate-challenge.pending.example.com");
     expect(challenge).toHaveTextContent("ferrogate-site-verify=deadbeef");
-    expect(
-      screen.queryByTestId("site-domain-challenge-app.example.com"),
-    ).toBeNull();
+    expect(screen.queryByTestId("site-domain-challenge-app.example.com")).toBeNull();
   });
 
   it("says Unknown for a hostname whose liveness the gateway does not report", async () => {
@@ -339,7 +335,7 @@ describe("SiteDomainsPage", () => {
     // Suggestions appear only once the form targets the SESSION tenant, because
     // GET /v1/assets is scoped to the caller's own tenant.
     expect(
-      document.getElementById("bind-site-options")!.querySelectorAll("option"),
+      nn(document.getElementById("bind-site-options")).querySelectorAll("option"),
     ).toHaveLength(0);
 
     await user.click(screen.getByRole("combobox", { name: "Tenant" }));
@@ -347,11 +343,9 @@ describe("SiteDomainsPage", () => {
 
     await waitFor(() =>
       expect(
-        [
-          ...document
-            .getElementById("bind-site-options")!
-            .querySelectorAll("option"),
-        ].map((option) => option.getAttribute("value")),
+        [...nn(document.getElementById("bind-site-options")).querySelectorAll("option")].map(
+          (option) => option.getAttribute("value"),
+        ),
       ).toEqual(["docs", "marketing"]),
     );
   });
@@ -410,9 +404,7 @@ describe("SiteDomainsPage", () => {
     await screen.findByText("暂无已绑定的主机名。");
 
     await user.type(screen.getByLabelText("主机名（FQDN）"), "localhost");
-    expect(
-      await screen.findByText("主机名 localhost 必须是完全限定域名"),
-    ).toBeInTheDocument();
+    expect(await screen.findByText("主机名 localhost 必须是完全限定域名")).toBeInTheDocument();
   });
 
   it("rejects a single-label (non-FQDN) hostname", async () => {
@@ -422,9 +414,7 @@ describe("SiteDomainsPage", () => {
     await screen.findByText("No bound hostnames.");
 
     await user.type(screen.getByLabelText("Hostname (FQDN)"), "localhost");
-    expect(
-      await screen.findByText(/must be a fully qualified domain name/),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(/must be a fully qualified domain name/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Bind hostname" })).toBeDisabled();
   });
 
@@ -457,7 +447,7 @@ describe("SiteDomainsPage", () => {
     expect(errorToast.mock.calls[0][0]).not.toBe("certificate store is locked");
     // The gateway's own wording is retained as the technical detail.
     const options = errorToast.mock.calls[0][1] as { description?: ReactNode };
-    const { container } = render(<>{options.description}</>);
+    const { container } = render(options.description);
     expect(container.textContent).toBe("certificate store is locked");
   });
 

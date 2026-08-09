@@ -18,7 +18,7 @@
  * code under test), because a fixture built with the reader cannot show that
  * the reader reads what is actually in the table.
  */
-import { SELF, applyD1Migrations, env } from "cloudflare:test";
+import { SELF, type applyD1Migrations, env } from "cloudflare:test";
 import { DurableObjectTenantDatabaseRouter } from "@ferrogate/storage";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 
@@ -84,7 +84,7 @@ beforeEach(async () => {
     [TENANT, OTHER_TENANT].map(async (tenantId) => {
       const db = await tenantDb(tenantId);
       await db
-        .prepare(`DELETE FROM tenant_resources WHERE resource_kind = ?`)
+        .prepare("DELETE FROM tenant_resources WHERE resource_kind = ?")
         .bind(TOOL_APPROVAL_COLLECTION)
         .run();
     }),
@@ -144,7 +144,7 @@ async function storedApprovals(): Promise<ToolApprovalDocument[]> {
   const rows = await Promise.all(
     [TENANT, OTHER_TENANT].map(async (tenantId) =>
       (await tenantDb(tenantId))
-        .prepare(`SELECT document_json FROM tenant_resources WHERE resource_kind = ?`)
+        .prepare("SELECT document_json FROM tenant_resources WHERE resource_kind = ?")
         .bind(TOOL_APPROVAL_COLLECTION)
         .all<{ document_json: string }>(),
     ),

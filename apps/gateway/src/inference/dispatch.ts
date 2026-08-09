@@ -150,25 +150,19 @@ export interface DispatchDeadline {
  * zero `provider_dispatch_timeout_secs`, so this only ever fires for a test or
  * a caller that explicitly opts out.
  */
-export function dispatchDeadline(
-  timeoutMs: number,
-  clientSignal?: AbortSignal,
-): DispatchDeadline {
+export function dispatchDeadline(timeoutMs: number, clientSignal?: AbortSignal): DispatchDeadline {
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
     return { signal: clientSignal, expired: () => false };
   }
   const deadline = AbortSignal.timeout(timeoutMs);
-  const signal =
-    clientSignal === undefined ? deadline : AbortSignal.any([clientSignal, deadline]);
+  const signal = clientSignal === undefined ? deadline : AbortSignal.any([clientSignal, deadline]);
   return { signal, expired: () => deadline.aborted };
 }
 
 /** Thrown by {@link readBoundedProviderBody}; carries the Rust `bail!` message. */
 export class ProviderBodyTooLargeError extends Error {
   constructor(maxBytes: number) {
-    super(
-      `provider_response_body_too_large: provider response body exceeds ${maxBytes} bytes`,
-    );
+    super(`provider_response_body_too_large: provider response body exceeds ${maxBytes} bytes`);
   }
 }
 

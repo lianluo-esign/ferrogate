@@ -87,7 +87,7 @@ export function createTestRuntime(options: TestRuntimeOptions = {}): TestRuntime
     // through `options.directories`, keyed by the path the command is given, so
     // a symlink entry can be presented WITHOUT a filesystem that supports one.
     listDirectory: async (path) => {
-      const tree = (options.directories ?? {})[path.replace(/\/+$/, "")];
+      const tree = options.directories?.[path.replace(/\/+$/, "")];
       if (tree === undefined) throw new Error(`no such test directory: ${path}`);
       return tree;
     },

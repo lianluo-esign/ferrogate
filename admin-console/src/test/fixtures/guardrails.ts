@@ -71,9 +71,7 @@ export function policyRevision(overrides: Partial<Revision> = {}): Revision {
   };
 }
 
-export function checkEvaluation(
-  overrides: Partial<CheckEvaluation> = {},
-): CheckEvaluation {
+export function checkEvaluation(overrides: Partial<CheckEvaluation> = {}): CheckEvaluation {
   return {
     id: "chk-1",
     evaluation_id: "eval-1",

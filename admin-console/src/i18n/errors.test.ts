@@ -1,3 +1,4 @@
+import { ApiError } from "@/types/auth";
 // Unit coverage for the backend error/status-code -> operator-copy scaffold (#346).
 //
 // Proves the four contracts the mapping must hold: (1) a stable status/code ->
@@ -7,10 +8,9 @@
 // actually resolves to real, non-empty copy in BOTH locales (catalog consistency
 // for the `error.*` namespace).
 import { beforeAll, describe, expect, it } from "vitest";
+import { LOCALES, type Locale, type Messages, loadCatalog } from "./catalog";
 import { operatorErrorFor, statusCopyKey } from "./errors";
-import { loadCatalog, LOCALES, type Locale, type Messages } from "./catalog";
 import { translate } from "./i18n-provider";
-import { ApiError } from "@/types/auth";
 
 // The full generic error namespace the scaffold owns (the exact key contract the
 // EN + zh-CN catalogs must both cover).
@@ -60,7 +60,9 @@ describe("operatorErrorFor", () => {
 
   it("prefers a specifically-mapped backend code over the HTTP status", () => {
     // 400 would map to badRequest, but the code has bespoke copy and wins.
-    const result = operatorErrorFor(new ApiError(400, "invalid_credentials", "Invalid credentials"));
+    const result = operatorErrorFor(
+      new ApiError(400, "invalid_credentials", "Invalid credentials"),
+    );
     expect(result.titleKey).toBe("error.code.invalidCredentials");
     expect(result.code).toBe("invalid_credentials");
     // A specific code produced bespoke copy -> the redundant message is dropped.

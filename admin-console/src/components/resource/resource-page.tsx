@@ -1,9 +1,6 @@
-import { useRef, useState } from "react";
-import { AsyncStatus } from "@/components/ui/async-status";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ChevronLeft, ChevronRight, Plus } from "lucide-react";
-import { useSearchParams } from "react-router-dom";
-import { toast } from "sonner";
+import { CatalogScopeToggle } from "@/components/resource/catalog-scope-toggle";
+import { ResourceForm } from "@/components/resource/resource-form";
+import { ResourceTable } from "@/components/resource/resource-table";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -14,34 +11,32 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { AsyncStatus } from "@/components/ui/async-status";
 import { Button } from "@/components/ui/button";
-import {
-  Sheet,
-  SheetContent,
-  SheetHeader,
-  SheetTitle,
-} from "@/components/ui/sheet";
-import { CatalogScopeToggle } from "@/components/resource/catalog-scope-toggle";
-import { ResourceForm } from "@/components/resource/resource-form";
-import { ResourceTable } from "@/components/resource/resource-table";
+import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { useAuth } from "@/hooks/use-auth";
 import { useCatalogApiKey } from "@/hooks/use-catalog-api-key";
 import { useCatalogScope } from "@/hooks/use-catalog-scope";
-import { useI18n } from "@/i18n";
 import { useOperatorError } from "@/hooks/use-operator-error";
+import { useI18n } from "@/i18n";
 import {
+  type AdminPage,
   gatewayDelete,
   gatewayGet,
   gatewayPost,
   gatewayPut,
-  type AdminPage,
 } from "@/lib/gateway-client";
 import {
+  type ResourceConfig,
   defaultFieldValues,
   resolveConfigText,
   resolveOptionalConfigText,
-  type ResourceConfig,
 } from "@/lib/resource-config";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { ChevronLeft, ChevronRight, Plus } from "lucide-react";
+import { useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
+import { toast } from "sonner";
 
 export function ResourcePage<T extends Record<string, unknown>>({
   config,
@@ -56,17 +51,15 @@ export function ResourcePage<T extends Record<string, unknown>>({
   // non-scopable resources keep exactly their prior tenant-key behavior.
   const catalogApiKey = useCatalogApiKey();
   const { scope } = useCatalogScope();
-  const apiKey = config.platformScopable ? catalogApiKey : session!.gatewayApiKey;
+  const apiKey = config.platformScopable
+    ? catalogApiKey
+    : (session as NonNullable<typeof session>).gatewayApiKey;
   const { t } = useI18n();
   const { toastError } = useOperatorError();
   // Per-resource copy resolves the typed catalog key when present (migrated
   // resources) and falls back to the legacy inline literal otherwise (#348).
   const title = resolveConfigText(t, config.titleKey, config.title);
-  const description = resolveOptionalConfigText(
-    t,
-    config.descriptionKey,
-    config.description,
-  );
+  const description = resolveOptionalConfigText(t, config.descriptionKey, config.description);
   const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
   const paginationMode = config.pagination ?? (config.fetchList ? "none" : "offset");
@@ -154,9 +147,7 @@ export function ResourcePage<T extends Record<string, unknown>>({
       <div className="flex items-start justify-between gap-3">
         <div>
           <h1 className="text-lg font-semibold">{title}</h1>
-          {description && (
-            <p className="text-sm text-muted-foreground">{description}</p>
-          )}
+          {description && <p className="text-sm text-muted-foreground">{description}</p>}
         </div>
         <div className="flex items-center gap-3">
           {config.platformScopable && <CatalogScopeToggle />}
@@ -190,9 +181,7 @@ export function ResourcePage<T extends Record<string, unknown>>({
         rows={rows}
         isLoading={isLoading}
         readOnly={!canEdit && !canDelete}
-        emptyLabel={
-          listError ? t("resource.table.unavailable") : t("resource.table.empty")
-        }
+        emptyLabel={listError ? t("resource.table.unavailable") : t("resource.table.empty")}
         rowLabel={config.rowLabel}
         rowHref={config.rowHref}
         onEdit={
@@ -204,13 +193,20 @@ export function ResourcePage<T extends Record<string, unknown>>({
               }
             : undefined
         }
-        onDelete={canDelete ? (row, trigger) => {
-          deleteReturnFocusRef.current = trigger ?? null;
-          setDeletingRow(row);
-        } : undefined}
+        onDelete={
+          canDelete
+            ? (row, trigger) => {
+                deleteReturnFocusRef.current = trigger ?? null;
+                setDeletingRow(row);
+              }
+            : undefined
+        }
       />
 
-      <nav className="flex flex-col gap-2 text-sm text-muted-foreground sm:flex-row sm:items-center sm:justify-between" aria-label={t("resource.pagination.label", { name: title })}>
+      <nav
+        className="flex flex-col gap-2 text-sm text-muted-foreground sm:flex-row sm:items-center sm:justify-between"
+        aria-label={t("resource.pagination.label", { name: title })}
+      >
         <span aria-live="polite">
           {total !== undefined
             ? t("resource.pagination.rangeOf", {
@@ -282,9 +278,7 @@ export function ResourcePage<T extends Record<string, unknown>>({
                   : defaultFieldValues(config.fields)
               }
               submitLabel={
-                editingRow
-                  ? t("resource.action.saveChanges")
-                  : t("resource.action.create")
+                editingRow ? t("resource.action.saveChanges") : t("resource.action.create")
               }
               onCancel={() => setFormOpen(false)}
               onSubmit={async (values) => {
@@ -304,7 +298,10 @@ export function ResourcePage<T extends Record<string, unknown>>({
         </SheetContent>
       </Sheet>
 
-      <AlertDialog open={Boolean(deletingRow)} onOpenChange={(open) => !open && setDeletingRow(null)}>
+      <AlertDialog
+        open={Boolean(deletingRow)}
+        onOpenChange={(open) => !open && setDeletingRow(null)}
+      >
         <AlertDialogContent
           onCloseAutoFocus={(event) => {
             if (!deleteReturnFocusRef.current) return;
@@ -341,17 +338,16 @@ export function ResourcePage<T extends Record<string, unknown>>({
         </AlertDialogContent>
       </AlertDialog>
 
-      <AlertDialog open={Boolean(revealedSecret)} onOpenChange={(open) => !open && setRevealedSecret(null)}>
+      <AlertDialog
+        open={Boolean(revealedSecret)}
+        onOpenChange={(open) => !open && setRevealedSecret(null)}
+      >
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>{t("resource.secret.title")}</AlertDialogTitle>
-            <AlertDialogDescription>
-              {t("resource.secret.description")}
-            </AlertDialogDescription>
+            <AlertDialogDescription>{t("resource.secret.description")}</AlertDialogDescription>
           </AlertDialogHeader>
-          <code className="block break-all rounded-md bg-muted p-3 text-sm">
-            {revealedSecret}
-          </code>
+          <code className="block break-all rounded-md bg-muted p-3 text-sm">{revealedSecret}</code>
           <AlertDialogFooter>
             <AlertDialogAction
               onClick={() => {

@@ -13,12 +13,7 @@
  * payload, a payload without `choices`, or a `[DONE]` sentinel is skipped
  * rather than failing the request.
  */
-import {
-  type SseFrame,
-  frameJson,
-  isDoneFrame,
-  parseSse,
-} from "./sse.js";
+import { type SseFrame, frameJson, isDoneFrame, parseSse } from "./sse.js";
 import { ToolCallAccumulator } from "./toolcalls.js";
 import { asArray, asString, get, getString, nonNull } from "./values.js";
 
@@ -114,9 +109,9 @@ export class OpenAiCompletionAggregator {
    */
   result(): AggregatedChatCompletion {
     const message: Record<string, unknown> = { role: "assistant" };
-    message["content"] = this.#sawContent ? this.#content : null;
+    message.content = this.#sawContent ? this.#content : null;
     if (!this.#toolCalls.isEmpty) {
-      message["tool_calls"] = this.#toolCalls.toOpenAiToolCalls();
+      message.tool_calls = this.#toolCalls.toOpenAiToolCalls();
     }
     const completion: AggregatedChatCompletion = {
       id: this.#id ?? FALLBACK_COMPLETION_ID,

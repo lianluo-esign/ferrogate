@@ -1,9 +1,9 @@
+import { ResourceForm } from "@/components/resource/resource-form";
+import { type FieldConfig, defaultFieldValues } from "@/lib/resource-config";
+import { renderWithProviders } from "@/test/test-utils";
 import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import { ResourceForm } from "@/components/resource/resource-form";
-import { defaultFieldValues, type FieldConfig } from "@/lib/resource-config";
-import { renderWithProviders } from "@/test/test-utils";
 
 const fields: FieldConfig[] = [
   { name: "name", label: "Name", type: "text", required: true },

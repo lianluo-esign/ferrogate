@@ -233,9 +233,9 @@ describe("a buffered inference request produces one durable row", () => {
 
     // And the document half is the whole record, for the JSONL export.
     const document = JSON.parse(row.request_json) as Record<string, unknown>;
-    expect(document["object"]).toBe("request_log");
-    expect(document["logical_model"]).toBe("gpt-4o-mini");
-    expect(document["total_tokens"]).toBe(15);
+    expect(document.object).toBe("request_log");
+    expect(document.logical_model).toBe("gpt-4o-mini");
+    expect(document.total_tokens).toBe(15);
   });
 
   it("stamps started/completed seconds that bracket the request", async () => {
@@ -246,7 +246,10 @@ describe("a buffered inference request produces one durable row", () => {
     await h.settle();
     const after = Math.floor(Date.now() / 1000);
 
-    const row = (await storedRequestLogs())[0] as { started_at_unix: number; completed_at_unix: number };
+    const row = (await storedRequestLogs())[0] as {
+      started_at_unix: number;
+      completed_at_unix: number;
+    };
     expect(row.started_at_unix).toBeGreaterThanOrEqual(before);
     expect(row.completed_at_unix).toBeLessThanOrEqual(after);
     expect(row.completed_at_unix).toBeGreaterThanOrEqual(row.started_at_unix);
@@ -348,7 +351,7 @@ describe("a REFUSED request is still evidence", () => {
     expect(row.status_code).toBe(200);
     // No model was invoked, so no model is recorded.
     expect(row.logical_model).toBeNull();
-    expect(JSON.parse(row.request_json)["path"]).toBe("/v1/models");
+    expect(JSON.parse(row.request_json).path).toBe("/v1/models");
   });
 });
 
@@ -670,9 +673,7 @@ describe("a later write MERGES into the row rather than blanking it", () => {
       .prepare("SELECT projection_key FROM request_logs WHERE request_id = ?")
       .bind("fg-unicode-tenant")
       .all<{ projection_key: string }>();
-    expect(rows.results).toEqual([
-      { projection_key: `8:${tenantId}:fg-unicode-tenant` },
-    ]);
+    expect(rows.results).toEqual([{ projection_key: `8:${tenantId}:fg-unicode-tenant` }]);
   });
 });
 
@@ -698,9 +699,7 @@ describe("a failing consumer batch is logged, not swallowed", () => {
         batch: async () => {
           throw new Error("D1_ERROR: no such table: request_logs: SQLITE_ERROR");
         },
-      } as unknown as Parameters<typeof consumeRequestLogBatch>[2] extends (
-        e: unknown,
-      ) => infer R
+      } as unknown as Parameters<typeof consumeRequestLogBatch>[2] extends (e: unknown) => infer R
         ? R
         : never;
 

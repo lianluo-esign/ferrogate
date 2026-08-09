@@ -61,9 +61,10 @@
  * request is simply not in it) rather than emitting a cost with no owner, which
  * is the one thing a chargeback file must never do.
  */
-import { HttpError } from "../middleware/errors.js";
+
 import { type CsvValue, encodeCsv } from "../export/csv.js";
 import { type ParquetColumn, type ParquetValue, encodeParquet } from "../export/parquet.js";
+import { HttpError } from "../middleware/errors.js";
 import type { CallerScope, StoreRecord } from "../ports.js";
 import { adminListPaginated, parseListQuery } from "../responses.js";
 import { BILLING_EVENT_TABLE, REQUEST_LOG_TABLE } from "../store/d1.js";
@@ -97,7 +98,7 @@ const COST_RECORD_OBJECT = "cost_record";
  */
 function costRecordTenantFence(scope: CallerScope): { sql: string; params: string[] } {
   if (scope.kind === "platform_operator") return { sql: "", params: [] };
-  return { sql: `rl.tenant = ?`, params: [scope.tenantId] };
+  return { sql: "rl.tenant = ?", params: [scope.tenantId] };
 }
 
 /**

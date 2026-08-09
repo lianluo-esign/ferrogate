@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 
+import { sseParseStream, sseSerializeStream } from "../../src/streaming/sse.js";
 import {
   STREAMING_CAPTURE_MAX_BYTES,
   STREAMING_CAPTURE_PREFIX_MAX_BYTES,
@@ -12,7 +13,6 @@ import {
   usageCaptureStream,
   usageToOpenAiJson,
 } from "../../src/streaming/usage.js";
-import { sseParseStream, sseSerializeStream } from "../../src/streaming/sse.js";
 import {
   OPENAI_TEXT_STREAM,
   bytes,
@@ -46,10 +46,7 @@ describe("extractUsage", () => {
 
   test("Anthropic message_delta reports only output_tokens", () => {
     expect(
-      extractUsage(
-        { type: "message_delta", delta: {}, usage: { output_tokens: 17 } },
-        "anthropic",
-      ),
+      extractUsage({ type: "message_delta", delta: {}, usage: { output_tokens: 17 } }, "anthropic"),
     ).toEqual({
       promptTokens: undefined,
       completionTokens: 17,
@@ -99,9 +96,11 @@ describe("mergeUsage", () => {
   });
 
   test("total_tokens is synthesized when the provider omits it", () => {
-    expect(mergeUsage(undefined, { promptTokens: 2, completionTokens: 3 })).toEqual(
-      { promptTokens: 2, completionTokens: 3, totalTokens: 5 },
-    );
+    expect(mergeUsage(undefined, { promptTokens: 2, completionTokens: 3 })).toEqual({
+      promptTokens: 2,
+      completionTokens: 3,
+      totalTokens: 5,
+    });
   });
 
   test("a reported total wins over the synthesized one", () => {
@@ -182,9 +181,7 @@ describe("UsageCapture over a live stream", () => {
         .pipeThrough(capture.stream),
     );
     expect(frames).toHaveLength(3);
-    expect(seen).toEqual([
-      { promptTokens: 11, completionTokens: 17, totalTokens: 28 },
-    ]);
+    expect(seen).toEqual([{ promptTokens: 11, completionTokens: 17, totalTokens: 28 }]);
   });
 
   test("a stream that never reports usage resolves to undefined", async () => {
@@ -246,9 +243,7 @@ describe("StreamingBodyCapture (bounded prefix+tail window)", () => {
     const capture = new StreamingBodyCapture();
     capture.append(bytes("data: a\n\n"));
     capture.append(bytes("data: b\n\n"));
-    expect(new TextDecoder().decode(capture.body())).toBe(
-      "data: a\n\ndata: b\n\n",
-    );
+    expect(new TextDecoder().decode(capture.body())).toBe("data: a\n\ndata: b\n\n");
     expect(capture.truncated).toBe(false);
   });
 
@@ -262,9 +257,7 @@ describe("StreamingBodyCapture (bounded prefix+tail window)", () => {
     expect(capture.truncated).toBe(true);
     expect(body.startsWith("HEAD-MARKER")).toBe(true);
     expect(body.endsWith('data: {"usage":{"prompt_tokens":9}}\n\n')).toBe(true);
-    expect(capture.body().length).toBeLessThanOrEqual(
-      STREAMING_CAPTURE_MAX_BYTES,
-    );
+    expect(capture.body().length).toBeLessThanOrEqual(STREAMING_CAPTURE_MAX_BYTES);
     // The usage frame at the tail is still scrapeable after truncation.
     expect(extractLastStreamUsage(capture.body())?.promptTokens).toBe(9);
   });
@@ -273,9 +266,7 @@ describe("StreamingBodyCapture (bounded prefix+tail window)", () => {
     const capture = new StreamingBodyCapture();
     capture.append(new Uint8Array(STREAMING_CAPTURE_PREFIX_MAX_BYTES * 3).fill(0x61));
     capture.append(new Uint8Array(STREAMING_CAPTURE_MAX_BYTES).fill(0x62));
-    expect(capture.body().length).toBeLessThanOrEqual(
-      STREAMING_CAPTURE_MAX_BYTES,
-    );
+    expect(capture.body().length).toBeLessThanOrEqual(STREAMING_CAPTURE_MAX_BYTES);
   });
 
   test("bodyCaptureStream taps bytes without altering them", async () => {

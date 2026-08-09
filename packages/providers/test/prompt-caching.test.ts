@@ -30,6 +30,7 @@ import {
   toChatCompletions,
 } from "../src/index.js";
 import type { ProviderConfig } from "../src/index.js";
+const nn = <T>(v: T): NonNullable<T> => v as NonNullable<T>;
 
 // --- fixtures --------------------------------------------------------------
 
@@ -95,7 +96,6 @@ const chatPlan = (body: Record<string, unknown>) => ({
   body: body as never,
 });
 
-
 const workersAiProvider: ProviderConfig = {
   name: "cf-ai",
   kind: "workers-ai",
@@ -152,7 +152,7 @@ describe("the directive reaches every family's own caching mechanism", () => {
     // prefix is rendered tools → system → messages, so a marker there covers
     // the tools and the system prompt while leaving the volatile turn — the
     // caller's actual question — outside the cached span.
-    expect(body["messages"]).toEqual([
+    expect(body.messages).toEqual([
       {
         role: "system",
         content: [
@@ -162,7 +162,7 @@ describe("the directive reaches every family's own caching mechanism", () => {
       { role: "user", content: "is claim 91 covered?" },
     ]);
     // The FerroGate-only directive must never reach a provider.
-    expect(body["prompt_cache"]).toBeUndefined();
+    expect(body.prompt_cache).toBeUndefined();
   });
 
   test("anthropic's default ttl is the 5-minute ephemeral form", () => {
@@ -170,10 +170,10 @@ describe("the directive reaches every family's own caching mechanism", () => {
       anthropicProvider,
       chatPlan(chatBody({ mode: "auto" })),
     );
-    const messages = (prepared.body as Record<string, any>)["messages"] as Array<
-      Record<string, any>
-    >;
-    expect(messages[0]!["content"][0]["cache_control"]).toEqual({ type: "ephemeral" });
+    const messages = (prepared.body as Record<string, any>).messages as Array<Record<string, any>>;
+    expect((messages[0] as NonNullable<(typeof messages)[0]>).content[0].cache_control).toEqual({
+      type: "ephemeral",
+    });
   });
 
   test("a top-level `system` carries the breakpoint when the body has one", () => {
@@ -188,7 +188,7 @@ describe("the directive reaches every family's own caching mechanism", () => {
         prompt_cache: { mode: "auto" },
       }),
     );
-    expect((prepared.body as Record<string, any>)["system"]).toEqual([
+    expect((prepared.body as Record<string, any>).system).toEqual([
       { type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral" } },
     ]);
   });
@@ -201,10 +201,7 @@ describe("the directive reaches every family's own caching mechanism", () => {
     const body = prepared.body as Record<string, any>;
     // Same boundary, Converse's spelling: a `cachePoint` BLOCK after the static
     // system content rather than a member of the preceding block.
-    expect(body["system"]).toEqual([
-      { text: SYSTEM_PROMPT },
-      { cachePoint: { type: "default" } },
-    ]);
+    expect(body.system).toEqual([{ text: SYSTEM_PROMPT }, { cachePoint: { type: "default" } }]);
   });
 
   test("openai-compatible relies on automatic caching and strips the directive", () => {
@@ -216,10 +213,10 @@ describe("the directive reaches every family's own caching mechanism", () => {
     // OpenAI caches long prefixes automatically, so `auto` is already satisfied
     // — but the directive is FerroGate's field, and OpenAI rejects unknown
     // top-level members, so leaving it on the body would 400 the request.
-    expect(body["prompt_cache"]).toBeUndefined();
+    expect(body.prompt_cache).toBeUndefined();
     // …and the rest of the body is untouched: no breakpoint is invented for a
     // family that chooses its own prefix.
-    expect(body["messages"]).toEqual([
+    expect(body.messages).toEqual([
       { role: "system", content: SYSTEM_PROMPT },
       { role: "user", content: "is claim 91 covered?" },
     ]);
@@ -230,12 +227,12 @@ describe("the directive reaches every family's own caching mechanism", () => {
       geminiProvider,
       chatPlan(chatBody({ mode: "auto" })),
     );
-    expect((gemini.body as Record<string, any>)["prompt_cache"]).toBeUndefined();
+    expect((gemini.body as Record<string, any>).prompt_cache).toBeUndefined();
     const vertex = new VertexAiAdapter().prepareChatCompletions(
       vertexProvider,
       chatPlan(chatBody({ mode: "auto" })),
     );
-    expect((vertex.body as Record<string, any>)["prompt_cache"]).toBeUndefined();
+    expect((vertex.body as Record<string, any>).prompt_cache).toBeUndefined();
   });
 });
 
@@ -436,7 +433,10 @@ describe("preparing one family never rewrites the caller's body", () => {
    * would carry anything an adapter decided to normalise.
    */
   const preparers: Array<[string, (body: Record<string, unknown>) => unknown]> = [
-    ["anthropic", (b) => new AnthropicAdapter().prepareChatCompletions(anthropicProvider, chatPlan(b))],
+    [
+      "anthropic",
+      (b) => new AnthropicAdapter().prepareChatCompletions(anthropicProvider, chatPlan(b)),
+    ],
     ["bedrock", (b) => new BedrockAdapter().prepareChatCompletions(bedrockProvider, chatPlan(b))],
     [
       "openai-compatible",
@@ -471,8 +471,8 @@ describe("preparing one family never rewrites the caller's body", () => {
       const shared = chatBody({ mode: "auto" });
       const solo = chatBody({ mode: "auto" });
       const [first, second] = order as [string, string];
-      const prepareFirst = preparers.find(([name]) => name === first)![1];
-      const prepareSecond = preparers.find(([name]) => name === second)![1];
+      const prepareFirst = nn(preparers.find(([name]) => name === first))[1];
+      const prepareSecond = nn(preparers.find(([name]) => name === second))[1];
 
       prepareFirst(shared as Record<string, unknown>);
       expect(
@@ -489,13 +489,15 @@ describe("the Anthropic-native ingress keeps the caller's caching intent", () =>
   test("a native cache_control becomes the canonical directive", () => {
     const translated = toChatCompletions({
       model: "claude-logical",
-      system: [{ type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral", ttl: "1h" } }],
+      system: [
+        { type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral", ttl: "1h" } },
+      ],
       messages: [{ role: "user", content: "is claim 91 covered?" }],
     } as never) as Record<string, any>;
     // Every block above is REBUILT by the translation, so the marker itself
     // cannot survive; the intent is what has to, or a Claude-native caller
     // loses its whole prefix discount on FerroGate's own Claude ingress.
-    expect(translated["prompt_cache"]).toEqual({ mode: "explicit", ttl: "1h" });
+    expect(translated.prompt_cache).toEqual({ mode: "explicit", ttl: "1h" });
   });
 
   test("an explicit prompt_cache is read here too, and beats an inferred marker", () => {
@@ -512,7 +514,7 @@ describe("the Anthropic-native ingress keeps the caller's caching intent", () =>
       messages: [{ role: "user", content: "is claim 91 covered?" }],
       prompt_cache: { mode: "off" },
     } as never) as Record<string, any>;
-    expect(translated["prompt_cache"]).toEqual({ mode: "off" });
+    expect(translated.prompt_cache).toEqual({ mode: "off" });
   });
 
   test("a request with no marker states no intent", () => {
@@ -520,7 +522,7 @@ describe("the Anthropic-native ingress keeps the caller's caching intent", () =>
       model: "claude-logical",
       messages: [{ role: "user", content: "hi" }],
     } as never) as Record<string, any>;
-    expect(translated["prompt_cache"]).toBeUndefined();
+    expect(translated.prompt_cache).toBeUndefined();
   });
 
   test("the response carries the hit/miss split back in Anthropic's vocabulary", () => {
@@ -538,7 +540,7 @@ describe("the Anthropic-native ingress keeps the caller's caching intent", () =>
     ) as Record<string, any>;
     // OpenAI's prompt_tokens INCLUDES the cached tokens; Anthropic's
     // input_tokens excludes them, so the fresh count is the difference.
-    expect(message["usage"]).toEqual({
+    expect(message.usage).toEqual({
       input_tokens: 12,
       output_tokens: 3,
       cache_read_input_tokens: 9_000,
@@ -553,7 +555,7 @@ describe("the Anthropic-native ingress keeps the caller's caching intent", () =>
       } as never,
       "claude-logical",
     ) as Record<string, any>;
-    expect(message["usage"]).toEqual({ input_tokens: 5, output_tokens: 2 });
+    expect(message.usage).toEqual({ input_tokens: 5, output_tokens: 2 });
   });
 });
 
@@ -564,17 +566,20 @@ describe("`off` removes the caller's native markers too", () => {
     const prepared = new AnthropicAdapter().prepareChatCompletions(
       anthropicProvider,
       chatPlan(
-        chatBody({ mode: "off" }, {
-          messages: [
-            {
-              role: "user",
-              content: [
-                { type: "text", text: "policy", cache_control: { type: "ephemeral" } },
-                { type: "text", text: "is claim 91 covered?" },
-              ],
-            },
-          ],
-        }),
+        chatBody(
+          { mode: "off" },
+          {
+            messages: [
+              {
+                role: "user",
+                content: [
+                  { type: "text", text: "policy", cache_control: { type: "ephemeral" } },
+                  { type: "text", text: "is claim 91 covered?" },
+                ],
+              },
+            ],
+          },
+        ),
       ),
     );
     // A native marker the caller left in place would keep writing the prompt to

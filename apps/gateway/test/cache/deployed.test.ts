@@ -88,7 +88,12 @@ function interceptUpstream(): { count: () => number; restore: () => void } {
       { status: 200, headers: { "content-type": "application/json" } },
     );
   }) as typeof fetch;
-  return { count: () => calls, restore: () => void (globalThis.fetch = original) };
+  return {
+    count: () => calls,
+    restore: () => {
+      globalThis.fetch = original;
+    },
+  };
 }
 
 function post(body: unknown, extra: Record<string, string> = {}): Promise<Response> {

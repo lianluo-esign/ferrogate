@@ -1,3 +1,5 @@
+import { operatorErrorFor, useI18n } from "@/i18n";
+import { isLocalizedError } from "@/lib/localized-error";
 // Adoption layer for the #346 backend-error -> localized-copy scaffold (#348).
 //
 // `src/i18n/errors.ts` maps a thrown backend failure to a GENERIC, localized
@@ -16,8 +18,6 @@
 // not rewrite it, and neither do we.
 import { useCallback, useMemo } from "react";
 import { toast } from "sonner";
-import { operatorErrorFor, useI18n } from "@/i18n";
-import { isLocalizedError } from "@/lib/localized-error";
 
 export interface OperatorErrorCopy {
   /** Localized, operator-facing headline for the failure. */

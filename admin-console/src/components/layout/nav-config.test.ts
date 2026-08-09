@@ -1,13 +1,13 @@
-import { describe, expect, it } from "vitest";
 import {
-  findNavigationLeaf,
-  isPathActive,
   NAV_DASHBOARD,
   NAV_GROUPS,
+  findNavigationLeaf,
+  isPathActive,
 } from "@/components/layout/nav-config";
+import { translate } from "@/i18n";
 import { APP_DETAIL_ROUTE_PARENTS, APP_ROUTES } from "@/lib/app-routes";
 import { RESOURCE_ROUTES } from "@/resources";
-import { translate } from "@/i18n";
+import { describe, expect, it } from "vitest";
 
 const navItems = [NAV_DASHBOARD, ...NAV_GROUPS.flatMap((group) => group.items)];
 
@@ -55,12 +55,8 @@ describe("admin navigation registry", () => {
 
   it("labels every navigation destination with a resolvable catalog key", () => {
     for (const item of navItems) {
-      expect(translate("en", item.titleKey), `${item.url} en label`).not.toBe(
-        item.titleKey,
-      );
-      expect(translate("zh-CN", item.titleKey), `${item.url} zh-CN label`).not.toBe(
-        item.titleKey,
-      );
+      expect(translate("en", item.titleKey), `${item.url} en label`).not.toBe(item.titleKey);
+      expect(translate("zh-CN", item.titleKey), `${item.url} zh-CN label`).not.toBe(item.titleKey);
     }
   });
 });

@@ -27,16 +27,13 @@
  * tenant believes is on their own agreement.
  */
 import type { TenantByokResolver } from "./byok.js";
-import { type EnvLike, defaultEnv } from "./env.js";
 import { CfSecretBindings } from "./cloudflare-bindings.js";
 import { cfBindingEnvVar } from "./cloudflare-bindings.js";
-import {
-  CfSecretsStoreConfig,
-  CloudflareSecretResolver,
-} from "./cloudflare.js";
+import { CfSecretsStoreConfig, CloudflareSecretResolver } from "./cloudflare.js";
+import { type EnvLike, defaultEnv } from "./env.js";
 import { EnvSecretResolver } from "./resolver.js";
-import { VaultConfig, VaultSecretResolver } from "./vault.js";
 import { parseSecretRef } from "./secret-ref.js";
+import { VaultConfig, VaultSecretResolver } from "./vault.js";
 
 export class SecretResolverRegistry {
   private vault: VaultSecretResolver | null;
@@ -68,12 +65,7 @@ export class SecretResolverRegistry {
 
   /** An empty registry: only `env://` and the `cf://` binding convention. */
   static new(env: EnvLike = defaultEnv()): SecretResolverRegistry {
-    return new SecretResolverRegistry(
-      null,
-      null,
-      CfSecretBindings.new(env),
-      env,
-    );
+    return new SecretResolverRegistry(null, null, CfSecretBindings.new(env), env);
   }
 
   /** A registry with the Vault backend enabled. */
@@ -81,12 +73,7 @@ export class SecretResolverRegistry {
     vault: VaultSecretResolver,
     env: EnvLike = defaultEnv(),
   ): SecretResolverRegistry {
-    return new SecretResolverRegistry(
-      vault,
-      null,
-      CfSecretBindings.new(env),
-      env,
-    );
+    return new SecretResolverRegistry(vault, null, CfSecretBindings.new(env), env);
   }
 
   /** Enable the Cloudflare Secrets Store REST backend (builder). */
@@ -125,10 +112,7 @@ export class SecretResolverRegistry {
     fetchImpl: typeof fetch = fetch,
   ): SecretResolverRegistry {
     const vaultConfig = VaultConfig.fromEnv(env);
-    const vault =
-      vaultConfig !== null
-        ? new VaultSecretResolver(vaultConfig, fetchImpl)
-        : null;
+    const vault = vaultConfig !== null ? new VaultSecretResolver(vaultConfig, fetchImpl) : null;
 
     const cfConfig = CfSecretsStoreConfig.fromEnv(env);
     let cloudflare: CloudflareSecretResolver | null = null;
@@ -139,20 +123,14 @@ export class SecretResolverRegistry {
         // A present-but-unbuildable client is treated as "not configured"
         // (the cf:// path then errors clearly unless a binding provides it).
         console.warn(
-          "Cloudflare Secrets Store is configured but its client could not be built; " +
-            `cf:// references will error: ${
-              error instanceof Error ? error.message : String(error)
-            }`,
+          `Cloudflare Secrets Store is configured but its client could not be built; cf:// references will error: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
         );
       }
     }
 
-    return new SecretResolverRegistry(
-      vault,
-      cloudflare,
-      CfSecretBindings.new(env),
-      env,
-    );
+    return new SecretResolverRegistry(vault, cloudflare, CfSecretBindings.new(env), env);
   }
 
   /** Resolve a raw `secret_ref` string; `null` = not found, throw = failure. */
@@ -171,10 +149,7 @@ export class SecretResolverRegistry {
       case "byok":
         if (this.byok === null) {
           throw new Error(
-            `secret reference ${raw} is a per-tenant BYOK alias, but no tenant-bound resolver ` +
-              "is mounted on this registry (call withByok(new TenantByokResolver({ tenantId, " +
-              "store, keyring })) with the AUTHENTICATED caller's tenant). Refusing rather " +
-              "than falling back to the platform's own provider credential.",
+            `secret reference ${raw} is a per-tenant BYOK alias, but no tenant-bound resolver is mounted on this registry (call withByok(new TenantByokResolver({ tenantId, store, keyring })) with the AUTHENTICATED caller's tenant). Refusing rather than falling back to the platform's own provider credential.`,
           );
         }
         return this.byok.resolve(reference);
@@ -187,12 +162,7 @@ export class SecretResolverRegistry {
         if (bound !== null) return bound;
         if (this.cloudflare !== null) return this.cloudflare.resolve(reference);
         throw new Error(
-          `cf:// secret ${raw} could not be resolved: no Worker-binding value found (checked the ` +
-            `${cfBindingEnvVar(reference.name)} environment variable and the injected binding ` +
-            `map; see docs/cloudflare-secrets-resolution.md), and the Cloudflare Secrets Store ` +
-            `REST backend is not configured (set CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN to ` +
-            `enable existence checks — note Secrets Store values are write-only over REST and can ` +
-            `never be fetched at load time)`,
+          `cf:// secret ${raw} could not be resolved: no Worker-binding value found (checked the ${cfBindingEnvVar(reference.name)} environment variable and the injected binding map; see docs/cloudflare-secrets-resolution.md), and the Cloudflare Secrets Store REST backend is not configured (set CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN to enable existence checks — note Secrets Store values are write-only over REST and can never be fetched at load time)`,
         );
       }
     }

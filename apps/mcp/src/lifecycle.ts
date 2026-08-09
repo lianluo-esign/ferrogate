@@ -146,10 +146,7 @@ export function lifecycleRejectionCode(status: LifecycleStatus): string {
 
 /** Rust `LifecycleRejection::message` for the Request seam. */
 export function lifecycleRejectionMessage(reference: LifecycleRef): string {
-  return (
-    `${reference.kind} ${reference.id} is ${reference.status}; ` +
-    "requests authenticated against this tenancy chain are refused"
-  );
+  return `${reference.kind} ${reference.id} is ${reference.status}; requests authenticated against this tenancy chain are refused`;
 }
 
 /**

@@ -81,9 +81,9 @@ describe("crossedBudgetThresholds — the tier loop in state_wallets.rs", () => 
     // would yield Infinity and fire every tier at once, on a tenant who has no
     // budget configured at all.
     for (const budgetUsd of [undefined, 0, -1, Number.NaN]) {
-      expect(crossedBudgetThresholds({ spentUsd: 500, budgetUsd, thresholdPcts: [50, 80] })).toEqual(
-        [],
-      );
+      expect(
+        crossedBudgetThresholds({ spentUsd: 500, budgetUsd, thresholdPcts: [50, 80] }),
+      ).toEqual([]);
     }
   });
 

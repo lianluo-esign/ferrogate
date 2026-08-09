@@ -1,15 +1,15 @@
-import { HttpResponse, http } from "msw";
-import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  PresignedUploadRejectedError,
   adminDelete,
   adminGet,
   adminPost,
   adminPut,
-  PresignedUploadRejectedError,
   putPresignedObject,
 } from "@/lib/gateway-client";
-import { ApiError } from "@/types/auth";
 import { gatewayUrl, mockAdminError, server } from "@/test/msw";
+import { ApiError } from "@/types/auth";
+import { http, HttpResponse } from "msw";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 const API_KEY = "fg-test-key";
 
@@ -163,10 +163,7 @@ describe("putPresignedObject (#368 bound direct upload)", () => {
   }
 
   function stubRequestAcceptsSignal() {
-    vi.stubGlobal(
-      "Request",
-      class {},
-    );
+    vi.stubGlobal("Request", class {});
   }
 
   it("forwards the signed payload hash verbatim and never sets content-length", async () => {
@@ -189,9 +186,7 @@ describe("putPresignedObject (#368 bound direct upload)", () => {
     expect(headers["Content-Type"]).toBe("application/gzip");
     // Fetch forbids a page setting content-length; the browser derives the
     // signed value from the body instead.
-    expect(Object.keys(headers).map((name) => name.toLowerCase())).not.toContain(
-      "content-length",
-    );
+    expect(Object.keys(headers).map((name) => name.toLowerCase())).not.toContain("content-length");
   });
 
   it("refuses to PUT bytes whose length differs from the signed content-length", async () => {

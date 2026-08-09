@@ -10,13 +10,9 @@ import {
 
 describe("cfBindingEnvVar", () => {
   it("follows the documented uppercase + non-alnum→_ convention", () => {
-    expect(cfBindingEnvVar("openai-api-key")).toBe(
-      `${CF_BINDING_ENV_PREFIX}OPENAI_API_KEY`,
-    );
+    expect(cfBindingEnvVar("openai-api-key")).toBe(`${CF_BINDING_ENV_PREFIX}OPENAI_API_KEY`);
     // Every non-alphanumeric collapses to `_` — always a shell-exportable name.
-    expect(cfBindingEnvVar("openai.api/key")).toBe(
-      "FERROGATE_CF_SECRET_OPENAI_API_KEY",
-    );
+    expect(cfBindingEnvVar("openai.api/key")).toBe("FERROGATE_CF_SECRET_OPENAI_API_KEY");
   });
 });
 
@@ -73,9 +69,9 @@ describe("CfSecretBindings.lookup", () => {
   });
 
   it("resolve() rejects a non-cf reference", async () => {
-    await expect(
-      CfSecretBindings.new({}).resolve(parseSecretRef("env://X")),
-    ).rejects.toThrow(/non-cf/);
+    await expect(CfSecretBindings.new({}).resolve(parseSecretRef("env://X"))).rejects.toThrow(
+      /non-cf/,
+    );
   });
 });
 
@@ -84,9 +80,7 @@ describe("registry cf:// binding precedence", () => {
     const registry = SecretResolverRegistry.new({
       FERROGATE_CF_SECRET_REGISTRY_ENV_BIND_KEY: "sk-bound",
     });
-    expect(await registry.resolve("cf://provider-keys/registry-env-bind-key")).toBe(
-      "sk-bound",
-    );
+    expect(await registry.resolve("cf://provider-keys/registry-env-bind-key")).toBe("sk-bound");
   });
 
   it("refuses an ambiguous cf:// reference before the REST backend", async () => {
@@ -94,18 +88,18 @@ describe("registry cf:// binding precedence", () => {
     // loud "unscripted request" error — its absence proves the binding-context
     // guard fired first.
     const registry = SecretResolverRegistry.new({});
-    await expect(
-      registry.resolve("cf://provider-keys/Registry_Ambiguous.Key"),
-    ).rejects.toThrow(/not canonical/);
-    await expect(
-      registry.resolve("cf://provider-keys/Registry_Ambiguous.Key"),
-    ).rejects.not.toThrow(/unscripted request/);
+    await expect(registry.resolve("cf://provider-keys/Registry_Ambiguous.Key")).rejects.toThrow(
+      /not canonical/,
+    );
+    await expect(registry.resolve("cf://provider-keys/Registry_Ambiguous.Key")).rejects.not.toThrow(
+      /unscripted request/,
+    );
   });
 
   it("errors clearly when cf:// is unconfigured, naming the binding var", async () => {
     const registry = SecretResolverRegistry.new({});
-    await expect(
-      registry.resolve("cf://provider-keys/unbound-unconfigured-key"),
-    ).rejects.toThrow(/FERROGATE_CF_SECRET_UNBOUND_UNCONFIGURED_KEY/);
+    await expect(registry.resolve("cf://provider-keys/unbound-unconfigured-key")).rejects.toThrow(
+      /FERROGATE_CF_SECRET_UNBOUND_UNCONFIGURED_KEY/,
+    );
   });
 });

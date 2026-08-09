@@ -230,10 +230,7 @@ export const modelPriceSchema = z.object({
 });
 
 /** Mirrors `ModelPrice::usd`. */
-export function modelPriceUsd(
-  input_price_per_1m: number,
-  output_price_per_1m: number,
-): ModelPrice {
+export function modelPriceUsd(input_price_per_1m: number, output_price_per_1m: number): ModelPrice {
   return { input_price_per_1m, output_price_per_1m, currency: "USD" };
 }
 
@@ -352,9 +349,15 @@ function positive(value: number | undefined): number | undefined {
  * True when this event carries an audio quantity the card CANNOT price — the
  * case that must stay `price_not_found` rather than settling at $0 (#129).
  */
-export function audioQuantityUnpriced(price: ModelPrice, audio: AudioQuantity | undefined): boolean {
+export function audioQuantityUnpriced(
+  price: ModelPrice,
+  audio: AudioQuantity | undefined,
+): boolean {
   if (audio === undefined) return false;
-  if (positive(audio.audio_seconds) !== undefined && positive(price.audio_second_price_per_1m) === undefined) {
+  if (
+    positive(audio.audio_seconds) !== undefined &&
+    positive(price.audio_second_price_per_1m) === undefined
+  ) {
     return true;
   }
   return (
@@ -386,10 +389,8 @@ export function estimateCost(
 
   const input_cost =
     audioCostUsd(price, audio) +
-    (fresh * price.input_price_per_1m +
-      cachedRead * cachedRate +
-      cacheWrite * writeRate) /
-    1_000_000.0;
+    (fresh * price.input_price_per_1m + cachedRead * cachedRate + cacheWrite * writeRate) /
+      1_000_000.0;
   const output_cost =
     (visible * price.output_price_per_1m + reasoning * reasoningRate) / 1_000_000.0;
   return {
@@ -412,10 +413,7 @@ export const BillingUsageSource = {
   GatewayEstimate: "gateway_estimate",
 } as const;
 
-export const billingUsageSourceSchema = z.enum([
-  "provider_usage",
-  "gateway_estimate",
-]);
+export const billingUsageSourceSchema = z.enum(["provider_usage", "gateway_estimate"]);
 
 /** Mirrors `BillingUsageSource::as_str` (identity — the wire tag is the string). */
 export function billingUsageSourceAsStr(source: BillingUsageSource): string {

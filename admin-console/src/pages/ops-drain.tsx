@@ -1,12 +1,4 @@
-// Graceful drain control (issue #322) over GET/POST /admin/v1/drain.
-//
-// Drain flips this node out of the load-balancer's healthy set: it stops
-// accepting NEW AI requests while letting in-flight work finish. Both
-// starting and stopping a drain sit behind a confirmation dialog with explicit
-// consequence text, since either changes whether live traffic is served.
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { toast } from "sonner";
-import { Badge } from "@/components/ui/badge";
+import { BoolBadge, DefinitionRow } from "@/components/ops/ops-primitives";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -17,18 +9,21 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import { BoolBadge, DefinitionRow } from "@/components/ops/ops-primitives";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useAuth } from "@/hooks/use-auth";
 import { useI18n } from "@/i18n";
-import { adminGet, adminPost, type AdminSchema } from "@/lib/gateway-client";
+import { type AdminSchema, adminGet, adminPost } from "@/lib/gateway-client";
+// Graceful drain control (issue #322) over GET/POST /admin/v1/drain.
+//
+// Drain flips this node out of the load-balancer's healthy set: it stops
+// accepting NEW AI requests while letting in-flight work finish. Both
+// starting and stopping a drain sit behind a confirmation dialog with explicit
+// consequence text, since either changes whether live traffic is served.
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
+import { toast } from "sonner";
 
 type DrainStatus = AdminSchema<"AdminDrainResponse">;
 
@@ -37,7 +32,7 @@ const DRAIN_REFETCH_INTERVAL_MS = 5_000;
 export default function OpsDrainPage() {
   const { session } = useAuth();
   const { t } = useI18n();
-  const apiKey = session!.gatewayApiKey;
+  const apiKey = (session as NonNullable<typeof session>).gatewayApiKey;
   const queryClient = useQueryClient();
   const queryKey = ["ops-drain"];
 
@@ -50,13 +45,10 @@ export default function OpsDrainPage() {
   });
 
   const mutation = useMutation({
-    mutationFn: (drain: boolean) =>
-      adminPost(apiKey, "/admin/v1/drain", { drain }),
+    mutationFn: (drain: boolean) => adminPost(apiKey, "/admin/v1/drain", { drain }),
     onSuccess: (result: DrainStatus) => {
       toast.success(
-        result.draining
-          ? t("page.opsDrain.toast.draining")
-          : t("page.opsDrain.toast.serving"),
+        result.draining ? t("page.opsDrain.toast.draining") : t("page.opsDrain.toast.serving"),
       );
       queryClient.setQueryData(queryKey, result);
       queryClient.invalidateQueries({ queryKey });
@@ -72,13 +64,14 @@ export default function OpsDrainPage() {
     <div className="flex flex-col gap-4">
       <div>
         <h1 className="text-lg font-semibold">{t("page.opsDrain.title")}</h1>
-        <p className="text-sm text-muted-foreground">
-          {t("page.opsDrain.description")}
-        </p>
+        <p className="text-sm text-muted-foreground">{t("page.opsDrain.description")}</p>
       </div>
 
       {error ? (
-        <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <p
+          role="alert"
+          className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+        >
           {t("page.opsDrain.loadError", { message: (error as Error).message })}
         </p>
       ) : null}
@@ -89,9 +82,7 @@ export default function OpsDrainPage() {
             {t("page.opsDrain.status.title")}
             {data ? (
               <Badge variant={draining ? "destructive" : "default"}>
-                {draining
-                  ? t("page.opsDrain.status.draining")
-                  : t("page.opsDrain.status.serving")}
+                {draining ? t("page.opsDrain.status.draining") : t("page.opsDrain.status.serving")}
               </Badge>
             ) : null}
           </CardTitle>
@@ -171,9 +162,7 @@ export default function OpsDrainPage() {
                 setConfirmDrain(null);
               }}
             >
-              {confirmDrain
-                ? t("page.opsDrain.confirm.start")
-                : t("page.opsDrain.confirm.resume")}
+              {confirmDrain ? t("page.opsDrain.confirm.start") : t("page.opsDrain.confirm.resume")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

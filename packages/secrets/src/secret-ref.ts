@@ -129,9 +129,7 @@ export function parseSecretRef(raw: string): SecretRef {
       );
     }
     if (field.length === 0) {
-      throw new Error(
-        `vault:// secret reference requires a non-empty #field (got ${trimmed})`,
-      );
+      throw new Error(`vault:// secret reference requires a non-empty #field (got ${trimmed})`);
     }
     return { kind: "vault", mount, path, field };
   }
@@ -162,17 +160,14 @@ export function parseSecretRef(raw: string): SecretRef {
       // `byok://Openai` are both "not an alias", and describing the first as
       // "contains a slash" invites someone to make slashes legal.
       throw new Error(
-        `byok:// secret reference requires a single alias matching ` +
-          `${BYOK_ALIAS_PATTERN.source} (lowercase alphanumerics plus . _ -, no path ` +
-          `separators, 1-64 chars), e.g. byok://openai-enterprise (got ${trimmed})`,
+        `byok:// secret reference requires a single alias matching ${BYOK_ALIAS_PATTERN.source} (lowercase alphanumerics plus . _ -, no path separators, 1-64 chars), e.g. byok://openai-enterprise (got ${trimmed})`,
       );
     }
     return { kind: "byok", alias };
   }
 
   throw new Error(
-    "unsupported secret reference scheme (expected env://, vault://, cf://, or byok://): " +
-      trimmed,
+    `unsupported secret reference scheme (expected env://, vault://, cf://, or byok://): ${trimmed}`,
   );
 }
 

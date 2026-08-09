@@ -36,8 +36,8 @@
 import { z } from "zod";
 import {
   ensureTenantMcpServerCatalogBackfill,
-  removeMcpServerControlProjection,
   projectMcpServer,
+  removeMcpServerControlProjection,
   unprojectMcpServer,
 } from "../store/mcp_server_catalog.js";
 import {

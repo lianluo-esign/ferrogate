@@ -163,13 +163,13 @@ describe("dispatchStreamingUpstream", () => {
     });
 
     expect(seen).toBeDefined();
-    expect(seen!.aborted).toBe(false);
+    expect((seen as NonNullable<typeof seen>).aborted).toBe(false);
 
-    const reader = upstream.body!.getReader();
+    const reader = (upstream.body as NonNullable<typeof upstream.body>).getReader();
     await reader.read();
     await reader.cancel();
 
-    expect(seen!.aborted).toBe(true);
+    expect((seen as NonNullable<typeof seen>).aborted).toBe(true);
     expect(upstream.abort.aborted).toBe(true);
   });
 
@@ -188,7 +188,7 @@ describe("dispatchStreamingUpstream", () => {
 
     client.abort();
 
-    expect(seen!.aborted).toBe(true);
+    expect((seen as NonNullable<typeof seen>).aborted).toBe(true);
     expect(upstream.abort.aborted).toBe(true);
   });
 

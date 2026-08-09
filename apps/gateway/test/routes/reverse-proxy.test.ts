@@ -76,7 +76,9 @@ beforeEach(() => {
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
+  // biome-ignore lint/performance/noDelete: removes the own-property key entirely; assigning undefined would leave an enumerable undefined-valued key and change JSON serialization, the 'in' operator, and Object.keys semantics
   delete mutable.GATEWAY_ROUTES;
+  // biome-ignore lint/performance/noDelete: removes the own-property key entirely; assigning undefined would leave an enumerable undefined-valued key and change JSON serialization, the 'in' operator, and Object.keys semantics
   delete mutable.GATEWAY_UPSTREAMS;
 });
 
@@ -171,8 +173,8 @@ describe("upstream request filter", () => {
     // The adopted W3C trace id, not the request id — `middleware/trace.ts`
     // parked these on the context for exactly this consumer.
     expect(sent?.headers["x-ferrogate-trace-id"]).toBe("4bf92f3577b34da6a3ce929d0e0e4736");
-    expect(sent?.headers["traceparent"]).toBe(traceparent);
-    expect(sent?.headers["tracestate"]).toBe("vendor=1");
+    expect(sent?.headers.traceparent).toBe(traceparent);
+    expect(sent?.headers.tracestate).toBe("vendor=1");
     // Rust `x-forwarded-host` carries the ORIGINAL host.
     expect(sent?.headers["x-forwarded-host"]).toBe("ferrogate.test");
     // The per-route request header table.
@@ -225,6 +227,7 @@ describe("upstream request filter", () => {
 
     expect(captured[0]?.headers["x-resolved"]).toBe("tenant_local_dev");
     expect(captured[0]?.headers["x-unresolved"]).toBeUndefined();
+    // biome-ignore lint/performance/noDelete: removes the own-property key entirely; assigning undefined would leave an enumerable undefined-valued key and change JSON serialization, the 'in' operator, and Object.keys semantics
     delete mutable.GATEWAY_DEV_TENANT_ID;
   });
 });
@@ -381,9 +384,7 @@ describe("RuntimeRouteTable", () => {
       ],
       [{ name: "u", url: "https://origin.internal" }],
     );
-    expect(
-      built.matchRequest(null, "/x", new Headers({ "x-channel": "beta" }))?.name,
-    ).toBe("r");
+    expect(built.matchRequest(null, "/x", new Headers({ "x-channel": "beta" }))?.name).toBe("r");
     expect(built.matchRequest(null, "/x", new Headers({ "x-channel": "ga" }))).toBeUndefined();
     expect(built.matchRequest(null, "/x", new Headers())).toBeUndefined();
   });
@@ -441,7 +442,12 @@ describe("RuntimeRouteTable", () => {
   test("satisfies @ferrogate/routing's RouteMatcher, conservatively", async () => {
     const built = table(
       [
-        { name: "guarded", upstream: "u", path_prefixes: ["/x"], match_headers: [{ name: "a", value: "b" }] },
+        {
+          name: "guarded",
+          upstream: "u",
+          path_prefixes: ["/x"],
+          match_headers: [{ name: "a", value: "b" }],
+        },
         { name: "plain", upstream: "u", path_prefixes: ["/y"] },
       ],
       [{ name: "u", url: "https://origin.internal" }],

@@ -213,17 +213,21 @@ export class MemoryAssetStore {
    * classifier): folds the usage read, the quota guard, and the create-if-absent
    * guard into one decision so two different-id commits can't jointly overshoot.
    */
-  createAssetWithinQuota(
-    asset: StoredAsset,
-    quotaBytes: number | undefined,
-  ): AssetQuotaAdmission {
+  createAssetWithinQuota(asset: StoredAsset, quotaBytes: number | undefined): AssetQuotaAdmission {
     const idExists = this.assets.has(asset.id);
     if (idExists) return classifyAssetQuotaAdmission(false, true, false, 0, 0, quotaBytes);
     const usedBytes = this.tenantAssetStorageBytesUsed(asset.tenantId);
     const attemptedBytes = asset.sizeBytes;
     const quotaOk = quotaBytes === undefined || usedBytes + attemptedBytes <= quotaBytes;
     if (!quotaOk) {
-      return classifyAssetQuotaAdmission(false, false, false, usedBytes, attemptedBytes, quotaBytes);
+      return classifyAssetQuotaAdmission(
+        false,
+        false,
+        false,
+        usedBytes,
+        attemptedBytes,
+        quotaBytes,
+      );
     }
     this.upsertAsset(asset);
     return classifyAssetQuotaAdmission(true, false, true, usedBytes, attemptedBytes, quotaBytes);

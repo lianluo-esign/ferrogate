@@ -15,10 +15,11 @@
 import { describe, expect, test } from "vitest";
 import * as configPackage from "../src/index.js";
 import { fromCaddyfileStr, loadConfigFromObject } from "../src/loader.js";
-import { resolveClientIp, UnauthenticatedIpRateLimiter } from "../src/network-access.js";
+import { UnauthenticatedIpRateLimiter, resolveClientIp } from "../src/network-access.js";
 import { configSchema } from "../src/schema/config.js";
 import { resolveEnvPlaceholders } from "../src/secrets.js";
 import { validateConfig } from "../src/validate.js";
+const nn = <T>(v: T): NonNullable<T> => v as NonNullable<T>;
 
 describe("secrets: no std::env (the env is an explicit argument)", () => {
   test("resolves against a Worker-style `env` binding object handed in by the caller", () => {
@@ -28,15 +29,20 @@ describe("secrets: no std::env (the env is an explicit argument)", () => {
   });
 
   test("the explicit env WINS over ambient process state", () => {
-    const ambient = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process;
+    const ambient = (globalThis as { process?: { env?: Record<string, string | undefined> } })
+      .process;
     expect(ambient?.env).toBeDefined(); // this suite runs under Node, unlike workerd
-    ambient!.env!.FERROGATE_PLATFORM_LIMIT_PROBE = "from-process";
+    nn((ambient as NonNullable<typeof ambient>).env).FERROGATE_PLATFORM_LIMIT_PROBE =
+      "from-process";
     try {
       expect(
-        resolveEnvPlaceholders("{env.FERROGATE_PLATFORM_LIMIT_PROBE}", { FERROGATE_PLATFORM_LIMIT_PROBE: "from-binding" }),
+        resolveEnvPlaceholders("{env.FERROGATE_PLATFORM_LIMIT_PROBE}", {
+          FERROGATE_PLATFORM_LIMIT_PROBE: "from-binding",
+        }),
       ).toBe("from-binding");
     } finally {
-      delete ambient!.env!.FERROGATE_PLATFORM_LIMIT_PROBE;
+      // biome-ignore lint/performance/noDelete: removes the own-property key entirely; assigning undefined would leave an enumerable undefined-valued key and change JSON serialization, the 'in' operator, and Object.keys semantics
+      delete nn((ambient as NonNullable<typeof ambient>).env).FERROGATE_PLATFORM_LIMIT_PROBE;
     }
   });
 
@@ -90,7 +96,14 @@ describe("loader: no filesystem", () => {
   test("no file/TOML/YAML entry point is exported (there is no path to read)", () => {
     const surface = Object.keys(configPackage);
     expect(surface).toContain("loadConfigFromObject");
-    for (const absent of ["fromFile", "fromTomlStr", "fromTomlFile", "fromYamlStr", "fromYamlFile", "resolvePathsRelativeTo"]) {
+    for (const absent of [
+      "fromFile",
+      "fromTomlStr",
+      "fromTomlFile",
+      "fromYamlStr",
+      "fromYamlFile",
+      "resolvePathsRelativeTo",
+    ]) {
       expect(surface).not.toContain(absent);
     }
   });
@@ -106,7 +119,9 @@ describe("loader: no filesystem", () => {
       "Caddyfile",
     );
     expect(loaded.config.upstreams).toHaveLength(1);
-    expect(loaded.config.upstreams[0]!.url).toBe("http://backend.internal:9000");
+    expect(
+      (loaded.config.upstreams[0] as NonNullable<(typeof loaded.config.upstreams)[0]>).url,
+    ).toBe("http://backend.internal:9000");
     expect(loaded.config.listen).toBe("127.0.0.1:8080"); // adapt_site_address
     expect(loaded.config.auth.disabled).toBe(true);
   });

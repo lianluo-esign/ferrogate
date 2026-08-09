@@ -58,10 +58,11 @@
  * D1 insert would both carry it. It is called out here rather than silently
  * dropped so the next owner does not assume this route is audited.
  */
-import type { Context } from "hono";
+
 import { PromptLabelError } from "@ferrogate/config";
-import { resolveCandidates } from "../inference/defaults.js";
+import type { Context } from "hono";
 import { modelsFromEnv } from "../inference/catalog.js";
+import { resolveCandidates } from "../inference/defaults.js";
 import { callerFromAuth } from "../inference/identity.js";
 import type { InferenceBindings } from "../inference/ports.js";
 import {
@@ -70,6 +71,8 @@ import {
   callerCanUseProvider,
   scopeCanSeeModel,
 } from "../inference/ports.js";
+import { HttpError } from "../middleware/errors.js";
+import type { AuthContext, GatewayEnv } from "../ports.js";
 import type { PromptLabelBindings } from "../prompts/labels.js";
 import { promptLabelRejection, resolvePromptLabel } from "../prompts/labels.js";
 import {
@@ -79,8 +82,6 @@ import {
   parsePromptTemplates,
   renderPromptTemplate,
 } from "../prompts/template.js";
-import { HttpError } from "../middleware/errors.js";
-import type { AuthContext, GatewayEnv } from "../ports.js";
 
 // The renderer moved to `../prompts/template.ts` (#694) so the inference
 // prompt-by-reference expander can reach it without `inference/` importing
@@ -141,10 +142,13 @@ async function readRenderRequest(c: Context<GatewayEnv>): Promise<PromptTemplate
     throw new HttpError(400, "invalid_request_body", INVALID_RENDER_BODY);
   }
   const body = decoded as Record<string, unknown>;
-  const variables = body["variables"];
-  const revision = body["revision"];
-  const label = body["label"];
-  if (variables !== undefined && (typeof variables !== "object" || variables === null || Array.isArray(variables))) {
+  const variables = body.variables;
+  const revision = body.revision;
+  const label = body.label;
+  if (
+    variables !== undefined &&
+    (typeof variables !== "object" || variables === null || Array.isArray(variables))
+  ) {
     throw new HttpError(400, "invalid_request_body", INVALID_RENDER_BODY);
   }
   if (revision !== undefined && revision !== null && !Number.isInteger(revision)) {
@@ -157,11 +161,7 @@ async function readRenderRequest(c: Context<GatewayEnv>): Promise<PromptTemplate
   // caller who does not know which one they meant, and either precedence rule
   // makes the ignored one look honoured — which is how a rollback lands on the
   // revision it was rolling back FROM.
-  if (
-    typeof revision === "number" &&
-    typeof label === "string" &&
-    label.trim() !== ""
-  ) {
+  if (typeof revision === "number" && typeof label === "string" && label.trim() !== "") {
     throw new HttpError(
       400,
       "invalid_request_body",
@@ -259,9 +259,7 @@ export async function renderPromptTemplateHandler(c: Context<GatewayEnv>): Promi
   const models = modelsFromEnv((c.env ?? {}) as InferenceBindings);
   const candidates = resolveCandidates(models, template.model);
   if (candidates.length === 0) {
-    const known = models
-      .catalog()
-      .find((route) => route.logicalModel === template.model);
+    const known = models.catalog().find((route) => route.logicalModel === template.model);
     throw known === undefined
       ? new HttpError(400, "model_not_found", `unknown model ${template.model}`)
       : new HttpError(400, "model_disabled", `model ${template.model} is disabled`);
@@ -296,7 +294,10 @@ export async function renderPromptTemplateHandler(c: Context<GatewayEnv>): Promi
   // which labels it has. The pointer read is one KV `get` against a key derived
   // from the AUTHENTICATED caller's scope, so a tenant cannot reach another
   // tenant's pointer by naming the same template id and label.
-  const revision = request.label === null ? request.revision : await labelledRevision(c, caller.scope, id, request.label);
+  const revision =
+    request.label === null
+      ? request.revision
+      : await labelledRevision(c, caller.scope, id, request.label);
 
   const version = findPromptTemplateVersion(template, revision);
   if (version === undefined) {

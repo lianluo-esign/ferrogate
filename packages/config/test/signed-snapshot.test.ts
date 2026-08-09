@@ -1,23 +1,29 @@
 import { describe, expect, test } from "vitest";
+import { clusterConfigSchema } from "../src/schema/sections.js";
 import {
+  SIGNED_SNAPSHOT_SCHEMA_VERSION,
+  type SignedSnapshotEnvelope,
+  type SignedSnapshotPayload,
+  SignedSnapshotStore,
   buildSnapshotCrypto,
   isSmallOrderOrNonCanonicalPoint,
   parseSigningKey,
   parseVerifyingKey,
   signSnapshot,
-  SignedSnapshotStore,
-  SIGNED_SNAPSHOT_SCHEMA_VERSION,
   verifySnapshot,
-  type SignedSnapshotEnvelope,
-  type SignedSnapshotPayload,
 } from "../src/signed-snapshot.js";
-import { clusterConfigSchema } from "../src/schema/sections.js";
+const nn = <T>(v: T): NonNullable<T> => v as NonNullable<T>;
 
 // A deterministic 32-byte Ed25519 seed and its public key are derived at runtime
 // via WebCrypto so the test is self-contained.
 async function freshKeypair(): Promise<{ seedB64: string; publicB64: string }> {
-  const pair = (await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"])) as CryptoKeyPair;
-  const pkcs8 = new Uint8Array((await crypto.subtle.exportKey("pkcs8", pair.privateKey)) as ArrayBuffer);
+  const pair = (await crypto.subtle.generateKey({ name: "Ed25519" }, true, [
+    "sign",
+    "verify",
+  ])) as CryptoKeyPair;
+  const pkcs8 = new Uint8Array(
+    (await crypto.subtle.exportKey("pkcs8", pair.privateKey)) as ArrayBuffer,
+  );
   const seed = pkcs8.slice(pkcs8.length - 32); // last 32 bytes of the PKCS8 DER
   const raw = new Uint8Array((await crypto.subtle.exportKey("raw", pair.publicKey)) as ArrayBuffer);
   const b64 = (b: Uint8Array) => btoa(String.fromCharCode(...b));
@@ -30,7 +36,10 @@ describe("sign / verify round trip", () => {
   test("a freshly signed envelope verifies and rejects tampering", async () => {
     const { seedB64, publicB64 } = await freshKeypair();
     const signingKey = await parseSigningKey(seedB64, "cluster.snapshot_signing_key");
-    const verifyingKey = await parseVerifyingKey(publicB64, "cluster.snapshot_trusted_keys.public_key");
+    const verifyingKey = await parseVerifyingKey(
+      publicB64,
+      "cluster.snapshot_trusted_keys.public_key",
+    );
     const trusted = new Map([["k1", verifyingKey]]);
 
     const envelope = await signSnapshot(payload, "t1", "d1", 5, 10_000, signingKey, "k1");
@@ -39,7 +48,10 @@ describe("sign / verify round trip", () => {
     const ok = await verifySnapshot(envelope, trusted, "t1", "d1", 4, 9_000);
     expect(ok.ok).toBe(true);
 
-    const tampered: SignedSnapshotEnvelope = { ...envelope, payload: { version: 2, api_keys: [], policies: [] } };
+    const tampered: SignedSnapshotEnvelope = {
+      ...envelope,
+      payload: { version: 2, api_keys: [], policies: [] },
+    };
     const bad = await verifySnapshot(tampered, trusted, "t1", "d1", 4, 9_000);
     expect(bad).toEqual({ ok: false, reason: "bad_signature" });
   });
@@ -58,7 +70,9 @@ describe("sign / verify round trip", () => {
       ok: false,
       reason: "unknown_key_id",
     });
-    expect(await verifySnapshot({ ...envelope, signature: "" }, trusted, "t1", "d1", 4, 9_000)).toEqual({
+    expect(
+      await verifySnapshot({ ...envelope, signature: "" }, trusted, "t1", "d1", 4, 9_000),
+    ).toEqual({
       ok: false,
       reason: "missing_signature",
     });
@@ -120,7 +134,8 @@ describe("buildSnapshotCrypto", () => {
  * and small-order `A`/`R`. Both halves are now enforced in `verifySnapshot`.
  */
 describe("verify_strict parity: small-order / non-canonical points", () => {
-  const hex = (value: string) => Uint8Array.from(value.match(/../g)!.map((b) => parseInt(b, 16)));
+  const hex = (value: string) =>
+    Uint8Array.from(nn(value.match(/../g)).map((b) => Number.parseInt(b, 16)));
   const leBytes = (value: bigint) => {
     const out = new Uint8Array(32);
     let rest = value;
@@ -139,8 +154,14 @@ describe("verify_strict parity: small-order / non-canonical points", () => {
     ["y = p-1 (order 2)", leBytes(P - 1n)],
     ["y = p (non-canonical, order 4)", leBytes(P)],
     ["y = p+1 (non-canonical, order 1)", leBytes(P + 1n)],
-    ["order-8 representative #1", hex("26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05")],
-    ["order-8 representative #2", hex("c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a")],
+    [
+      "order-8 representative #1",
+      hex("26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05"),
+    ],
+    [
+      "order-8 representative #2",
+      hex("c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a"),
+    ],
   ];
   test.each(smallOrder)("flags %s", (_name, bytes) => {
     expect(isSmallOrderOrNonCanonicalPoint(bytes)).toBe(true);
@@ -160,7 +181,9 @@ describe("verify_strict parity: small-order / non-canonical points", () => {
         "sign",
         "verify",
       ])) as CryptoKeyPair;
-      const raw = new Uint8Array((await crypto.subtle.exportKey("raw", pair.publicKey)) as ArrayBuffer);
+      const raw = new Uint8Array(
+        (await crypto.subtle.exportKey("raw", pair.publicKey)) as ArrayBuffer,
+      );
       expect(isSmallOrderOrNonCanonicalPoint(raw)).toBe(false);
     }
   });

@@ -162,7 +162,12 @@ function countEgress(): { calls: () => number; restore: () => void } {
     calls += 1;
     return await original(input as RequestInfo, init);
   }) as typeof fetch;
-  return { calls: () => calls, restore: () => void (globalThis.fetch = original) };
+  return {
+    calls: () => calls,
+    restore: () => {
+      globalThis.fetch = original;
+    },
+  };
 }
 
 let egress: ReturnType<typeof countEgress> | undefined;
@@ -260,18 +265,18 @@ describe("workers-ai is reachable on the deployed data plane", () => {
     const chunks = frames
       .filter((frame) => frame !== "[DONE]")
       .map((frame) => JSON.parse(frame) as Record<string, unknown>);
-    expect(chunks.every((chunk) => chunk["object"] === "chat.completion.chunk")).toBe(true);
+    expect(chunks.every((chunk) => chunk.object === "chat.completion.chunk")).toBe(true);
 
     const content = chunks
-      .flatMap((chunk) => (chunk["choices"] as { delta?: { content?: string } }[]) ?? [])
+      .flatMap((chunk) => (chunk.choices as { delta?: { content?: string } }[]) ?? [])
       .map((choice) => choice.delta?.content ?? "")
       .join("");
     expect(content).toBe("hi there");
 
     // The scrapable usage frame — without it the meter falls back to the
     // 512-token estimate, which is the documented token-budget bypass.
-    const usageFrame = chunks.find((chunk) => chunk["usage"] !== undefined);
-    expect(usageFrame?.["usage"]).toEqual({
+    const usageFrame = chunks.find((chunk) => chunk.usage !== undefined);
+    expect(usageFrame?.usage).toEqual({
       prompt_tokens: 4,
       completion_tokens: 2,
       total_tokens: 6,
@@ -358,7 +363,7 @@ describe("the committed [ai] stanza is the one the pool actually loaded", () => 
     return out.filter((line) => line.length > 0 && !line.startsWith("#"));
   };
 
-  it("declares [ai] binding = \"AI\" in the file wrangler deploys", () => {
+  it('declares [ai] binding = "AI" in the file wrangler deploys', () => {
     expect(/^\[ai\]/m.test(COMMITTED_WRANGLER_TOML)).toBe(true);
     expect(stanza(COMMITTED_WRANGLER_TOML, "[ai]")).toEqual(['binding = "AI"']);
   });
@@ -381,7 +386,7 @@ describe("the committed [ai] stanza is the one the pool actually loaded", () => 
     //
     // `beforeAll` installed the recording double over this binding, so the
     // real one is read from the saved original.
-    const bound = ORIGINAL["AI"] as { run?: unknown } | undefined;
+    const bound = ORIGINAL.AI as { run?: unknown } | undefined;
     expect(bound).toBeDefined();
     expect(bound).not.toBe(ai);
     expect(typeof bound?.run).toBe("function");

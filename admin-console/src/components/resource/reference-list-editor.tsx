@@ -1,4 +1,3 @@
-import { Plus, X } from "lucide-react";
 import { EntityReferencePicker } from "@/components/resource/entity-reference-picker";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -11,13 +10,14 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import { useI18n } from "@/i18n";
 import {
-  resolveConfigText,
-  resolveOptionalConfigText,
   type ReferenceListFieldConfig,
   type ReferenceListKind,
+  resolveConfigText,
+  resolveOptionalConfigText,
 } from "@/lib/resource-config";
-import { useI18n } from "@/i18n";
+import { Plus, X } from "lucide-react";
 
 interface ReferenceListEditorProps {
   id: string;
@@ -102,6 +102,7 @@ export function ReferenceListEditor({
             const rowValue = String(row[field.valueKey] ?? "");
             return (
               <li
+                // biome-ignore lint/suspicious/noArrayIndexKey: rows are positional, fully-controlled form entries with no stable unique id; index is the intended identity
                 key={index}
                 className="grid gap-2 rounded-md border p-3"
                 aria-label={t("resource.referenceList.rowLabel", {

@@ -1,3 +1,4 @@
+import { useI18n } from "@/i18n";
 // Locale-aware unix-seconds timestamp rendering (#348).
 //
 // Twelve surfaces formatted operator-visible timestamps with a bare
@@ -17,7 +18,6 @@
 // strings for audit/evidence rows, which must stay byte-for-byte identical
 // across a locale switch. Those are correct as they are and are left alone.
 import { useCallback } from "react";
-import { useI18n } from "@/i18n";
 
 /**
  * A `formatUnix(unix)` bound to the active locale.
@@ -26,9 +26,7 @@ import { useI18n } from "@/i18n";
  * convention is "-" on operational tables and "—" on billing tables; pass it
  * explicitly rather than normalizing an unrelated visual difference here.
  */
-export function useFormatUnix(
-  placeholder = "-",
-): (unix: number | null | undefined) => string {
+export function useFormatUnix(placeholder = "-"): (unix: number | null | undefined) => string {
   const { format } = useI18n();
   return useCallback(
     (unix: number | null | undefined): string => {

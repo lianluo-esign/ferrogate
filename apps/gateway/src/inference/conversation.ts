@@ -203,7 +203,7 @@ export function resolveRetentionSeconds(raw: unknown, tenantId: string): number 
   const table = parseRetentionTable(raw);
   const perTenant = table[tenantId];
   if (perTenant !== undefined) return perTenant;
-  return table["default"] ?? DEFAULT_RETENTION_SECONDS;
+  return table.default ?? DEFAULT_RETENTION_SECONDS;
 }
 
 function parseRetentionTable(raw: unknown): Record<string, number> {
@@ -277,7 +277,12 @@ export const CONVERSATION_NOT_FOUND_STATUS = 404;
 /** What one request may do with conversation state. */
 export type StoreDecision =
   | { readonly ok: true; readonly store: boolean }
-  | { readonly ok: false; readonly status: number; readonly code: string; readonly message: string };
+  | {
+      readonly ok: false;
+      readonly status: number;
+      readonly code: string;
+      readonly message: string;
+    };
 
 export interface StoreDecisionInput {
   /** The request's `store` member, as sent (absent ⇒ `undefined`). */
@@ -329,7 +334,7 @@ export function responseStoreDecision(input: StoreDecisionInput): StoreDecision 
         code: RESPONSE_STORE_DISABLED,
         message:
           "this gateway does not persist /v1/responses conversation state " +
-          "(GATEWAY_RESPONSES_STORE = \"off\"), so `store: true` and " +
+          '(GATEWAY_RESPONSES_STORE = "off"), so `store: true` and ' +
           "`previous_response_id` cannot be honoured",
       };
     }
@@ -402,7 +407,7 @@ export function normalizeInputItems(input: unknown): unknown[] {
 /** The `output` items of a stored response body, or `[]`. */
 export function outputItemsOf(response: unknown): unknown[] {
   if (typeof response !== "object" || response === null) return [];
-  const output = (response as Record<string, unknown>)["output"];
+  const output = (response as Record<string, unknown>).output;
   return Array.isArray(output) ? [...output] : [];
 }
 
@@ -449,9 +454,11 @@ export function upstreamConversationBody(
   input: readonly unknown[] | undefined,
 ): Record<string, unknown> {
   const body: Record<string, unknown> = { ...request };
-  delete body["previous_response_id"];
-  delete body["store"];
-  if (input !== undefined) body["input"] = [...input];
+  // biome-ignore lint/performance/noDelete: removes the own-property key entirely; assigning undefined would leave an enumerable undefined-valued key and change JSON serialization, the 'in' operator, and Object.keys semantics
+  delete body.previous_response_id;
+  // biome-ignore lint/performance/noDelete: removes the own-property key entirely; assigning undefined would leave an enumerable undefined-valued key and change JSON serialization, the 'in' operator, and Object.keys semantics
+  delete body.store;
+  if (input !== undefined) body.input = [...input];
   return body;
 }
 

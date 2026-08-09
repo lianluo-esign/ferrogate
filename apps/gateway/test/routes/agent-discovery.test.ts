@@ -7,10 +7,7 @@
  */
 import { describe, expect, it } from "vitest";
 
-import {
-  agentDiscoveryDocument,
-  parseAgentUpstreams,
-} from "../../src/routes/agent-discovery.js";
+import { agentDiscoveryDocument, parseAgentUpstreams } from "../../src/routes/agent-discovery.js";
 import { createGatewayApp } from "../../src/routes/index.js";
 
 const UPSTREAMS = [
@@ -56,9 +53,7 @@ function call(token: string | null, env: Record<string, string> = ENV): Promise<
   const { app } = createGatewayApp();
   const headers = new Headers();
   if (token !== null) headers.set("authorization", `Bearer ${token}`);
-  return Promise.resolve(
-    app.request("https://gw.test/.well-known/agent.json", { headers }, env),
-  );
+  return Promise.resolve(app.request("https://gw.test/.well-known/agent.json", { headers }, env));
 }
 
 describe("GET /.well-known/agent.json", () => {
@@ -68,7 +63,7 @@ describe("GET /.well-known/agent.json", () => {
     expect((await call(null)).status).toBe(401);
     const denied = await call("fg_noscope");
     expect(denied.status).toBe(403);
-    expect((await denied.json() as { error: { code: string } }).error.code).toBe("scope_denied");
+    expect(((await denied.json()) as { error: { code: string } }).error.code).toBe("scope_denied");
   });
 
   it("lists the enabled, caller-visible upstreams in an AdminList envelope", async () => {

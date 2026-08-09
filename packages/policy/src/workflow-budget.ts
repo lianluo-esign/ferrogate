@@ -9,12 +9,12 @@
  * provider call).
  */
 import {
-  dimensionExceededBy,
+  type StoredWorkflowRunBudget,
   WORKFLOW_RUN_BUDGET_EXHAUSTED,
+  type WorkflowBudgetDimension,
+  dimensionExceededBy,
   workflowBudgetDenialCode,
   workflowBudgetDimensionStr,
-  type StoredWorkflowRunBudget,
-  type WorkflowBudgetDimension,
 } from "./stored-types.js";
 
 /** Fail-closed denial code: a node dispatched a model its allowlist forbids. */
@@ -98,9 +98,7 @@ function budgetDenial(dimension: WorkflowBudgetDimension, runId: string): Workfl
 }
 
 /** Result envelope for the pure pre-flight (Rust `Result<(), WorkflowBudgetDenial>`). */
-export type PreflightResult =
-  | { ok: true }
-  | { ok: false; denial: WorkflowBudgetDenial };
+export type PreflightResult = { ok: true } | { ok: false; denial: WorkflowBudgetDenial };
 
 /**
  * Pure, fail-closed pre-flight of a step's proposed spend against a run's durable
@@ -159,7 +157,8 @@ export function preflightWorkflowBudget(
   nowUnix: number,
 ): PreflightResult {
   if (budget.status === WORKFLOW_RUN_BUDGET_EXHAUSTED) {
-    const dimension = dimensionExceededBy(budget, costCredits, tokens, toolCalls, nowUnix) ?? "cost";
+    const dimension =
+      dimensionExceededBy(budget, costCredits, tokens, toolCalls, nowUnix) ?? "cost";
     return { ok: false, denial: budgetDenial(dimension, budget.runId) };
   }
   const dimension = dimensionExceededBy(budget, costCredits, tokens, toolCalls, nowUnix);
@@ -184,9 +183,7 @@ export interface WorkflowNodeDispatchDenial {
 }
 
 /** Result envelope for node-dispatch evaluation. */
-export type NodeDispatchResult =
-  | { ok: true }
-  | { ok: false; denial: WorkflowNodeDispatchDenial };
+export type NodeDispatchResult = { ok: true } | { ok: false; denial: WorkflowNodeDispatchDenial };
 
 /**
  * Fail-closed evaluation of a node's model/provider allowlist against the

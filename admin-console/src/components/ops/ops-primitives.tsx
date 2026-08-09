@@ -1,3 +1,5 @@
+import { Badge } from "@/components/ui/badge";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 // Shared presentation helpers for the Operations cockpit (issue #322).
 //
 // The ops pages (status, config reload, drain, gateway configs, provider
@@ -11,8 +13,6 @@
 // console's. #348 moved that to `useFormatUnix` (src/hooks/use-format-unix.ts),
 // which needs the active locale and therefore has to be a hook.
 import type { ReactNode } from "react";
-import { Badge } from "@/components/ui/badge";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
 type BadgeVariant = "default" | "secondary" | "destructive" | "outline";
 
@@ -29,15 +29,11 @@ export function StatTile({
   return (
     <Card>
       <CardHeader className="pb-2">
-        <CardTitle className="text-xs font-medium text-muted-foreground">
-          {label}
-        </CardTitle>
+        <CardTitle className="text-xs font-medium text-muted-foreground">{label}</CardTitle>
       </CardHeader>
       <CardContent>
         <div className="text-2xl font-semibold tabular-nums">{value}</div>
-        {hint ? (
-          <p className="mt-1 text-xs text-muted-foreground">{hint}</p>
-        ) : null}
+        {hint ? <p className="mt-1 text-xs text-muted-foreground">{hint}</p> : null}
       </CardContent>
     </Card>
   );
@@ -105,8 +101,6 @@ export function BoolBadge({
 }) {
   const isGood = good === "true" ? value : !value;
   return (
-    <Badge variant={isGood ? "default" : "destructive"}>
-      {value ? trueLabel : falseLabel}
-    </Badge>
+    <Badge variant={isGood ? "default" : "destructive"}>{value ? trueLabel : falseLabel}</Badge>
   );
 }

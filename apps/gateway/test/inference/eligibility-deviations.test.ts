@@ -20,10 +20,15 @@
  * answer it is not giving. That way the pin goes red if the deviation widens,
  * AND it names the exact assertion a future 1:1 pass has to flip.
  */
-import type { ResidencyPolicy } from "../../src/residency/index.js";
+
 import { describe, expect, it } from "vitest";
-import { eligibleCandidates, routeExclusionReasons, routeRequirements } from "../../src/inference/index.js";
+import {
+  eligibleCandidates,
+  routeExclusionReasons,
+  routeRequirements,
+} from "../../src/inference/index.js";
 import type { PhysicalRoute, RouteRequirements } from "../../src/inference/index.js";
+import type { ResidencyPolicy } from "../../src/residency/index.js";
 
 /** A route that declares NOTHING optional — the shape `GATEWAY_MODELS` ships. */
 const UNDECLARED: PhysicalRoute = {
@@ -96,9 +101,7 @@ describe("deviation 2 — an undeclared `context_window` never excludes", () => 
     const small: PhysicalRoute = { ...UNDECLARED, contextWindow: 8_192 };
     const reasons = routeExclusionReasons(small, requirements, null);
     expect(reasons.map((reason) => reason.code)).toEqual(["context_window_too_small"]);
-    expect(reasons[0]?.detail).toBe(
-      "required_context_window=100000;declared_context_window=8192",
-    );
+    expect(reasons[0]?.detail).toBe("required_context_window=100000;declared_context_window=8192");
   });
 });
 

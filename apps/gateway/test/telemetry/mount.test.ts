@@ -25,6 +25,7 @@
  */
 import { SELF, env } from "cloudflare:test";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+const nn = <T>(v: T): NonNullable<T> => v as NonNullable<T>;
 
 const BASE = "https://gw.test";
 const UPSTREAM_HOST = "api.telemetry-probe.example";
@@ -222,15 +223,15 @@ describe("the deployed Worker emits telemetry to the collector binding", () => {
       ];
     };
     const attributes = Object.fromEntries(
-      traces.resourceSpans[0].scopeSpans[0].spans[0]!.attributes.map((attribute) => [
+      nn(traces.resourceSpans[0].scopeSpans[0].spans[0]).attributes.map((attribute) => [
         attribute.key,
         attribute.value.stringValue,
       ]),
     );
     // The contract operation id, so this cannot pass off some other request.
-    expect(attributes["route"]).toBe("listTools");
-    expect(attributes["path"]).toBe("/v1/tools");
-    expect(attributes["status_code"]).toBe("501");
+    expect(attributes.route).toBe("listTools");
+    expect(attributes.path).toBe("/v1/tools");
+    expect(attributes.status_code).toBe("501");
   });
 
   it("REDUNDANCY: two mounts on one inference request emit EXACTLY one batch pair", async () => {
@@ -273,10 +274,13 @@ describe("the deployed Worker emits telemetry to the collector binding", () => {
     // happened to be batched together.
     expect(spans).toHaveLength(1);
     const attributes = Object.fromEntries(
-      spans[0]!.attributes.map((attribute) => [attribute.key, attribute.value.stringValue]),
+      (spans[0] as NonNullable<(typeof spans)[0]>).attributes.map((attribute) => [
+        attribute.key,
+        attribute.value.stringValue,
+      ]),
     );
-    expect(attributes["request_id"]).toBe(servedRequestId);
-    expect(attributes["route"]).toBe("createChatCompletion");
+    expect(attributes.request_id).toBe(servedRequestId);
+    expect(attributes.route).toBe("createChatCompletion");
   });
 
   it("the span names the operation the deployed router matched", async () => {
@@ -300,7 +304,7 @@ describe("the deployed Worker emits telemetry to the collector binding", () => {
         },
       ];
     };
-    const span = traces.resourceSpans[0].scopeSpans[0].spans[0]!;
+    const span = nn(traces.resourceSpans[0].scopeSpans[0].spans[0]);
     const attributes = Object.fromEntries(
       span.attributes.map((attribute) => [attribute.key, attribute.value.stringValue]),
     );
@@ -308,17 +312,17 @@ describe("the deployed Worker emits telemetry to the collector binding", () => {
     expect(span.name).toBe("ferrogate.gateway.request");
     // The CONTRACT operation id, not a path guess — proof the emission is
     // wired to the router that matched, not to a string in the test.
-    expect(attributes["route"]).toBe("createChatCompletion");
-    expect(attributes["method"]).toBe("POST");
-    expect(attributes["path"]).toBe("/v1/chat/completions");
-    expect(attributes["status_code"]).toBe("200");
+    expect(attributes.route).toBe("createChatCompletion");
+    expect(attributes.method).toBe("POST");
+    expect(attributes.path).toBe("/v1/chat/completions");
+    expect(attributes.status_code).toBe("200");
     // The id the OUTER gateway middleware minted for THIS request — the same
     // one the client was told in `x-request-id`, which is what makes a span
     // joinable to a client-side incident report. Asserting the header rather
     // than a format keeps it honest: a hard-coded shape would still pass if the
     // emission published some other request's id.
     expect(servedRequestId).toBeTruthy();
-    expect(attributes["request_id"]).toBe(servedRequestId);
+    expect(attributes.request_id).toBe(servedRequestId);
     expect(traces.resourceSpans[0].resource.attributes).toContainEqual({
       key: "service.name",
       value: { stringValue: "ferrogate-gateway" },
@@ -399,8 +403,8 @@ describe("the deployed Worker emits telemetry to the collector binding", () => {
         throw new Error("collector unreachable");
       },
     };
-    const previous = mutable["TELEMETRY_COLLECTOR"];
-    mutable["TELEMETRY_COLLECTOR"] = failing;
+    const previous = mutable.TELEMETRY_COLLECTOR;
+    mutable.TELEMETRY_COLLECTOR = failing;
     try {
       // The emitter is memoized per env object, so the failing binding only
       // takes effect for a request served after the swap IF the memo is keyed
@@ -410,7 +414,7 @@ describe("the deployed Worker emits telemetry to the collector binding", () => {
       expect(response.status).toBe(200);
       expect(((await response.json()) as { id: string }).id).toBe("chatcmpl-probe");
     } finally {
-      mutable["TELEMETRY_COLLECTOR"] = previous;
+      mutable.TELEMETRY_COLLECTOR = previous;
     }
   });
 });

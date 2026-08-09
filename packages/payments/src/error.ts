@@ -95,11 +95,7 @@ export class PaymentError extends Error {
   }
 
   static unsupportedNetwork(network: string): PaymentError {
-    return new PaymentError(
-      "unsupported_network",
-      { network },
-      `unsupported network ${network}`,
-    );
+    return new PaymentError("unsupported_network", { network }, `unsupported network ${network}`);
   }
 
   static unsupportedScheme(scheme: string): PaymentError {

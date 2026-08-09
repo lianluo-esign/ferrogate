@@ -46,7 +46,7 @@ export class AnthropicAdapter extends BaseProviderAdapter {
       stream: request.stream,
     };
     const system = getField(body, "system");
-    if (system !== undefined) draft["system"] = system;
+    if (system !== undefined) draft.system = system;
     // `messages` and `system` in the draft are still the CALLER's objects,
     // shared with every other candidate on the failover ladder. `ownBody` takes
     // a private deep copy, so the breakpoints and coercion tools placed below
@@ -91,11 +91,11 @@ export class AnthropicAdapter extends BaseProviderAdapter {
       stream: request.stream,
     };
     const system = getField(body, "system");
-    if (system !== undefined) draft["system"] = system;
+    if (system !== undefined) draft.system = system;
     const tools = getField(body, "tools");
-    if (tools !== undefined) draft["tools"] = tools;
+    if (tools !== undefined) draft.tools = tools;
     const toolChoice = getField(body, "tool_choice");
-    if (toolChoice !== undefined) draft["tool_choice"] = toolChoice;
+    if (toolChoice !== undefined) draft.tool_choice = toolChoice;
     // Owned for the same reason as the chat path: `intoAnthropicBody` copies the
     // Responses body shallowly, so `system`/`tools` here can still be subtrees
     // the caller — and every other candidate — holds.
@@ -163,9 +163,9 @@ export class AnthropicAdapter extends BaseProviderAdapter {
   override injectTools(body: Json, tools: readonly ToolDef[]): Json {
     const object = ensureObjectBody(body);
     if (tools.length === 0) return object;
-    object["tools"] = tools.map((tool) => {
+    object.tools = tools.map((tool) => {
       const value: JsonObject = { name: tool.name, input_schema: tool.input_schema as Json };
-      if (tool.description !== undefined) value["description"] = tool.description;
+      if (tool.description !== undefined) value.description = tool.description;
       return value;
     });
     return object;
@@ -191,8 +191,8 @@ export class AnthropicAdapter extends BaseProviderAdapter {
   override appendToolResults(body: Json, results: readonly ToolResult[]): Json {
     const object = ensureObjectBody(body);
     if (results.length === 0) return object;
-    if (!Array.isArray(object["messages"])) object["messages"] = [];
-    const messages = object["messages"] as Json[];
+    if (!Array.isArray(object.messages)) object.messages = [];
+    const messages = object.messages as Json[];
     messages.push({
       role: "user",
       content: results.map((result) => ({

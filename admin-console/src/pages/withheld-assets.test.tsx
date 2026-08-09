@@ -1,9 +1,3 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
-import { QueryClientProvider } from "@tanstack/react-query";
-import { HttpResponse, http } from "msw";
-import { MemoryRouter } from "react-router-dom";
-import { beforeEach, describe, expect, it } from "vitest";
 import { AuthProvider } from "@/hooks/use-auth";
 import { I18nProvider, type Locale } from "@/i18n";
 import { en } from "@/i18n/locales/en";
@@ -12,6 +6,12 @@ import type { AdminSchema } from "@/lib/gateway-client";
 import WithheldAssetsPage from "@/pages/withheld-assets";
 import { gatewayUrl, server } from "@/test/msw";
 import { createTestQueryClient, seedSession } from "@/test/test-utils";
+import { QueryClientProvider } from "@tanstack/react-query";
+import { render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { http, HttpResponse } from "msw";
+import { MemoryRouter } from "react-router-dom";
+import { beforeEach, describe, expect, it } from "vitest";
 
 type WithheldAsset = AdminSchema<"WithheldAssetSummary">;
 
@@ -83,16 +83,10 @@ describe("WithheldAssetsPage", () => {
       }),
     ).toBeInTheDocument();
     expect(await screen.findByText("ferrogate")).toBeInTheDocument();
-    expect(
-      screen.getByText(en["page.withheldAssets.visibility.pendingScan"]),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText(en["page.withheldAssets.visibility.quarantined"]),
-    ).toBeInTheDocument();
+    expect(screen.getByText(en["page.withheldAssets.visibility.pendingScan"])).toBeInTheDocument();
+    expect(screen.getByText(en["page.withheldAssets.visibility.quarantined"])).toBeInTheDocument();
     // Row without retained evidence shows the "none" affordance.
-    expect(
-      screen.getByText(en["page.withheldAssets.evidence.none"]),
-    ).toBeInTheDocument();
+    expect(screen.getByText(en["page.withheldAssets.evidence.none"])).toBeInTheDocument();
   });
 
   it("renders localized copy in zh-CN", async () => {
@@ -111,9 +105,7 @@ describe("WithheldAssetsPage", () => {
     ).toBeInTheDocument();
     // Wait for the async list to resolve before asserting row-level copy.
     expect(
-      await screen.findByText(
-        zhCN["page.withheldAssets.visibility.pendingScan"],
-      ),
+      await screen.findByText(zhCN["page.withheldAssets.visibility.pendingScan"]),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("button", {
@@ -140,9 +132,7 @@ describe("WithheldAssetsPage", () => {
 
     const dialog = await screen.findByRole("dialog");
     expect(
-      within(dialog).getByText(
-        "scanner=clamav verdict=pending signature=verified",
-      ),
+      within(dialog).getByText("scanner=clamav verdict=pending signature=verified"),
     ).toBeInTheDocument();
   });
 
@@ -212,12 +202,12 @@ describe("WithheldAssetsPage", () => {
     );
 
     await waitFor(() => expect(promoteRequest).not.toBeNull());
-    expect(promoteRequest!.body.scan_outcome).toBe("clean");
-    expect(promoteRequest!.body.evidence).toBe("clean scan, ticket OPS-42");
+    // biome-ignore lint/style/noNonNullAssertion: promoteRequest is assigned only inside the mock fetch callback, so TS control-flow narrows the outer binding to null and no cast can name its declared type; ! reads the capture the expect() above just asserted is present
+    const promoteReq = promoteRequest!;
+    expect(promoteReq.body.scan_outcome).toBe("clean");
+    expect(promoteReq.body.evidence).toBe("clean scan, ticket OPS-42");
     // List refreshed to the promoted (now empty) state.
-    expect(
-      await screen.findByText(en["page.withheldAssets.empty"]),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(en["page.withheldAssets.empty"])).toBeInTheDocument();
   });
 
   it("quarantines an asset with the flagged verdict", async () => {
@@ -282,13 +272,11 @@ describe("WithheldAssetsPage", () => {
       http.get(gatewayUrl("/v1/assets/withheld"), () =>
         HttpResponse.json({ object: "list", data: [withheld()], total: 1 }),
       ),
-      http.post(
-        gatewayUrl("/v1/assets/cli_tool/ferrogate/1.0.0/visibility"),
-        () =>
-          HttpResponse.json(
-            { error: { code: "conflict", message: "already terminal" } },
-            { status: 409 },
-          ),
+      http.post(gatewayUrl("/v1/assets/cli_tool/ferrogate/1.0.0/visibility"), () =>
+        HttpResponse.json(
+          { error: { code: "conflict", message: "already terminal" } },
+          { status: 409 },
+        ),
       ),
     );
     const user = userEvent.setup();
@@ -312,9 +300,7 @@ describe("WithheldAssetsPage", () => {
     );
 
     expect(
-      await within(dialog).findByText(
-        en["page.withheldAssets.error.conflict"],
-      ),
+      await within(dialog).findByText(en["page.withheldAssets.error.conflict"]),
     ).toBeInTheDocument();
   });
 
@@ -324,13 +310,10 @@ describe("WithheldAssetsPage", () => {
       http.get(gatewayUrl("/v1/assets/withheld"), () =>
         HttpResponse.json({ object: "list", data: [withheld()], total: 1 }),
       ),
-      http.post(
-        gatewayUrl("/v1/assets/cli_tool/ferrogate/1.0.0/visibility"),
-        () => {
-          posted = true;
-          return HttpResponse.json({}, { status: 200 });
-        },
-      ),
+      http.post(gatewayUrl("/v1/assets/cli_tool/ferrogate/1.0.0/visibility"), () => {
+        posted = true;
+        return HttpResponse.json({}, { status: 200 });
+      }),
     );
     const user = userEvent.setup();
 
@@ -349,9 +332,7 @@ describe("WithheldAssetsPage", () => {
     );
 
     expect(
-      await within(dialog).findByText(
-        en["page.withheldAssets.error.evidenceRequired"],
-      ),
+      await within(dialog).findByText(en["page.withheldAssets.error.evidenceRequired"]),
     ).toBeInTheDocument();
     expect(posted).toBe(false);
   });

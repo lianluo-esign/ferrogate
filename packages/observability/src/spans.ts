@@ -28,14 +28,7 @@ export const GATEWAY_REQUEST_SPAN: GatewaySpanTemplate = {
 export const AUTH_SPAN: GatewaySpanTemplate = {
   name: "ferrogate.auth",
   kind: GatewaySpanKind.Auth,
-  fields: [
-    "request_id",
-    "api_key_id",
-    "organization_id",
-    "project_id",
-    "scope",
-    "result",
-  ],
+  fields: ["request_id", "api_key_id", "organization_id", "project_id", "scope", "result"],
 };
 
 export const POLICY_SPAN: GatewaySpanTemplate = {

@@ -33,6 +33,7 @@ import { z } from "zod";
 import { HttpError } from "../middleware/errors.js";
 import { StoreConflictError, type StoreRecord } from "../ports.js";
 import { adminItem } from "../responses.js";
+import { type TenantWorkerRepository, openTenantWorkerRepository } from "../store/tenant-worker.js";
 import {
   type TransportCredential,
   mintTransportCredential,
@@ -42,10 +43,6 @@ import {
   stripCredentialFields,
   workerRegistrationDocument,
 } from "../store/worker_registry.js";
-import {
-  openTenantWorkerRepository,
-  type TenantWorkerRepository,
-} from "../store/tenant-worker.js";
 import {
   type CollectionSpec,
   type GroupModule,
@@ -250,8 +247,7 @@ async function hydrateTenantWorkerIdentity(
   }
   const registration = await readWorkerRegistration(db, record.id);
   const tenantId = tenantIdOf(record);
-  const workspaceId =
-    typeof record.workspace_id === "string" ? record.workspace_id.trim() : "";
+  const workspaceId = typeof record.workspace_id === "string" ? record.workspace_id.trim() : "";
   if (
     registration === null ||
     registration.tenant_id !== tenantId ||
@@ -309,8 +305,7 @@ export const registerSelfHostedWorkerHandler: Handler = async (c) => {
   const blocker = registrationBlocker(record);
   if (blocker !== null) throw new HttpError(400, "invalid_request_body", blocker);
   const existingRegistration = await readWorkerRegistration(db, id);
-  const workspaceId =
-    typeof record.workspace_id === "string" ? record.workspace_id.trim() : "";
+  const workspaceId = typeof record.workspace_id === "string" ? record.workspace_id.trim() : "";
   if (
     existingRegistration !== null &&
     (existingRegistration.tenant_id !== tenantIdOf(record) ||
@@ -521,22 +516,19 @@ export const selfHostedWorkerRoutes: GroupModule = crudGroup(
       ARTIFACTS,
       "self_hosted_worker_artifact",
       workerArtifactSchema,
-      (repository, workerId, record, now) =>
-        repository.recordArtifact(workerId, record, now),
+      (repository, workerId, record, now) => repository.recordArtifact(workerId, record, now),
     ),
     recordAdminSelfHostedWorkerCheckpoint: appendChild(
       CHECKPOINTS,
       "self_hosted_worker_checkpoint",
       workerCheckpointSchema,
-      (repository, workerId, record, now) =>
-        repository.recordCheckpoint(workerId, record, now),
+      (repository, workerId, record, now) => repository.recordCheckpoint(workerId, record, now),
     ),
     recordAdminSelfHostedWorkerTelemetryEvent: appendChild(
       EVENTS,
       "self_hosted_worker_event",
       workerEventSchema,
-      (repository, workerId, record, now) =>
-        repository.recordTelemetry(workerId, record, now),
+      (repository, workerId, record, now) => repository.recordTelemetry(workerId, record, now),
     ),
 
     listAdminSelfHostedWorkerTelemetryEvents: subListHandler({

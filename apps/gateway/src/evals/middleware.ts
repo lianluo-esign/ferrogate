@@ -72,6 +72,7 @@ import {
   onlineEvalCapturePlan,
   onlineEvalSamplingDecision,
 } from "./policy.js";
+import { warmLegQuality } from "./quality-source.js";
 import type { OnlineEvalSample } from "./record.js";
 import {
   coverageArmSampleFrom,
@@ -82,7 +83,6 @@ import {
   shadowEvalLegFor,
 } from "./shadow-leg.js";
 import type { OnlineEvalSink } from "./sink.js";
-import { warmLegQuality } from "./quality-source.js";
 import {
   type OnlineEvalBindings,
   type OnlineEvalPolicySource,
@@ -356,7 +356,7 @@ export function onlineEvaluation(
     let plannedDecision: { samplingKey: string; rate: number } | undefined;
     let policy: OnlineEvalPolicy | null = null;
 
-    if (resolution !== undefined && resolution.ok) {
+    if (resolution?.ok) {
       policy = resolution.policy;
       const plan = onlineEvalCapturePlan({
         policy,

@@ -220,8 +220,8 @@ describe("the per-leg aggregate, against the real schema", () => {
     // A second refresh that ACCUMULATED would show 40 here, and every mean the
     // router reads would be computed over doubled rows.
     expect(rows).toHaveLength(1);
-    expect(rows[0]?.["score_count"]).toBe(20);
-    expect(rows[0]?.["score_total"]).toBeCloseTo(18, 6);
+    expect(rows[0]?.score_count).toBe(20);
+    expect(rows[0]?.score_total).toBeCloseTo(18, 6);
   });
 
   it("prunes a cell whose scores have all aged out, beside a live one", async () => {
@@ -244,7 +244,7 @@ describe("the per-leg aggregate, against the real schema", () => {
       [aggregate({ provider: "azure-eu" })],
       later,
     );
-    expect((await storedLegQuality()).map((row) => row["provider"])).toEqual(["azure-eu"]);
+    expect((await storedLegQuality()).map((row) => row.provider)).toEqual(["azure-eu"]);
   });
 
   it("prunes the LAST cell when the tenant's whole aggregate ages out", async () => {
@@ -362,7 +362,7 @@ describe("the per-leg aggregate, against the real schema", () => {
     );
 
     const rows = await storedLegQuality();
-    expect(rows.map((row) => row["provider"])).toEqual(["azure-eu", "openai-main"]);
+    expect(rows.map((row) => row.provider)).toEqual(["azure-eu", "openai-main"]);
     // And it is the ROUTER-readable projection, under this tenant.
     expect(await readOnlineEvalLegQuality(controlDb(), TENANT)).toHaveLength(2);
   });

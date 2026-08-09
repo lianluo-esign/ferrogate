@@ -21,22 +21,23 @@
  *   two strings for a both-or-neither contradiction and needs no TLS
  *   terminator or filesystem to decide.
  */
-import { z } from "zod";
+
 import { providerIsDurable, providerIsImplemented } from "@ferrogate/storage/provider";
-import { BILLING_SERVICE_DEFAULT_ENDPOINT } from "../schema/sections.js";
-import type { Config, StorageProviderKind } from "../schema/index.js";
+import { z } from "zod";
 import { IpCidr } from "../network-access.js";
-import {
-  capabilityActionAsStr,
-  selectorSupportsAction,
-  validateCapabilityTargetSelector,
-} from "./capability-target.js";
+import type { Config, StorageProviderKind } from "../schema/index.js";
+import { BILLING_SERVICE_DEFAULT_ENDPOINT } from "../schema/sections.js";
 import {
   describeX402ScopedPolicyError,
   validateScopedX402SpendPolicies,
   x402PolicyScopeKindSchema,
 } from "../x402-scope.js";
 import type { X402ScopedSpendPolicy } from "../x402-scope.js";
+import {
+  capabilityActionAsStr,
+  selectorSupportsAction,
+  validateCapabilityTargetSelector,
+} from "./capability-target.js";
 import {
   endpointProtectsCredentials,
   fail,
@@ -48,6 +49,7 @@ import {
   validatePostgresIdentifier,
   validateSecretRef,
 } from "./helpers.js";
+const nn = <T>(v: T): NonNullable<T> => v as NonNullable<T>;
 
 // `StorageProviderKind::is_durable()` / `::implemented()` are OWNED by
 // `@ferrogate/storage` (that is where the backends actually exist), so they are
@@ -186,8 +188,7 @@ export function validateObservability(config: Config): void {
     if (!endpointProtectsCredentials(endpoint)) {
       fail(
         "observability.otlp_endpoint",
-        `refusing to send the collector credential over plaintext to \`${endpoint}\`; use https ` +
-          `(loopback http is allowed for local development)`,
+        `refusing to send the collector credential over plaintext to \`${endpoint}\`; use https (loopback http is allowed for local development)`,
       );
     }
   }
@@ -232,7 +233,8 @@ export function validateAnalytics(config: Config): void {
   if (analytics.export_timeout_secs === 0) {
     fail("analytics.export_timeout_secs", "must be greater than zero");
   }
-  if (analytics.batch_max_events === 0) fail("analytics.batch_max_events", "must be greater than zero");
+  if (analytics.batch_max_events === 0)
+    fail("analytics.batch_max_events", "must be greater than zero");
   if (analytics.flush_interval_millis === 0) {
     fail("analytics.flush_interval_millis", "must be greater than zero");
   }
@@ -283,10 +285,7 @@ export function validateCache(config: Config): void {
   if (cache.mode === "semantic") {
     const threshold = cache.semantic_similarity_threshold;
     if (!(threshold > 0 && threshold <= 1)) {
-      fail(
-        "cache.semantic_similarity_threshold",
-        "must be within (0.0, 1.0] for semantic mode",
-      );
+      fail("cache.semantic_similarity_threshold", "must be within (0.0, 1.0] for semantic mode");
     }
   }
 }
@@ -315,7 +314,7 @@ function validatePostgresWireStorage(config: Config, fieldPrefix: string): void 
   for (let index = 0; index < storage.postgres_search_path.length; index += 1) {
     validatePostgresIdentifier(
       `storage.postgres_search_path[${index}]`,
-      storage.postgres_search_path[index]!,
+      nn(storage.postgres_search_path[index]),
     );
   }
   if (
@@ -337,7 +336,7 @@ export function validateStorage(config: Config): void {
   }
   const seen = new Set<StorageProviderKind>();
   for (let index = 0; index < storage.provider_order.length; index += 1) {
-    const provider = storage.provider_order[index]!;
+    const provider = nn(storage.provider_order[index]);
     if (provider === "memory") {
       fail(`storage.provider_order[${index}]`, "memory is not a durable provider");
     }
@@ -511,16 +510,14 @@ function validateManagedWorkerActionList(field: string, actions: string[]): void
 export function validateAgentRuntime(config: Config): void {
   const runtime = config.agent_runtime;
   if (runtime.max_turns === 0) fail("agent_runtime.max_turns", "must be greater than zero");
-  if (runtime.timeout_millis === 0) fail("agent_runtime.timeout_millis", "must be greater than zero");
+  if (runtime.timeout_millis === 0)
+    fail("agent_runtime.timeout_millis", "must be greater than zero");
   if (runtime.provider === "managed_worker") {
     const worker = runtime.managed_worker;
     if (worker.external_action_authorizer_http_listen !== null) {
       fail(
         "agent_runtime.managed_worker.external_action_authorizer_http_listen",
-        `insecure plaintext authorizer transport is unsupported; configure ` +
-          `external_action_authorizer_socket in a private owner-only directory (authenticated ` +
-          `guest transport remains tracked in #205), got ` +
-          `${JSON.stringify(worker.external_action_authorizer_http_listen)}`,
+        `insecure plaintext authorizer transport is unsupported; configure external_action_authorizer_socket in a private owner-only directory (authenticated guest transport remains tracked in #205), got ${JSON.stringify(worker.external_action_authorizer_http_listen)}`,
       );
     }
     if (isSetAndBlank(worker.external_action_authorizer_socket)) {
@@ -678,10 +675,7 @@ function validateClusterSnapshotShape(config: Config): void {
       fail("cluster.snapshot_max_age_secs", "must be greater than zero when signing is enabled");
     }
     if (!isSetAndPresent(cluster.snapshot_signing_key_id)) {
-      fail(
-        "cluster.snapshot_signing_key_id",
-        "required when cluster.snapshot_signing_key is set",
-      );
+      fail("cluster.snapshot_signing_key_id", "required when cluster.snapshot_signing_key is set");
     }
   }
   const keyIds = new Set<string>();
@@ -699,7 +693,7 @@ function validateClusterSnapshotShape(config: Config): void {
 export function validateNetworkAccess(config: Config): void {
   const networkAccess = config.network_access;
   for (let index = 0; index < networkAccess.ip_allowlist.length; index += 1) {
-    const entry = networkAccess.ip_allowlist[index]!;
+    const entry = nn(networkAccess.ip_allowlist[index]);
     try {
       IpCidr.parse(entry);
     } catch (error) {
@@ -800,7 +794,7 @@ export function inertBillingServiceWarnings(config: Config): string[] {
  */
 export function validateCloudflareAiGatewayProviders(config: Config): void {
   for (let index = 0; index < config.providers.length; index += 1) {
-    const routing = config.providers[index]!.cloudflare_ai_gateway;
+    const routing = nn(config.providers[index]).cloudflare_ai_gateway;
     if (routing === null) continue;
     const at = (field: string) => `providers[${index}].cloudflare_ai_gateway${field}`;
     const cloudflare = config.cloudflare;
@@ -844,7 +838,10 @@ export function validateX402SpendPolicies(config: Config): void {
     if (!parsed.success) {
       // Rust rejects this shape during deserialization; the TS schema carries the
       // policy body opaquely (PORT-TODO above), so the shape is decided here.
-      fail(`x402_spend_policies[${index}]`, parsed.error.issues[0]?.message ?? "invalid declaration");
+      fail(
+        `x402_spend_policies[${index}]`,
+        parsed.error.issues[0]?.message ?? "invalid declaration",
+      );
     }
     return {
       scope_type: parsed.data.scope_type,

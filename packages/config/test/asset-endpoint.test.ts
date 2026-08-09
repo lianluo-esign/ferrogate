@@ -1,10 +1,10 @@
 import { describe, expect, test } from "vitest";
 import {
+  R2_ENDPOINT_SUFFIX,
+  R2_REGION,
   endpointTargetsR2,
   parseEndpoint,
   parseR2Endpoint,
-  R2_ENDPOINT_SUFFIX,
-  R2_REGION,
 } from "../src/asset-endpoint.js";
 
 describe("parseEndpoint", () => {

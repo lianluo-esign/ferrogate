@@ -66,10 +66,7 @@ import type {
   TenantDatabaseRouter,
   TenantObjectAddress,
 } from "@ferrogate/storage";
-import type {
-  ControlDataNamespace,
-  TenantDataNamespace,
-} from "@ferrogate/storage/durable-objects";
+import type { ControlDataNamespace, TenantDataNamespace } from "@ferrogate/storage/durable-objects";
 import type { Context, MiddlewareHandler } from "hono";
 import type { GatewayBindings, GatewayEnv, GatewayVariables } from "../ports.js";
 
@@ -202,10 +199,7 @@ export interface TenantDatabaseResolver {
   /** The account-global CONTROL database. */
   control(): D1Database;
   /** Resolve one tenant's database, or THROW. Never falls back. */
-  forTenant(
-    tenantId: string,
-    address?: TenantObjectAddress,
-  ): Promise<TenantDatabaseHandle>;
+  forTenant(tenantId: string, address?: TenantObjectAddress): Promise<TenantDatabaseHandle>;
 }
 
 /**

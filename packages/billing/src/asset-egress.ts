@@ -59,16 +59,14 @@
  * through {@link AssetEgressMeter}, whose production implementation writes the
  * same durable `billing_ledger` row every inference charge writes.
  */
-import {
-  type BillingEvent,
-} from "./event.js";
+import type { BillingEvent } from "./event.js";
 import { charge as chargeEvent, ledgerEntryId } from "./ledger.js";
-import { PriceBook, egressCostUsd } from "./pricing.js";
-import { providerAttemptForRequest } from "./usage.js";
 import { usdToCredits } from "./metering/credits.js";
 import { D1LedgerStore } from "./metering/d1.js";
 import type { LedgerStore, MeteredCharge } from "./metering/ports.js";
 import { meteringDatabaseFrom } from "./metering/runtime.js";
+import { PriceBook, egressCostUsd } from "./pricing.js";
+import { providerAttemptForRequest } from "./usage.js";
 
 // ---------------------------------------------------------------------------
 // The quota slice this module reads
@@ -379,10 +377,7 @@ export type AssetEgressRead<TAsset extends AssetEgressReadableAsset, TFailure> =
   | { readonly ok: true; readonly asset: TAsset; readonly content: Uint8Array }
   | { readonly ok: false; readonly error: TFailure };
 
-export interface ReadAssetWithEgressInput<
-  TAsset extends AssetEgressReadableAsset,
-  TFailure,
-> {
+export interface ReadAssetWithEgressInput<TAsset extends AssetEgressReadableAsset, TFailure> {
   readonly quota: AssetEgressQuota;
   readonly apiKeyId: string;
   readonly tenantId: string;
@@ -398,10 +393,7 @@ export interface ReadAssetWithEgressInput<
   readonly nowUnix: number;
 }
 
-export type ReadAssetWithEgressResult<
-  TAsset extends AssetEgressReadableAsset,
-  TFailure,
-> =
+export type ReadAssetWithEgressResult<TAsset extends AssetEgressReadableAsset, TFailure> =
   | {
       readonly ok: true;
       readonly asset: TAsset;
@@ -494,7 +486,8 @@ export class LedgerAssetEgressMeter implements AssetEgressMeter {
 
   async record(charge: AssetEgressCharge): Promise<void> {
     if (charge.costUsd === undefined) return;
-    const ledger = typeof this.#ledger === "function" ? this.#ledger(charge.tenantId) : this.#ledger;
+    const ledger =
+      typeof this.#ledger === "function" ? this.#ledger(charge.tenantId) : this.#ledger;
     if (ledger === undefined) return;
     const event = assetEgressBillingEvent(charge);
     const entry = chargeEvent(PriceBook.default(), event);
@@ -593,10 +586,7 @@ export async function recordAssetEgress(
  * One read-side path for every asset consumer: gate the resolved object before
  * reading it, then meter the bytes returned by storage.
  */
-export async function readAssetWithEgress<
-  TAsset extends AssetEgressReadableAsset,
-  TFailure,
->(
+export async function readAssetWithEgress<TAsset extends AssetEgressReadableAsset, TFailure>(
   input: ReadAssetWithEgressInput<TAsset, TFailure>,
 ): Promise<ReadAssetWithEgressResult<TAsset, TFailure>> {
   assetEgressTargetId(input.asset, input.tenantId);
@@ -638,10 +628,7 @@ export function assetPullAuditMessage(assetId: string, bytes: number): string {
 }
 
 /** The canonical `stored_assets.id` used by gateway and MCP audit rows. */
-export function assetEgressTargetId(
-  asset: AssetEgressReadableAsset,
-  tenantId: string,
-): string {
+export function assetEgressTargetId(asset: AssetEgressReadableAsset, tenantId: string): string {
   void tenantId;
   if (typeof asset.id !== "string" || asset.id.trim() === "") {
     throw new Error(ASSET_EGRESS_IDENTITY_ERROR);

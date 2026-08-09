@@ -47,16 +47,9 @@ export function interceptProviderFetch(handler: ProviderHandler): ProviderInterc
   const original = globalThis.fetch;
   const requests: RecordedRequest[] = [];
 
-  const stub = (async (
-    input: RequestInfo | URL,
-    init?: RequestInit,
-  ): Promise<Response> => {
+  const stub = (async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const url =
-      typeof input === "string"
-        ? input
-        : input instanceof URL
-          ? input.toString()
-          : input.url;
+      typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
     const method = init?.method ?? (input instanceof Request ? input.method : "GET");
     const headers: Record<string, string> = {};
     new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined)).forEach(

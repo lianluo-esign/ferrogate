@@ -492,8 +492,8 @@ function readAudioUpload(): MiddlewareHandler<InferenceEnv> {
     // caller ends up billed for transcribing something other than what they
     // attached. Refused HERE rather than in a Zod union so the message names
     // the actual mistake.
-    const hasReference = typeof body["file_ref"] === "string" && body["file_ref"] !== "";
-    const hasInlineFile = body["file"] !== undefined;
+    const hasReference = typeof body.file_ref === "string" && body.file_ref !== "";
+    const hasInlineFile = body.file !== undefined;
     if (hasReference && hasInlineFile) {
       return errorResponse(
         reject(
@@ -607,7 +607,7 @@ function attributedMetadata(
   c: InferenceContext,
   request: Record<string, unknown>,
 ): RequestMetadata | undefined {
-  const stated = request["metadata"] as RequestMetadata | undefined;
+  const stated = request.metadata as RequestMetadata | undefined;
   const defaults = c.get("inferenceAttributionDefaults");
   if (defaults === undefined || Object.keys(defaults).length === 0) return stated;
   return { ...defaults, ...(stated ?? {}) };
@@ -2258,8 +2258,8 @@ async function handleOpenAiInference(
     return errorResponse(conversation, requestId);
   }
   const request = conversation === undefined ? sent : conversation.upstreamBody;
-  const logicalModel = String(request["model"]);
-  const stream = request["stream"] === true;
+  const logicalModel = String(request.model);
+  const stream = request.stream === true;
   const metadata = attributedMetadata(c, request);
 
   // Rust `estimate_chat_completion_usage` — `/v1/responses` shares it, because
@@ -2351,7 +2351,7 @@ async function handleOpenAiInference(
 
   if (stream && isStreamingUpstream(upstreamResponse)) {
     const dialect: StreamDialect = operation === "responses" ? "openai.responses" : "openai.chat";
-    if (conversation !== undefined && conversation.store) {
+    if (conversation?.store) {
       publishTurn(c, deps, conversation, logicalModel);
     }
     return streamResponse(
@@ -2480,32 +2480,25 @@ function chainRejection(reason: ChainFailure, previousResponseId: string): Infer
       return reject(
         CONVERSATION_NOT_FOUND_STATUS,
         PREVIOUS_RESPONSE_EXPIRED,
-        `previous_response_id ${previousResponseId} has passed this tenant's ` +
-          `/v1/responses retention window and can no longer be continued; ` +
-          `start a new conversation or raise the window`,
+        `previous_response_id ${previousResponseId} has passed this tenant's /v1/responses retention window and can no longer be continued; start a new conversation or raise the window`,
       );
     case "broken":
       return reject(
         CONVERSATION_NOT_FOUND_STATUS,
         CONVERSATION_CHAIN_BROKEN,
-        `the conversation ending at ${previousResponseId} is missing an earlier ` +
-          `turn (deleted or expired), so it cannot be continued without silently ` +
-          `dropping context; start a new conversation`,
+        `the conversation ending at ${previousResponseId} is missing an earlier turn (deleted or expired), so it cannot be continued without silently dropping context; start a new conversation`,
       );
     case "too_long":
       return reject(
         409,
         CONVERSATION_CHAIN_TOO_LONG,
-        `the conversation ending at ${previousResponseId} has reached the ` +
-          `${MAX_CONVERSATION_TURNS}-turn limit; start a new conversation ` +
-          `(truncating it here would drop context without telling you)`,
+        `the conversation ending at ${previousResponseId} has reached the ${MAX_CONVERSATION_TURNS}-turn limit; start a new conversation (truncating it here would drop context without telling you)`,
       );
     default:
       return reject(
         CONVERSATION_NOT_FOUND_STATUS,
         PREVIOUS_RESPONSE_NOT_FOUND,
-        `previous_response_id ${previousResponseId} is not a stored response for ` +
-          `this credential`,
+        `previous_response_id ${previousResponseId} is not a stored response for this credential`,
       );
   }
 }
@@ -2527,10 +2520,10 @@ async function prepareConversation(
   caller: Caller,
   request: Record<string, unknown>,
 ): Promise<ConversationPlan | InferenceRejection> {
-  const rawPrevious = request["previous_response_id"];
+  const rawPrevious = request.previous_response_id;
   const previousResponseId =
     typeof rawPrevious === "string" && rawPrevious.trim() !== "" ? rawPrevious.trim() : undefined;
-  const requestedStore = typeof request["store"] === "boolean" ? request["store"] : undefined;
+  const requestedStore = typeof request.store === "boolean" ? request.store : undefined;
   const continuing = previousResponseId !== undefined;
   const nowUnix = deps.nowUnixSeconds();
   const owner = conversationOwner(caller);
@@ -2632,7 +2625,7 @@ async function prepareConversation(
     }
   }
 
-  const turnInput = normalizeInputItems(request["input"]);
+  const turnInput = normalizeInputItems(request.input);
   return {
     owner,
     store: decision.store,
@@ -2642,7 +2635,7 @@ async function prepareConversation(
       // body must reach the provider exactly as the caller wrote it — including
       // an `input` shape this gateway does not model — so that nothing about
       // conversation state changes a single-turn request.
-      continuing ? conversationInput(prior, request["input"]) : undefined,
+      continuing ? conversationInput(prior, request.input) : undefined,
     ),
     responseId: mintResponseId(),
     previousResponseId: previousResponseId ?? null,
@@ -2697,18 +2690,18 @@ function finishBufferedTurn(
     return { body: original, headers: conversationResponseHeaders(plan.responseId, false) };
   }
 
-  const upstreamId = body["id"];
+  const upstreamId = body.id;
   if (typeof upstreamId === "string" && upstreamId !== "") {
     body[UPSTREAM_RESPONSE_ID_MEMBER] = upstreamId;
   }
-  body["id"] = plan.responseId;
+  body.id = plan.responseId;
   if (plan.previousResponseId !== null) {
     // Echoed back so a client that logs the response can reconstruct the chain
     // from the bodies alone — and so the member the caller sent is not simply
     // missing from the answer.
-    body["previous_response_id"] = plan.previousResponseId;
+    body.previous_response_id = plan.previousResponseId;
   }
-  body["store"] = plan.store;
+  body.store = plan.store;
   const serialized = JSON.stringify(body);
 
   if (plan.store) {
@@ -2777,9 +2770,7 @@ async function persistTurn(
 ): Promise<boolean> {
   if (approximateBytes > MAX_STORED_TURN_BYTES) {
     console.warn(
-      `[ferrogate] responses: turn ${plan.responseId} is ${approximateBytes} bytes, ` +
-        `over the ${MAX_STORED_TURN_BYTES}-byte ${RESPONSE_STATE_TOO_LARGE} limit; ` +
-        "served but not stored",
+      `[ferrogate] responses: turn ${plan.responseId} is ${approximateBytes} bytes, over the ${MAX_STORED_TURN_BYTES}-byte ${RESPONSE_STATE_TOO_LARGE} limit; served but not stored`,
     );
     return false;
   }
@@ -2881,8 +2872,8 @@ async function handleMessages(c: InferenceContext, deps: ResolvedInferenceDeps):
   const requestId = c.get("requestId");
   const caller = c.get("inferenceCaller");
   const request = c.get("inferenceBody") as Record<string, unknown>;
-  const logicalModel = String(request["model"]);
-  const stream = request["stream"] === true;
+  const logicalModel = String(request.model);
+  const stream = request.stream === true;
 
   const translated = deps.translator.toChatCompletions(request);
   if (!translated.ok) {
@@ -3069,7 +3060,7 @@ function handleCountMessageTokens(c: InferenceContext, deps: ResolvedInferenceDe
   const requestId = c.get("requestId");
   const caller = c.get("inferenceCaller");
   const request = c.get("inferenceBody") as Record<string, unknown>;
-  const logicalModel = String(request["model"]);
+  const logicalModel = String(request.model);
 
   const gate = countTokensModelGate(deps, caller, logicalModel);
   if (gate !== null) {
@@ -3146,7 +3137,7 @@ async function handleEmbeddings(
   const requestId = c.get("requestId");
   const caller = c.get("inferenceCaller");
   const request = c.get("inferenceBody") as Record<string, unknown>;
-  const logicalModel = String(request["model"]);
+  const logicalModel = String(request.model);
   const metadata = attributedMetadata(c, request);
 
   // Rust `estimate_embeddings_usage` — the arm that scores a PRE-TOKENIZED
@@ -3296,8 +3287,8 @@ async function handleRerank(c: InferenceContext, deps: ResolvedInferenceDeps): P
   const requestId = c.get("requestId");
   const caller = c.get("inferenceCaller");
   const request = c.get("inferenceBody") as Record<string, unknown>;
-  const logicalModel = String(request["model"]);
-  const metadata = request["metadata"] as RequestMetadata | undefined;
+  const logicalModel = String(request.model);
+  const metadata = request.metadata as RequestMetadata | undefined;
 
   const estimated = estimateRerankUsage(request);
 
@@ -3453,7 +3444,7 @@ async function handleAudioUpload(
   const requestId = c.get("requestId");
   const caller = c.get("inferenceCaller");
   const request = c.get("inferenceBody") as Record<string, unknown>;
-  const logicalModel = String(request["model"]);
+  const logicalModel = String(request.model);
   const metadata = attributedMetadata(c, request);
 
   // ---- the by-reference ingress (issue #703) --------------------------------
@@ -3579,7 +3570,7 @@ async function handleAudioUpload(
   // every request while still being ABSENT from the default `json` answer, which
   // is what OpenAI documents. Shaping first would have made the meter's input
   // depend on what the client asked to see.
-  const format = request["response_format"];
+  const format = request.response_format;
   if (format === "text") {
     const transcript = (translated as { text?: unknown } | undefined)?.text;
     return rawUpstreamResponse(
@@ -3643,7 +3634,7 @@ async function resolveAudioReference(
   caller: Caller,
   request: Record<string, unknown>,
 ): Promise<undefined | InferenceRejection> {
-  const raw = request["file_ref"];
+  const raw = request.file_ref;
   if (typeof raw !== "string" || raw === "") {
     return undefined;
   }
@@ -3671,8 +3662,9 @@ async function resolveAudioReference(
   if (isRejection(opened)) {
     return opened;
   }
-  request["file"] = opened;
-  delete request["file_ref"];
+  request.file = opened;
+  // biome-ignore lint/performance/noDelete: removes the own-property key entirely; assigning undefined would leave an enumerable undefined-valued key and change JSON serialization, the 'in' operator, and Object.keys semantics
+  delete request.file_ref;
   return undefined;
 }
 
@@ -3709,7 +3701,7 @@ async function handleSpeech(c: InferenceContext, deps: ResolvedInferenceDeps): P
   const requestId = c.get("requestId");
   const caller = c.get("inferenceCaller");
   const request = c.get("inferenceBody") as Record<string, unknown>;
-  const logicalModel = String(request["model"]);
+  const logicalModel = String(request.model);
   const metadata = attributedMetadata(c, request);
 
   const estimated = estimateSpeechUsage(request);
@@ -3798,7 +3790,7 @@ async function handleSpeech(c: InferenceContext, deps: ResolvedInferenceDeps): P
   const audio = adapter?.translateSpeechResponse?.(bytes, upstreamContentType);
   const payload = audio ?? { bytes, contentType: upstreamContentType };
 
-  const characters = typeof request["input"] === "string" ? (request["input"] as string).length : 0;
+  const characters = typeof request.input === "string" ? (request.input as string).length : 0;
   recordUsage(
     c,
     deps,
@@ -3847,7 +3839,7 @@ async function handleImages(c: InferenceContext, deps: ResolvedInferenceDeps): P
   const requestId = c.get("requestId");
   const caller = c.get("inferenceCaller");
   const request = c.get("inferenceBody") as Record<string, unknown>;
-  const logicalModel = String(request["model"]);
+  const logicalModel = String(request.model);
   const metadata = attributedMetadata(c, request);
 
   // Rust `estimate_images_usage` (issue #275): the pre-charge unit is GENERATED

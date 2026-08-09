@@ -78,11 +78,11 @@
  */
 import { DurableObject } from "cloudflare:workers";
 import {
-  ProviderCircuitState,
-  closedCircuit,
   type ProviderCircuit,
   type ProviderCircuitSnapshot,
+  ProviderCircuitState,
   type ReliabilitySettings,
+  closedCircuit,
 } from "./reliability.js";
 
 const CIRCUIT_STORAGE_KEY = "provider:circuit";

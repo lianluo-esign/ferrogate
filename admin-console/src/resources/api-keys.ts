@@ -1,9 +1,9 @@
-import { adminGet, type AdminSchema } from "@/lib/gateway-client";
+import { type AdminSchema, adminGet } from "@/lib/gateway-client";
 import {
-  booleanColumn,
   DISABLED_WHEN_NOT_ENABLED,
   DISABLED_WHEN_STATUS_NOT_ACTIVE,
   type ResourceConfig,
+  booleanColumn,
 } from "@/lib/resource-config";
 
 /**
@@ -34,10 +34,35 @@ export const apiKeysConfig: ResourceConfig<AdminApiKey> = {
   fetchList: async (apiKey) => adminGet(apiKey, "/admin/v1/api-keys"),
   rowLabel: (row) => row.name,
   columns: [
-    { key: "name", headerKey: "resource.apiKeys.col.name", priority: "primary", minWidth: 220, mobileVisibility: "always" },
-    { key: "key_source", headerKey: "resource.apiKeys.col.source", priority: "secondary", minWidth: 140, mobileVisibility: "always" },
-    booleanColumn<AdminApiKey>({ key: "enabled", headerKey: "resource.apiKeys.col.enabled", priority: "secondary", minWidth: 100, mobileVisibility: "always" }),
-    { key: "scopes", headerKey: "resource.apiKeys.col.scopes", priority: "detail", minWidth: 240, mobileVisibility: "details", render: (row) => (row.scopes ?? []).join(", ") || "-" },
+    {
+      key: "name",
+      headerKey: "resource.apiKeys.col.name",
+      priority: "primary",
+      minWidth: 220,
+      mobileVisibility: "always",
+    },
+    {
+      key: "key_source",
+      headerKey: "resource.apiKeys.col.source",
+      priority: "secondary",
+      minWidth: 140,
+      mobileVisibility: "always",
+    },
+    booleanColumn<AdminApiKey>({
+      key: "enabled",
+      headerKey: "resource.apiKeys.col.enabled",
+      priority: "secondary",
+      minWidth: 100,
+      mobileVisibility: "always",
+    }),
+    {
+      key: "scopes",
+      headerKey: "resource.apiKeys.col.scopes",
+      priority: "detail",
+      minWidth: 240,
+      mobileVisibility: "details",
+      render: (row) => (row.scopes ?? []).join(", ") || "-",
+    },
   ],
   fields: [
     {
@@ -215,8 +240,16 @@ export const apiKeysConfig: ResourceConfig<AdminApiKey> = {
       labelKey: "resource.apiKeys.field.userId",
       type: "text",
     },
-    { name: "monthly_token_budget", labelKey: "resource.apiKeys.field.monthlyTokenBudget", type: "number" },
-    { name: "request_limit_per_minute", labelKey: "resource.apiKeys.field.requestLimitPerMinute", type: "number" },
+    {
+      name: "monthly_token_budget",
+      labelKey: "resource.apiKeys.field.monthlyTokenBudget",
+      type: "number",
+    },
+    {
+      name: "request_limit_per_minute",
+      labelKey: "resource.apiKeys.field.requestLimitPerMinute",
+      type: "number",
+    },
     { name: "expires_at_unix", labelKey: "resource.apiKeys.field.expiresAt", type: "number" },
     { name: "log_bodies", labelKey: "resource.apiKeys.field.logBodies", type: "boolean" },
     { name: "cache_enabled", labelKey: "resource.apiKeys.field.cacheEnabled", type: "boolean" },

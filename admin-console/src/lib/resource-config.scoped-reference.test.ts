@@ -1,10 +1,10 @@
-import { describe, expect, it } from "vitest";
 import {
-  clearDependentReferenceValues,
-  resolveActiveReference,
   type EntityReferenceFieldConfig,
   type FieldConfig,
+  clearDependentReferenceValues,
+  resolveActiveReference,
 } from "@/lib/resource-config";
+import { describe, expect, it } from "vitest";
 
 // #341: unit coverage for the scope-kind-driven reference mechanics that back
 // the quota/policy scope pickers — target selection by a sibling field, and the

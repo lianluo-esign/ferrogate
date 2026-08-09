@@ -1,5 +1,5 @@
-import { describe, expect, test } from "vitest";
 import { DEFAULT_APPROVAL_POLICY, approvalPolicySchema } from "@ferrogate/schemas";
+import { describe, expect, test } from "vitest";
 
 describe("approvalPolicySchema", () => {
   test("accepts the snake_case wire tokens", () => {

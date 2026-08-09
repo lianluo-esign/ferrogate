@@ -21,8 +21,8 @@
  *     drain var and so cannot exercise the `GATEWAY_DRAIN` arm behaviourally.
  */
 import { SELF, applyD1Migrations, env } from "cloudflare:test";
-import { controlNamespace } from "./support/control-namespace.js";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { controlNamespace } from "./support/control-namespace.js";
 
 import {
   DRAIN_COLLECTION,

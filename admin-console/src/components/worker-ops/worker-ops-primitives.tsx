@@ -1,3 +1,15 @@
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { useI18n } from "@/i18n";
 // Shared building blocks for the Worker ops pages (issue #320): the
 // register/rotate credential-shown-once dialog (mirrors the virtual-key
 // "save this secret now" pattern in resource-page.tsx / #249 mTLS identity)
@@ -11,18 +23,6 @@
 // document. These helpers parse that document defensively (never throw on
 // malformed JSON) and pull the correlation fields when present.
 import { toast } from "sonner";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { useI18n } from "@/i18n";
 
 /** Customer-reported (#305/#307) correlation fields lifted out of event_json. */
 export interface ReportedCorrelation {
@@ -39,10 +39,7 @@ const EMPTY_CORRELATION: ReportedCorrelation = {
   parentActionFingerprint: null,
 };
 
-function pickString(
-  source: Record<string, unknown>,
-  ...keys: string[]
-): string | null {
+function pickString(source: Record<string, unknown>, ...keys: string[]): string | null {
   for (const key of keys) {
     const value = source[key];
     if (typeof value === "string" && value.length > 0) return value;
@@ -73,17 +70,11 @@ export function parseReportedCorrelation(
       ? (root.correlation as Record<string, unknown>)
       : {};
   return {
-    requestId:
-      pickString(root, "request_id") ?? pickString(nested, "request_id"),
+    requestId: pickString(root, "request_id") ?? pickString(nested, "request_id"),
     traceId: pickString(root, "trace_id") ?? pickString(nested, "trace_id"),
-    agentRunId:
-      pickString(root, "agent_run_id") ?? pickString(nested, "agent_run_id"),
+    agentRunId: pickString(root, "agent_run_id") ?? pickString(nested, "agent_run_id"),
     parentActionFingerprint:
-      pickString(
-        root,
-        "parent_action_fingerprint",
-        "parent_action_sha256",
-      ) ??
+      pickString(root, "parent_action_fingerprint", "parent_action_sha256") ??
       pickString(nested, "parent_action_fingerprint", "parent_action_sha256"),
   };
 }
@@ -101,8 +92,7 @@ export function aggregateReportedCorrelation(
       requestId: acc.requestId ?? parsed.requestId,
       traceId: acc.traceId ?? parsed.traceId,
       agentRunId: acc.agentRunId ?? parsed.agentRunId,
-      parentActionFingerprint:
-        acc.parentActionFingerprint ?? parsed.parentActionFingerprint,
+      parentActionFingerprint: acc.parentActionFingerprint ?? parsed.parentActionFingerprint,
     };
   }, EMPTY_CORRELATION);
 }
@@ -168,18 +158,14 @@ export function CredentialRevealDialog({
           <AlertDialogDescription>{description}</AlertDialogDescription>
         </AlertDialogHeader>
         <div className="grid gap-1">
-          <span className="text-xs font-medium text-muted-foreground">
-            {credentialLabel}
-          </span>
+          <span className="text-xs font-medium text-muted-foreground">{credentialLabel}</span>
           <code
             className="block break-all rounded-md bg-muted p-3 font-mono text-sm"
             data-testid="revealed-credential"
           >
             {credential ?? "—"}
           </code>
-          <p className="text-xs font-medium text-destructive">
-            {t("workerOps.reveal.warning")}
-          </p>
+          <p className="text-xs font-medium text-destructive">{t("workerOps.reveal.warning")}</p>
         </div>
         <AlertDialogFooter>
           <Button type="button" variant="outline" onClick={() => void copy()}>

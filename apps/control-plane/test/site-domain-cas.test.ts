@@ -44,8 +44,8 @@
 import { SELF } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { applySchema, resetD1 } from "./d1.js";
-import { rawTenantDocument } from "./tenant-object.js";
 import { BASE, arm, bearer, jsonRequest, tenantKey } from "./harness.js";
+import { rawTenantDocument } from "./tenant-object.js";
 
 const TENANT = "tenant_a";
 const KEY = "key-tenant-a";
@@ -128,7 +128,11 @@ describe("site-domain verification rate limit (#576)", () => {
     // cooldown on every rejected retry — a caller hammering the endpoint would
     // lock itself out for longer and longer, which is not the limit #576
     // specifies.
-    const afterRefusal = await rawTenantDocument(TENANT, "site-domain-verifications", VERIFICATION_ID);
+    const afterRefusal = await rawTenantDocument(
+      TENANT,
+      "site-domain-verifications",
+      VERIFICATION_ID,
+    );
     expect(afterRefusal).toEqual(held);
   });
 

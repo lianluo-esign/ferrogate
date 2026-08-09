@@ -129,13 +129,13 @@ import {
 } from "@ferrogate/billing";
 import {
   DurableObjectTenantDatabaseRouter,
-  backfillTenantConfigurationPolicy,
   type QuotaScopeKind,
   type TenantDatabaseHandle,
+  backfillTenantConfigurationPolicy,
   budgetAlertStoreForTenant,
 } from "@ferrogate/storage";
-import { controlDatabaseFrom } from "../control-data.js";
 import type { TenantDataNamespace } from "@ferrogate/storage/durable-objects";
+import { controlDatabaseFrom } from "../control-data.js";
 import {
   type QuotaPolicySource,
   type SpendSource,
@@ -280,9 +280,9 @@ export function budgetAlertPortsFrom(env: unknown): BudgetAlertPorts | undefined
     claims: {
       async claimBudgetAlertNotification(claim) {
         if (claim.tenantId.trim() === "") return false;
-        return budgetAlertStoreForTenant(await tenantDbFor(claim.tenantId)).claimBudgetAlertNotification(
-          claim,
-        );
+        return budgetAlertStoreForTenant(
+          await tenantDbFor(claim.tenantId),
+        ).claimBudgetAlertNotification(claim);
       },
     },
   };
@@ -372,7 +372,15 @@ export async function dispatchBudgetThresholdAlerts(
   // scope rows plus the plan as a single `db.batch()`, so this costs one round
   // trip rather than one per scope — the shape `resolve_effective_quota` uses
   // on the admission path, reused rather than restated.
-  let lookup: (kind: QuotaScopeKind, id: string) => { readonly monthlyBudgetUsd?: number | undefined; readonly alertThresholdPcts: readonly number[] } | undefined;
+  let lookup: (
+    kind: QuotaScopeKind,
+    id: string,
+  ) =>
+    | {
+        readonly monthlyBudgetUsd?: number | undefined;
+        readonly alertThresholdPcts: readonly number[];
+      }
+    | undefined;
   try {
     const snapshot = await ports.policies.policiesFor({
       apiKeyId: input.scopes.find((scope) => scope.scopeType === "key")?.scopeId ?? "",
@@ -407,11 +415,7 @@ export async function dispatchBudgetThresholdAlerts(
 
     let spentUsd: number;
     try {
-      const reading = await spend.committedSpendUsd(
-        scope.scopeType,
-        scope.scopeId,
-        periodMonth,
-      );
+      const reading = await spend.committedSpendUsd(scope.scopeType, scope.scopeId, periodMonth);
       if (!reading.ok) {
         report("budget_alert_rollup", new Error(reading.detail));
         continue;

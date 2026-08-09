@@ -28,7 +28,9 @@ describe("openai SDK - files", () => {
     expect(created.bytes).toBe(new TextEncoder().encode(contents).byteLength);
 
     const listed = await client.files.list({ purpose: "assistants" });
-    expect(listed.data).toEqual(expect.arrayContaining([expect.objectContaining({ id: created.id })]));
+    expect(listed.data).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: created.id })]),
+    );
 
     const retrieved = await client.files.retrieve(created.id);
     expect(retrieved).toEqual(created);

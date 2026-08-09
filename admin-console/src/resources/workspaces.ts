@@ -1,8 +1,5 @@
 import { adminGet } from "@/lib/gateway-client";
-import {
-  DISABLED_WHEN_STATUS_NOT_ACTIVE,
-  type ResourceConfig,
-} from "@/lib/resource-config";
+import { DISABLED_WHEN_STATUS_NOT_ACTIVE, type ResourceConfig } from "@/lib/resource-config";
 
 export interface AdminWorkspace extends Record<string, unknown> {
   id: string;
@@ -27,8 +24,7 @@ export const workspacesConfig: ResourceConfig<AdminWorkspace> = {
   basePath: "/admin/v1/workspaces",
   idField: "id",
   pagination: "offset",
-  fetchList: (apiKey, request) =>
-    adminGet(apiKey, "/admin/v1/workspaces", { query: request }),
+  fetchList: (apiKey, request) => adminGet(apiKey, "/admin/v1/workspaces", { query: request }),
   columns: [
     { key: "name", headerKey: "resource.workspaces.col.name" },
     { key: "slug", headerKey: "resource.workspaces.col.slug" },
@@ -56,7 +52,17 @@ export const workspacesConfig: ResourceConfig<AdminWorkspace> = {
     },
     { name: "name", labelKey: "resource.workspaces.field.name", type: "text", required: true },
     { name: "slug", labelKey: "resource.workspaces.field.slug", type: "text", required: true },
-    { name: "environment", labelKey: "resource.workspaces.field.environment", type: "text", placeholder: "default" },
-    { name: "status", labelKey: "resource.workspaces.field.status", type: "text", placeholder: "active" },
+    {
+      name: "environment",
+      labelKey: "resource.workspaces.field.environment",
+      type: "text",
+      placeholder: "default",
+    },
+    {
+      name: "status",
+      labelKey: "resource.workspaces.field.status",
+      type: "text",
+      placeholder: "active",
+    },
   ],
 };

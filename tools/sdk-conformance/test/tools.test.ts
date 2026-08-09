@@ -11,8 +11,9 @@
  * The accumulation is done by the SDK's own `ChatCompletionStream`, so what is
  * asserted is what an application would actually observe.
  */
-import { describe, expect, it } from "vitest";
+
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
+import { describe, expect, it } from "vitest";
 import {
   DONE_FRAME,
   dataFrame,
@@ -78,7 +79,12 @@ const TOOL_STREAM = [
         delta: {
           role: "assistant",
           tool_calls: [
-            { index: 0, id: "call_abc123", type: "function", function: { name: "get_weather", arguments: "" } },
+            {
+              index: 0,
+              id: "call_abc123",
+              type: "function",
+              function: { name: "get_weather", arguments: "" },
+            },
           ],
         },
       },
@@ -90,11 +96,15 @@ const TOOL_STREAM = [
   }),
   dataFrame({
     ...CHUNK_BASE,
-    choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: 'ty":"Sha' } }] } }],
+    choices: [
+      { index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: 'ty":"Sha' } }] } },
+    ],
   }),
   dataFrame({
     ...CHUNK_BASE,
-    choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: 'nghai"}' } }] } }],
+    choices: [
+      { index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: 'nghai"}' } }] } },
+    ],
   }),
   dataFrame({ ...CHUNK_BASE, choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] }),
   DONE_FRAME,
@@ -138,12 +148,12 @@ describe("openai SDK — tool calls", () => {
       const body = upstream.last().body as Record<string, unknown>;
       // A gateway that dropped or rewrote any of these would change which tool
       // the model may call — a correctness change, not a transport detail.
-      expect(body["tools"]).toEqual([WEATHER_TOOL]);
-      expect(body["tool_choice"]).toEqual({
+      expect(body.tools).toEqual([WEATHER_TOOL]);
+      expect(body.tool_choice).toEqual({
         type: "function",
         function: { name: "get_weather" },
       });
-      expect(body["parallel_tool_calls"]).toBe(false);
+      expect(body.parallel_tool_calls).toBe(false);
     } finally {
       upstream.restore();
     }

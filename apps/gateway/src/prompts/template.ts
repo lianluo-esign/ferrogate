@@ -16,7 +16,11 @@
  * evaluation order changes under a bundler and a `const` is briefly undefined.
  * This module imports nothing from either side.
  */
-import { type PromptTemplate, type PromptTemplateVersion, promptTemplateSchema } from "@ferrogate/config";
+import {
+  type PromptTemplate,
+  type PromptTemplateVersion,
+  promptTemplateSchema,
+} from "@ferrogate/config";
 
 /** JSON array of `PromptTemplate` records — Rust `[[prompt_templates]]`. */
 export const PROMPT_TEMPLATES_VAR = "GATEWAY_PROMPT_TEMPLATES";
@@ -69,7 +73,9 @@ export function activePromptTemplateVersion(
       (best, version) => (best === undefined || version.revision > best.revision ? version : best),
       undefined,
     );
-  return highest(template.versions.filter((v) => v.status === "active")) ?? highest(template.versions);
+  return (
+    highest(template.versions.filter((v) => v.status === "active")) ?? highest(template.versions)
+  );
 }
 
 /** `find_prompt_template_version`: an explicit revision, else the active one. */
@@ -182,12 +188,12 @@ export function renderPromptTemplate(
   }));
   const request: Record<string, unknown> = { model: template.model };
   if (template.target === "responses") {
-    request["input"] = messages;
+    request.input = messages;
   } else {
-    request["messages"] = messages;
+    request.messages = messages;
   }
-  if (version.temperature !== null) request["temperature"] = version.temperature;
-  if (version.top_p !== null) request["top_p"] = version.top_p;
-  if (version.max_tokens !== null) request["max_tokens"] = version.max_tokens;
+  if (version.temperature !== null) request.temperature = version.temperature;
+  if (version.top_p !== null) request.top_p = version.top_p;
+  if (version.max_tokens !== null) request.max_tokens = version.max_tokens;
   return request;
 }

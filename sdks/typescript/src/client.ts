@@ -155,7 +155,9 @@ function withPrefix(url: string, prefix: ControlPlanePrefix): string {
     return url;
   }
   parsed.pathname =
-    parsed.pathname.slice(0, markerIndex) + prefix + parsed.pathname.slice(markerIndex + marker.length);
+    parsed.pathname.slice(0, markerIndex) +
+    prefix +
+    parsed.pathname.slice(markerIndex + marker.length);
   return parsed.toString();
 }
 

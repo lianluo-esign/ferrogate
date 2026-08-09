@@ -53,10 +53,7 @@
  * (`inference/shadow.ts::shadowMirrorFor`).
  */
 
-import {
-  tenantJurisdictionForResidencyRegions,
-  type TenantJurisdiction,
-} from "@ferrogate/storage";
+import { type TenantJurisdiction, tenantJurisdictionForResidencyRegions } from "@ferrogate/storage";
 
 /**
  * Where the DURABLE RECORD of a request may live.

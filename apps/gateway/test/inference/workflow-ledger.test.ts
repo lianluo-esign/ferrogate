@@ -17,8 +17,8 @@
  * `control_plane_resources` here is the production table, not a fixture.
  */
 import { env } from "cloudflare:test";
-import { DurableObjectTenantDatabaseRouter } from "@ferrogate/storage";
 import type { WorkflowGraph, WorkflowRunFacts } from "@ferrogate/policy";
+import { DurableObjectTenantDatabaseRouter } from "@ferrogate/storage";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
   AGENT_WORKFLOW_COLLECTION,
@@ -98,7 +98,7 @@ async function seedWorkflow(id: string, document: Record<string, unknown>): Prom
   )
     .bind(AGENT_WORKFLOW_COLLECTION, id, JSON.stringify(document))
     .run();
-  const tenantId = document["tenant_id"];
+  const tenantId = document.tenant_id;
   if (typeof tenantId === "string" && tenantId.trim() !== "") {
     await (await tenantDb(tenantId))
       .prepare(
@@ -390,12 +390,12 @@ describe("the durable step ledger", () => {
     const otherRun = await history.factsFor({ ...query, runId: "run_b" });
     const facts = factsOf(otherRun) as unknown as Record<string, unknown>;
     // A different run has no previous node and no start time …
-    expect(facts["previousSuccessfulNodeId"]).toBeUndefined();
-    expect(facts["runStartedAtUnix"]).toBeUndefined();
+    expect(facts.previousSuccessfulNodeId).toBeUndefined();
+    expect(facts.runStartedAtUnix).toBeUndefined();
     // … but `max_model_calls` and the token budget are per WORKFLOW in Rust,
     // so those still see the earlier run's spend.
-    expect(facts["modelCallCount"]).toBe(1);
-    expect(facts["tokensUsed"]).toBe(4);
+    expect(facts.modelCallCount).toBe(1);
+    expect(facts.tokensUsed).toBe(4);
   });
 
   it("REFUSES rather than reporting an empty run when the read fails", async () => {

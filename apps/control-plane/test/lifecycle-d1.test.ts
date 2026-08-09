@@ -30,8 +30,8 @@ import type { AuthContext, ControlPlaneBindings, ControlPlaneStore } from "../sr
 import { StoreTenancyLifecycleGate } from "../src/store/lifecycle.js";
 import { MemoryControlPlaneStore } from "../src/store/memory.js";
 import { applySchema, db, resetD1, seedD1 } from "./d1.js";
-import { registerObjectTenants } from "./tenant-object.js";
 import { BASE, type NativeKey, arm, bearer, jsonRequest, operatorKey } from "./harness.js";
+import { registerObjectTenants } from "./tenant-object.js";
 
 const OPERATOR = operatorKey.secret;
 const TENANT_KEY = "tenant-a-secret";
@@ -444,12 +444,17 @@ describe("resolveLifecycle", () => {
   const store: ControlPlaneStore = new MemoryControlPlaneStore();
 
   it("builds the durable gate when the control database is in play", () => {
-    const env = { CONTROL_DATA: (testEnv as unknown as { CONTROL_DATA: unknown }).CONTROL_DATA } as unknown as ControlPlaneBindings;
+    const env = {
+      CONTROL_DATA: (testEnv as unknown as { CONTROL_DATA: unknown }).CONTROL_DATA,
+    } as unknown as ControlPlaneBindings;
     expect(resolveLifecycle(env, store)).toBeInstanceOf(StoreTenancyLifecycleGate);
   });
 
   it("builds the declarative gate when the memory store is asked for by name", () => {
-    const env = { CONTROL_DATA: (testEnv as unknown as { CONTROL_DATA: unknown }).CONTROL_DATA, CONTROL_PLANE_STORE: "memory" } as unknown as ControlPlaneBindings;
+    const env = {
+      CONTROL_DATA: (testEnv as unknown as { CONTROL_DATA: unknown }).CONTROL_DATA,
+      CONTROL_PLANE_STORE: "memory",
+    } as unknown as ControlPlaneBindings;
     expect(resolveLifecycle(env, store)).toBeInstanceOf(JsonTenancyLifecycleGate);
   });
 

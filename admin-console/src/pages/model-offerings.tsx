@@ -1,22 +1,4 @@
-// Nested model-offerings CRUD (#912 slice 2c): the admin surface over
-// GET/POST /admin/v1/models/{model_id}/offerings and
-// GET/PUT/PATCH/DELETE /admin/v1/models/{model_id}/offerings/{offering_id}.
-// Reached from the models list (each row's name links here) or by direct URL.
-//
-// This page REUSES slice 2a's platform-scope machinery: `useCatalogApiKey()`
-// returns the platform-operator key under platform scope (superadmin only) and
-// the tenant gateway key otherwise, and `<CatalogScopeToggle>` flips between the
-// two. The console never sends a `tenant_id`; the backend resolves catalog scope
-// purely from WHICH credential asked, and every response carries `scope`. The
-// list query keys on the active scope so toggling refetches the OTHER catalog.
-//
-// provider_id and upstream_model_id are plain TEXT inputs on purpose — the
-// shared entity-reference-picker hard-codes the tenant credential and would list
-// TENANT providers even under platform scope, so it cannot be used here.
-import { useMemo, useRef, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, useParams } from "react-router-dom";
-import { toast } from "sonner";
+import { CatalogScopeToggle } from "@/components/resource/catalog-scope-toggle";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -37,12 +19,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import {
-  Sheet,
-  SheetContent,
-  SheetHeader,
-  SheetTitle,
-} from "@/components/ui/sheet";
+import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Switch } from "@/components/ui/switch";
 import {
   Table,
@@ -52,18 +29,30 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { CatalogScopeToggle } from "@/components/resource/catalog-scope-toggle";
 import { useCatalogApiKey } from "@/hooks/use-catalog-api-key";
 import { useCatalogScope } from "@/hooks/use-catalog-scope";
 import { useOperatorError } from "@/hooks/use-operator-error";
-import { useI18n, type TranslationKey } from "@/i18n";
-import {
-  adminDelete,
-  adminGet,
-  adminPost,
-  adminPut,
-  type AdminSchema,
-} from "@/lib/gateway-client";
+import { type TranslationKey, useI18n } from "@/i18n";
+import { type AdminSchema, adminDelete, adminGet, adminPost, adminPut } from "@/lib/gateway-client";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+// Nested model-offerings CRUD (#912 slice 2c): the admin surface over
+// GET/POST /admin/v1/models/{model_id}/offerings and
+// GET/PUT/PATCH/DELETE /admin/v1/models/{model_id}/offerings/{offering_id}.
+// Reached from the models list (each row's name links here) or by direct URL.
+//
+// This page REUSES slice 2a's platform-scope machinery: `useCatalogApiKey()`
+// returns the platform-operator key under platform scope (superadmin only) and
+// the tenant gateway key otherwise, and `<CatalogScopeToggle>` flips between the
+// two. The console never sends a `tenant_id`; the backend resolves catalog scope
+// purely from WHICH credential asked, and every response carries `scope`. The
+// list query keys on the active scope so toggling refetches the OTHER catalog.
+//
+// provider_id and upstream_model_id are plain TEXT inputs on purpose — the
+// shared entity-reference-picker hard-codes the tenant credential and would list
+// TENANT providers even under platform scope, so it cannot be used here.
+import { useMemo, useRef, useState } from "react";
+import { Link, useParams } from "react-router-dom";
+import { toast } from "sonner";
 
 type Offering = AdminSchema<"AdminOffering">;
 type OfferingMutation = AdminSchema<"AdminModelOfferingMutation">;
@@ -131,7 +120,11 @@ const SCALAR_FIELDS: readonly ScalarField[] = [
   { name: "context_window", labelKey: "page.modelOfferings.field.contextWindow", kind: "number" },
   { name: "region", labelKey: "page.modelOfferings.field.region", kind: "text" },
   { name: "input_price_per_1m", labelKey: "page.modelOfferings.field.inputPrice", kind: "number" },
-  { name: "output_price_per_1m", labelKey: "page.modelOfferings.field.outputPrice", kind: "number" },
+  {
+    name: "output_price_per_1m",
+    labelKey: "page.modelOfferings.field.outputPrice",
+    kind: "number",
+  },
   {
     name: "cached_input_price_per_1m",
     labelKey: "page.modelOfferings.field.cachedInputPrice",
@@ -423,12 +416,8 @@ export default function ModelOfferingsPage() {
       </div>
       <div className="flex items-start justify-between gap-3">
         <div>
-          <h1 className="text-lg font-semibold">
-            {t("page.modelOfferings.title", { modelId })}
-          </h1>
-          <p className="text-sm text-muted-foreground">
-            {t("page.modelOfferings.description")}
-          </p>
+          <h1 className="text-lg font-semibold">{t("page.modelOfferings.title", { modelId })}</h1>
+          <p className="text-sm text-muted-foreground">{t("page.modelOfferings.description")}</p>
           {scope === "platform" ? (
             <p className="mt-1 text-xs text-muted-foreground">{t("catalog.scope.hint")}</p>
           ) : null}
@@ -484,9 +473,7 @@ export default function ModelOfferingsPage() {
                   <TableCell className="font-medium">
                     {offering.provider ?? offering.provider_id}
                   </TableCell>
-                  <TableCell className="font-mono text-xs">
-                    {offering.upstream_model_id}
-                  </TableCell>
+                  <TableCell className="font-mono text-xs">{offering.upstream_model_id}</TableCell>
                   <TableCell>{offering.role}</TableCell>
                   <TableCell>{str(offering.priority)}</TableCell>
                   <TableCell>{offering.enabled ? t("common.yes") : t("common.no")}</TableCell>
@@ -560,9 +547,7 @@ export default function ModelOfferingsPage() {
               <Switch
                 id="enabled"
                 checked={form.enabled}
-                onCheckedChange={(checked) =>
-                  setForm((prev) => ({ ...prev, enabled: checked }))
-                }
+                onCheckedChange={(checked) => setForm((prev) => ({ ...prev, enabled: checked }))}
               />
               <Label htmlFor="enabled">{t("page.modelOfferings.field.enabled")}</Label>
             </div>
@@ -588,10 +573,7 @@ export default function ModelOfferingsPage() {
         </SheetContent>
       </Sheet>
 
-      <AlertDialog
-        open={deleting !== null}
-        onOpenChange={(open) => !open && setDeleting(null)}
-      >
+      <AlertDialog open={deleting !== null} onOpenChange={(open) => !open && setDeleting(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>{t("page.modelOfferings.delete.title")}</AlertDialogTitle>

@@ -1,15 +1,15 @@
-import { HttpResponse, http } from "msw";
-import { screen, waitFor } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
 import { ResourceForm } from "@/components/resource/resource-form";
-import { defaultFieldValues, type FieldConfig } from "@/lib/resource-config";
+import { type FieldConfig, defaultFieldValues } from "@/lib/resource-config";
 import { agentUpstreamsConfig } from "@/resources/agent-upstreams";
 import { policiesConfig } from "@/resources/policies";
 import { promptTemplatesConfig } from "@/resources/prompt-templates";
 import { quotaPoliciesConfig } from "@/resources/quota-policies";
 import { gatewayUrl, server } from "@/test/msw";
 import { renderWithProviders, seedSession } from "@/test/test-utils";
+import { screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { http, HttpResponse } from "msw";
+import { describe, expect, it, vi } from "vitest";
 
 // #341: routing/policy/quota forms adopt the shared #337 entity-reference
 // pickers for their relationship fields. These tests prove a converted form
@@ -24,9 +24,7 @@ const providers = [
   { name: "openai", kind: "openai", base_url: "https://api.openai.com" },
   { name: "anthropic", kind: "anthropic", base_url: "https://api.anthropic.com" },
 ];
-const projects = [
-  { id: "project-1", tenant_id: "tenant-1", name: "Production", slug: "prod" },
-];
+const projects = [{ id: "project-1", tenant_id: "tenant-1", name: "Production", slug: "prod" }];
 const tenants = [{ id: "tenant-1", name: "Acme", slug: "acme" }];
 const workspaces = [
   { id: "workspace-1", project_id: "project-1", name: "Prod workspace", slug: "prod-ws" },
@@ -44,16 +42,34 @@ function installCatalogHandlers() {
       HttpResponse.json({ object: "list", data: providers }),
     ),
     http.get(gatewayUrl("/admin/v1/projects"), () =>
-      HttpResponse.json({ object: "list", data: projects, total: projects.length, offset: 0, limit: 20 }),
+      HttpResponse.json({
+        object: "list",
+        data: projects,
+        total: projects.length,
+        offset: 0,
+        limit: 20,
+      }),
     ),
     http.get(gatewayUrl("/admin/v1/workspaces"), () =>
-      HttpResponse.json({ object: "list", data: workspaces, total: workspaces.length, offset: 0, limit: 20 }),
+      HttpResponse.json({
+        object: "list",
+        data: workspaces,
+        total: workspaces.length,
+        offset: 0,
+        limit: 20,
+      }),
     ),
     http.get(gatewayUrl("/admin/v1/virtual-keys"), () =>
       HttpResponse.json({ object: "list", data: virtualKeys }),
     ),
     http.get(gatewayUrl("/admin/v1/tenant-accounts"), () =>
-      HttpResponse.json({ object: "list", data: tenants, total: tenants.length, offset: 0, limit: 20 }),
+      HttpResponse.json({
+        object: "list",
+        data: tenants,
+        total: tenants.length,
+        offset: 0,
+        limit: 20,
+      }),
     ),
     http.get(gatewayUrl("/admin/v1/tenant-accounts/:id"), ({ params }) => {
       const tenant = tenants.find((item) => item.id === params.id);
@@ -162,17 +178,15 @@ describe("routing/policy/quota entity-reference conversions", () => {
     await user.click(await screen.findByRole("option", { name: "Project" }));
     await user.click(screen.getByRole("combobox", { name: /Scope ID/ }));
     await user.click(await screen.findByRole("option", { name: /Production/ }));
-    expect(
-      await screen.findByRole("list", { name: "Selected Scope ID" }),
-    ).toHaveTextContent("Production");
+    expect(await screen.findByRole("list", { name: "Selected Scope ID" })).toHaveTextContent(
+      "Production",
+    );
 
     // Switching to Tenant scope clears the project selection (no wrong-scope
     // leak) and re-targets the picker at tenant accounts.
     await user.click(screen.getByRole("combobox", { name: /Scope type/ }));
     await user.click(await screen.findByRole("option", { name: "Tenant" }));
-    expect(
-      screen.queryByRole("list", { name: "Selected Scope ID" }),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("list", { name: "Selected Scope ID" })).not.toBeInTheDocument();
     await user.click(screen.getByRole("combobox", { name: /Scope ID/ }));
     await user.click(await screen.findByRole("option", { name: /Acme/ }));
 

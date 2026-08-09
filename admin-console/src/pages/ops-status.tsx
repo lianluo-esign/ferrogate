@@ -1,26 +1,16 @@
+import { BoolBadge, DefinitionRow, HealthBadge, StatTile } from "@/components/ops/ops-primitives";
+import { Badge } from "@/components/ui/badge";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { useAuth } from "@/hooks/use-auth";
+import { useFormatUnix } from "@/hooks/use-format-unix";
+import { useI18n } from "@/i18n";
+import { type AdminSchema, adminGet } from "@/lib/gateway-client";
 // Operations status dashboard (issue #322): the landing ops view over
 // GET /admin/v1/status (AdminStatus). Surfaces the running snapshot, the
 // enabled-vs-total counters, the ACME renewal + reload_required posture (#265),
 // the cluster readiness/drain state and storage/analytics backend evidence in
 // one scannable board.
 import { useQuery } from "@tanstack/react-query";
-import { Badge } from "@/components/ui/badge";
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import {
-  BoolBadge,
-  DefinitionRow,
-  HealthBadge,
-  StatTile,
-} from "@/components/ops/ops-primitives";
-import { useAuth } from "@/hooks/use-auth";
-import { useI18n } from "@/i18n";
-import { useFormatUnix } from "@/hooks/use-format-unix";
-import { adminGet, type AdminSchema } from "@/lib/gateway-client";
 
 type AdminStatus = AdminSchema<"AdminStatus">;
 type AdminAcmeStatus = AdminSchema<"AdminAcmeStatus">;
@@ -42,9 +32,7 @@ function AcmeCard({ acme }: { acme: AdminAcmeStatus | null | undefined }) {
       </CardHeader>
       <CardContent>
         {!acme || !acme.enabled ? (
-          <p className="text-sm text-muted-foreground">
-            {t("page.opsStatus.acme.disabled")}
-          </p>
+          <p className="text-sm text-muted-foreground">{t("page.opsStatus.acme.disabled")}</p>
         ) : (
           <div className="divide-y">
             <DefinitionRow
@@ -97,9 +85,7 @@ function AcmeCard({ acme }: { acme: AdminAcmeStatus | null | undefined }) {
             {acme.last_renewal_error ? (
               <DefinitionRow
                 label={t("page.opsStatus.field.lastError")}
-                value={
-                  <span className="text-destructive">{acme.last_renewal_error}</span>
-                }
+                value={<span className="text-destructive">{acme.last_renewal_error}</span>}
               />
             ) : null}
           </div>
@@ -138,9 +124,7 @@ function ClusterCard({ cluster }: { cluster: AdminStatus["cluster"] }) {
                   trueLabel={t("common.yes")}
                   falseLabel={t("common.no")}
                 />
-                <span className="text-xs text-muted-foreground">
-                  {cluster.readiness_reason}
-                </span>
+                <span className="text-xs text-muted-foreground">{cluster.readiness_reason}</span>
               </span>
             }
           />
@@ -214,7 +198,7 @@ export default function OpsStatusPage() {
   const { session } = useAuth();
   const { t } = useI18n();
   const formatUnix = useFormatUnix();
-  const apiKey = session!.gatewayApiKey;
+  const apiKey = (session as NonNullable<typeof session>).gatewayApiKey;
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["ops-status"],
@@ -226,13 +210,14 @@ export default function OpsStatusPage() {
     <div className="flex flex-col gap-4">
       <div>
         <h1 className="text-lg font-semibold">{t("page.opsStatus.title")}</h1>
-        <p className="text-sm text-muted-foreground">
-          {t("page.opsStatus.description")}
-        </p>
+        <p className="text-sm text-muted-foreground">{t("page.opsStatus.description")}</p>
       </div>
 
       {error ? (
-        <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <p
+          role="alert"
+          className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+        >
           {t("page.opsStatus.loadError", { message: (error as Error).message })}
         </p>
       ) : null}
@@ -304,9 +289,7 @@ export default function OpsStatusPage() {
           data.platform_offerings !== undefined ? (
             <Card>
               <CardHeader>
-                <CardTitle className="text-base">
-                  {t("page.opsStatus.platform.title")}
-                </CardTitle>
+                <CardTitle className="text-base">{t("page.opsStatus.platform.title")}</CardTitle>
               </CardHeader>
               <CardContent>
                 <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
@@ -415,9 +398,7 @@ export default function OpsStatusPage() {
                     <DefinitionRow
                       label={t("page.opsStatus.field.lastError")}
                       value={
-                        <span className="text-destructive">
-                          {data.analytics.last_export_error}
-                        </span>
+                        <span className="text-destructive">{data.analytics.last_export_error}</span>
                       }
                     />
                   ) : null}

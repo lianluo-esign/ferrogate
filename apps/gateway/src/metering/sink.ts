@@ -124,9 +124,9 @@ import {
   chargeWithTenantAttribution,
   d1UsageAggregateSink,
   eventWithTenantAttribution,
+  usageWriteFor,
   withUsageDerivedRollups,
   withUsageProjectionRetry,
-  usageWriteFor,
 } from "./usage-ledger.js";
 import {
   clearUsageProjectionRetry,
@@ -897,8 +897,7 @@ export class MeteringUsageSink implements UsageSink {
       (attribution?.requestId === charge.requestId ? attribution.tenantId : undefined) ??
       charge.event.tenant.organization_id ??
       "";
-    const hasTenantResolver =
-      tenantId !== "" && rc !== undefined && this.#bindings?.usageDatabase;
+    const hasTenantResolver = tenantId !== "" && rc !== undefined && this.#bindings?.usageDatabase;
     const tenantDatabase = hasTenantResolver
       ? this.#bindings?.usageDatabase?.(rc.env, tenantId)
       : undefined;

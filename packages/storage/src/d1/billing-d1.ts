@@ -208,8 +208,7 @@ export class D1BillingEventLedger {
     }
     if (existing.eventJson !== event.eventJson) {
       throw StorageError.conflict(
-        `billing event id ${event.billingEventId} was replayed with different ` +
-          "provider-attempt settlement data",
+        `billing event id ${event.billingEventId} was replayed with different provider-attempt settlement data`,
       );
     }
     return { recorded: false };
@@ -256,8 +255,7 @@ export class D1BillingEventLedger {
     try {
       const result = await this.controlDb
         .prepare(
-          `${SELECT_OUTBOX_COLUMNS} WHERE next_attempt_unix <= ? AND ` +
-            "dead_lettered_at_unix IS NULL ORDER BY next_attempt_unix ASC LIMIT ?",
+          `${SELECT_OUTBOX_COLUMNS} WHERE next_attempt_unix <= ? AND dead_lettered_at_unix IS NULL ORDER BY next_attempt_unix ASC LIMIT ?`,
         )
         .bind(nowUnix, Math.max(0, Math.trunc(limit)))
         .all<OutboxRow>();
@@ -313,14 +311,11 @@ export class D1BillingEventLedger {
   }
 
   /** Dead-lettered rows, most recently given up on first (issue #143). */
-  async listDeadLetteredBillingReports(
-    limit: number,
-  ): Promise<StoredBillingReportOutboxEntry[]> {
+  async listDeadLetteredBillingReports(limit: number): Promise<StoredBillingReportOutboxEntry[]> {
     try {
       const result = await this.controlDb
         .prepare(
-          `${SELECT_OUTBOX_COLUMNS} WHERE dead_lettered_at_unix IS NOT NULL ` +
-            "ORDER BY dead_lettered_at_unix DESC LIMIT ?",
+          `${SELECT_OUTBOX_COLUMNS} WHERE dead_lettered_at_unix IS NOT NULL ORDER BY dead_lettered_at_unix DESC LIMIT ?`,
         )
         .bind(Math.max(0, Math.trunc(limit)))
         .all<OutboxRow>();
@@ -360,18 +355,13 @@ export class D1BillingEventLedger {
       throw d1Error("replay_dead_lettered_billing_report", error);
     }
     const entry = await this.getBillingReportOutboxEntry(id);
-    return entry === undefined
-      ? { kind: "not_found" }
-      : { kind: "not_dead_lettered", entry };
+    return entry === undefined ? { kind: "not_found" } : { kind: "not_dead_lettered", entry };
   }
 
   /** Delete a delivered row (the sweeper's reap step). */
   async deleteBillingReport(id: string): Promise<void> {
     try {
-      await this.controlDb
-        .prepare("DELETE FROM billing_report_outbox WHERE id = ?")
-        .bind(id)
-        .run();
+      await this.controlDb.prepare("DELETE FROM billing_report_outbox WHERE id = ?").bind(id).run();
     } catch (error) {
       throw d1Error("delete_billing_report", error);
     }

@@ -1,4 +1,4 @@
-import { booleanColumn, type ResourceConfig } from "@/lib/resource-config";
+import { type ResourceConfig, booleanColumn } from "@/lib/resource-config";
 
 export interface AdminSkillPackage extends Record<string, unknown> {
   id: string;
@@ -26,13 +26,31 @@ export const skillPackagesConfig: ResourceConfig<AdminSkillPackage> = {
   columns: [
     { key: "name", headerKey: "resource.skillPackages.col.name" },
     { key: "version", headerKey: "resource.skillPackages.col.version" },
-    booleanColumn<AdminSkillPackage>({ key: "enabled", headerKey: "resource.skillPackages.col.enabled" }),
-    { key: "capabilities", headerKey: "resource.skillPackages.col.capabilities", render: (row) => String(row.capabilities?.length ?? 0) },
+    booleanColumn<AdminSkillPackage>({
+      key: "enabled",
+      headerKey: "resource.skillPackages.col.enabled",
+    }),
+    {
+      key: "capabilities",
+      headerKey: "resource.skillPackages.col.capabilities",
+      render: (row) => String(row.capabilities?.length ?? 0),
+    },
   ],
   fields: [
-    { name: "id", labelKey: "resource.skillPackages.field.id", type: "text", required: true, createOnly: true },
+    {
+      name: "id",
+      labelKey: "resource.skillPackages.field.id",
+      type: "text",
+      required: true,
+      createOnly: true,
+    },
     { name: "name", labelKey: "resource.skillPackages.field.name", type: "text", required: true },
-    { name: "version", labelKey: "resource.skillPackages.field.version", type: "text", placeholder: "0.1.0" },
+    {
+      name: "version",
+      labelKey: "resource.skillPackages.field.version",
+      type: "text",
+      placeholder: "0.1.0",
+    },
     { name: "description", labelKey: "resource.skillPackages.field.description", type: "textarea" },
     { name: "enabled", labelKey: "resource.skillPackages.field.enabled", type: "boolean" },
     { name: "api_key_ids", labelKey: "resource.skillPackages.field.apiKeyIds", type: "csv" },

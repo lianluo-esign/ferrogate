@@ -19,8 +19,8 @@ import { type SpendAnomalyReport, runSpendAnomalyPass } from "../finops/pass.js"
 import type { ControlPlaneBindings, ControlPlaneDeps } from "../ports.js";
 import { type SiemExportReport, runSiemExportPass } from "../siem/pump.js";
 import {
-  reconcileProvisionedTenantCatalogAudits,
   type TenantCatalogAuditSweepReport,
+  reconcileProvisionedTenantCatalogAudits,
 } from "../store/tenant-model-catalog.js";
 import type { ScheduleTickSummary } from "./engine.js";
 

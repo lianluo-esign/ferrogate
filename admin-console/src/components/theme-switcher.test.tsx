@@ -1,9 +1,9 @@
+import { AppThemeProvider, THEME_STORAGE_KEY } from "@/components/theme-provider";
+import { ThemeSwitcher } from "@/components/theme-switcher";
+import { I18nProvider, type Locale, translate } from "@/i18n";
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AppThemeProvider, THEME_STORAGE_KEY } from "@/components/theme-provider";
-import { ThemeSwitcher } from "@/components/theme-switcher";
-import { I18nProvider, translate, type Locale } from "@/i18n";
 
 function installColorScheme(dark: boolean) {
   let matches = dark;
@@ -35,7 +35,7 @@ function installColorScheme(dark: boolean) {
     setDark(next: boolean) {
       matches = next;
       const event = { matches: next, media: mediaQuery.media } as MediaQueryListEvent;
-      listeners.forEach((listener) => listener(event));
+      for (const listener of listeners) listener(event);
     },
   };
 }

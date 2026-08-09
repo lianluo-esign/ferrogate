@@ -1,4 +1,4 @@
-import { expect, type Page } from "@playwright/test";
+import { type Page, expect } from "@playwright/test";
 
 // The locales the console ships (mirrors LOCALES in src/i18n/catalog.ts). Kept
 // as a literal union so the route-matrix spec parametrizes over exactly the
@@ -29,10 +29,10 @@ export const LOCALE_AUTONYM: Record<MatrixLocale, "English" | "简体中文"> = 
 // `resolveInitialLocale()` reads this versioned key first (src/i18n/detect.ts),
 // ahead of `navigator.languages`, so this pins the whole session's language.
 export async function seedLocale(page: Page, locale: MatrixLocale): Promise<void> {
-  await page.addInitScript(
-    ({ key, value }) => localStorage.setItem(key, value),
-    { key: LOCALE_STORAGE_KEY, value: locale },
-  );
+  await page.addInitScript(({ key, value }) => localStorage.setItem(key, value), {
+    key: LOCALE_STORAGE_KEY,
+    value: locale,
+  });
 }
 
 // Open the global LanguageSwitcher and pick a locale by its autonym.

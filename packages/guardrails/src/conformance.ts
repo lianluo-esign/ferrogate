@@ -8,23 +8,24 @@
  * validate, (4) an error whose kind is declared, (5) timeout on an expired
  * deadline, (6) non-empty version reporting.
  */
+
+import { byteLen, encodeUtf8 } from "./bytes.js";
 import {
-  DetectorError,
-  firstMatchedText,
   type ContentPatch,
   type DetectorDescriptor,
+  DetectorError,
   type DetectorHealth,
   type DetectorInput,
   type DetectorResult,
   type GuardrailDetector,
+  firstMatchedText,
 } from "./contract.js";
 import {
+  type GuardrailEnvelope,
   allContentSources,
   envelopeFromText,
   validateContentPatchesForSegments,
-  type GuardrailEnvelope,
 } from "./envelope.js";
-import { byteLen, encodeUtf8 } from "./bytes.js";
 
 /** Synthetic AWS-style access key. NOT a real credential (assembled). */
 export const PROBE_SECRET = "AKIA" + "IOSFODNN7" + "EXAMPLE";
@@ -88,7 +89,9 @@ export function allBehavioursExercised(report: ConformanceReport): boolean {
 }
 
 /** Drive `detector` through the six required behaviours. */
-export async function runDetectorConformance(detector: GuardrailDetector): Promise<ConformanceReport> {
+export async function runDetectorConformance(
+  detector: GuardrailDetector,
+): Promise<ConformanceReport> {
   const report: ConformanceReport = {
     pass_verdict: false,
     sanitized_fail: false,
@@ -182,7 +185,9 @@ export async function runDetectorConformance(detector: GuardrailDetector): Promi
 }
 
 /** Run the harness and throw unless every required behaviour was exercised. */
-export async function assertDetectorConforms(detector: GuardrailDetector): Promise<ConformanceReport> {
+export async function assertDetectorConforms(
+  detector: GuardrailDetector,
+): Promise<ConformanceReport> {
   const report = await runDetectorConformance(detector);
   if (!allBehavioursExercised(report)) {
     throw new Error(`detector failed guardrail conformance: ${JSON.stringify(report.failures)}`);

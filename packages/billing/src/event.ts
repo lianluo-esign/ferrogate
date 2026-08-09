@@ -11,17 +11,18 @@
  * as `bigint` per the inventory's no-drift directive (§2.5); it round-trips to
  * a JSON number on the wire (matching Rust `i64` serialization).
  */
+
+import { type TenantContext, tenantContextSchema } from "@ferrogate/core";
 import { z } from "zod";
-import { tenantContextSchema, type TenantContext } from "@ferrogate/core";
 import {
+  type BillingUsageSource,
+  type ProviderAttempt,
+  type TokenUsage,
   billingUsageSourceSchema,
   tokenUsageSchema,
   u16,
   u32,
   u64,
-  type BillingUsageSource,
-  type ProviderAttempt,
-  type TokenUsage,
 } from "./usage.js";
 
 // ---------------------------------------------------------------------------
@@ -68,9 +69,7 @@ function byteLen(value: string): number {
  * otherwise a human-readable reason for the first violation (mirrors Rust
  * `Result<(), String>`).
  */
-export function validateRequestMetadata(
-  metadata: Record<string, string>,
-): string | null {
+export function validateRequestMetadata(metadata: Record<string, string>): string | null {
   const keys = Object.keys(metadata);
   if (keys.length > MAX_METADATA_ENTRIES) {
     return `metadata supports at most ${MAX_METADATA_ENTRIES} entries, got ${keys.length}`;
@@ -139,7 +138,10 @@ export interface BillingEvent {
   audio_characters?: number;
 }
 
-const optStr = z.string().nullish().transform((v) => v ?? undefined);
+const optStr = z
+  .string()
+  .nullish()
+  .transform((v) => v ?? undefined);
 /** `Option<i64>` on the wire is a JSON number; keep it as `bigint` internally. */
 const optI64 = z
   .union([z.bigint(), z.number().int()])
@@ -171,43 +173,54 @@ export const billingEventWireSchema = z
     usage_source: billingUsageSourceSchema.default("provider_usage"),
     status_code: u16,
     occurred_at_unix: u64.nullish().transform((v) => v ?? undefined),
-    cost_usd: z.number().nullish().transform((v) => v ?? undefined),
+    cost_usd: z
+      .number()
+      .nullish()
+      .transform((v) => v ?? undefined),
     latency_ms: u64.nullish().transform((v) => v ?? undefined),
     metadata: z.record(z.string()).default({}),
     wallet_delta_credits: optI64,
     wallet_balance_after_credits: optI64,
-    audio_seconds: z.number().nullish().transform((v) => v ?? undefined),
-    audio_characters: z.number().nullish().transform((v) => v ?? undefined),
+    audio_seconds: z
+      .number()
+      .nullish()
+      .transform((v) => v ?? undefined),
+    audio_characters: z
+      .number()
+      .nullish()
+      .transform((v) => v ?? undefined),
   })
-  .transform((w): BillingEvent => ({
-    request_id: w.request_id,
-    trace_id: w.trace_id,
-    provider_attempt: {
-      provider_attempt_id: w.provider_attempt_id,
-      provider_attempt_index: w.provider_attempt_index,
-    },
-    agent_run_id: w.agent_run_id,
-    workflow_id: w.workflow_id,
-    workflow_version: w.workflow_version,
-    workflow_node_id: w.workflow_node_id,
-    cluster_id: w.cluster_id,
-    node_id: w.node_id,
-    tenant: w.tenant,
-    logical_model: w.logical_model,
-    provider: w.provider,
-    provider_model: w.provider_model,
-    usage: w.usage,
-    usage_source: w.usage_source,
-    status_code: w.status_code,
-    occurred_at_unix: w.occurred_at_unix,
-    cost_usd: w.cost_usd,
-    latency_ms: w.latency_ms,
-    metadata: w.metadata,
-    wallet_delta_credits: w.wallet_delta_credits,
-    wallet_balance_after_credits: w.wallet_balance_after_credits,
-    audio_seconds: w.audio_seconds,
-    audio_characters: w.audio_characters,
-  }));
+  .transform(
+    (w): BillingEvent => ({
+      request_id: w.request_id,
+      trace_id: w.trace_id,
+      provider_attempt: {
+        provider_attempt_id: w.provider_attempt_id,
+        provider_attempt_index: w.provider_attempt_index,
+      },
+      agent_run_id: w.agent_run_id,
+      workflow_id: w.workflow_id,
+      workflow_version: w.workflow_version,
+      workflow_node_id: w.workflow_node_id,
+      cluster_id: w.cluster_id,
+      node_id: w.node_id,
+      tenant: w.tenant,
+      logical_model: w.logical_model,
+      provider: w.provider,
+      provider_model: w.provider_model,
+      usage: w.usage,
+      usage_source: w.usage_source,
+      status_code: w.status_code,
+      occurred_at_unix: w.occurred_at_unix,
+      cost_usd: w.cost_usd,
+      latency_ms: w.latency_ms,
+      metadata: w.metadata,
+      wallet_delta_credits: w.wallet_delta_credits,
+      wallet_balance_after_credits: w.wallet_balance_after_credits,
+      audio_seconds: w.audio_seconds,
+      audio_characters: w.audio_characters,
+    }),
+  );
 
 /** Parse an untrusted JSON value into a {@link BillingEvent} (throws on invalid). */
 export function parseBillingEvent(value: unknown): BillingEvent {

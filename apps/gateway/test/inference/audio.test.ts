@@ -29,15 +29,15 @@
  */
 import { SELF, env } from "cloudflare:test";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { GUARDRAIL_OPERATIONS } from "../../src/guardrails/middleware.js";
 import {
   MAX_AUDIO_UPLOAD_BYTES,
-  fetchDispatcher,
-  setInferenceRequestScope,
   type PhysicalRoute,
   type TokenAdmissionHandle,
   type TokenGovernor,
+  fetchDispatcher,
+  setInferenceRequestScope,
 } from "../../src/inference/index.js";
-import { GUARDRAIL_OPERATIONS } from "../../src/guardrails/middleware.js";
 import { CACHEABLE_OPERATION_IDS } from "../../src/middleware/response-cache.js";
 import { DRAIN_GUARDED_OPERATION_IDS } from "../../src/routes/drain.js";
 import { INFERENCE_OPERATION_IDS } from "../../src/routes/index.js";
@@ -158,7 +158,12 @@ function countEgress(): { calls: () => number; restore: () => void } {
     calls += 1;
     return await original(input as RequestInfo, init);
   }) as typeof fetch;
-  return { calls: () => calls, restore: () => void (globalThis.fetch = original) };
+  return {
+    calls: () => calls,
+    restore: () => {
+      globalThis.fetch = original;
+    },
+  };
 }
 
 let egress: ReturnType<typeof countEgress> | undefined;
@@ -381,7 +386,7 @@ describe("transcription is served by Workers AI Whisper", () => {
     expect(await res.json()).toEqual({ text: "hello from the edge" });
     expect(ai.runs.at(-1)?.model).toBe("@cf/openai/whisper-large-v3-turbo");
     // Whisper's native run grammar: base64 audio, not a multipart part.
-    expect(typeof ai.runs.at(-1)?.input["audio"]).toBe("string");
+    expect(typeof ai.runs.at(-1)?.input.audio).toBe("string");
     expect(egress.calls()).toBe(0);
   });
 
@@ -407,10 +412,10 @@ describe("transcription is served by Workers AI Whisper", () => {
   it("passes `translate` to the binding for /v1/audio/translations, and only there", async () => {
     ai.answerWith(() => ({ text: "hola" }));
     await upload("/v1/audio/translations", { model: "edge-whisper" });
-    expect(ai.runs.at(-1)?.input["task"]).toBe("translate");
+    expect(ai.runs.at(-1)?.input.task).toBe("translate");
 
     await upload("/v1/audio/transcriptions", { model: "edge-whisper" });
-    expect(ai.runs.at(-1)?.input["task"]).toBe("transcribe");
+    expect(ai.runs.at(-1)?.input.task).toBe("transcribe");
   });
 
   it("refuses to transcribe on a model that declares no transcription capability", async () => {
@@ -511,7 +516,7 @@ describe("guardrails on the audio surface", () => {
         screensResponse: true,
       });
     }
-    expect(GUARDRAIL_OPERATIONS["createSpeech"]).toMatchObject({
+    expect(GUARDRAIL_OPERATIONS.createSpeech).toMatchObject({
       protocol: "audio_speech",
       screensRequest: true,
       // A speech RESPONSE is audio bytes; there is nothing to walk.

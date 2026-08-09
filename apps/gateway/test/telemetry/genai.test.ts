@@ -242,10 +242,10 @@ describe("the deployed Worker emits OTel GenAI semantic conventions", () => {
     await waitForCollected(2);
 
     const attributes = spanAttributes();
-    expect(attributes["route"]).toBe("createChatCompletion");
-    expect(attributes["path"]).toBe("/v1/chat/completions");
-    expect(attributes["status_code"]).toBe("200");
-    expect(attributes["request_id"]).toBe(servedRequestId);
+    expect(attributes.route).toBe("createChatCompletion");
+    expect(attributes.path).toBe("/v1/chat/completions");
+    expect(attributes.status_code).toBe("200");
+    expect(attributes.request_id).toBe(servedRequestId);
     // And the span NAME is unchanged, which is what a saved Grafana query
     // filters on. The semconv `{operation} {model}` name is available behind
     // the `genai` profile; it is not forced on an existing deployment.
@@ -337,7 +337,7 @@ describe("the deployed Worker emits OTel GenAI semantic conventions", () => {
     await waitForCollected(2);
 
     const attributes = spanAttributes();
-    expect(attributes["route"]).toBe("listTools");
+    expect(attributes.route).toBe("listTools");
     expect(attributes["gen_ai.operation.name"]).toBeUndefined();
     expect(attributes["gen_ai.request.model"]).toBeUndefined();
     expect(attributes["gen_ai.system"]).toBeUndefined();

@@ -175,13 +175,13 @@ function numberColumn(value: unknown): number {
 function rowToAggregate(tenantId: string, row: Record<string, unknown>): OnlineEvalLegAggregate {
   return {
     tenantId,
-    criterionId: String(row["criterion_id"] ?? ""),
-    judgeModel: String(row["judge_model"] ?? ""),
-    logicalModel: String(row["logical_model"] ?? ""),
-    provider: String(row["provider"] ?? ""),
-    providerModel: String(row["provider_model"] ?? ""),
-    scoreTotal: numberColumn(row["score_total"]),
-    scoreCount: numberColumn(row["score_count"]),
+    criterionId: String(row.criterion_id ?? ""),
+    judgeModel: String(row.judge_model ?? ""),
+    logicalModel: String(row.logical_model ?? ""),
+    provider: String(row.provider ?? ""),
+    providerModel: String(row.provider_model ?? ""),
+    scoreTotal: numberColumn(row.score_total),
+    scoreCount: numberColumn(row.score_count),
   };
 }
 

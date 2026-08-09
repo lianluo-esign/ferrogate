@@ -16,10 +16,7 @@ export function bytes(text: string): Uint8Array {
 }
 
 /** Split a byte array at the given absolute offsets. */
-export function splitBytes(
-  input: Uint8Array,
-  offsets: readonly number[],
-): Uint8Array[] {
+export function splitBytes(input: Uint8Array, offsets: readonly number[]): Uint8Array[] {
   const cuts = [...new Set([0, ...offsets, input.length])].sort((a, b) => a - b);
   const out: Uint8Array[] = [];
   for (let index = 1; index < cuts.length; index += 1) {
@@ -42,9 +39,7 @@ export function chunkBytes(input: Uint8Array, size: number): Uint8Array[] {
 }
 
 /** A `ReadableStream<Uint8Array>` over literal chunks. */
-export function streamOf(
-  chunks: readonly (Uint8Array | string)[],
-): ReadableStream<Uint8Array> {
+export function streamOf(chunks: readonly (Uint8Array | string)[]): ReadableStream<Uint8Array> {
   let index = 0;
   return new ReadableStream<Uint8Array>({
     pull(controller) {
@@ -97,9 +92,7 @@ export async function drainBytes(stream: ReadableStream<Uint8Array>): Promise<Ui
 }
 
 /** Drain a frame stream into an array. */
-export async function drainFrames(
-  stream: ReadableStream<SseFrame>,
-): Promise<SseFrame[]> {
+export async function drainFrames(stream: ReadableStream<SseFrame>): Promise<SseFrame[]> {
   const out: SseFrame[] = [];
   const reader = stream.getReader();
   for (;;) {

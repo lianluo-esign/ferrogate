@@ -1,9 +1,6 @@
-import { ShieldCheck } from "lucide-react";
-import { Link } from "react-router-dom";
+import { NAV_DASHBOARD, NAV_GROUPS } from "@/components/layout/nav-config";
 import { NavMain } from "@/components/layout/nav-main";
 import { NavUser } from "@/components/layout/nav-user";
-import { NAV_DASHBOARD, NAV_GROUPS } from "@/components/layout/nav-config";
-import { useI18n } from "@/i18n";
 import {
   Sidebar,
   SidebarContent,
@@ -14,6 +11,9 @@ import {
   SidebarMenuItem,
   SidebarRail,
 } from "@/components/ui/sidebar";
+import { useI18n } from "@/i18n";
+import { ShieldCheck } from "lucide-react";
+import { Link } from "react-router-dom";
 
 export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
   const { t } = useI18n();

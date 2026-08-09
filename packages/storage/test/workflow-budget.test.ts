@@ -2,9 +2,9 @@ import { beforeEach, describe, expect, test } from "vitest";
 import {
   MemoryWorkflowBudgetStore,
   StorageError,
+  type StoredWorkflowRunBudget,
   dimensionExceededBy,
   workflowBudgetDenialCode,
-  type StoredWorkflowRunBudget,
 } from "../src/index.js";
 
 describe("dimensionExceededBy — first-breached precedence (§1.5.3)", () => {

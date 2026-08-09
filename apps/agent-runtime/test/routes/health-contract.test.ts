@@ -219,9 +219,7 @@ describe("the deployed Worker serves the contract probes", () => {
     expect(body.ready).toBe(response.status === 200);
     // The whole point of the port: a 503 is now REACHABLE, and the reason names
     // which conjunct failed.
-    expect(["state_loaded", "revision_missing", "operator_drain"]).toContain(
-      body.readiness_reason,
-    );
+    expect(["state_loaded", "revision_missing", "operator_drain"]).toContain(body.readiness_reason);
     expect(typeof body.draining).toBe("boolean");
     expect(typeof body.accepting_new_requests).toBe("boolean");
     expect(body.dependencies).toEqual({ ready: expect.any(Boolean) });

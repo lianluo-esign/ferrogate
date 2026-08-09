@@ -68,28 +68,26 @@ describe("gemini chat completions", () => {
       );
       // Credential header is Google's, NOT `Authorization: Bearer`.
       expect(sent.headers["x-goog-api-key"]).toBe("provider-secret");
-      expect(sent.headers["authorization"]).toBeUndefined();
+      expect(sent.headers.authorization).toBeUndefined();
 
       const body = sent.body as Record<string, unknown>;
       // Gemini grammar: `contents`/`parts`, system prompt lifted out of
       // `messages`, generation knobs renamed. No OpenAI leftovers.
-      expect(body["contents"]).toStrictEqual([{ role: "user", parts: [{ text: "hi" }] }]);
-      expect(body["systemInstruction"]).toStrictEqual({
+      expect(body.contents).toStrictEqual([{ role: "user", parts: [{ text: "hi" }] }]);
+      expect(body.systemInstruction).toStrictEqual({
         role: "system",
         parts: [{ text: "be terse" }],
       });
-      expect(body["generationConfig"]).toStrictEqual({ temperature: 0.25 });
-      expect(body["model"]).toBeUndefined();
-      expect(body["messages"]).toBeUndefined();
+      expect(body.generationConfig).toStrictEqual({ temperature: 0.25 });
+      expect(body.model).toBeUndefined();
+      expect(body.messages).toBeUndefined();
     } finally {
       provider.restore();
     }
   });
 
   it("addresses the streaming endpoint when the caller asks to stream", async () => {
-    const provider = interceptProviderFetch(() =>
-      providerJson({ ...GEMINI_COMPLETION }),
-    );
+    const provider = interceptProviderFetch(() => providerJson({ ...GEMINI_COMPLETION }));
     try {
       const h = harness({}, ROUTES);
       await h.post("/v1/chat/completions", {
@@ -150,9 +148,9 @@ describe("gemini embeddings", () => {
       // and a pass-through would fail this.
       expect(res.status).toBe(200);
       const body = (await res.json()) as Record<string, unknown>;
-      expect(body["object"]).toBe("list");
-      expect(body["model"]).toBe("gemini-embed");
-      expect(body["data"]).toStrictEqual([
+      expect(body.object).toBe("list");
+      expect(body.model).toBe("gemini-embed");
+      expect(body.data).toStrictEqual([
         { object: "embedding", index: 0, embedding: [0.5, 0.25] },
         { object: "embedding", index: 1, embedding: [0.125] },
       ]);

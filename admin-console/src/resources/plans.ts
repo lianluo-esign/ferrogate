@@ -1,8 +1,8 @@
-import { adminGet, type AdminSchema } from "@/lib/gateway-client";
+import { type AdminSchema, adminGet } from "@/lib/gateway-client";
 import {
-  booleanColumn,
   DISABLED_WHEN_NOT_ENABLED,
   type ResourceConfig,
+  booleanColumn,
 } from "@/lib/resource-config";
 
 /**
@@ -28,12 +28,18 @@ export const plansConfig: ResourceConfig<AdminPlan> = {
     { key: "name", headerKey: "resource.plans.col.name" },
     { key: "slug", headerKey: "resource.plans.col.slug" },
     booleanColumn<AdminPlan>({ key: "mcp_enabled", headerKey: "resource.plans.col.mcp" }),
-    booleanColumn<AdminPlan>({ key: "extension_tools_enabled", headerKey: "resource.plans.col.extensions" }),
+    booleanColumn<AdminPlan>({
+      key: "extension_tools_enabled",
+      headerKey: "resource.plans.col.extensions",
+    }),
     booleanColumn<AdminPlan>({
       key: "self_hosted_workers_enabled",
       headerKey: "resource.plans.col.selfHostedWorkers",
     }),
-    booleanColumn<AdminPlan>({ key: "asset_hosting_enabled", headerKey: "resource.plans.col.assetHosting" }),
+    booleanColumn<AdminPlan>({
+      key: "asset_hosting_enabled",
+      headerKey: "resource.plans.col.assetHosting",
+    }),
     { key: "default_monthly_budget_usd", headerKey: "resource.plans.col.defaultMonthlyBudget" },
   ],
   fields: [
@@ -48,14 +54,26 @@ export const plansConfig: ResourceConfig<AdminPlan> = {
     { name: "name", labelKey: "resource.plans.field.name", type: "text", required: true },
     { name: "slug", labelKey: "resource.plans.field.slug", type: "text", required: true },
     { name: "mcp_enabled", labelKey: "resource.plans.field.mcpEnabled", type: "boolean" },
-    { name: "extension_tools_enabled", labelKey: "resource.plans.field.extensionToolsEnabled", type: "boolean" },
+    {
+      name: "extension_tools_enabled",
+      labelKey: "resource.plans.field.extensionToolsEnabled",
+      type: "boolean",
+    },
     {
       name: "self_hosted_workers_enabled",
       labelKey: "resource.plans.field.selfHostedWorkersEnabled",
       type: "boolean",
     },
-    { name: "asset_hosting_enabled", labelKey: "resource.plans.field.assetHostingEnabled", type: "boolean" },
-    { name: "admin_console_seats", labelKey: "resource.plans.field.adminConsoleSeats", type: "number" },
+    {
+      name: "asset_hosting_enabled",
+      labelKey: "resource.plans.field.assetHostingEnabled",
+      type: "boolean",
+    },
+    {
+      name: "admin_console_seats",
+      labelKey: "resource.plans.field.adminConsoleSeats",
+      type: "number",
+    },
     {
       // #340: the plan's default model allowlist was a raw CSV of model names.
       // Models are a first-class catalog, so it now uses the shared multi-entity
@@ -78,7 +96,11 @@ export const plansConfig: ResourceConfig<AdminPlan> = {
     },
     { name: "default_rpm_limit", labelKey: "resource.plans.field.defaultRpmLimit", type: "number" },
     { name: "default_tpm_limit", labelKey: "resource.plans.field.defaultTpmLimit", type: "number" },
-    { name: "default_monthly_budget_usd", labelKey: "resource.plans.field.defaultMonthlyBudget", type: "number" },
+    {
+      name: "default_monthly_budget_usd",
+      labelKey: "resource.plans.field.defaultMonthlyBudget",
+      type: "number",
+    },
     {
       name: "default_asset_storage_quota_bytes",
       labelKey: "resource.plans.field.defaultAssetStorageQuota",

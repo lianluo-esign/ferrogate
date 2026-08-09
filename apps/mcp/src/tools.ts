@@ -18,15 +18,16 @@
  * `tools/call` into its correlation chain. It is threaded through
  * {@link DispatchContext}, never re-derived and never fabricated.
  */
-import type { JsonValue } from "@ferrogate/core";
+
 import {
   ASSET_EGRESS_IDENTITY_ERROR,
+  type AssetEgressDenial,
+  type ReadAssetWithEgressResult,
   assetEgressTargetId,
   assetPullAuditMessage,
   readAssetWithEgress,
-  type AssetEgressDenial,
-  type ReadAssetWithEgressResult,
 } from "@ferrogate/billing";
+import type { JsonValue } from "@ferrogate/core";
 
 import { resolveMcpIdentity } from "./identity/oauth.js";
 import {
@@ -49,6 +50,7 @@ import {
   toolMeta,
 } from "./multiplex.js";
 import {
+  type AssetReadFailure,
   type AuditEvent,
   type DispatchContext,
   McpDispatchHeaders,
@@ -56,7 +58,6 @@ import {
   type McpPorts,
   type McpTool,
   type StoredAsset,
-  type AssetReadFailure,
   type ToolExecuteBackend,
   hasScope,
   isJsonObjectValue,
@@ -300,9 +301,7 @@ export async function toolsList(
       // needs to know before an agent starts reasoning from a short catalogue.
       fan.degraded.length > 0 ? "degraded" : "success",
       fan.degraded.length > 0
-        ? `listed ${tools.length} MCP tools through native MCP endpoint; ` +
-            `${fan.degraded.length} upstream(s) unreachable: ` +
-            fan.degraded.map((failure) => failure.server).join(", ")
+        ? `listed ${tools.length} MCP tools through native MCP endpoint; ${fan.degraded.length} upstream(s) unreachable: ${fan.degraded.map((failure) => failure.server).join(", ")}`
         : `listed ${tools.length} MCP tools through native MCP endpoint`,
     ),
   );
@@ -318,7 +317,7 @@ export async function toolsList(
       _meta: toolMeta(tool),
     })),
   };
-  if (Object.keys(meta).length > 0) result["_meta"] = meta;
+  if (Object.keys(meta).length > 0) result._meta = meta;
   return jsonRpcResult(id, result);
 }
 
@@ -338,7 +337,7 @@ export async function toolsCall(
   params: unknown,
 ): Promise<JsonRpcResponse> {
   const object = isJsonObjectValue(params) ? params : undefined;
-  const name = object?.["name"];
+  const name = object?.name;
   if (typeof name !== "string") {
     return jsonRpcError(id, mcpErrorCode("tool_not_found"), "tools/call params.name is required");
   }
@@ -352,7 +351,7 @@ export async function toolsCall(
     return jsonRpcError(id, mcpErrorCode(denial.code), denial.message);
   }
 
-  const args = object?.["arguments"] ?? {};
+  const args = object?.arguments ?? {};
   const request: ToolExecutionRequest = { name, arguments: args as JsonValue, route: "/v1/mcp" };
   // #687: the caller's explicit upstream, from `params._meta["ferrogate/server"]`
   // — the same string `tools/list` put on that tool's own `_meta`. It is the
@@ -367,7 +366,7 @@ export async function toolsCall(
   // Unwrap an MCP-shaped `{ content: [...] }` result, else pass the payload
   // through unchanged — exactly what `tool_call_result` does.
   const content = isJsonObjectValue(result.response.content)
-    ? (result.response.content["content"] ?? result.response.content)
+    ? (result.response.content.content ?? result.response.content)
     : result.response.content;
   return jsonRpcResult(id, { content, isError: result.response.is_error });
 }
@@ -642,9 +641,9 @@ async function executeBuiltinTool(
   args: JsonValue,
 ): Promise<{ ok: true; content: JsonValue } | { ok: false; error: ToolExecutionHttpError }> {
   const object = isJsonObjectValue(args) ? args : {};
-  const assetType = object["asset_type"];
-  const name = object["name"];
-  const version = object["version"];
+  const assetType = object.asset_type;
+  const name = object.name;
+  const version = object.version;
   if (typeof assetType !== "string" || typeof name !== "string" || typeof version !== "string") {
     return {
       ok: false,
@@ -699,9 +698,7 @@ export async function readAssetForMcp(
   const assets = await ports.assets.list(tenantId);
   const asset = assets.find(
     (candidate) =>
-      candidate.assetType === assetType &&
-      candidate.name === name &&
-      candidate.version === version,
+      candidate.assetType === assetType && candidate.name === name && candidate.version === version,
   );
   if (asset === undefined || !asset.downloadable) {
     return { ok: false, kind: "read", error: { kind: "not_found" } };
@@ -816,11 +813,11 @@ export function assetContentEntry(
     _meta: { "ferrogate/sha256": asset.sha256, "ferrogate/sizeBytes": asset.sizeBytes },
   };
   if (isTextualMimeType(asset.contentType)) {
-    entry["text"] = new TextDecoder().decode(content);
+    entry.text = new TextDecoder().decode(content);
   } else {
     let binary = "";
     for (const byte of content) binary += String.fromCharCode(byte);
-    entry["blob"] = btoa(binary);
+    entry.blob = btoa(binary);
   }
   return entry;
 }

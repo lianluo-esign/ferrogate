@@ -71,10 +71,9 @@ describe("EnvBindingTenantDatabaseRouter — resolution", () => {
 
 describe("BackendDispatchingTenantDatabaseRouter — migration routing", () => {
   test("keeps pre-cutover tenants on the shared source until cutover", async () => {
-    await env.CONTROL_DB
-      .prepare(
-        "UPDATE tenant_databases SET storage_backend = 'durable_object', migration_state = 'copying', migration_epoch = 1 WHERE tenant_id = ?",
-      )
+    await env.CONTROL_DB.prepare(
+      "UPDATE tenant_databases SET storage_backend = 'durable_object', migration_state = 'copying', migration_epoch = 1 WHERE tenant_id = ?",
+    )
       .bind(TENANT_A)
       .run();
     const dispatch = new BackendDispatchingTenantDatabaseRouter(env.CONTROL_DB, {
@@ -91,18 +90,18 @@ describe("BackendDispatchingTenantDatabaseRouter — migration routing", () => {
       // into a runtime failure during the backfill window.
       await expect(dispatch.rearmScheduleAlarm(TENANT_A)).resolves.toBeUndefined();
 
-      await env.CONTROL_DB
-        .prepare("UPDATE tenant_databases SET migration_state = 'done' WHERE tenant_id = ?")
+      await env.CONTROL_DB.prepare(
+        "UPDATE tenant_databases SET migration_state = 'done' WHERE tenant_id = ?",
+      )
         .bind(TENANT_A)
         .run();
       const postCutover = await dispatch.forTenant(TENANT_A);
       expect(postCutover.source).toBe("durable_object");
       expect(postCutover.db).not.toBe(env.TENANT_DB_A);
     } finally {
-      await env.CONTROL_DB
-        .prepare(
-          "UPDATE tenant_databases SET storage_backend = 'native_binding', migration_state = 'shared', migration_epoch = 0 WHERE tenant_id = ?",
-        )
+      await env.CONTROL_DB.prepare(
+        "UPDATE tenant_databases SET storage_backend = 'native_binding', migration_state = 'shared', migration_epoch = 0 WHERE tenant_id = ?",
+      )
         .bind(TENANT_A)
         .run();
     }

@@ -15,7 +15,10 @@
       "crates",
       "workers",
       "vendor",
-      "docs/legacy"
+      "docs/legacy",
+      "**/*.generated.ts",
+      "docs/openapi",
+      "apps/mcp/spec"
     ]
   },
   "linter": {

@@ -142,7 +142,7 @@ function gateway(
           // request, whose `Map` is discarded before the next one — so an RPM
           // limit could never be reached and the "the refusal was counted"
           // assertion below would be vacuous rather than informative.
-          RATE_LIMIT: (poolEnv as unknown as Record<string, unknown>)["RATE_LIMIT"],
+          RATE_LIMIT: (poolEnv as unknown as Record<string, unknown>).RATE_LIMIT,
         }),
     ...(options.guardrails === true
       ? {

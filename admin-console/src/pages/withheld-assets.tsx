@@ -1,17 +1,3 @@
-// Withheld-assets operator surface (issue #379): the console view over
-// GET /v1/assets/withheld — the operator-only inverse of GET /v1/assets that
-// lists the pending_scan / quarantined asset versions the ordinary
-// list/manifest/resolution paths hide from consumers (#366).
-//
-// From a row the operator acts via POST /v1/assets/{type}/{name}/{version}/
-// visibility (#378): a completed out-of-band scan either promotes a
-// pending_scan asset to visible (clean verdict) or quarantines it (flagged
-// verdict). That transition is a fail-closed compare-and-swap on the server —
-// an already-terminal asset returns 409 and a missing one 404 — so the confirm
-// dialog surfaces those verdicts verbatim rather than optimistically mutating.
-import { useMemo, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -41,9 +27,23 @@ import {
 } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
 import { useAuth } from "@/hooks/use-auth";
-import { useI18n, type TranslationKey } from "@/i18n";
-import { adminGet, adminPost, type AdminSchema } from "@/lib/gateway-client";
+import { type TranslationKey, useI18n } from "@/i18n";
+import { type AdminSchema, adminGet, adminPost } from "@/lib/gateway-client";
 import { ApiError } from "@/types/auth";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+// Withheld-assets operator surface (issue #379): the console view over
+// GET /v1/assets/withheld — the operator-only inverse of GET /v1/assets that
+// lists the pending_scan / quarantined asset versions the ordinary
+// list/manifest/resolution paths hide from consumers (#366).
+//
+// From a row the operator acts via POST /v1/assets/{type}/{name}/{version}/
+// visibility (#378): a completed out-of-band scan either promotes a
+// pending_scan asset to visible (clean verdict) or quarantines it (flagged
+// verdict). That transition is a fail-closed compare-and-swap on the server —
+// an already-terminal asset returns 409 and a missing one 404 — so the confirm
+// dialog surfaces those verdicts verbatim rather than optimistically mutating.
+import { useMemo, useState } from "react";
+import { toast } from "sonner";
 
 type WithheldAsset = AdminSchema<"WithheldAssetSummary">;
 type Visibility = WithheldAsset["visibility"];
@@ -76,13 +76,9 @@ function assetLabel(asset: WithheldAsset): string {
 function VisibilityBadge({ visibility }: { visibility: Visibility }) {
   const { t } = useI18n();
   return visibility === "quarantined" ? (
-    <Badge variant="destructive">
-      {t("page.withheldAssets.visibility.quarantined")}
-    </Badge>
+    <Badge variant="destructive">{t("page.withheldAssets.visibility.quarantined")}</Badge>
   ) : (
-    <Badge variant="secondary">
-      {t("page.withheldAssets.visibility.pendingScan")}
-    </Badge>
+    <Badge variant="secondary">{t("page.withheldAssets.visibility.pendingScan")}</Badge>
   );
 }
 
@@ -100,9 +96,7 @@ function EvidenceDialog({
         {asset ? (
           <>
             <DialogHeader>
-              <DialogTitle>
-                {t("page.withheldAssets.evidence.dialogTitle")}
-              </DialogTitle>
+              <DialogTitle>{t("page.withheldAssets.evidence.dialogTitle")}</DialogTitle>
               <DialogDescription>
                 {t("page.withheldAssets.evidence.dialogDescription", {
                   asset: assetLabel(asset),
@@ -110,8 +104,7 @@ function EvidenceDialog({
               </DialogDescription>
             </DialogHeader>
             <code className="whitespace-pre-wrap break-all rounded-md bg-muted px-3 py-2 font-mono text-xs">
-              {asset.screening_evidence ??
-                t("page.withheldAssets.evidence.none")}
+              {asset.screening_evidence ?? t("page.withheldAssets.evidence.none")}
             </code>
             <DialogFooter>
               <Button type="button" variant="outline" onClick={onClose}>
@@ -126,10 +119,7 @@ function EvidenceDialog({
 }
 
 /** Maps an Admin API failure to localized, verdict-specific operator copy. */
-function decisionErrorMessage(
-  t: ReturnType<typeof useI18n>["t"],
-  error: unknown,
-): string {
+function decisionErrorMessage(t: ReturnType<typeof useI18n>["t"], error: unknown): string {
   if (error instanceof ApiError) {
     if (error.status === 404) return t("page.withheldAssets.error.notFound");
     if (error.status === 409) return t("page.withheldAssets.error.conflict");
@@ -146,7 +136,7 @@ function decisionErrorMessage(
 export default function WithheldAssetsPage() {
   const { session } = useAuth();
   const { t, format } = useI18n();
-  const apiKey = session!.gatewayApiKey;
+  const apiKey = (session as NonNullable<typeof session>).gatewayApiKey;
   const queryClient = useQueryClient();
 
   const [assetType, setAssetType] = useState(ALL_TYPES);
@@ -171,12 +161,13 @@ export default function WithheldAssetsPage() {
     [assetType, search, offset],
   );
 
-  const queryKey = useMemo(
-    () => ["withheld-assets", query] as const,
-    [query],
-  );
+  const queryKey = useMemo(() => ["withheld-assets", query] as const, [query]);
 
-  const { data, isLoading, error: listError } = useQuery({
+  const {
+    data,
+    isLoading,
+    error: listError,
+  } = useQuery({
     queryKey,
     queryFn: () => adminGet(apiKey, "/v1/assets/withheld", { query }),
   });
@@ -196,18 +187,13 @@ export default function WithheldAssetsPage() {
         scan_outcome: INTENT_SCAN_OUTCOME[intent],
         evidence: evidence.trim(),
       };
-      return adminPost(
-        apiKey,
-        "/v1/assets/{asset_type}/{name}/{version}/visibility",
-        body,
-        {
-          params: {
-            asset_type: asset.asset_type,
-            name: asset.name,
-            version: asset.version,
-          },
+      return adminPost(apiKey, "/v1/assets/{asset_type}/{name}/{version}/visibility", body, {
+        params: {
+          asset_type: asset.asset_type,
+          name: asset.name,
+          version: asset.version,
         },
-      );
+      });
     },
     onSuccess: (_result, variables) => {
       toast.success(
@@ -258,19 +244,13 @@ export default function WithheldAssetsPage() {
   return (
     <div className="flex flex-col gap-4">
       <div>
-        <h1 className="text-lg font-semibold">
-          {t("page.withheldAssets.title")}
-        </h1>
-        <p className="text-sm text-muted-foreground">
-          {t("page.withheldAssets.description")}
-        </p>
+        <h1 className="text-lg font-semibold">{t("page.withheldAssets.title")}</h1>
+        <p className="text-sm text-muted-foreground">{t("page.withheldAssets.description")}</p>
       </div>
 
       <div className="flex flex-wrap items-end gap-4">
         <div className="grid gap-2">
-          <Label htmlFor="withheld-asset-type">
-            {t("page.withheldAssets.filter.assetType")}
-          </Label>
+          <Label htmlFor="withheld-asset-type">{t("page.withheldAssets.filter.assetType")}</Label>
           <Select
             value={assetType}
             onValueChange={(value) => {
@@ -282,9 +262,7 @@ export default function WithheldAssetsPage() {
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value={ALL_TYPES}>
-                {t("page.withheldAssets.filter.allTypes")}
-              </SelectItem>
+              <SelectItem value={ALL_TYPES}>{t("page.withheldAssets.filter.allTypes")}</SelectItem>
               {ASSET_TYPE_FILTERS.map((option) => (
                 <SelectItem key={option.value} value={option.value}>
                   {t(option.labelKey)}
@@ -294,9 +272,7 @@ export default function WithheldAssetsPage() {
           </Select>
         </div>
         <div className="grid gap-2">
-          <Label htmlFor="withheld-search">
-            {t("page.withheldAssets.filter.search")}
-          </Label>
+          <Label htmlFor="withheld-search">{t("page.withheldAssets.filter.search")}</Label>
           <Input
             id="withheld-search"
             className="w-64"
@@ -356,11 +332,7 @@ export default function WithheldAssetsPage() {
                   <TableCell>{format.bytes(asset.size_bytes)}</TableCell>
                   <TableCell>
                     {asset.screening_evidence ? (
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => setEvidenceAsset(asset)}
-                      >
+                      <Button variant="outline" size="sm" onClick={() => setEvidenceAsset(asset)}>
                         {t("page.withheldAssets.evidence.view")}
                       </Button>
                     ) : (
@@ -416,15 +388,9 @@ export default function WithheldAssetsPage() {
         </div>
       </div>
 
-      <EvidenceDialog
-        asset={evidenceAsset}
-        onClose={() => setEvidenceAsset(null)}
-      />
+      <EvidenceDialog asset={evidenceAsset} onClose={() => setEvidenceAsset(null)} />
 
-      <Dialog
-        open={pending !== null}
-        onOpenChange={(open) => !open && closeDecision()}
-      >
+      <Dialog open={pending !== null} onOpenChange={(open) => !open && closeDecision()}>
         <DialogContent className="sm:max-w-lg">
           {pending ? (
             <>
@@ -453,9 +419,7 @@ export default function WithheldAssetsPage() {
                     id="withheld-evidence"
                     value={evidence}
                     onChange={(event) => setEvidence(event.target.value)}
-                    placeholder={t(
-                      "page.withheldAssets.field.evidencePlaceholder",
-                    )}
+                    placeholder={t("page.withheldAssets.field.evidencePlaceholder")}
                     rows={3}
                   />
                 </div>
@@ -474,9 +438,7 @@ export default function WithheldAssetsPage() {
                 </Button>
                 <Button
                   type="button"
-                  variant={
-                    pending.intent === "quarantine" ? "destructive" : "default"
-                  }
+                  variant={pending.intent === "quarantine" ? "destructive" : "default"}
                   disabled={decisionMutation.isPending}
                   onClick={submitDecision}
                 >

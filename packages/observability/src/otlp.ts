@@ -9,10 +9,7 @@
  * endpoint (Rust returned `Err`); on success they return an
  * {@link OtlpHttpRequest} whose `body` is the serialized bytes.
  */
-import {
-  ObservabilityConfigError,
-  ObservabilityExporterKind,
-} from "./config.js";
+import { ObservabilityConfigError, ObservabilityExporterKind } from "./config.js";
 import { genAiMetricsJson } from "./genai.js";
 import type { GatewayMetricsSnapshot } from "./metrics.js";
 
@@ -180,11 +177,7 @@ export function buildOtlpLogsRequest(
   return buildOtlpRequest(endpoint, "/v1/logs", body);
 }
 
-function buildOtlpRequest(
-  endpoint: string,
-  path: string,
-  body: unknown,
-): OtlpHttpRequest {
+function buildOtlpRequest(endpoint: string, path: string, body: unknown): OtlpHttpRequest {
   const trimmed = endpoint.trim();
   if (trimmed === "") {
     throw new ObservabilityConfigError("MissingEndpoint", {
@@ -218,9 +211,7 @@ function trimEndMatches(value: string, ch: string): string {
 
 function resourceJson(serviceName: string): unknown {
   return {
-    attributes: [
-      { key: "service.name", value: { stringValue: serviceName } },
-    ],
+    attributes: [{ key: "service.name", value: { stringValue: serviceName } }],
   };
 }
 
@@ -230,10 +221,7 @@ function instrumentationScopeJson(): unknown {
 
 function gatewayMetricsJson(snapshot: GatewayMetricsSnapshot): unknown[] {
   const guardrailPassTotal = saturatingSub(
-    saturatingSub(
-      snapshot.guardrailEvaluationTotal,
-      snapshot.guardrailEvaluationFailTotal,
-    ),
+    saturatingSub(snapshot.guardrailEvaluationTotal, snapshot.guardrailEvaluationFailTotal),
     snapshot.guardrailEvaluationErrorTotal,
   );
 
@@ -500,9 +488,7 @@ function sumMetricJson(
     sum: {
       aggregationTemporality: 2,
       isMonotonic: true,
-      dataPoints: [
-        { asDouble: value, attributes: attributesJson(attributes) },
-      ],
+      dataPoints: [{ asDouble: value, attributes: attributesJson(attributes) }],
     },
   };
 }

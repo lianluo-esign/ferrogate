@@ -28,6 +28,7 @@
  */
 import type { ApiKey, PolicyRule } from "./schema/index.js";
 import type { ClusterConfig } from "./schema/index.js";
+const nn = <T>(v: T): NonNullable<T> => v as NonNullable<T>;
 
 /** Schema version this build knows how to verify. */
 export const SIGNED_SNAPSHOT_SCHEMA_VERSION = 1;
@@ -162,7 +163,11 @@ export async function parseSigningKey(b64Seed: string, field: string): Promise<C
   try {
     return await crypto.subtle.importKey("pkcs8", pkcs8, { name: "Ed25519" }, false, ["sign"]);
   } catch {
-    throw new SnapshotConfigError("wrong_key_length", `field ${field}: invalid ed25519 signing key`, field);
+    throw new SnapshotConfigError(
+      "wrong_key_length",
+      `field ${field}: invalid ed25519 signing key`,
+      field,
+    );
   }
 }
 
@@ -231,7 +236,7 @@ function decompressEdPoint(bytes: Uint8Array): { x: bigint; y: bigint } | null {
   if (bytes.length !== ED25519_KEY_LEN) return null;
   let value = 0n;
   for (let index = ED25519_KEY_LEN - 1; index >= 0; index -= 1) {
-    value = (value << 8n) | BigInt(bytes[index]!);
+    value = (value << 8n) | BigInt(nn(bytes[index]));
   }
   const sign = (value >> 255n) & 1n;
   const y = value & ((1n << 255n) - 1n);
@@ -471,7 +476,11 @@ export class SnapshotSigner {
   ) {}
 
   /** Sign `payload` for `revision`, stamping expiry `nowUnix + maxAgeSecs`. */
-  sign(payload: SignedSnapshotPayload, revision: number, nowUnix: number): Promise<SignedSnapshotEnvelope> {
+  sign(
+    payload: SignedSnapshotPayload,
+    revision: number,
+    nowUnix: number,
+  ): Promise<SignedSnapshotEnvelope> {
     const notAfterUnix = nowUnix + this.maxAgeSecs;
     return signSnapshot(
       payload,
@@ -493,7 +502,11 @@ export class SnapshotVerifier {
     readonly expectedDeployment: string,
   ) {}
 
-  verify(envelope: SignedSnapshotEnvelope, activeRevision: number, nowUnix: number): Promise<VerifyResult> {
+  verify(
+    envelope: SignedSnapshotEnvelope,
+    activeRevision: number,
+    nowUnix: number,
+  ): Promise<VerifyResult> {
     return verifySnapshot(
       envelope,
       this.trustedKeys,
@@ -528,13 +541,17 @@ export function snapshotCryptoIdentity(crypto: SnapshotCrypto): [string, string]
  */
 export async function buildSnapshotCrypto(cluster: ClusterConfig): Promise<SnapshotCrypto> {
   const signingEnabled =
-    typeof cluster.snapshot_signing_key === "string" && cluster.snapshot_signing_key.trim().length > 0;
+    typeof cluster.snapshot_signing_key === "string" &&
+    cluster.snapshot_signing_key.trim().length > 0;
   const verificationEnabled = cluster.snapshot_trusted_keys.length > 0;
 
   if (!signingEnabled && !verificationEnabled) return { signer: null, verifier: null };
 
   const tenantId = requireIdentity(cluster.snapshot_tenant_id, "cluster.snapshot_tenant_id");
-  const deploymentId = requireIdentity(cluster.snapshot_deployment_id, "cluster.snapshot_deployment_id");
+  const deploymentId = requireIdentity(
+    cluster.snapshot_deployment_id,
+    "cluster.snapshot_deployment_id",
+  );
 
   let signer: SnapshotSigner | null = null;
   if (signingEnabled) {
@@ -551,8 +568,17 @@ export async function buildSnapshotCrypto(cluster: ClusterConfig): Promise<Snaps
         "field cluster.snapshot_signing_key_id: required when cluster.snapshot_signing_key is set",
       );
     }
-    const signingKey = await parseSigningKey(cluster.snapshot_signing_key ?? "", "cluster.snapshot_signing_key");
-    signer = new SnapshotSigner(signingKey, keyId, tenantId, deploymentId, cluster.snapshot_max_age_secs);
+    const signingKey = await parseSigningKey(
+      cluster.snapshot_signing_key ?? "",
+      "cluster.snapshot_signing_key",
+    );
+    signer = new SnapshotSigner(
+      signingKey,
+      keyId,
+      tenantId,
+      deploymentId,
+      cluster.snapshot_max_age_secs,
+    );
   }
 
   let verifier: SnapshotVerifier | null = null;
@@ -566,7 +592,10 @@ export async function buildSnapshotCrypto(cluster: ClusterConfig): Promise<Snaps
           "field cluster.snapshot_trusted_keys: key_id cannot be empty",
         );
       }
-      const verifyingKey = await parseVerifyingKey(entry.public_key, "cluster.snapshot_trusted_keys.public_key");
+      const verifyingKey = await parseVerifyingKey(
+        entry.public_key,
+        "cluster.snapshot_trusted_keys.public_key",
+      );
       if (trustedKeys.has(keyId)) {
         throw new SnapshotConfigError(
           "duplicate_trusted_key_id",
@@ -655,7 +684,11 @@ export class SignedSnapshotStore {
         seconds_until_expiry: snapshot.not_after_unix - nowUnix,
       };
     }
-    return { type: "expired_fail_closed", revision: snapshot.revision, not_after_unix: snapshot.not_after_unix };
+    return {
+      type: "expired_fail_closed",
+      revision: snapshot.revision,
+      not_after_unix: snapshot.not_after_unix,
+    };
   }
 
   /** The payload safe to serve at `nowUnix`, or `null` once expired / never set. */

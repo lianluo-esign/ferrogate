@@ -103,7 +103,8 @@ export const zhCN = {
   "dashboard.metric.agentRunsHint": "所有已记录的运行",
   "dashboard.metric.workers": "自托管工作节点",
   "dashboard.metric.workersHint": "健康（已注册或在线）/ 已注册总数",
-  "dashboard.metric.workersUnknownHint": "工作节点上报了本控制台无法归类的状态，因此健康数量未知。请查看下方清单中的状态明细。",
+  "dashboard.metric.workersUnknownHint":
+    "工作节点上报了本控制台无法归类的状态，因此健康数量未知。请查看下方清单中的状态明细。",
   "dashboard.breakdown.enabledOfTotal": "已启用 {enabled} / 共 {total}",
   "dashboard.breakdown.activeOfTotal": "活跃 {active} / 共 {total}",
   "dashboard.breakdown.connectedOfTotal": "已连接 {connected} / 共 {total}",
@@ -353,7 +354,8 @@ export const zhCN = {
   "resource.quotaPolicies.option.scopeType.key": "密钥",
   "resource.quotaPolicies.field.scopeId": "作用域 ID",
   "resource.quotaPolicies.field.modelAllowlist": "模型允许列表",
-  "resource.quotaPolicies.field.modelAllowlist.desc": "此作用域可调用的模型；留空表示允许所有模型。",
+  "resource.quotaPolicies.field.modelAllowlist.desc":
+    "此作用域可调用的模型；留空表示允许所有模型。",
   "resource.quotaPolicies.field.rpmLimit": "每分钟请求数",
   "resource.quotaPolicies.field.tpmLimit": "每分钟令牌数",
   "resource.quotaPolicies.field.monthlyBudget": "每月预算（美元）",
@@ -615,7 +617,7 @@ export const zhCN = {
   "resource.agentUpstreams.field.capabilities": "能力（逗号分隔：invoke,read,stream,discover）",
   "resource.agentUpstreams.field.tenants": "租户",
   "resource.agentUpstreams.field.tenants.desc": "允许派发到此上游的租户；留空表示所有租户。",
-  "resource.agentUpstreams.field.auth": "鉴权（JSON，例如 \"none\" 或 {\"bearer\":{\"token\":\"...\"}}）",
+  "resource.agentUpstreams.field.auth": '鉴权（JSON，例如 "none" 或 {"bearer":{"token":"..."}}）',
 
   "resource.agentWorkflows.title": "智能体工作流",
   "resource.agentWorkflows.description": "多步编排图（模型/工具/路由/人工/检查点节点）。",
@@ -666,11 +668,13 @@ export const zhCN = {
   "resource.skillPackages.capabilityKind.mcpTool": "MCP 工具",
   "resource.skillPackages.capabilityKind.promptTemplate": "提示词模板",
   "resource.skillPackages.capabilityKind.agentWorkflow": "智能体工作流",
-  "resource.skillPackages.field.resources": "资源（JSON：plugins/mcp_servers/prompt_templates/agent_workflows）",
+  "resource.skillPackages.field.resources":
+    "资源（JSON：plugins/mcp_servers/prompt_templates/agent_workflows）",
   "resource.skillPackages.field.metadata": "元数据（JSON）",
 
   "resource.promptTemplates.title": "提示词模板",
-  "resource.promptTemplates.description": "通过 /v1/prompts/{id}/render 提供的带版本、可复用提示词。",
+  "resource.promptTemplates.description":
+    "通过 /v1/prompts/{id}/render 提供的带版本、可复用提示词。",
   "resource.promptTemplates.col.name": "名称",
   "resource.promptTemplates.col.model": "模型",
   "resource.promptTemplates.col.status": "状态",
@@ -697,7 +701,8 @@ export const zhCN = {
   "resource.mcpServers.field.name": "名称",
   "resource.mcpServers.field.enabled": "已启用",
   "resource.mcpServers.field.config": "完整服务器配置（JSON）",
-  "resource.mcpServers.field.config.desc": "按 ferrogate-mcp::McpServerConfig 的传输、鉴权、TLS 与端点字段。",
+  "resource.mcpServers.field.config.desc":
+    "按 ferrogate-mcp::McpServerConfig 的传输、鉴权、TLS 与端点字段。",
 
   "resource.selfHostedWorkers.title": "自托管工作节点",
   "resource.selfHostedWorkers.description":
@@ -821,8 +826,7 @@ export const zhCN = {
 
   // 静态站点管理与发布流程（src/pages/static-sites.tsx，#345）。
   "page.staticSites.title": "静态站点",
-  "page.staticSites.description":
-    "发布并管理在 /sites/{tenant}/{site}/ 下提供服务的静态站点包。",
+  "page.staticSites.description": "发布并管理在 /sites/{tenant}/{site}/ 下提供服务的静态站点包。",
   "page.staticSites.publish.title": "发布站点",
   "page.staticSites.publish.description":
     "为某个租户和站点上传 ZIP 包。重新发布某个版本会替换所提供的文件。",
@@ -895,8 +899,7 @@ export const zhCN = {
   "page.staticSites.history.title": "版本历史",
   "page.staticSites.history.description":
     "已保留的包版本。serving 通道指向的版本就是访客当前获取的版本；回滚可将其重新指向先前的包。",
-  "page.staticSites.history.empty":
-    "尚无已保留的包版本。重新发布本站点以保留可回滚的带版本包。",
+  "page.staticSites.history.empty": "尚无已保留的包版本。重新发布本站点以保留可回滚的带版本包。",
   "page.staticSites.history.unavailable": "版本历史不可用。",
   "page.staticSites.history.active": "当前生效",
   "page.staticSites.history.yanked": "已撤回",
@@ -1456,10 +1459,8 @@ export const zhCN = {
   "page.guardrailPolicyDetail.toast.activated": "修订 {revision} 已激活",
   "page.guardrailPolicyDetail.toast.rolledBack": "已回滚到修订 {revision}",
   "page.guardrailPolicyDetail.active.title": "生效修订版本",
-  "page.guardrailPolicyDetail.active.description":
-    "当前绑定到该策略护栏运行时的修订。",
-  "page.guardrailPolicyDetail.active.none":
-    "暂无激活修订——请从下方历史中激活一个。",
+  "page.guardrailPolicyDetail.active.description": "当前绑定到该策略护栏运行时的修订。",
+  "page.guardrailPolicyDetail.active.none": "暂无激活修订——请从下方历史中激活一个。",
   "page.guardrailPolicyDetail.field.revision": "修订：",
   "page.guardrailPolicyDetail.field.name": "名称：",
   "page.guardrailPolicyDetail.field.mode": "模式：",
@@ -1498,8 +1499,7 @@ export const zhCN = {
   "page.guardrailPolicyDetail.dryRun.model": "模型（可选）",
   "page.guardrailPolicyDetail.dryRun.provider": "提供方（可选）",
   "page.guardrailPolicyDetail.dryRun.text": "示例负载文本",
-  "page.guardrailPolicyDetail.dryRun.textPlaceholder":
-    "粘贴示例提示词/响应，以对本地检查进行评估",
+  "page.guardrailPolicyDetail.dryRun.textPlaceholder": "粘贴示例提示词/响应，以对本地检查进行评估",
   "page.guardrailPolicyDetail.dryRun.running": "运行中…",
   "page.guardrailPolicyDetail.dryRun.submit": "运行试运行",
   "page.guardrailPolicyDetail.dryRun.plannedAgainst": "规划针对",
@@ -1805,8 +1805,7 @@ export const zhCN = {
   "page.mcpIdentities.initiating": "启动中…",
   "page.mcpIdentities.reconnect": "重新连接（OAuth）",
   "page.mcpIdentities.connect": "连接（OAuth）",
-  "page.mcpIdentities.notInteractive":
-    "{authType} 身份不通过交互式 OAuth 流程连接。",
+  "page.mcpIdentities.notInteractive": "{authType} 身份不通过交互式 OAuth 流程连接。",
   "page.mcpIdentities.disconnecting": "断开中…",
   "page.mcpIdentities.disconnect": "断开连接",
   "page.mcpIdentities.authPanel.title": "在带外完成授权",
@@ -2005,8 +2004,7 @@ export const zhCN = {
 
   // Withheld assets — operator inspect/act surface (src/pages/withheld-assets.tsx, #379).
   "page.withheldAssets.title": "扣留的资产",
-  "page.withheldAssets.description":
-    "对消费者隐藏的待扫描和已隔离资产。查看证据后决定提升或隔离。",
+  "page.withheldAssets.description": "对消费者隐藏的待扫描和已隔离资产。查看证据后决定提升或隔离。",
   "page.withheldAssets.filter.assetType": "资产类型",
   "page.withheldAssets.filter.allTypes": "全部类型",
   "page.withheldAssets.filter.search": "搜索",
@@ -2027,12 +2025,10 @@ export const zhCN = {
   "page.withheldAssets.action.promote": "提升",
   "page.withheldAssets.action.quarantine": "隔离",
   "page.withheldAssets.promote.title": "提升为可见",
-  "page.withheldAssets.promote.description":
-    "为 {asset} 记录干净裁决。它将变为可见并离开此队列。",
+  "page.withheldAssets.promote.description": "为 {asset} 记录干净裁决。它将变为可见并离开此队列。",
   "page.withheldAssets.promote.success": "资产已提升为可见",
   "page.withheldAssets.quarantine.title": "隔离资产",
-  "page.withheldAssets.quarantine.description":
-    "为 {asset} 记录标记裁决。它将永久扣留。",
+  "page.withheldAssets.quarantine.description": "为 {asset} 记录标记裁决。它将永久扣留。",
   "page.withheldAssets.quarantine.success": "资产已隔离",
   "page.withheldAssets.field.evidence": "证据",
   "page.withheldAssets.field.evidencePlaceholder": "扫描器 id、裁决详情或工单引用",
@@ -2076,15 +2072,13 @@ export const zhCN = {
   // Per-plugin tools view (src/pages/plugin-tools.tsx).
   "page.pluginTools.back": "← 插件",
   "page.pluginTools.title": "{pluginId} 的工具",
-  "page.pluginTools.description":
-    "此插件注册的可执行工具，不含提供方密钥或插件配置。",
+  "page.pluginTools.description": "此插件注册的可执行工具，不含提供方密钥或插件配置。",
   "page.pluginTools.error": "加载插件工具失败：{message}",
 
   // Nested model-offerings CRUD (src/pages/model-offerings.tsx, #912 slice 2c).
   "page.modelOfferings.back": "← 模型",
   "page.modelOfferings.title": "{modelId} 的服务方案",
-  "page.modelOfferings.description":
-    "关联到此模型的提供方通道，含其路由角色与每百万令牌价格。",
+  "page.modelOfferings.description": "关联到此模型的提供方通道，含其路由角色与每百万令牌价格。",
   "page.modelOfferings.loadError": "加载服务方案失败：{message}",
   "page.modelOfferings.empty": "此模型尚未关联任何服务方案。",
   "page.modelOfferings.create.title": "新建服务方案",
@@ -2256,8 +2250,7 @@ export const zhCN = {
   "page.selfHostedWorkersOps.placeholder.organizationId": "org-...",
   "page.selfHostedWorkersOps.placeholder.projectId": "proj-...",
   "page.selfHostedWorkersOps.placeholder.identityExpires": "留空表示永不过期",
-  "page.selfHostedWorkersOps.error.required":
-    "Worker 名称、工作空间 id 和身份指纹为必填项。",
+  "page.selfHostedWorkersOps.error.required": "Worker 名称、工作空间 id 和身份指纹为必填项。",
   "page.selfHostedWorkersOps.error.expiryInvalid": "身份过期时间必须是 Unix 时间戳（秒）。",
   "page.selfHostedWorkersOps.submit": "注册",
   "page.selfHostedWorkersOps.submitting": "正在注册…",

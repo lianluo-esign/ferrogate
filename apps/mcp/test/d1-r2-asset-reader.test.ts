@@ -27,8 +27,8 @@
  * on the read. This test pins that property against the D1+R2 path.
  */
 import { SELF, env } from "cloudflare:test";
-import { controlNamespace } from "./support/control-namespace.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { controlNamespace } from "./support/control-namespace.js";
 
 import { DurableObjectTenantDatabaseRouter } from "@ferrogate/storage";
 import {

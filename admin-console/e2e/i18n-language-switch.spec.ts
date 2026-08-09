@@ -1,5 +1,5 @@
 import { installAuthenticatedAdminApi } from "./support/admin-api";
-import { chooseLanguage, LOCALE_STORAGE_KEY } from "./support/i18n";
+import { LOCALE_STORAGE_KEY, chooseLanguage } from "./support/i18n";
 import {
   attachViewportScreenshot,
   expect,

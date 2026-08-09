@@ -61,8 +61,8 @@
  * them turns this file red and forces the ledger to move with the code.
  */
 import { SELF, env } from "cloudflare:test";
-import { controlNamespaceOverD1 } from "./support/control-namespace.js";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { controlNamespaceOverD1 } from "./support/control-namespace.js";
 
 import {
   D1RbacAuthorizer as GatewayRbac,
@@ -72,33 +72,33 @@ import {
 } from "../src/adapters.js";
 import type { AuthContext as GatewayAuth, RbacDecision } from "../src/ports.js";
 
+// The CONTROL_DATA adapters (#880) rbac.ts imports — read as TEXT to prove they
+// stay same-app leaves, never imported for value here.
+import agentControlDataSource from "../../agent-runtime/src/control-data.ts?raw";
+// TYPE-ONLY, therefore erased: importing the caller shape from each Worker's
+// own `ports.ts` costs no runtime edge and keeps the fixtures honest — a field
+// rename on either Worker fails the typecheck here rather than silently
+// building an `AuthContext` that Worker would never produce.
+import type { AuthContext as AgentAuth } from "../../agent-runtime/src/ports.js";
 // --- apps/agent-runtime: the OTHER enforcer's real authorizer ---------------
 import {
   rbacDenialCode as agentDenialCode,
   rbacDenialMessage as agentDenialMessage,
   rbacAuthorizerFromEnv as agentRbacFromEnv,
 } from "../../agent-runtime/src/rbac.js";
-// TYPE-ONLY, therefore erased: importing the caller shape from each Worker's
-// own `ports.ts` costs no runtime edge and keeps the fixtures honest — a field
-// rename on either Worker fails the typecheck here rather than silently
-// building an `AuthContext` that Worker would never produce.
-import type { AuthContext as AgentAuth } from "../../agent-runtime/src/ports.js";
 import agentRbacSource from "../../agent-runtime/src/rbac.ts?raw";
 // --- apps/control-plane: read as TEXT, never imported -----------------------
 import controlPlaneAdapters from "../../control-plane/src/adapters.ts?raw";
 import controlPlaneAuth from "../../control-plane/src/middleware/auth.ts?raw";
+import mcpControlDataSource from "../../mcp/src/control-data.ts?raw";
+import type { AuthContext as McpAuth } from "../../mcp/src/ports.js";
 // --- apps/mcp: the OTHER enforcer's real authorizer -------------------------
 import {
   rbacDenialCode as mcpDenialCode,
   rbacDenialMessage as mcpDenialMessage,
   rbacAuthorizerFromEnv as mcpRbacFromEnv,
 } from "../../mcp/src/rbac.js";
-import type { AuthContext as McpAuth } from "../../mcp/src/ports.js";
 import mcpRbacSource from "../../mcp/src/rbac.ts?raw";
-// The CONTROL_DATA adapters (#880) rbac.ts imports — read as TEXT to prove they
-// stay same-app leaves, never imported for value here.
-import agentControlDataSource from "../../agent-runtime/src/control-data.ts?raw";
-import mcpControlDataSource from "../../mcp/src/control-data.ts?raw";
 import {
   seedTenantRosterRows,
   tenantObjectPrivilegedBatch,
@@ -241,14 +241,11 @@ async function fleetDecisions(
     mcp: await mcpRbacFromEnv({
       CONTROL_DATA: controlNamespaceOverD1(db) as DurableObjectNamespace,
       TENANT_DATA: tenantData,
-    }).authorize(
-      mcpAuth(tenantId, operator),
-      action,
-    ),
-    "agent-runtime": await agentRbacFromEnv({ CONTROL_DATA: controlNamespaceOverD1(db), TENANT_DATA: tenantData }).authorize(
-      agentAuth(tenantId, operator),
-      action,
-    ),
+    }).authorize(mcpAuth(tenantId, operator), action),
+    "agent-runtime": await agentRbacFromEnv({
+      CONTROL_DATA: controlNamespaceOverD1(db),
+      TENANT_DATA: tenantData,
+    }).authorize(agentAuth(tenantId, operator), action),
   };
 }
 
@@ -470,9 +467,10 @@ describe("§4 the imported authorizers pull no foreign module graph", () => {
       const imports = [
         ...source.matchAll(/^import\s+(type\s+)?[\s\S]*?from\s+["']([^"']+)["'];?$/gm),
       ].map((m) => ({ typeOnly: m[1] !== undefined, specifier: m[2] as string }));
-      expect(imports.length, `${name} has no imports at all — the probe went stale`).toBeGreaterThan(
-        0,
-      );
+      expect(
+        imports.length,
+        `${name} has no imports at all — the probe went stale`,
+      ).toBeGreaterThan(0);
       for (const { typeOnly, specifier } of imports) {
         if (typeOnly) continue;
         expect(

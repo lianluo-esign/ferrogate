@@ -19,15 +19,15 @@ import {
   AE_MAX_BLOB_BYTES,
   AE_MAX_DOUBLES,
   AE_MAX_INDEX_BYTES,
+  type AnalyticsEngineDataPoint,
+  type AnalyticsEngineDatasetBinding,
   AnalyticsEngineSink,
   ObservabilityConfigError,
+  type OtlpLogRecord,
+  type OtlpSpanRecord,
   analyticsEngineDataPointViolation,
   defaultGatewayMetricsSnapshot,
   otlpAttribute,
-  type AnalyticsEngineDataPoint,
-  type AnalyticsEngineDatasetBinding,
-  type OtlpLogRecord,
-  type OtlpSpanRecord,
 } from "../src/index.js";
 
 function recorder(): AnalyticsEngineDatasetBinding & { points: AnalyticsEngineDataPoint[] } {
@@ -105,23 +105,17 @@ describe("analyticsEngineDataPointViolation — the limits AE drops points for",
     expect(AE_MAX_INDEX_BYTES).toBe(96);
 
     // 16 KB of blobs is legal on the platform, and must be legal here.
-    expect(
-      analyticsEngineDataPointViolation({ ...ok, blobs: ["a".repeat(16384)] }),
-    ).toBeNull();
+    expect(analyticsEngineDataPointViolation({ ...ok, blobs: ["a".repeat(16384)] })).toBeNull();
     // The old 5120 ceiling would have refused this; the real one must not.
-    expect(
-      analyticsEngineDataPointViolation({ ...ok, blobs: ["a".repeat(5121)] }),
-    ).toBeNull();
+    expect(analyticsEngineDataPointViolation({ ...ok, blobs: ["a".repeat(5121)] })).toBeNull();
     // One byte past the documented ceiling still has to be refused.
-    expect(
-      analyticsEngineDataPointViolation({ ...ok, blobs: ["a".repeat(16385)] }),
-    ).toContain("over the 16384-byte limit");
+    expect(analyticsEngineDataPointViolation({ ...ok, blobs: ["a".repeat(16385)] })).toContain(
+      "over the 16384-byte limit",
+    );
   });
 
   test("a non-finite double is refused (JSON has no NaN/Infinity)", () => {
-    expect(analyticsEngineDataPointViolation({ ...ok, doubles: [Number.NaN] })).toContain(
-      "finite",
-    );
+    expect(analyticsEngineDataPointViolation({ ...ok, doubles: [Number.NaN] })).toContain("finite");
     expect(
       analyticsEngineDataPointViolation({ ...ok, doubles: [Number.POSITIVE_INFINITY] }),
     ).toContain("finite");

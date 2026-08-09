@@ -1,4 +1,4 @@
-import { booleanColumn, type ResourceConfig } from "@/lib/resource-config";
+import { type ResourceConfig, booleanColumn } from "@/lib/resource-config";
 
 export interface AdminAgentUpstream extends Record<string, unknown> {
   id: string;
@@ -28,13 +28,35 @@ export const agentUpstreamsConfig: ResourceConfig<AdminAgentUpstream> = {
     { key: "name", headerKey: "resource.agentUpstreams.col.name" },
     { key: "endpoint", headerKey: "resource.agentUpstreams.col.endpoint" },
     { key: "protocol", headerKey: "resource.agentUpstreams.col.protocol" },
-    booleanColumn<AdminAgentUpstream>({ key: "enabled", headerKey: "resource.agentUpstreams.col.enabled" }),
-    { key: "capabilities", headerKey: "resource.agentUpstreams.col.capabilities", render: (row) => row.capabilities.join(", ") },
+    booleanColumn<AdminAgentUpstream>({
+      key: "enabled",
+      headerKey: "resource.agentUpstreams.col.enabled",
+    }),
+    {
+      key: "capabilities",
+      headerKey: "resource.agentUpstreams.col.capabilities",
+      render: (row) => row.capabilities.join(", "),
+    },
   ],
   fields: [
-    { name: "name", labelKey: "resource.agentUpstreams.field.name", type: "text", required: true, createOnly: true },
-    { name: "description", labelKey: "resource.agentUpstreams.field.description", type: "textarea" },
-    { name: "endpoint", labelKey: "resource.agentUpstreams.field.endpoint", type: "text", required: true },
+    {
+      name: "name",
+      labelKey: "resource.agentUpstreams.field.name",
+      type: "text",
+      required: true,
+      createOnly: true,
+    },
+    {
+      name: "description",
+      labelKey: "resource.agentUpstreams.field.description",
+      type: "textarea",
+    },
+    {
+      name: "endpoint",
+      labelKey: "resource.agentUpstreams.field.endpoint",
+      type: "text",
+      required: true,
+    },
     { name: "enabled", labelKey: "resource.agentUpstreams.field.enabled", type: "boolean" },
     {
       name: "capabilities",

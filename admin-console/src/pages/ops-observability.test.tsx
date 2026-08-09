@@ -1,12 +1,12 @@
-import { screen, waitFor } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
-import { HttpResponse, http } from "msw";
-import { useSearchParams } from "react-router-dom";
-import { beforeEach, describe, expect, it } from "vitest";
+import type { AdminSchema } from "@/lib/gateway-client";
 import OpsObservabilityPage from "@/pages/ops-observability";
 import { gatewayUrl, mockAdminList, server } from "@/test/msw";
 import { renderWithProviders, seedSession } from "@/test/test-utils";
-import type { AdminSchema } from "@/lib/gateway-client";
+import { screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { http, HttpResponse } from "msw";
+import { useSearchParams } from "react-router-dom";
+import { beforeEach, describe, expect, it } from "vitest";
 
 /** Surfaces the live URL query string so URL-state assertions can read it. */
 function SearchProbe() {
@@ -71,9 +71,7 @@ describe("OpsObservabilityPage", () => {
     // 2 NDJSON records → count badge + download enabled.
     expect(await screen.findByText("2")).toBeInTheDocument();
     await waitFor(() =>
-      expect(
-        screen.getByRole("button", { name: "Download JSONL" }),
-      ).toBeEnabled(),
+      expect(screen.getByRole("button", { name: "Download JSONL" })).toBeEnabled(),
     );
   });
 
@@ -97,9 +95,7 @@ describe("OpsObservabilityPage", () => {
     await user.click(screen.getByRole("combobox", { name: "Model" }));
     await user.click(await screen.findByRole("option", { name: /gpt-4o/ }));
 
-    await waitFor(() =>
-      expect(screen.getByTestId("search")).toHaveTextContent("model=gpt-4o"),
-    );
+    await waitFor(() => expect(screen.getByTestId("search")).toHaveTextContent("model=gpt-4o"));
     // The picker trigger displays the resolved human label, not a raw id box.
     expect(screen.getByRole("combobox", { name: "Model" })).toHaveTextContent("gpt-4o");
   });

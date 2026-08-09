@@ -1,11 +1,11 @@
-import { HttpResponse, http } from "msw";
-import { screen, waitFor } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
 import { ResourceForm } from "@/components/resource/resource-form";
-import { defaultFieldValues, type FieldConfig } from "@/lib/resource-config";
+import { type FieldConfig, defaultFieldValues } from "@/lib/resource-config";
 import { gatewayUrl, server } from "@/test/msw";
 import { renderWithProviders, seedSession } from "@/test/test-utils";
+import { screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { http, HttpResponse } from "msw";
+import { describe, expect, it, vi } from "vitest";
 
 const cascadingFields: FieldConfig[] = [
   {
@@ -73,7 +73,10 @@ function installCascadingHandlers() {
       const tenant = tenants.find((item) => item.id === params.tenantId);
       return tenant
         ? HttpResponse.json({ object: "tenant", tenant })
-        : HttpResponse.json({ error: { code: "not_found", message: "not found" } }, { status: 404 });
+        : HttpResponse.json(
+            { error: { code: "not_found", message: "not found" } },
+            { status: 404 },
+          );
     }),
     http.get(gatewayUrl("/admin/v1/projects"), ({ request }) => {
       const url = new URL(request.url);
@@ -85,7 +88,10 @@ function installCascadingHandlers() {
       const project = projects.find((item) => item.id === params.projectId);
       return project
         ? HttpResponse.json({ object: "project", project })
-        : HttpResponse.json({ error: { code: "not_found", message: "not found" } }, { status: 404 });
+        : HttpResponse.json(
+            { error: { code: "not_found", message: "not found" } },
+            { status: 404 },
+          );
     }),
     http.get(gatewayUrl("/admin/v1/workspaces"), ({ request }) => {
       const url = new URL(request.url);
@@ -99,15 +105,15 @@ function installCascadingHandlers() {
       const workspace = workspaces.find((item) => item.id === params.workspaceId);
       return workspace
         ? HttpResponse.json({ object: "workspace", workspace })
-        : HttpResponse.json({ error: { code: "not_found", message: "not found" } }, { status: 404 });
+        : HttpResponse.json(
+            { error: { code: "not_found", message: "not found" } },
+            { status: 404 },
+          );
     }),
   );
 }
 
-function renderReferenceForm(
-  fields: FieldConfig[],
-  initialValues = defaultFieldValues(fields),
-) {
+function renderReferenceForm(fields: FieldConfig[], initialValues = defaultFieldValues(fields)) {
   seedSession();
   const onSubmit = vi.fn().mockResolvedValue(undefined);
   renderWithProviders(
@@ -145,12 +151,8 @@ describe("EntityReferencePicker", () => {
 
     await user.click(screen.getByRole("combobox", { name: "Tenant *" }));
     await user.click(await screen.findByRole("option", { name: /Acme/ }));
-    expect(screen.getByRole("list", { name: "Selected Project" })).toHaveTextContent(
-      "Production",
-    );
-    expect(screen.getByRole("list", { name: "Selected Workspaces" })).toHaveTextContent(
-      "US East",
-    );
+    expect(screen.getByRole("list", { name: "Selected Project" })).toHaveTextContent("Production");
+    expect(screen.getByRole("list", { name: "Selected Workspaces" })).toHaveTextContent("US East");
 
     await user.click(screen.getByRole("combobox", { name: "Tenant *" }));
     await user.click(await screen.findByRole("option", { name: /Globex/ }));
@@ -163,7 +165,12 @@ describe("EntityReferencePicker", () => {
   it("serializes multi-reference values as canonical IDs", async () => {
     const permissions = [
       { id: "permission-1", key: "admin.read", name: "Read administration", description: "Read" },
-      { id: "permission-2", key: "admin.write", name: "Write administration", description: "Write" },
+      {
+        id: "permission-2",
+        key: "admin.write",
+        name: "Write administration",
+        description: "Write",
+      },
     ];
     server.use(
       http.get(gatewayUrl("/admin/v1/permissions"), ({ request }) => {
@@ -171,7 +178,13 @@ describe("EntityReferencePicker", () => {
         const data = permissions.filter((permission) =>
           `${permission.key} ${permission.name}`.toLowerCase().includes(search),
         );
-        return HttpResponse.json({ object: "list", data, total: data.length, offset: 0, limit: 20 });
+        return HttpResponse.json({
+          object: "list",
+          data,
+          total: data.length,
+          offset: 0,
+          limit: 20,
+        });
       }),
     );
     const fields: FieldConfig[] = [
@@ -277,9 +290,7 @@ describe("EntityReferencePicker", () => {
     await user.click(screen.getByRole("button", { name: "Close" }));
     await user.click(screen.getByRole("button", { name: "Create" }));
 
-    await waitFor(() =>
-      expect(onSubmit).toHaveBeenCalledWith({ allowed_models: ["gpt-live"] }),
-    );
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledWith({ allowed_models: ["gpt-live"] }));
   });
 
   it("keeps an already-stored disabled value inspectable and repairable", async () => {

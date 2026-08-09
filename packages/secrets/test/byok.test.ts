@@ -46,10 +46,7 @@ class MapCredentialStore implements TenantCredentialStore {
     this.rows.set(`${tenantId}\0${alias}`, record);
   }
 
-  async lookup(
-    tenantId: string,
-    alias: string,
-  ): Promise<SealedTenantCredential | null> {
+  async lookup(tenantId: string, alias: string): Promise<SealedTenantCredential | null> {
     return this.rows.get(`${tenantId}\0${alias}`) ?? null;
   }
 }
@@ -98,9 +95,7 @@ describe("TenantByokResolver", () => {
       keyring: byokKeyringFromEnv({ [BYOK_MASTER_KEY_ENV]: KEY_A }),
     });
 
-    expect(await resolver.resolve(parseSecretRef("byok://openai-enterprise"))).toBe(
-      "sk-tenant-a",
-    );
+    expect(await resolver.resolve(parseSecretRef("byok://openai-enterprise"))).toBe("sk-tenant-a");
   });
 
   it("THE FENCE: another tenant asking for the same alias gets nothing", async () => {
@@ -118,13 +113,7 @@ describe("TenantByokResolver", () => {
 
   it("THE SECOND FENCE: a row copied into another tenant's partition will not open", async () => {
     const store = new MapCredentialStore();
-    const sealed = await seed(
-      store,
-      "tenant_a",
-      "openai-enterprise",
-      "openai",
-      "sk-tenant-a",
-    );
+    const sealed = await seed(store, "tenant_a", "openai-enterprise", "openai", "sk-tenant-a");
 
     // Simulate the worst case the SQL fence cannot cover: the ciphertext itself
     // is already sitting under tenant_b's key, e.g. a bad admin write or a
@@ -141,9 +130,9 @@ describe("TenantByokResolver", () => {
       keyring: byokKeyringFromEnv({ [BYOK_MASTER_KEY_ENV]: KEY_A }),
     });
 
-    await expect(
-      attacker.resolve(parseSecretRef("byok://openai-enterprise")),
-    ).rejects.toThrow(/could not be decrypted/i);
+    await expect(attacker.resolve(parseSecretRef("byok://openai-enterprise"))).rejects.toThrow(
+      /could not be decrypted/i,
+    );
   });
 
   it("refuses to be constructed without a tenant, rather than resolving globally", () => {
@@ -170,9 +159,9 @@ describe("TenantByokResolver", () => {
       keyring: byokKeyringFromEnv({ [BYOK_MASTER_KEY_ENV]: KEY_B }),
     });
 
-    await expect(
-      resolver.resolve(parseSecretRef("byok://openai-enterprise")),
-    ).rejects.toThrow(/openai-enterprise/);
+    await expect(resolver.resolve(parseSecretRef("byok://openai-enterprise"))).rejects.toThrow(
+      /openai-enterprise/,
+    );
     const error = await resolver
       .resolve(parseSecretRef("byok://openai-enterprise"))
       .catch((caught: unknown) => caught);
@@ -187,15 +176,11 @@ describe("rotation without a deploy", () => {
     await seed(store, "tenant_a", "openai-enterprise", "openai", "sk-old", keyring);
 
     const resolver = new TenantByokResolver({ tenantId: "tenant_a", store, keyring });
-    expect(await resolver.resolve(parseSecretRef("byok://openai-enterprise"))).toBe(
-      "sk-old",
-    );
+    expect(await resolver.resolve(parseSecretRef("byok://openai-enterprise"))).toBe("sk-old");
 
     // Rotation = one row write. No binding, no wrangler.toml edit, no deploy.
     await seed(store, "tenant_a", "openai-enterprise", "openai", "sk-new", keyring);
-    expect(await resolver.resolve(parseSecretRef("byok://openai-enterprise"))).toBe(
-      "sk-new",
-    );
+    expect(await resolver.resolve(parseSecretRef("byok://openai-enterprise"))).toBe("sk-new");
   });
 
   it("a MASTER key rotation reads old rows through the versioned keyring", async () => {
@@ -247,8 +232,6 @@ describe("SecretResolverRegistry", () => {
 
   it("refuses byok:// when no tenant-bound resolver is mounted", async () => {
     const registry = SecretResolverRegistry.new({});
-    await expect(registry.resolve("byok://anthropic-negotiated")).rejects.toThrow(
-      /tenant/i,
-    );
+    await expect(registry.resolve("byok://anthropic-negotiated")).rejects.toThrow(/tenant/i);
   });
 });

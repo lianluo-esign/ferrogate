@@ -1,11 +1,11 @@
-// Component tests for the billing dead-letters browser (#319).
-import { screen, within } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
-import { HttpResponse, http } from "msw";
-import { beforeEach, expect, it } from "vitest";
 import BillingDeadLettersPage from "@/pages/billing-dead-letters";
 import { gatewayUrl, mockAdminError, server } from "@/test/msw";
 import { renderWithProviders, seedSession } from "@/test/test-utils";
+// Component tests for the billing dead-letters browser (#319).
+import { screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { http, HttpResponse } from "msw";
+import { beforeEach, expect, it } from "vitest";
 
 const PATH = "/admin/v1/billing-outbox-dead-letters";
 
@@ -31,11 +31,7 @@ function entry(overrides: Record<string, unknown> = {}) {
 }
 
 function mockDeadLetters(rows: unknown[]): void {
-  server.use(
-    http.get(gatewayUrl(PATH), () =>
-      HttpResponse.json({ object: "list", data: rows }),
-    ),
-  );
+  server.use(http.get(gatewayUrl(PATH), () => HttpResponse.json({ object: "list", data: rows })));
 }
 
 beforeEach(() => {
@@ -78,10 +74,7 @@ it("filters rows by request id", async () => {
   renderWithProviders(<BillingDeadLettersPage />);
   await screen.findByText("led-dead-1");
 
-  await user.type(
-    screen.getByPlaceholderText("Filter by id, request id, or tenant"),
-    "led-dead-2",
-  );
+  await user.type(screen.getByPlaceholderText("Filter by id, request id, or tenant"), "led-dead-2");
 
   expect(screen.getByText("led-dead-2")).toBeInTheDocument();
   expect(screen.queryByText("led-dead-1")).not.toBeInTheDocument();

@@ -123,8 +123,7 @@ const rule = {
     messages: {
       jsxText:
         'Hard-coded operator-facing text "{{ text }}". Move it into the @/i18n catalog and render with t("<key>"). See eslint-rules/no-untranslated-literal.js.',
-      prop:
-        'Hard-coded operator-facing string on `{{ prop }}`. Use `{{ prop }}={t("<key>")}` from @/i18n. See eslint-rules/no-untranslated-literal.js.',
+      prop: 'Hard-coded operator-facing string on `{{ prop }}`. Use `{{ prop }}={t("<key>")}` from @/i18n. See eslint-rules/no-untranslated-literal.js.',
       toast:
         'Hard-coded operator-facing string passed to `toast.{{ method }}(...)`. Route it through the @/i18n catalog: `toast.{{ method }}(t("<key>"))`. See eslint-rules/no-untranslated-literal.js.',
     },

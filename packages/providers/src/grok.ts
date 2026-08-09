@@ -5,6 +5,8 @@
  * {@link OpenAiCompatibleAdapter} after re-labeling the provider kind, adding
  * only the `grok`/`xai` kind gate.
  */
+
+import { OpenAiCompatibleAdapter } from "./openai.js";
 import { AdapterError, BaseProviderAdapter } from "./types.js";
 import type {
   ChatCompletionPlan,
@@ -14,7 +16,6 @@ import type {
   ProviderUsage,
   ResponsesPlan,
 } from "./types.js";
-import { OpenAiCompatibleAdapter } from "./openai.js";
 
 export class GrokAdapter extends BaseProviderAdapter {
   readonly #openaiCompatible = new OpenAiCompatibleAdapter();
@@ -34,10 +35,7 @@ export class GrokAdapter extends BaseProviderAdapter {
     );
   }
 
-  override prepareResponses(
-    provider: ProviderConfig,
-    request: ResponsesPlan,
-  ): ProviderHttpRequest {
+  override prepareResponses(provider: ProviderConfig, request: ResponsesPlan): ProviderHttpRequest {
     validateKind(provider.kind);
     return this.#openaiCompatible.prepareResponses(
       { ...provider, kind: "openai-compatible" },

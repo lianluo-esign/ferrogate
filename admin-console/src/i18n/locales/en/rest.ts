@@ -10,7 +10,6 @@
 // This is where NEW page/route copy goes. It is TYPE-aggregated by `../en.ts`, so
 // keys added here are part of `TranslationKey` and zh-CN must still translate them.
 export const enRest = {
-
   // Backend error/status-code -> localized operator copy (#346).
   //
   // The stable, GENERIC operator headlines resolved by `../errors.ts` from an
@@ -137,8 +136,7 @@ export const enRest = {
   "dashboard.inventory.runtime.title": "Gateway runtime",
   "dashboard.inventory.runtime.description": "Derived from the active gateway configuration.",
   "dashboard.inventory.controlPlane.title": "Control plane",
-  "dashboard.inventory.controlPlane.description":
-    "Durable tenancy, agents, assets, and workers.",
+  "dashboard.inventory.controlPlane.description": "Durable tenancy, agents, assets, and workers.",
   "dashboard.inventory.col.resource": "Resource",
   "dashboard.inventory.col.total": "Total",
   "dashboard.inventory.col.breakdown": "Breakdown",
@@ -214,11 +212,9 @@ export const enRest = {
   "resource.toast.deleted": "{name} deleted",
 
   "resource.secret.title": "Save this secret now",
-  "resource.secret.description":
-    "This value will not be shown again. Store it somewhere safe.",
+  "resource.secret.description": "This value will not be shown again. Store it somewhere safe.",
   "resource.secret.copyClose": "Copy & close",
-  "resource.secret.copyError":
-    "Could not copy to clipboard; the secret is shown above.",
+  "resource.secret.copyError": "Could not copy to clipboard; the secret is shown above.",
 
   "resource.picker.selectDependencyFirst": "Select {name} first",
   "resource.picker.selectPlaceholder": "Select {label}",
@@ -529,8 +525,7 @@ export const enRest = {
   "catalog.scope.hint": "Editing the platform default catalog shared by every tenant.",
 
   "resource.providers.title": "Providers",
-  "resource.providers.description":
-    "Upstream model providers configured for this gateway.",
+  "resource.providers.description": "Upstream model providers configured for this gateway.",
   "resource.providers.col.name": "Name",
   "resource.providers.col.kind": "Kind",
   "resource.providers.col.compatibility": "Compatibility",
@@ -587,8 +582,7 @@ export const enRest = {
   "resource.agentUpstreams.field.tenants": "Tenants",
   "resource.agentUpstreams.field.tenants.desc":
     "Tenants allowed to dispatch to this upstream; leave empty for all tenants.",
-  "resource.agentUpstreams.field.auth":
-    "Auth (JSON, e.g. \"none\" or {\"bearer\":{\"token\":\"...\"}})",
+  "resource.agentUpstreams.field.auth": 'Auth (JSON, e.g. "none" or {"bearer":{"token":"..."}})',
 
   "resource.agentWorkflows.title": "Agent workflows",
   "resource.agentWorkflows.description":
@@ -883,8 +877,7 @@ export const enRest = {
   "page.staticSites.acme.enabled": "ACME enabled",
   "page.staticSites.acme.disabled": "ACME disabled",
   // Per-site detail drawer: the published bundle's file tree, from the manifest.
-  "page.staticSites.detail.description":
-    "Bundle {version} — {files} files, {bytes}.",
+  "page.staticSites.detail.description": "Bundle {version} — {files} files, {bytes}.",
   "page.staticSites.detail.files": "Bundle files",
   // Per-file download (asset GET of each file's path-keyed object) + serve link.
   "page.staticSites.detail.download": "Download",
@@ -1109,8 +1102,7 @@ export const enRest = {
   "page.opsGatewayConfigs.toast.deleted": "Config profile deleted",
   "page.opsGatewayConfigs.dialog.editTitle": "Edit config profile",
   "page.opsGatewayConfigs.dialog.newTitle": "New config profile",
-  "page.opsGatewayConfigs.dialog.description":
-    "Applied through a process-local reload on save.",
+  "page.opsGatewayConfigs.dialog.description": "Applied through a process-local reload on save.",
   "page.opsGatewayConfigs.field.id": "Id",
   "page.opsGatewayConfigs.field.name": "Name",
   "page.opsGatewayConfigs.field.revision": "Revision",
@@ -1213,7 +1205,8 @@ export const enRest = {
   "page.agentJobs.cancel": "Cancel job",
   "page.agentJobs.cancel.error": "Cancel failed: {message}",
   "page.agentJobs.result.title": "Result",
-  "page.agentJobs.result.pending": "The job is still running; the result is collectable once it is terminal.",
+  "page.agentJobs.result.pending":
+    "The job is still running; the result is collectable once it is terminal.",
   "page.agentJobs.result.loading": "Collecting the result…",
   "page.agentJobs.result.output": "Output",
   "page.agentJobs.result.noOutput": "The runtime recorded no terminal output.",
@@ -1265,8 +1258,7 @@ export const enRest = {
   "page.agentRuns.unattributed.col.evidence": "Evidence",
   "page.agentRuns.unattributed.status.running": "Running",
   "page.agentRuns.unattributed.status.inactive": "Inactive",
-  "page.agentRuns.unattributed.status.runningBasis":
-    "Derived from activity within the last {ttl}s",
+  "page.agentRuns.unattributed.status.runningBasis": "Derived from activity within the last {ttl}s",
   "page.agentRuns.unattributed.status.noStopEvent":
     "Recency window expired — no stop event was recorded, so there is no end time",
   "page.agentRuns.unattributed.status.unknown": "Unknown",
@@ -1410,10 +1402,10 @@ export const enRest = {
   "page.agentSchedules.validation.intervalRequired": "Interval seconds is required",
   "page.agentSchedules.runNow.title": "Run schedule now?",
   "page.agentSchedules.runNow.description":
-    "This immediately fires \"{name}\" (target: {target}) outside its normal cadence and records the fire in its history.",
+    'This immediately fires "{name}" (target: {target}) outside its normal cadence and records the fire in its history.',
   "page.agentSchedules.delete.title": "Delete schedule?",
   "page.agentSchedules.delete.description":
-    "This permanently deletes \"{name}\". Recorded fire history is kept but the schedule stops firing.",
+    'This permanently deletes "{name}". Recorded fire history is kept but the schedule stops firing.',
 
   // Guardrail policies list (#348 / #316).
   "page.guardrailPolicies.title": "Guardrail policies",
@@ -1605,8 +1597,7 @@ export const enRest = {
   "page.billingPaymentMethods.tenantIdPlaceholder": "organization id",
   "page.billingPaymentMethods.list": "List",
   "page.billingPaymentMethods.loadError": "Failed to load payment methods: {message}",
-  "page.billingPaymentMethods.prompt":
-    "Enter a tenant id above to load payment methods.",
+  "page.billingPaymentMethods.prompt": "Enter a tenant id above to load payment methods.",
   "page.billingPaymentMethods.empty": "No payment methods for this tenant.",
   "page.billingPaymentMethods.badge.default": "default",
   "page.billingPaymentMethods.col.id": "Id",
@@ -1660,8 +1651,7 @@ export const enRest = {
   "page.billingMetering.events.noEvents": "No events",
   "page.billingMetering.export.loadError": "Failed to load export status: {message}",
   "page.billingMetering.export.empty": "No export status records.",
-  "page.billingMetering.aggregates.loadError":
-    "Failed to load usage aggregates: {message}",
+  "page.billingMetering.aggregates.loadError": "Failed to load usage aggregates: {message}",
   "page.billingMetering.aggregates.empty": "No usage aggregates.",
 
   // Billing — dead-letters (issue #319; #348 slice).
@@ -1805,8 +1795,7 @@ export const enRest = {
   "page.tenantRoles.empty": "No roles bound to this tenant.",
   "page.tenantRoles.removing": "Removing…",
   "page.tenantRoles.remove.title": "Remove role binding?",
-  "page.tenantRoles.remove.description":
-    "Role {role} will be unbound from tenant {tenant}.",
+  "page.tenantRoles.remove.description": "Role {role} will be unbound from tenant {tenant}.",
   "page.tenantRoles.toast.assigned": "Role assigned to tenant",
   "page.tenantRoles.toast.removed": "Role binding removed",
 
@@ -2011,8 +2000,7 @@ export const enRest = {
   "page.assets.presign.phaseCommitting": "Committing…",
   "page.assets.presign.success": "Large object committed",
   "page.assets.presign.errorHeading": "Upload failed",
-  "page.assets.presign.tooLarge":
-    "File is {size}, over the {max} presigned limit.",
+  "page.assets.presign.tooLarge": "File is {size}, over the {max} presigned limit.",
   "page.assets.presign.cancelUpload": "Cancel upload",
   "page.assets.presign.cancelledNoIntent":
     "Upload cancelled. Nothing was published — no version was registered — and the transfer stopped before any upload intent was created, so no staging capacity is held.",
@@ -2072,8 +2060,7 @@ export const enRest = {
   "page.withheldAssets.field.evidencePlaceholder":
     "Scanner id, verdict detail, or ticket reference",
   "page.withheldAssets.error.evidenceRequired": "Evidence is required.",
-  "page.withheldAssets.error.notFound":
-    "That asset no longer exists — it may have been deleted.",
+  "page.withheldAssets.error.notFound": "That asset no longer exists — it may have been deleted.",
   "page.withheldAssets.error.conflict":
     "That asset is no longer pending a scan — it was already promoted or quarantined.",
   "page.withheldAssets.error.badRequest": "The gateway rejected the verdict: {message}",
@@ -2087,8 +2074,7 @@ export const enRest = {
   "page.managedWorkerSessions.title": "Managed worker sessions",
   "page.managedWorkerSessions.description":
     "Persisted runtime sessions for gateway-managed isolated agent workers, with their isolation backend and lifecycle event trail.",
-  "page.managedWorkerSessions.error":
-    "Failed to load managed worker sessions: {message}",
+  "page.managedWorkerSessions.error": "Failed to load managed worker sessions: {message}",
   "page.managedWorkerSessions.col.session": "Session",
   "page.managedWorkerSessions.col.run": "Run",
   "page.managedWorkerSessions.col.isolation": "Isolation",
@@ -2173,8 +2159,7 @@ export const enRest = {
 
   // Self-hosted run inspector (src/pages/self-hosted-runs.tsx).
   "page.selfHostedRuns.title": "Self-hosted runs",
-  "page.selfHostedRuns.description.before":
-    "Inspect a customer-reported run timeline (",
+  "page.selfHostedRuns.description.before": "Inspect a customer-reported run timeline (",
   "page.selfHostedRuns.description.after":
     ") by its run id. The correlation triple and parent action fingerprint are lifted from the worker's reported event documents.",
   "page.selfHostedRuns.field.runId": "Run id",
@@ -2246,10 +2231,8 @@ export const enRest = {
   "page.selfHostedWorkerDetail.rotateDialog.description":
     "Issue a replacement mTLS identity fingerprint. The previous identity is retired and the new one is shown once.",
   "page.selfHostedWorkerDetail.rotateDialog.fingerprint": "New identity fingerprint",
-  "page.selfHostedWorkerDetail.rotateDialog.expiry":
-    "Identity expiry Unix seconds (optional)",
-  "page.selfHostedWorkerDetail.rotateDialog.expiryPlaceholder":
-    "leave blank for no expiry",
+  "page.selfHostedWorkerDetail.rotateDialog.expiry": "Identity expiry Unix seconds (optional)",
+  "page.selfHostedWorkerDetail.rotateDialog.expiryPlaceholder": "leave blank for no expiry",
   "page.selfHostedWorkerDetail.rotateDialog.errorFingerprintRequired":
     "A new identity fingerprint is required.",
   "page.selfHostedWorkerDetail.rotateDialog.errorExpiryInvalid":
@@ -2264,8 +2247,7 @@ export const enRest = {
   "page.selfHostedWorkersOps.title": "Self-hosted worker lifecycle",
   "page.selfHostedWorkersOps.subtitle.before":
     "Register, inspect, and rotate customer-infrastructure agent workers. All worker telemetry is customer-reported evidence (",
-  "page.selfHostedWorkersOps.subtitle.after":
-    ") — not managed-worker enforcement proof.",
+  "page.selfHostedWorkersOps.subtitle.after": ") — not managed-worker enforcement proof.",
   "page.selfHostedWorkersOps.register": "Register worker",
   "page.selfHostedWorkersOps.error": "Failed to load self-hosted workers: {message}",
   "page.selfHostedWorkersOps.col.worker": "Worker",
@@ -2288,8 +2270,7 @@ export const enRest = {
   "page.selfHostedWorkersOps.field.identityFingerprint": "Identity fingerprint",
   "page.selfHostedWorkersOps.field.organizationId": "Organization id (optional)",
   "page.selfHostedWorkersOps.field.projectId": "Project id (optional)",
-  "page.selfHostedWorkersOps.field.identityExpires":
-    "Identity expiry Unix seconds (optional)",
+  "page.selfHostedWorkersOps.field.identityExpires": "Identity expiry Unix seconds (optional)",
   "page.selfHostedWorkersOps.field.orchestrationEnabled": "Orchestration enabled",
   "page.selfHostedWorkersOps.placeholder.workerName": "edge-runner-01",
   "page.selfHostedWorkersOps.placeholder.workspaceId": "ws-...",

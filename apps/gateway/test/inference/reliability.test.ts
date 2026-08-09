@@ -157,16 +157,15 @@ describe("same-provider retry", () => {
       return attempts === 1 ? providerJson({ error: "overloaded" }, 503) : providerJson(CHAT_OK);
     });
     try {
-      const app = harness({ reliability: { maxDispatchRetries: 1 } }, [route({ provider: "solo" })]);
+      const app = harness({ reliability: { maxDispatchRetries: 1 } }, [
+        route({ provider: "solo" }),
+      ]);
       const res = await app.post("/v1/chat/completions", CHAT_BODY);
 
       expect(res.status).toBe(200);
       expect(attempts).toBe(2);
       // BOTH attempts went to the same provider — a retry is not a failover.
-      expect(provider.requests.map((request) => providerOf(request.url))).toEqual([
-        "solo",
-        "solo",
-      ]);
+      expect(provider.requests.map((request) => providerOf(request.url))).toEqual(["solo", "solo"]);
       // The response the client is served is the SECOND attempt's.
       expect(((await res.json()) as { id: string }).id).toBe("chatcmpl-ok");
     } finally {
@@ -182,7 +181,9 @@ describe("same-provider retry", () => {
     });
     try {
       // Retries are generously available; the PREDICATE is what refuses.
-      const app = harness({ reliability: { maxDispatchRetries: 5 } }, [route({ provider: "solo" })]);
+      const app = harness({ reliability: { maxDispatchRetries: 5 } }, [
+        route({ provider: "solo" }),
+      ]);
       const res = await app.post("/v1/chat/completions", CHAT_BODY);
 
       expect(res.status).toBe(400);
@@ -199,7 +200,9 @@ describe("same-provider retry", () => {
       return providerJson({ error: "overloaded" }, 503);
     });
     try {
-      const app = harness({ reliability: { maxDispatchRetries: 2 } }, [route({ provider: "solo" })]);
+      const app = harness({ reliability: { maxDispatchRetries: 2 } }, [
+        route({ provider: "solo" }),
+      ]);
       const res = await app.post("/v1/chat/completions", CHAT_BODY);
 
       // 1 initial + 2 retries, and then the provider's own status reaches the
@@ -340,10 +343,10 @@ describe("provider circuit breaker", () => {
     );
     try {
       const circuit = new InMemoryProviderCircuit(withBreaker({ circuitFailureThreshold: 1 }));
-      const app = harness(
-        { reliability: withBreaker({ circuitFailureThreshold: 1 }), circuit },
-        [route({ provider: "wedged", priority: 0 }), route({ provider: "healthy", priority: 1 })],
-      );
+      const app = harness({ reliability: withBreaker({ circuitFailureThreshold: 1 }), circuit }, [
+        route({ provider: "wedged", priority: 0 }),
+        route({ provider: "healthy", priority: 1 }),
+      ]);
 
       // First request: wedged fails (opening its circuit), healthy serves.
       expect((await app.post("/v1/chat/completions", CHAT_BODY)).status).toBe(200);
@@ -755,10 +758,10 @@ describe("a stream that faults mid-body is never retried", () => {
       providerSseThatFaults([OPENAI_CHAT_STREAM_FRAMES[0] as string]),
     );
     try {
-      const app = harness(
-        { reliability: { maxDispatchRetries: 3 } },
-        [route({ provider: "primary", priority: 0 }), route({ provider: "backup", priority: 1 })],
-      );
+      const app = harness({ reliability: { maxDispatchRetries: 3 } }, [
+        route({ provider: "primary", priority: 0 }),
+        route({ provider: "backup", priority: 1 }),
+      ]);
       const res = await app.post("/v1/chat/completions", { ...CHAT_BODY, stream: true });
 
       // The gateway committed at the headers: 200, streaming.

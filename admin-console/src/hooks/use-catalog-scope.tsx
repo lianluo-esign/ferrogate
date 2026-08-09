@@ -1,12 +1,5 @@
-import {
-  createContext,
-  useContext,
-  useEffect,
-  useMemo,
-  useState,
-  type ReactNode,
-} from "react";
 import { useAuth } from "@/hooks/use-auth";
+import { type ReactNode, createContext, useContext, useEffect, useMemo, useState } from "react";
 
 /**
  * Which model-catalog a scopable resource page currently addresses (#912).
@@ -58,11 +51,7 @@ export function CatalogScopeProvider({ children }: { children: ReactNode }) {
     [scope, canUsePlatform],
   );
 
-  return (
-    <CatalogScopeContext.Provider value={value}>
-      {children}
-    </CatalogScopeContext.Provider>
-  );
+  return <CatalogScopeContext.Provider value={value}>{children}</CatalogScopeContext.Provider>;
 }
 
 export function useCatalogScope(): CatalogScopeContextValue {

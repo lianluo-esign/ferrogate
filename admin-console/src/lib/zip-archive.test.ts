@@ -1,12 +1,12 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { describe, expect, it } from "vitest";
-import { hasZipMagic, readsAsZipArchive, ZIP_MAGIC } from "@/lib/zip-archive";
+import { ZIP_MAGIC, hasZipMagic, readsAsZipArchive } from "@/lib/zip-archive";
 import {
   E2E_PUBLISH_BUNDLE,
   E2E_REPUBLISH_BUNDLE,
   zipBundleBytes,
 } from "@/test/fixtures/zip-bundle";
+import { describe, expect, it } from "vitest";
 
 // The permanent guard for the #345 fixture break.
 //
@@ -30,15 +30,13 @@ describe("readsAsZipArchive", () => {
   }
 
   it("accepts the exact bundle e2e/static-sites.spec.ts publishes", async () => {
-    await expect(readsAsZipArchive(fileOf(E2E_PUBLISH_BUNDLE, "landing.zip"))).resolves.toBe(
-      true,
-    );
+    await expect(readsAsZipArchive(fileOf(E2E_PUBLISH_BUNDLE, "landing.zip"))).resolves.toBe(true);
   });
 
   it("accepts the exact bundle e2e/static-sites.spec.ts republishes", async () => {
-    await expect(
-      readsAsZipArchive(fileOf(E2E_REPUBLISH_BUNDLE, "marketing-v3.zip")),
-    ).resolves.toBe(true);
+    await expect(readsAsZipArchive(fileOf(E2E_REPUBLISH_BUNDLE, "marketing-v3.zip"))).resolves.toBe(
+      true,
+    );
   });
 
   // Non-vacuity: the buffers the specs used BEFORE the magic-byte gate landed
@@ -47,12 +45,10 @@ describe("readsAsZipArchive", () => {
   it("rejects the pre-gate fixtures the specs used to upload", async () => {
     const preGatePublish = new Uint8Array(4096).fill(1);
     const preGateRepublish = new Uint8Array(2048).fill(9);
-    await expect(readsAsZipArchive(fileOf(preGatePublish, "landing.zip"))).resolves.toBe(
+    await expect(readsAsZipArchive(fileOf(preGatePublish, "landing.zip"))).resolves.toBe(false);
+    await expect(readsAsZipArchive(fileOf(preGateRepublish, "marketing-v3.zip"))).resolves.toBe(
       false,
     );
-    await expect(
-      readsAsZipArchive(fileOf(preGateRepublish, "marketing-v3.zip")),
-    ).resolves.toBe(false);
   });
 
   it("rejects a file whose name claims .zip but whose bytes do not", async () => {
@@ -73,13 +69,8 @@ describe("readsAsZipArchive", () => {
 // original break again, and again invisible to `--list` and `typecheck:e2e`.
 describe("e2e/static-sites.spec.ts bundle fixtures", () => {
   it("uploads only the shared, guarded bundle constants", () => {
-    const spec = readFileSync(
-      resolve(process.cwd(), "e2e/static-sites.spec.ts"),
-      "utf8",
-    );
-    const buffers = [...spec.matchAll(/^\s*buffer: (.+),$/gm)].map(
-      (match) => match[1],
-    );
+    const spec = readFileSync(resolve(process.cwd(), "e2e/static-sites.spec.ts"), "utf8");
+    const buffers = [...spec.matchAll(/^\s*buffer: (.+),$/gm)].map((match) => match[1]);
     expect(buffers.length).toBeGreaterThan(0);
     for (const expression of buffers) {
       expect(expression).toMatch(/E2E_\w+_BUNDLE/);

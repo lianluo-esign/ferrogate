@@ -1,5 +1,3 @@
-import { Monitor, Moon, Sun } from "lucide-react";
-import { useTheme } from "next-themes";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -9,7 +7,10 @@ import {
   DropdownMenuRadioItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { useI18n, type TranslationKey } from "@/i18n";
+import { type TranslationKey, useI18n } from "@/i18n";
+import { Monitor, Moon, Sun } from "lucide-react";
+import { useTheme } from "next-themes";
+const nn = <T,>(v: T): NonNullable<T> => v as NonNullable<T>;
 
 const THEME_OPTIONS = [
   { value: "light", labelKey: "component.themeSwitcher.light", icon: Sun },
@@ -31,7 +32,7 @@ export function ThemeSwitcher() {
   const { t } = useI18n();
   const { theme, setTheme } = useTheme();
   const selectedTheme = isThemeName(theme) ? theme : "system";
-  const selectedOption = THEME_OPTIONS.find((option) => option.value === selectedTheme)!;
+  const selectedOption = nn(THEME_OPTIONS.find((option) => option.value === selectedTheme));
   const SelectedIcon = selectedOption.icon;
 
   return (

@@ -36,14 +36,14 @@ import {
   resolveEffectiveQuota,
 } from "@ferrogate/policy";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { resolveTenantStorage } from "../src/adapters.js";
+import type { ControlPlaneBindings } from "../src/ports.js";
 import {
   NO_PLAN_ID,
   PLANS_TABLE,
   QUOTA_POLICIES_TABLE,
   TENANTS_TABLE,
 } from "../src/store/quota_registry.js";
-import { resolveTenantStorage } from "../src/adapters.js";
-import type { ControlPlaneBindings } from "../src/ports.js";
 import { applySchema, db, resetD1 } from "./d1.js";
 import { BASE, arm, bearer, jsonRequest, operatorKey } from "./harness.js";
 
@@ -79,47 +79,47 @@ function jsonArray<T>(value: unknown): T[] {
 /** The gateway's `rowToStoredPolicy`, transcribed. */
 function rowToPolicy(row: Record<string, unknown>): StoredQuotaPolicy {
   return {
-    id: String(row["id"]),
-    scopeType: String(row["scope_type"]) as QuotaScopeKind,
-    scopeId: String(row["scope_id"]),
-    modelAllowlist: jsonArray<string>(row["model_allowlist_json"]),
-    rpmLimit: optionalNumber(row["rpm_limit"]),
-    tpmLimit: optionalNumber(row["tpm_limit"]),
-    monthlyBudgetUsd: optionalNumber(row["monthly_budget_usd"]),
-    assetStorageQuotaBytes: optionalNumber(row["asset_storage_quota_bytes"]),
-    assetMaxObjectBytes: optionalNumber(row["asset_max_object_bytes"]),
-    agentCostBudgetUsd: optionalNumber(row["agent_cost_budget_usd"]),
-    alertThresholdPcts: jsonArray<number>(row["alert_threshold_pcts_json"]),
-    enabled: Number(row["enabled"]) !== 0,
-    createdAtUnix: Number(row["created_at_unix"] ?? 0),
-    updatedAtUnix: Number(row["updated_at_unix"] ?? 0),
-    monthlyEgressBytesBudget: optionalNumber(row["monthly_egress_bytes_budget"]),
-    downloadRpmLimit: optionalNumber(row["download_rpm_limit"]),
+    id: String(row.id),
+    scopeType: String(row.scope_type) as QuotaScopeKind,
+    scopeId: String(row.scope_id),
+    modelAllowlist: jsonArray<string>(row.model_allowlist_json),
+    rpmLimit: optionalNumber(row.rpm_limit),
+    tpmLimit: optionalNumber(row.tpm_limit),
+    monthlyBudgetUsd: optionalNumber(row.monthly_budget_usd),
+    assetStorageQuotaBytes: optionalNumber(row.asset_storage_quota_bytes),
+    assetMaxObjectBytes: optionalNumber(row.asset_max_object_bytes),
+    agentCostBudgetUsd: optionalNumber(row.agent_cost_budget_usd),
+    alertThresholdPcts: jsonArray<number>(row.alert_threshold_pcts_json),
+    enabled: Number(row.enabled) !== 0,
+    createdAtUnix: Number(row.created_at_unix ?? 0),
+    updatedAtUnix: Number(row.updated_at_unix ?? 0),
+    monthlyEgressBytesBudget: optionalNumber(row.monthly_egress_bytes_budget),
+    downloadRpmLimit: optionalNumber(row.download_rpm_limit),
   };
 }
 
 /** The gateway's `rowToStoredPlan`, transcribed. */
 function rowToPlan(row: Record<string, unknown>): StoredPlan {
   return {
-    id: String(row["id"]),
-    name: String(row["name"] ?? ""),
-    slug: String(row["slug"] ?? ""),
-    mcpEnabled: Number(row["mcp_enabled"]) !== 0,
-    selfHostedWorkersEnabled: Number(row["self_hosted_workers_enabled"]) !== 0,
-    adminConsoleSeats: optionalNumber(row["admin_console_seats"]),
-    defaultModelAllowlist: jsonArray<string>(row["default_model_allowlist_json"]),
-    defaultRpmLimit: optionalNumber(row["default_rpm_limit"]),
-    defaultTpmLimit: optionalNumber(row["default_tpm_limit"]),
-    defaultMonthlyBudgetUsd: optionalNumber(row["default_monthly_budget_usd"]),
-    createdAtUnix: Number(row["created_at_unix"] ?? 0),
-    updatedAtUnix: Number(row["updated_at_unix"] ?? 0),
-    assetHostingEnabled: Number(row["asset_hosting_enabled"]) !== 0,
-    defaultAssetStorageQuotaBytes: optionalNumber(row["default_asset_storage_quota_bytes"]),
-    defaultAssetMaxObjectBytes: optionalNumber(row["default_asset_max_object_bytes"]),
-    defaultAgentCostBudgetUsd: optionalNumber(row["default_agent_cost_budget_usd"]),
-    defaultMonthlyEgressBytesBudget: optionalNumber(row["default_monthly_egress_bytes_budget"]),
-    defaultDownloadRpmLimit: optionalNumber(row["default_download_rpm_limit"]),
-    extensionToolsEnabled: Number(row["extension_tools_enabled"]) !== 0,
+    id: String(row.id),
+    name: String(row.name ?? ""),
+    slug: String(row.slug ?? ""),
+    mcpEnabled: Number(row.mcp_enabled) !== 0,
+    selfHostedWorkersEnabled: Number(row.self_hosted_workers_enabled) !== 0,
+    adminConsoleSeats: optionalNumber(row.admin_console_seats),
+    defaultModelAllowlist: jsonArray<string>(row.default_model_allowlist_json),
+    defaultRpmLimit: optionalNumber(row.default_rpm_limit),
+    defaultTpmLimit: optionalNumber(row.default_tpm_limit),
+    defaultMonthlyBudgetUsd: optionalNumber(row.default_monthly_budget_usd),
+    createdAtUnix: Number(row.created_at_unix ?? 0),
+    updatedAtUnix: Number(row.updated_at_unix ?? 0),
+    assetHostingEnabled: Number(row.asset_hosting_enabled) !== 0,
+    defaultAssetStorageQuotaBytes: optionalNumber(row.default_asset_storage_quota_bytes),
+    defaultAssetMaxObjectBytes: optionalNumber(row.default_asset_max_object_bytes),
+    defaultAgentCostBudgetUsd: optionalNumber(row.default_agent_cost_budget_usd),
+    defaultMonthlyEgressBytesBudget: optionalNumber(row.default_monthly_egress_bytes_budget),
+    defaultDownloadRpmLimit: optionalNumber(row.default_download_rpm_limit),
+    extensionToolsEnabled: Number(row.extension_tools_enabled) !== 0,
   };
 }
 
@@ -130,8 +130,7 @@ async function gatewayPolicyRow(
 ): Promise<Record<string, unknown> | null> {
   return await db()
     .prepare(
-      `SELECT ${GATEWAY_QUOTA_POLICY_COLUMNS} FROM ${QUOTA_POLICIES_TABLE} ` +
-        "WHERE (scope_type = ? AND scope_id = ?)",
+      `SELECT ${GATEWAY_QUOTA_POLICY_COLUMNS} FROM ${QUOTA_POLICIES_TABLE} WHERE (scope_type = ? AND scope_id = ?)`,
     )
     .bind(scopeType, scopeId)
     .first<Record<string, unknown>>();
@@ -194,16 +193,17 @@ beforeEach(async () => {
     .run();
   await db()
     .prepare(
-       `INSERT INTO tenant_databases
+      `INSERT INTO tenant_databases
          (tenant_id, storage_backend, provisioning_status, migration_state,
           location_hint, location_hint_source, location_hint_recorded_at_unix, jurisdiction)
        VALUES (?, 'durable_object', 'ready', 'done', ?, ?, ?, ?)`,
     )
     .bind("acme", "wnam", "test:registered tenant", 0, null)
     .run();
-  const tenantHandle = await resolveTenantStorage(
-    env as unknown as ControlPlaneBindings,
-  ).forTenant("acme", { locationHint: "wnam" });
+  const tenantHandle = await resolveTenantStorage(env as unknown as ControlPlaneBindings).forTenant(
+    "acme",
+    { locationHint: "wnam" },
+  );
   await tenantHandle.db.batch([
     tenantHandle.db.prepare("DELETE FROM tenant_resources"),
     tenantHandle.db
@@ -359,12 +359,12 @@ describe("MOUNT: a plan created through the admin API is the gateway's floor", (
     // A tenant account with no plan assignment must NOT join to a plan: the
     // document path reports `plan_id: null`, and an invented `'free'` (the
     // column default) would silently apply a floor the operator never chose.
-    expect((await tenantRow("acme"))?.["plan_id"]).toBe(NO_PLAN_ID);
+    expect((await tenantRow("acme"))?.plan_id).toBe(NO_PLAN_ID);
     expect(await gatewayPlanRow("acme")).toBeNull();
 
     const assigned = await send("PUT", "/admin/v1/tenant-accounts/acme/plan", { plan_id: "pro" });
     expect(assigned.status).toBe(200);
-    expect((await tenantRow("acme"))?.["plan_id"]).toBe("pro");
+    expect((await tenantRow("acme"))?.plan_id).toBe("pro");
 
     const planRow = await gatewayPlanRow("acme");
     expect(planRow).not.toBeNull();
@@ -490,14 +490,14 @@ describe("the enforced quota and the reported quota are the SAME quota", () => {
         { headers: bearer(KEY) },
       )
     ).json() as Promise<Record<string, unknown>>;
-    const reportedWithProject = (await wire)["effective_quota"] as Record<string, unknown>;
+    const reportedWithProject = (await wire).effective_quota as Record<string, unknown>;
 
-    expect(reportedWithProject["rpm_limit"]).toBe(enforced.rpmLimit);
-    expect(reportedWithProject["tpm_limit"]).toBe(enforced.tpmLimit);
-    expect(reportedWithProject["monthly_budget_usd"]).toBe(enforced.monthlyBudgetUsd);
-    expect(reportedWithProject["model_allowlist"]).toEqual(enforced.modelAllowlist);
+    expect(reportedWithProject.rpm_limit).toBe(enforced.rpmLimit);
+    expect(reportedWithProject.tpm_limit).toBe(enforced.tpmLimit);
+    expect(reportedWithProject.monthly_budget_usd).toBe(enforced.monthlyBudgetUsd);
+    expect(reportedWithProject.model_allowlist).toEqual(enforced.modelAllowlist);
     // The tenant-only view agrees too (the project leg is not folded in
     // unasked): 60 from the tenant policy, not 20 from the project's.
-    expect((reported["effective_quota"] as Record<string, unknown>)["rpm_limit"]).toBe(60);
+    expect((reported.effective_quota as Record<string, unknown>).rpm_limit).toBe(60);
   });
 });

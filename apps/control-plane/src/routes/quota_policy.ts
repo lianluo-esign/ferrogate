@@ -71,6 +71,11 @@
  *    a regulated tenant) — if that is ever true, this becomes the same defect
  *    and needs the same split.
  */
+
+import {
+  ControlDatabaseTenantRegistry,
+  tenantJurisdictionForResidencyRegions,
+} from "@ferrogate/storage";
 import { z } from "zod";
 import { HttpError } from "../middleware/errors.js";
 import {
@@ -79,7 +84,6 @@ import {
   StoreConflictError,
   type StoreRecord,
 } from "../ports.js";
-import { ControlDatabaseTenantRegistry, tenantJurisdictionForResidencyRegions } from "@ferrogate/storage";
 import { adminDeleted, adminItem } from "../responses.js";
 import { deleteQuotaPolicyRow, projectQuotaPolicy } from "../store/quota_registry.js";
 import {
@@ -265,8 +269,7 @@ async function assertResidencyJurisdiction(
     registration.status === "failed";
   const actual = registration.jurisdiction;
   const mismatch =
-    required !== undefined &&
-    (actual !== undefined ? required !== actual : materialized);
+    required !== undefined && (actual !== undefined ? required !== actual : materialized);
   if (!mismatch) return;
 
   const actualLabel = actual ?? "unrestricted";
@@ -274,9 +277,7 @@ async function assertResidencyJurisdiction(
   throw new HttpError(
     409,
     "tenant_jurisdiction_migration_required",
-    `tenant ${scopeId} already has a Durable Object addressed in jurisdiction ${actualLabel}, ` +
-      `but this residency policy requires ${requiredLabel}; changing the jurisdiction is ` +
-      "part of the object address and requires a data migration",
+    `tenant ${scopeId} already has a Durable Object addressed in jurisdiction ${actualLabel}, but this residency policy requires ${requiredLabel}; changing the jurisdiction is part of the object address and requires a data migration`,
   );
 }
 
@@ -401,12 +402,7 @@ export const quotaPolicyRoutes: GroupModule = crudGroup(
       const id = quotaPolicyId(parsedType.data, body.scope_id);
       await assertResidencyJurisdiction(c, parsedType.data, body.scope_id, body);
       try {
-        const tenantId = await quotaPolicyTenantId(
-          deps,
-          parsedType.data,
-          body.scope_id,
-          body,
-        );
+        const tenantId = await quotaPolicyTenantId(deps, parsedType.data, body.scope_id, body);
         const stored = await deps.store.create(QUOTA_POLICIES, scope, {
           ...body,
           id,

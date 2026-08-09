@@ -1,17 +1,16 @@
-import { render, screen, within } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
-import { HttpResponse, http } from "msw";
-import { MemoryRouter } from "react-router-dom";
-import { QueryClientProvider } from "@tanstack/react-query";
-import { beforeEach, describe, expect, it } from "vitest";
 import { AuthProvider } from "@/hooks/use-auth";
 import { I18nProvider } from "@/i18n";
 import SelfHostedRunsPage from "@/pages/self-hosted-runs";
 import { gatewayUrl, server } from "@/test/msw";
 import { createTestQueryClient, seedSession } from "@/test/test-utils";
+import { QueryClientProvider } from "@tanstack/react-query";
+import { render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { http, HttpResponse } from "msw";
+import { MemoryRouter } from "react-router-dom";
+import { beforeEach, describe, expect, it } from "vitest";
 
-const PARENT_FP =
-  "sha256:parentparentparentparentparentparentparentparentparentparent0000";
+const PARENT_FP = "sha256:parentparentparentparentparentparentparentparentparentparent0000";
 
 function timeline() {
   return {
@@ -78,16 +77,12 @@ beforeEach(() => {
 describe("SelfHostedRunsPage", () => {
   it("prompts for a run id before any lookup", () => {
     renderPage();
-    expect(
-      screen.getByText(/Enter a run id reported by a self-hosted worker/),
-    ).toBeInTheDocument();
+    expect(screen.getByText(/Enter a run id reported by a self-hosted worker/)).toBeInTheDocument();
   });
 
   it("surfaces the correlation triple and parent action fingerprint from event_json", async () => {
     server.use(
-      http.get(gatewayUrl("/admin/v1/self-hosted-runs/run-9"), () =>
-        HttpResponse.json(timeline()),
-      ),
+      http.get(gatewayUrl("/admin/v1/self-hosted-runs/run-9"), () => HttpResponse.json(timeline())),
     );
     const user = userEvent.setup();
     renderPage();

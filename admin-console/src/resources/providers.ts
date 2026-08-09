@@ -1,5 +1,5 @@
 import { adminGet } from "@/lib/gateway-client";
-import { booleanColumn, type ResourceConfig } from "@/lib/resource-config";
+import { type ResourceConfig, booleanColumn } from "@/lib/resource-config";
 
 /**
  * Provider list-row shape. The list projection matches the contract
@@ -41,7 +41,10 @@ export const providersConfig: ResourceConfig<AdminProvider> = {
     { key: "kind", headerKey: "resource.providers.col.kind" },
     { key: "compatibility", headerKey: "resource.providers.col.compatibility" },
     { key: "base_url", headerKey: "resource.providers.col.baseUrl" },
-    booleanColumn<AdminProvider>({ key: "has_api_key", headerKey: "resource.providers.col.hasApiKey" }),
+    booleanColumn<AdminProvider>({
+      key: "has_api_key",
+      headerKey: "resource.providers.col.hasApiKey",
+    }),
     booleanColumn<AdminProvider>({ key: "enabled", headerKey: "resource.providers.col.enabled" }),
   ],
   fields: [

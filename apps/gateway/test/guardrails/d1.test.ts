@@ -14,9 +14,10 @@
  * coverage; this file exists to hold the two implementations together.
  */
 import { env } from "cloudflare:test";
-import { failingControlNamespace } from "../support/control-namespace.js";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { failingControlNamespace } from "../support/control-namespace.js";
 
+import type { PolicyRevision } from "@ferrogate/guardrails";
 import {
   type CasResult,
   D1GuardrailPolicyStore,
@@ -26,7 +27,6 @@ import {
   guardrailDepsFromEnv,
   loadGuardrailPolicyStore,
 } from "../../src/guardrails/index.js";
-import type { PolicyRevision } from "@ferrogate/guardrails";
 import { FINGERPRINT_SECRET_REF, secretScanPolicy } from "./fixtures.js";
 
 const bindings = env as unknown as Record<string, unknown>;
@@ -146,7 +146,7 @@ for (const build of [inMemoryUnderTest, d1UnderTest]) {
       await store.put(revision("p", 1));
       const result = await store.activate("p", 7, 0, "alice");
       expect(result.ok).toBe(false);
-      expect((await store.binding("p"))).toBeUndefined();
+      expect(await store.binding("p")).toBeUndefined();
     });
 
     test("archive retires the active revision and remembers it", async () => {
@@ -201,7 +201,7 @@ for (const build of [inMemoryUnderTest, d1UnderTest]) {
       const broken = revision("p", 1);
       broken.on_error = [];
       await expect(store.put(broken)).rejects.toThrow(/on_error/);
-      expect((await store.binding("p"))).toBeUndefined();
+      expect(await store.binding("p")).toBeUndefined();
     });
   });
 }
@@ -277,7 +277,9 @@ describe("D1GuardrailPolicyStore — durability", () => {
     await durableStore().putRevision(revision("p", 1));
     await durableStore().activate("p", 1, 0, "alice");
     await controlDb()
-      .prepare("UPDATE guardrail_policy_bindings SET binding_json = '{not json' WHERE policy_id = ?")
+      .prepare(
+        "UPDATE guardrail_policy_bindings SET binding_json = '{not json' WHERE policy_id = ?",
+      )
       .bind("p")
       .run();
 
@@ -313,10 +315,12 @@ describe("loadGuardrailPolicyStore", () => {
     seed.activate("from_var", 1, 0, "worker_var");
 
     const projected = await loadGuardrailPolicyStore(durableStore(), seed);
-    expect(projected.listBindings().map((b) => b.policyId).sort()).toEqual([
-      "durable",
-      "from_var",
-    ]);
+    expect(
+      projected
+        .listBindings()
+        .map((b) => b.policyId)
+        .sort(),
+    ).toEqual(["durable", "from_var"]);
   });
 
   test("skips a binding whose revision text is not in the snapshot", async () => {
@@ -380,6 +384,8 @@ describe("guardrailDepsFromEnv reads the durable tables", () => {
         throw new Error("D1_ERROR: control database is unreachable");
       },
     };
-    await expect(guardrailDepsFromEnv({ CONTROL_DATA: failingControlNamespace() })).rejects.toThrow(/unreachable/);
+    await expect(guardrailDepsFromEnv({ CONTROL_DATA: failingControlNamespace() })).rejects.toThrow(
+      /unreachable/,
+    );
   });
 });

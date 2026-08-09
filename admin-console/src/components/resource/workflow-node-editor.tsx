@@ -1,4 +1,3 @@
-import { Plus, X } from "lucide-react";
 import { EntityReferencePicker } from "@/components/resource/entity-reference-picker";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -10,8 +9,9 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { type TranslationKey, useI18n } from "@/i18n";
 import type { EntityReferenceConfig, ResourceTranslator } from "@/lib/resource-config";
-import { useI18n, type TranslationKey } from "@/i18n";
+import { Plus, X } from "lucide-react";
 
 /**
  * Structured reference panel for an agent-workflow `nodes` array (#342).
@@ -83,10 +83,7 @@ function asStringArray(value: unknown): string[] {
  * incomplete reference is never silently written: every node needs a unique id,
  * a `model` node needs a model, and a `tool` node needs a tool.
  */
-export function serializeWorkflowNodes(
-  value: unknown,
-  t: ResourceTranslator,
-): WorkflowNode[] {
+export function serializeWorkflowNodes(value: unknown, t: ResourceTranslator): WorkflowNode[] {
   const nodes = asNodes(value);
   const seen = new Set<string>();
   const result: WorkflowNode[] = [];
@@ -175,15 +172,14 @@ export function WorkflowNodeEditor({ id, label, value, onChange }: WorkflowNodeE
   return (
     <div className="grid gap-3">
       {nodes.length === 0 ? (
-        <p className="text-xs text-muted-foreground">
-          {t("resource.workflowNodes.empty")}
-        </p>
+        <p className="text-xs text-muted-foreground">{t("resource.workflowNodes.empty")}</p>
       ) : (
         <ul className="grid gap-3">
           {nodes.map((node, index) => {
             const kind = String(node.kind ?? "model");
             return (
               <li
+                // biome-ignore lint/suspicious/noArrayIndexKey: nodes are positional, fully-controlled form entries with no stable unique id; index is the intended identity
                 key={index}
                 className="grid gap-2 rounded-md border p-3"
                 aria-label={t("resource.workflowNodes.nodeLabel", { index: index + 1 })}
@@ -310,9 +306,7 @@ export function WorkflowNodeEditor({ id, label, value, onChange }: WorkflowNodeE
                       type="number"
                       min={0}
                       value={node.token_budget != null ? String(node.token_budget) : ""}
-                      onChange={(event) =>
-                        updateNode(index, { token_budget: event.target.value })
-                      }
+                      onChange={(event) => updateNode(index, { token_budget: event.target.value })}
                     />
                   </div>
                 </div>

@@ -22,7 +22,6 @@
 import { SELF } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { applySchema, resetD1 } from "./d1.js";
-import { rawTenantDocument } from "./tenant-object.js";
 import { BASE, arm, bearer, jsonRequest, operatorKey, tenantKey } from "./harness.js";
 import {
   TENANT_A,
@@ -37,6 +36,7 @@ import {
   tenantDbB,
   workspaceIds,
 } from "./tenant-db.js";
+import { rawTenantDocument } from "./tenant-object.js";
 
 const OPERATOR = operatorKey.secret;
 const A_KEY = "key-tenant-a";
@@ -76,7 +76,9 @@ describe("per-tenant D1 projection", () => {
     expect(created.status).toBe(201);
 
     // The document is still the admin surface's record of truth...
-    expect(await rawTenantDocument(TENANT_A, "projects", "proj_a")).toMatchObject({ tenant_id: TENANT_A });
+    expect(await rawTenantDocument(TENANT_A, "projects", "proj_a")).toMatchObject({
+      tenant_id: TENANT_A,
+    });
     // ...and the typed row now exists, in tenant A's database ONLY. The second
     // assertion is what makes this a ROUTER test rather than a "some database
     // got written" test: a router that ignored its argument would satisfy the

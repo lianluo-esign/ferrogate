@@ -1,3 +1,4 @@
+import { RuleTester } from "eslint";
 // Regression coverage for the i18n lint gate (#380).
 //
 // Locks the behavior of `ferrogate/no-untranslated-literal`: it must flag new
@@ -5,7 +6,6 @@
 // migrated `t("...")` idiom and genuinely-technical literals alone. The rule
 // itself lives outside `src/` (eslint-rules/) so it is never bundled.
 import { afterAll, describe, it } from "vitest";
-import { RuleTester } from "eslint";
 import plugin from "../../eslint-rules/no-untranslated-literal.js";
 
 const rule = plugin.rules["no-untranslated-literal"];
@@ -41,9 +41,9 @@ ruleTester.run("no-untranslated-literal", rule, {
     { code: "const x = <span>{count}</span>;" },
     // No 2+ letter run -> identifiers, units, numbers are ignored.
     { code: "const x = <span>%</span>;" },
-    { code: "const x = <div id=\"main\" className=\"flex gap-2\" />;" },
+    { code: 'const x = <div id="main" className="flex gap-2" />;' },
     // Technical props are not checked.
-    { code: "const x = <a href=\"/agents\" data-testid=\"go\" />;" },
+    { code: 'const x = <a href="/agents" data-testid="go" />;' },
     // Technical elements: code/pre/kbd hold literals, not copy.
     { code: "const x = <code>SELECT * FROM t</code>;" },
     { code: "const x = <pre>const y = 1;</pre>;" },
@@ -61,15 +61,15 @@ ruleTester.run("no-untranslated-literal", rule, {
       errors: [{ messageId: "jsxText" }],
     },
     {
-      code: "const x = <input placeholder=\"Search agents\" />;",
+      code: 'const x = <input placeholder="Search agents" />;',
       errors: [{ messageId: "prop" }],
     },
     {
-      code: "const x = <img alt=\"Company logo\" />;",
+      code: 'const x = <img alt="Company logo" />;',
       errors: [{ messageId: "prop" }],
     },
     {
-      code: "const x = <div aria-label=\"Close dialog\" />;",
+      code: 'const x = <div aria-label="Close dialog" />;',
       errors: [{ messageId: "prop" }],
     },
     {

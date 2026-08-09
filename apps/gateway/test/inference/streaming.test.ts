@@ -184,10 +184,10 @@ describe("POST /v1/chat/completions (stream: true)", () => {
       await readBody(res);
 
       const body = provider.lastRequest().body as Record<string, unknown>;
-      expect(body["stream"]).toBe(true);
+      expect(body.stream).toBe(true);
       // Without `include_usage` OpenAI omits the terminal usage frame entirely
       // and metering falls back to an estimate.
-      expect(body["stream_options"]).toEqual({ include_usage: true });
+      expect(body.stream_options).toEqual({ include_usage: true });
     } finally {
       provider.restore();
     }
@@ -205,7 +205,7 @@ describe("POST /v1/chat/completions (stream: true)", () => {
       });
       await readBody(res);
 
-      expect((provider.lastRequest().body as Record<string, unknown>)["stream_options"]).toEqual({
+      expect((provider.lastRequest().body as Record<string, unknown>).stream_options).toEqual({
         include_usage: true,
       });
     } finally {
@@ -245,7 +245,11 @@ describe("POST /v1/chat/completions (stream: true)", () => {
       const text = await readBody(res);
 
       expect(text).toBe(whole);
-      expect(h.usage.last).toMatchObject({ promptTokens: 11, completionTokens: 4, totalTokens: 15 });
+      expect(h.usage.last).toMatchObject({
+        promptTokens: 11,
+        completionTokens: 4,
+        totalTokens: 15,
+      });
     } finally {
       provider.restore();
     }
@@ -284,9 +288,12 @@ describe("POST /v1/chat/completions (stream: true)", () => {
   it("falls back to the buffered path when the provider ignores stream:true", async () => {
     const provider = interceptProviderFetch(
       () =>
-        new Response(JSON.stringify({ id: "chatcmpl-x", choices: [], usage: { total_tokens: 9 } }), {
-          headers: { "content-type": "application/json" },
-        }),
+        new Response(
+          JSON.stringify({ id: "chatcmpl-x", choices: [], usage: { total_tokens: 9 } }),
+          {
+            headers: { "content-type": "application/json" },
+          },
+        ),
     );
     try {
       const h = harness();
@@ -302,7 +309,6 @@ describe("POST /v1/chat/completions (stream: true)", () => {
       provider.restore();
     }
   });
-
 });
 
 describe("cross-dialect stream normalization", () => {

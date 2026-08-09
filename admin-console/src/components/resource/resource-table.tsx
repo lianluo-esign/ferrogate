@@ -1,8 +1,5 @@
-import { useRef, type ReactNode } from "react";
-import { Link } from "react-router-dom";
-import { AsyncStatus } from "@/components/ui/async-status";
-import { MoreHorizontal } from "lucide-react";
 import { TruncatedCopyable } from "@/components/agent-ops/agent-ops-primitives";
+import { AsyncStatus } from "@/components/ui/async-status";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -21,10 +18,13 @@ import {
 import { useMediaQuery } from "@/hooks/use-media-query";
 import { useI18n } from "@/i18n";
 import {
-  resolveConfigText,
   type ColumnConfig,
   type ResourceTranslator,
+  resolveConfigText,
 } from "@/lib/resource-config";
+import { MoreHorizontal } from "lucide-react";
+import { type ReactNode, useRef } from "react";
+import { Link } from "react-router-dom";
 
 interface ResourceTableProps<T extends Record<string, unknown>> {
   columns: ColumnConfig<T>[];
@@ -56,7 +56,7 @@ function columnValue<T>(
   if (column.copyable) {
     return <TruncatedCopyable value={rawColumnValue(column, row)} label={header} />;
   }
-  const renderer = compact ? column.compactRender ?? column.render : column.render;
+  const renderer = compact ? (column.compactRender ?? column.render) : column.render;
   // Render callbacks receive the active translator so cell-derived copy
   // (boolean Yes/No, Enabled/Disabled, …) localizes with the table (#385).
   return renderer ? renderer(row, t) : rawColumnValue(column, row);
@@ -94,10 +94,15 @@ function RowActions<T extends Record<string, unknown>>({
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end">
         {onEdit ? (
-          <DropdownMenuItem onSelect={() => onEdit(row, triggerRef.current)}>{t("resource.action.edit")}</DropdownMenuItem>
+          <DropdownMenuItem onSelect={() => onEdit(row, triggerRef.current)}>
+            {t("resource.action.edit")}
+          </DropdownMenuItem>
         ) : null}
         {onDelete ? (
-          <DropdownMenuItem className="text-destructive" onSelect={() => onDelete(row, triggerRef.current)}>
+          <DropdownMenuItem
+            className="text-destructive"
+            onSelect={() => onDelete(row, triggerRef.current)}
+          >
             {t("resource.action.delete")}
           </DropdownMenuItem>
         ) : null}
@@ -165,16 +170,24 @@ export function ResourceTable<T extends Record<string, unknown>>({
             return column.priority === "primary" || columnIndex < 2;
           });
           const detailColumns = columns.filter(
-            (column) =>
-              column.mobileVisibility !== "hidden" && !summaryColumns.includes(column),
+            (column) => column.mobileVisibility !== "hidden" && !summaryColumns.includes(column),
           );
           const label = labelFor(row);
           return (
-            <article key={`${label}-${rowIndex}`} className="rounded-md border px-3 py-2">
+            <article
+              // biome-ignore lint/suspicious/noArrayIndexKey: generic table rows have no guaranteed stable unique id, so the label is paired with the row position to disambiguate duplicate labels
+              key={`${label}-${rowIndex}`}
+              className="rounded-md border px-3 py-2"
+            >
               <dl className="divide-y">
                 {summaryColumns.map((column, columnIndex) => (
-                  <div key={column.key} className="grid grid-cols-[minmax(6rem,0.8fr)_minmax(0,1.4fr)] gap-3 py-2">
-                    <dt className="text-xs font-medium text-muted-foreground">{headerFor(column)}</dt>
+                  <div
+                    key={column.key}
+                    className="grid grid-cols-[minmax(6rem,0.8fr)_minmax(0,1.4fr)] gap-3 py-2"
+                  >
+                    <dt className="text-xs font-medium text-muted-foreground">
+                      {headerFor(column)}
+                    </dt>
                     <dd className="min-w-0 break-words text-sm">
                       {columnIndex === 0
                         ? linkWrap(columnValue(column, row, true, headerFor(column), t), row)
@@ -190,9 +203,16 @@ export function ResourceTable<T extends Record<string, unknown>>({
                   </summary>
                   <dl className="divide-y border-t">
                     {detailColumns.map((column) => (
-                      <div key={column.key} className="grid grid-cols-[minmax(6rem,0.8fr)_minmax(0,1.4fr)] gap-3 py-2">
-                        <dt className="text-xs font-medium text-muted-foreground">{headerFor(column)}</dt>
-                        <dd className="min-w-0 break-words text-sm">{columnValue(column, row, true, headerFor(column), t)}</dd>
+                      <div
+                        key={column.key}
+                        className="grid grid-cols-[minmax(6rem,0.8fr)_minmax(0,1.4fr)] gap-3 py-2"
+                      >
+                        <dt className="text-xs font-medium text-muted-foreground">
+                          {headerFor(column)}
+                        </dt>
+                        <dd className="min-w-0 break-words text-sm">
+                          {columnValue(column, row, true, headerFor(column), t)}
+                        </dd>
                       </div>
                     ))}
                   </dl>
@@ -223,11 +243,18 @@ export function ResourceTable<T extends Record<string, unknown>>({
         <TableHeader>
           <TableRow>
             {columns.map((column) => (
-              <TableHead key={column.key} style={{ minWidth: column.minWidth, width: column.minWidth }}>
+              <TableHead
+                key={column.key}
+                style={{ minWidth: column.minWidth, width: column.minWidth }}
+              >
                 {headerFor(column)}
               </TableHead>
             ))}
-            {hasActions ? <TableHead className="w-14"><span className="sr-only">{t("resource.table.actionsColumn")}</span></TableHead> : null}
+            {hasActions ? (
+              <TableHead className="w-14">
+                <span className="sr-only">{t("resource.table.actionsColumn")}</span>
+              </TableHead>
+            ) : null}
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -239,13 +266,18 @@ export function ResourceTable<T extends Record<string, unknown>>({
             </TableRow>
           ) : rows.length === 0 ? (
             <TableRow>
-              <TableCell colSpan={colSpan} className="h-24 text-center">{resolvedEmptyLabel}</TableCell>
+              <TableCell colSpan={colSpan} className="h-24 text-center">
+                {resolvedEmptyLabel}
+              </TableCell>
             </TableRow>
           ) : (
             rows.map((row, rowIndex) => {
               const label = labelFor(row);
               return (
-                <TableRow key={`${label}-${rowIndex}`}>
+                <TableRow
+                  // biome-ignore lint/suspicious/noArrayIndexKey: generic table rows have no guaranteed stable unique id, so the label is paired with the row position to disambiguate duplicate labels
+                  key={`${label}-${rowIndex}`}
+                >
                   {columns.map((column, columnIndex) => (
                     <TableCell key={column.key} className="min-w-0 overflow-hidden">
                       {columnIndex === 0

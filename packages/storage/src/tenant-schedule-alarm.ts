@@ -51,9 +51,7 @@ export function tenantScheduleAlarmMessage(
 
 /** Serialize an alarm using the same validated shape used by queue bindings. */
 export function encodeTenantScheduleAlarm(message: TenantScheduleAlarmMessage): string {
-  return JSON.stringify(
-    tenantScheduleAlarmMessage(message.tenant_id, message.scheduled_at_unix),
-  );
+  return JSON.stringify(tenantScheduleAlarmMessage(message.tenant_id, message.scheduled_at_unix));
 }
 
 /** Parse and validate an untrusted queue body before addressing any object. */

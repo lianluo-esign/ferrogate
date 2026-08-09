@@ -1,17 +1,8 @@
-// Self-hosted worker detail (issue #320): the evidence surface for one
-// registered customer worker. Reads the storage-backed worker projection
-// (GET /admin/v1/self-hosted-workers/{id}) for identity + heartbeat +
-// checkpoint/artifact counts, and the reported telemetry stream
-// (GET /admin/v1/self-hosted-workers/{id}/events) for the per-event timeline.
-//
-// Rotate (POST .../rotate, #249 mTLS) issues a new durable identity
-// fingerprint that is shown ONCE, mirroring worker registration. Everything
-// here is customer-reported evidence (trust_level:
-// reported_by_self_hosted_worker), never managed-worker enforcement proof.
-import { useMemo, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, useParams } from "react-router-dom";
-import { toast } from "sonner";
+import {
+  TruncatedCopyable,
+  formatUnix,
+  tenantLabel,
+} from "@/components/agent-ops/agent-ops-primitives";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -35,20 +26,29 @@ import {
 } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
-  formatUnix,
-  tenantLabel,
-  TruncatedCopyable,
-} from "@/components/agent-ops/agent-ops-primitives";
-import {
   CredentialRevealDialog,
-  parseReportedCorrelation,
   ReportedTrustBadge,
+  parseReportedCorrelation,
   workerStatusVariant,
 } from "@/components/worker-ops/worker-ops-primitives";
 import { useAuth } from "@/hooks/use-auth";
-import { useI18n } from "@/i18n";
 import { useOperatorError } from "@/hooks/use-operator-error";
-import { adminGet, adminPost, type AdminSchema } from "@/lib/gateway-client";
+import { useI18n } from "@/i18n";
+import { type AdminSchema, adminGet, adminPost } from "@/lib/gateway-client";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+// Self-hosted worker detail (issue #320): the evidence surface for one
+// registered customer worker. Reads the storage-backed worker projection
+// (GET /admin/v1/self-hosted-workers/{id}) for identity + heartbeat +
+// checkpoint/artifact counts, and the reported telemetry stream
+// (GET /admin/v1/self-hosted-workers/{id}/events) for the per-event timeline.
+//
+// Rotate (POST .../rotate, #249 mTLS) issues a new durable identity
+// fingerprint that is shown ONCE, mirroring worker registration. Everything
+// here is customer-reported evidence (trust_level:
+// reported_by_self_hosted_worker), never managed-worker enforcement proof.
+import { useMemo, useState } from "react";
+import { Link, useParams } from "react-router-dom";
+import { toast } from "sonner";
 
 function OverviewField({
   label,
@@ -81,9 +81,7 @@ function CountCard({
   return (
     <Card>
       <CardHeader className="pb-2">
-        <CardTitle className="text-sm font-medium text-muted-foreground">
-          {title}
-        </CardTitle>
+        <CardTitle className="text-sm font-medium text-muted-foreground">{title}</CardTitle>
       </CardHeader>
       <CardContent>
         <div className="text-2xl font-semibold" data-testid={testId}>
@@ -102,7 +100,7 @@ export default function SelfHostedWorkerDetailPage() {
   const { session } = useAuth();
   const { t } = useI18n();
   const { toastError } = useOperatorError();
-  const apiKey = session!.gatewayApiKey;
+  const apiKey = (session as NonNullable<typeof session>).gatewayApiKey;
   const queryClient = useQueryClient();
 
   const [rotateOpen, setRotateOpen] = useState(false);
@@ -183,24 +181,23 @@ export default function SelfHostedWorkerDetailPage() {
       </div>
 
       {workerError ? (
-        <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <p
+          role="alert"
+          className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+        >
           {t("page.selfHostedWorkerDetail.error", { message: workerError.message })}
         </p>
       ) : null}
 
       {workerLoading ? (
-        <p className="text-sm text-muted-foreground">
-          {t("page.selfHostedWorkerDetail.loading")}
-        </p>
+        <p className="text-sm text-muted-foreground">{t("page.selfHostedWorkerDetail.loading")}</p>
       ) : worker ? (
         <>
           <div className="flex items-start justify-between gap-4">
             <div>
               <h1 className="text-lg font-semibold">{worker.worker_name}</h1>
               <div className="mt-1 flex items-center gap-2">
-                <Badge variant={workerStatusVariant(worker.status)}>
-                  {worker.status}
-                </Badge>
+                <Badge variant={workerStatusVariant(worker.status)}>{worker.status}</Badge>
                 {worker.stale ? (
                   <Badge variant="outline" className="text-destructive">
                     {t("page.selfHostedWorkerDetail.badge.stale")}
@@ -262,20 +259,14 @@ export default function SelfHostedWorkerDetailPage() {
                       prefixLength={28}
                     />
                   </OverviewField>
-                  <OverviewField label={t("common.workspace")}>
-                    {worker.workspace_id}
-                  </OverviewField>
+                  <OverviewField label={t("common.workspace")}>{worker.workspace_id}</OverviewField>
                   <OverviewField label={t("common.tenant")}>
                     {tenantLabel(worker.tenant)}
                   </OverviewField>
                   <OverviewField label={t("page.selfHostedWorkerDetail.field.orchestration")}>
-                    {worker.orchestration_enabled
-                      ? t("common.enabled")
-                      : t("common.disabled")}
+                    {worker.orchestration_enabled ? t("common.enabled") : t("common.disabled")}
                   </OverviewField>
-                  <OverviewField
-                    label={t("page.selfHostedWorkerDetail.field.identityFingerprint")}
-                  >
+                  <OverviewField label={t("page.selfHostedWorkerDetail.field.identityFingerprint")}>
                     <TruncatedCopyable
                       value={worker.identity_fingerprint}
                       label={t("page.selfHostedWorkerDetail.field.identityFingerprint")}
@@ -433,7 +424,10 @@ export default function SelfHostedWorkerDetailPage() {
               />
             </div>
             {rotateError ? (
-              <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+              <p
+                role="alert"
+                className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+              >
                 {rotateError}
               </p>
             ) : null}
@@ -442,11 +436,7 @@ export default function SelfHostedWorkerDetailPage() {
             <Button type="button" variant="outline" onClick={() => setRotateOpen(false)}>
               {t("resource.action.cancel")}
             </Button>
-            <Button
-              type="button"
-              disabled={rotateMutation.isPending}
-              onClick={submitRotate}
-            >
+            <Button type="button" disabled={rotateMutation.isPending} onClick={submitRotate}>
               {rotateMutation.isPending
                 ? t("page.selfHostedWorkerDetail.rotateDialog.submitting")
                 : t("page.selfHostedWorkerDetail.rotateDialog.submit")}

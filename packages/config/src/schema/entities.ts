@@ -5,9 +5,11 @@
  * `config/types.rs` (inventory §5.3). `#[serde(deny_unknown_fields)]` structs
  * are `.strict()`.
  */
+
+import { DEFAULT_APPROVAL_POLICY, approvalPolicySchema } from "@ferrogate/core";
 import { z } from "zod";
-import { approvalPolicySchema, DEFAULT_APPROVAL_POLICY } from "@ferrogate/core";
 import {
+  ALL_CONTENT_SOURCES,
   agentUpstreamCapabilitySchema,
   agentUpstreamProtocolSchema,
   agentWorkflowNodeKindSchema,
@@ -26,7 +28,6 @@ import {
   providerCloudflareAiGatewayModeSchema,
   routingStrategySchema,
   skillPackageCapabilityKindSchema,
-  ALL_CONTENT_SOURCES,
 } from "./enums.js";
 import { sectionDefault } from "./util.js";
 
@@ -41,7 +42,9 @@ export const providerCloudflareAiGatewayConfigSchema = z.object({
   mode: providerCloudflareAiGatewayModeSchema,
   provider_slug: optString,
 });
-export type ProviderCloudflareAiGatewayConfig = z.infer<typeof providerCloudflareAiGatewayConfigSchema>;
+export type ProviderCloudflareAiGatewayConfig = z.infer<
+  typeof providerCloudflareAiGatewayConfigSchema
+>;
 
 export const providerSchema = z.object({
   name: z.string(),
@@ -253,8 +256,14 @@ export const guardrailProviderRuntimeConfigSchema = z.object({
   provider_circuit_failure_threshold: z.number().int().default(3),
   provider_circuit_cooldown_ms: z.number().int().default(30000),
   provider_max_retries: z.number().int().default(0),
-  provider_max_payload_bytes: z.number().int().default(1024 * 1024),
-  provider_max_response_bytes: z.number().int().default(256 * 1024),
+  provider_max_payload_bytes: z
+    .number()
+    .int()
+    .default(1024 * 1024),
+  provider_max_response_bytes: z
+    .number()
+    .int()
+    .default(256 * 1024),
   provider_allow_private_network: z.boolean().default(false),
   provider_secret_ref: optString,
 });

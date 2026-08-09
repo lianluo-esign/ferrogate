@@ -35,7 +35,6 @@
  * here seeds a score row.
  */
 import { createExecutionContext, env as poolEnv, waitOnExecutionContext } from "cloudflare:test";
-import { controlNamespace } from "../support/control-namespace.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { shadowEvalLegFor } from "../../src/evals/index.js";
 import { GATEWAY_MIDDLEWARE, gatewayQueue } from "../../src/index.js";
@@ -48,6 +47,7 @@ import {
   interceptProviderFetch,
   providerJson,
 } from "../inference/provider-mock.js";
+import { controlNamespace } from "../support/control-namespace.js";
 import { applyControlMigrations } from "./harness.js";
 
 const BASE = "https://gw.test";
@@ -261,7 +261,7 @@ function gatewayEnv(
     GATEWAY_NATIVE_API_KEYS: JSON.stringify(KEYS),
     GATEWAY_ONLINE_EVAL_POLICIES: JSON.stringify([OPT_IN]),
     ONLINE_EVAL: queue,
-    AI: (poolEnv as unknown as Record<string, unknown>)["AI"],
+    AI: (poolEnv as unknown as Record<string, unknown>).AI,
     ...extra,
   };
 }
@@ -297,8 +297,8 @@ describe("a control+shadow split scores BOTH arms under one instrument", () => {
 
     // Exactly two samples from that ONE request: the served arm and the mirror.
     expect(recorder.bodies).toHaveLength(2);
-    const control = recorder.bodies.find((body) => body["experiment_arm"] === "control");
-    const shadow = recorder.bodies.find((body) => body["experiment_arm"] === "shadow");
+    const control = recorder.bodies.find((body) => body.experiment_arm === "control");
+    const shadow = recorder.bodies.find((body) => body.experiment_arm === "shadow");
     expect(control, "no control-arm sample").toBeDefined();
     expect(shadow, "no shadow-arm sample — the shadow arm carries no eval score").toBeDefined();
     if (control === undefined || shadow === undefined) return;
@@ -306,25 +306,25 @@ describe("a control+shadow split scores BOTH arms under one instrument", () => {
     // The shadow sample is a sample OF THE MIRROR: its provider, its model, its
     // answer. A sample carrying the primary's completion under the shadow label
     // would be worse than no shadow score at all.
-    expect(shadow["provider"]).toBe("mirror-provider");
-    expect(shadow["provider_model"]).toBe("mirror-physical");
-    expect(shadow["completion"]).toBe(MIRROR_ANSWER);
-    expect(control["completion"]).toBe(PRIMARY_ANSWER);
+    expect(shadow.provider).toBe("mirror-provider");
+    expect(shadow.provider_model).toBe("mirror-physical");
+    expect(shadow.completion).toBe(MIRROR_ANSWER);
+    expect(control.completion).toBe(PRIMARY_ANSWER);
 
     // Filed under the LEG id — derived from the id the client was told, so the
     // shadow score joins `experiment_shadow_legs` and cannot collide with the
     // served arm's score for the same request.
-    expect(shadow["request_id"]).toBe(`${String(control["request_id"])}~shadow`);
+    expect(shadow.request_id).toBe(`${String(control.request_id)}~shadow`);
 
     // THE COMPARABILITY PRECONDITION, on the wire. Same judge, same criteria,
     // same prompt, same experiment — one instrument, two populations.
-    expect(shadow["judge_model"]).toBe(control["judge_model"]);
-    expect(shadow["criteria"]).toEqual(control["criteria"]);
-    expect(shadow["prompt"]).toBe(control["prompt"]);
-    expect(shadow["experiment_id"]).toBe(control["experiment_id"]);
-    expect(shadow["sampling_key"]).toBe(control["sampling_key"]);
-    expect(shadow["sample_rate"]).toBe(control["sample_rate"]);
-    expect(shadow["tenant_id"]).toBe("tenant_optin");
+    expect(shadow.judge_model).toBe(control.judge_model);
+    expect(shadow.criteria).toEqual(control.criteria);
+    expect(shadow.prompt).toBe(control.prompt);
+    expect(shadow.experiment_id).toBe(control.experiment_id);
+    expect(shadow.sampling_key).toBe(control.sampling_key);
+    expect(shadow.sample_rate).toBe(control.sample_rate);
+    expect(shadow.tenant_id).toBe("tenant_optin");
 
     // Now the DEPLOYED consumer, on the bytes the DEPLOYED producer emitted.
     provider.restore();
@@ -351,23 +351,23 @@ describe("a control+shadow split scores BOTH arms under one instrument", () => {
 
     const rows = await storedScores();
     expect(rows).toHaveLength(2);
-    const arms = rows.map((row) => row["experiment_arm"]).sort();
+    const arms = rows.map((row) => row.experiment_arm).sort();
     // THE ASSERTION THIS FILE EXISTS FOR. Without a `shadow` row here the
     // comparator has one population and can only answer `variant_arm_not_scored`.
     expect(arms).toEqual(["control", "shadow"]);
 
     // And both rows are the same instrument, so `compareExperimentQuality` has a
     // pair to subtract rather than two incomparable cells.
-    expect(new Set(rows.map((row) => row["judge_model"]))).toEqual(new Set(["judge-model"]));
-    expect(new Set(rows.map((row) => row["criterion_id"]))).toEqual(new Set(["grounded"]));
-    expect(new Set(rows.map((row) => row["experiment_id"]))).toHaveProperty("size", 1);
+    expect(new Set(rows.map((row) => row.judge_model))).toEqual(new Set(["judge-model"]));
+    expect(new Set(rows.map((row) => row.criterion_id))).toEqual(new Set(["grounded"]));
+    expect(new Set(rows.map((row) => row.experiment_id))).toHaveProperty("size", 1);
 
     // The judge really was shown the mirror's answer: it scores anything
     // containing the mirror's phrasing higher, so a shadow row that had been
     // built from the primary's completion would carry 0.4 here.
-    const shadowRow = rows.find((row) => row["experiment_arm"] === "shadow");
-    expect(shadowRow?.["score"]).toBeCloseTo(0.9, 6);
-    expect(rows.find((row) => row["experiment_arm"] === "control")?.["score"]).toBeCloseTo(0.4, 6);
+    const shadowRow = rows.find((row) => row.experiment_arm === "shadow");
+    expect(shadowRow?.score).toBeCloseTo(0.9, 6);
+    expect(rows.find((row) => row.experiment_arm === "control")?.score).toBeCloseTo(0.4, 6);
   });
 });
 
@@ -398,8 +398,8 @@ describe("#681 governs the eval leg, not just the mirror", () => {
     // switched the whole feature off for a governed tenant would be a different
     // and worse bug than the one it prevents.
     expect(recorder.bodies).toHaveLength(1);
-    expect(recorder.bodies[0]?.["experiment_arm"]).toBe("control");
-    expect(recorder.bodies.some((body) => body["experiment_arm"] === "shadow")).toBe(false);
+    expect(recorder.bodies[0]?.experiment_arm).toBe("control");
+    expect(recorder.bodies.some((body) => body.experiment_arm === "shadow")).toBe(false);
   });
 
   it("never copies a ZERO-DATA-RETENTION tenant's exchange to a judge, on either arm", async () => {
@@ -479,7 +479,7 @@ describe("the shadow arm is held to the SAME evaluability rule as the served arm
 
     // But no quality row is fabricated from a degraded provider's answer.
     expect(recorder.bodies).toHaveLength(1);
-    expect(recorder.bodies[0]?.["experiment_arm"]).toBe("control");
+    expect(recorder.bodies[0]?.experiment_arm).toBe("control");
 
     // AND the leg still SETTLED. This is the half that has no visible symptom:
     // the sampler awaits `leg.body` from inside `ctx.waitUntil`, so a path that

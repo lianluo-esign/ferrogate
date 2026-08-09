@@ -1,3 +1,9 @@
+import { AuthProvider } from "@/hooks/use-auth";
+import { I18nProvider } from "@/i18n";
+import AgentJobsPage from "@/pages/agent-jobs";
+import { gatewayUrl, server } from "@/test/msw";
+import { createTestQueryClient, seedSession } from "@/test/test-utils";
+import { QueryClientProvider } from "@tanstack/react-query";
 // Console coverage for the #474 async agent-job protocol page: submit ->
 // durable run id -> observe -> collect. The two properties worth locking in are
 // the ones the protocol is judged on and the ones a UI can silently lose: a
@@ -5,15 +11,9 @@
 // result is only collected once the runtime settled the run.
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { HttpResponse, http } from "msw";
+import { http, HttpResponse } from "msw";
 import { MemoryRouter } from "react-router-dom";
-import { QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, describe, expect, it } from "vitest";
-import { AuthProvider } from "@/hooks/use-auth";
-import { I18nProvider } from "@/i18n";
-import AgentJobsPage from "@/pages/agent-jobs";
-import { gatewayUrl, server } from "@/test/msw";
-import { createTestQueryClient, seedSession } from "@/test/test-utils";
 
 const RUN_ID = "job-0123456789abcdef0123456789abcdef";
 
@@ -113,9 +113,7 @@ describe("AgentJobsPage", () => {
         ),
       ),
       http.get(gatewayUrl(`/v1/agent-jobs/${RUN_ID}`), () => HttpResponse.json(jobStatus())),
-      http.get(gatewayUrl(`/v1/agent-jobs/${RUN_ID}/events`), () =>
-        HttpResponse.json(eventPage()),
-      ),
+      http.get(gatewayUrl(`/v1/agent-jobs/${RUN_ID}/events`), () => HttpResponse.json(eventPage())),
     );
     const user = userEvent.setup();
     renderPage();
@@ -146,9 +144,7 @@ describe("AgentJobsPage", () => {
           }),
         ),
       ),
-      http.get(gatewayUrl(`/v1/agent-jobs/${RUN_ID}/events`), () =>
-        HttpResponse.json(eventPage()),
-      ),
+      http.get(gatewayUrl(`/v1/agent-jobs/${RUN_ID}/events`), () => HttpResponse.json(eventPage())),
       http.get(gatewayUrl(`/v1/agent-jobs/${RUN_ID}/result`), () =>
         HttpResponse.json({
           object: "agent_job_result",
@@ -173,9 +169,7 @@ describe("AgentJobsPage", () => {
     await user.click(screen.getByRole("button", { name: "Track" }));
 
     expect(await screen.findByText(`Job ${RUN_ID}`)).toBeInTheDocument();
-    expect(
-      await screen.findByText("opened https://example.test/pr/4711"),
-    ).toBeInTheDocument();
+    expect(await screen.findByText("opened https://example.test/pr/4711")).toBeInTheDocument();
     // A terminal job cannot be cancelled again.
     expect(screen.getByRole("button", { name: "Cancel job" })).toBeDisabled();
   });
@@ -184,13 +178,17 @@ describe("AgentJobsPage", () => {
     server.use(
       http.get(gatewayUrl("/v1/agent-jobs/job-missing"), () =>
         HttpResponse.json(
-          { error: { code: "agent_job_not_found", message: "agent job job-missing was not found" } },
+          {
+            error: { code: "agent_job_not_found", message: "agent job job-missing was not found" },
+          },
           { status: 404 },
         ),
       ),
       http.get(gatewayUrl("/v1/agent-jobs/job-missing/events"), () =>
         HttpResponse.json(
-          { error: { code: "agent_job_not_found", message: "agent job job-missing was not found" } },
+          {
+            error: { code: "agent_job_not_found", message: "agent job job-missing was not found" },
+          },
           { status: 404 },
         ),
       ),
@@ -201,8 +199,6 @@ describe("AgentJobsPage", () => {
     await user.type(screen.getByLabelText("Job (run) id"), "job-missing");
     await user.click(screen.getByRole("button", { name: "Track" }));
 
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      /Could not read job job-missing/,
-    );
+    expect(await screen.findByRole("alert")).toHaveTextContent(/Could not read job job-missing/);
   });
 });

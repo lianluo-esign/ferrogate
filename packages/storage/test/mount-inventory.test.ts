@@ -173,11 +173,7 @@ const MOUNTED: [symbol: string, app: string][] = [
 ];
 
 /** Exports the `src/index.ts` header claims are DEAD: no app names them at all. */
-const DEAD = [
-  "D1BillingEventLedger",
-  "TenantMonotonicUpserts",
-  "ControlMonotonicUpserts",
-];
+const DEAD = ["D1BillingEventLedger", "TenantMonotonicUpserts", "ControlMonotonicUpserts"];
 
 describe("mount inventory (src/index.ts §1.7 marker)", () => {
   test("the app scan is not empty (a vacuous scan would pass everything)", () => {

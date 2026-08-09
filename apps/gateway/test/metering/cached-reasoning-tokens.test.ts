@@ -50,26 +50,21 @@
  * an invoice, so a test that recomputed the expectation the way the code does
  * would confirm nothing at all.
  */
-import {
-  PriceBook,
-  charge,
-  priceEntry,
-  type ModelPrice,
-} from "@ferrogate/billing";
+import { type ModelPrice, PriceBook, charge, priceEntry } from "@ferrogate/billing";
 import { describe, expect, it } from "vitest";
 
 import type { Usage } from "../../src/inference/ports.js";
 import {
+  type ProviderUsage,
   extractLastStreamUsage,
   sseUsageTap,
   usageFromResponseBody,
-  type ProviderUsage,
 } from "../../src/inference/usage.js";
 import { billingEventFromUsage } from "../../src/metering/event.js";
 import { routePriceSettledCostUsd } from "../../src/metering/route-price.js";
 import {
-  extractLastStreamUsage as extractLastStreamUsageFrames,
   type NormalizedUsage,
+  extractLastStreamUsage as extractLastStreamUsageFrames,
 } from "../../src/streaming/usage.js";
 
 // ---------------------------------------------------------------------------
@@ -253,9 +248,7 @@ describe("streaming capture", () => {
         controller.close();
       },
     });
-    const out = new Uint8Array(
-      await new Response(source.pipeThrough(tap)).arrayBuffer(),
-    );
+    const out = new Uint8Array(await new Response(source.pipeThrough(tap)).arrayBuffer());
 
     expect(new TextDecoder().decode(out)).toBe(ANTHROPIC_STREAM);
     expect(observed?.cachedInputTokens).toBe(20_000);
@@ -390,10 +383,7 @@ describe("golden settled costs", () => {
       "claude-sonnet-4",
       usageFromResponseBody("anthropic", ANTHROPIC_BODY),
     );
-    expect(settle("anthropic", "claude-sonnet-4", CLAUDE_SONNET_4, usage)).toBeCloseTo(
-      0.03525,
-      12,
-    );
+    expect(settle("anthropic", "claude-sonnet-4", CLAUDE_SONNET_4, usage)).toBeCloseTo(0.03525, 12);
     // The pre-#667 answer, for contrast: only `input_tokens` was seen, so
     // 1 000/1e6*3 + 500/1e6*15 = 0.0105 — a 3.4x under-bill.
     expect(settle("anthropic", "claude-sonnet-4", CLAUDE_SONNET_4, usage)).not.toBeCloseTo(

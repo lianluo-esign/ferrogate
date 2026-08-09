@@ -1,15 +1,9 @@
 import { describe, expect, test } from "vitest";
 import {
-  authorizeX402Payment,
-  canonicalUrl,
-  convert,
-  disabledX402SpendPolicy,
-  emptySpendSnapshot,
-  hexLower,
-  isValidSolanaAddress,
-  PaymentIntent,
   POLICY_NETWORK_DEVNET,
   POLICY_NETWORK_MAINNET,
+  type PaymentAuthorizationRequest,
+  PaymentIntent,
   REASON_ALLOWED,
   REASON_AMOUNT_BELOW_MIN,
   REASON_APPROVAL_REQUIRED,
@@ -26,17 +20,24 @@ import {
   REASON_RECIPIENT_NOT_ALLOWED,
   REASON_RESOURCE_MISMATCH,
   REASON_RESOURCE_NOT_ALLOWED,
-  resourceRuleMatches,
-  sha256,
-  U64_MAX,
-  validateX402SpendPolicy,
-  type PaymentAuthorizationRequest,
   type SelectedPayment,
   type SolanaNetwork,
   type SpendSnapshot,
+  U64_MAX,
   type ValidatedX402SpendPolicy,
   type X402SpendPolicy,
+  authorizeX402Payment,
+  canonicalUrl,
+  convert,
+  disabledX402SpendPolicy,
+  emptySpendSnapshot,
+  hexLower,
+  isValidSolanaAddress,
+  resourceRuleMatches,
+  sha256,
+  validateX402SpendPolicy,
 } from "../src/index.js";
+const nn = <T>(v: T): NonNullable<T> => v as NonNullable<T>;
 
 const USDC_DEVNET = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
 const USDC_MAINNET = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
@@ -156,11 +157,17 @@ describe("base58 address validation", () => {
 
 describe("ConversionRule.convert", () => {
   test("rounding up and down", () => {
-    expect(convert({ numerator: 1n, denominator: 1_000n, rounding: "up", version: "v" }, 100_001n)).toBe(101n);
-    expect(convert({ numerator: 1n, denominator: 1_000n, rounding: "down", version: "v" }, 100_999n)).toBe(100n);
+    expect(
+      convert({ numerator: 1n, denominator: 1_000n, rounding: "up", version: "v" }, 100_001n),
+    ).toBe(101n);
+    expect(
+      convert({ numerator: 1n, denominator: 1_000n, rounding: "down", version: "v" }, 100_999n),
+    ).toBe(100n);
   });
   test("overflow yields undefined, never a coerced zero", () => {
-    expect(convert({ numerator: 1_000n, denominator: 1n, rounding: "up", version: "v" }, U64_MAX)).toBeUndefined();
+    expect(
+      convert({ numerator: 1_000n, denominator: 1n, rounding: "up", version: "v" }, U64_MAX),
+    ).toBeUndefined();
   });
   test("is monotone non-decreasing in the atomic amount", () => {
     const rule = { numerator: 3n, denominator: 7n, rounding: "up" as const, version: "p" };
@@ -170,14 +177,19 @@ describe("ConversionRule.convert", () => {
       [500n, 500n],
     ];
     for (const [a, b] of pairs) {
-      expect(convert(rule, a)! <= convert(rule, b)!).toBe(true);
+      expect(nn(convert(rule, a)) <= nn(convert(rule, b))).toBe(true);
     }
   });
 });
 
 describe("authorizeX402Payment — decision paths", () => {
   test("allows a payment within every cap and populates evidence", () => {
-    const auth = decide(validated(basePolicy()), devnetPayment(100_000n), RESOURCE_URL, emptySpendSnapshot());
+    const auth = decide(
+      validated(basePolicy()),
+      devnetPayment(100_000n),
+      RESOURCE_URL,
+      emptySpendSnapshot(),
+    );
     expect(auth.decision().kind).toBe("allow");
     expect(auth.reasonCode()).toBe(REASON_ALLOWED);
     expect(auth.policyRevision()).toBe(7n);
@@ -187,7 +199,12 @@ describe("authorizeX402Payment — decision paths", () => {
   });
 
   test("disabled policy denies every payment", () => {
-    const auth = decide(validated(disabledX402SpendPolicy()), devnetPayment(100_000n), RESOURCE_URL, emptySpendSnapshot());
+    const auth = decide(
+      validated(disabledX402SpendPolicy()),
+      devnetPayment(100_000n),
+      RESOURCE_URL,
+      emptySpendSnapshot(),
+    );
     expect(auth.decision().kind).toBe("deny");
     expect(auth.reasonCode()).toBe(REASON_DISABLED);
   });
@@ -195,21 +212,38 @@ describe("authorizeX402Payment — decision paths", () => {
   test("denies a non-allowlisted network / mint / recipient", () => {
     const p = validated(basePolicy());
     expect(
-      decide(p, selected("mainnet", USDC_MAINNET, 100_000n, RECIPIENT_A, RESOURCE_URL), RESOURCE_URL, emptySpendSnapshot())
-        .reasonCode(),
+      decide(
+        p,
+        selected("mainnet", USDC_MAINNET, 100_000n, RECIPIENT_A, RESOURCE_URL),
+        RESOURCE_URL,
+        emptySpendSnapshot(),
+      ).reasonCode(),
     ).toBe(REASON_NETWORK_NOT_ALLOWED);
     expect(
-      decide(p, selected("devnet", FEE_PAYER, 100_000n, RECIPIENT_A, RESOURCE_URL), RESOURCE_URL, emptySpendSnapshot())
-        .reasonCode(),
+      decide(
+        p,
+        selected("devnet", FEE_PAYER, 100_000n, RECIPIENT_A, RESOURCE_URL),
+        RESOURCE_URL,
+        emptySpendSnapshot(),
+      ).reasonCode(),
     ).toBe(REASON_MINT_NOT_ALLOWED);
     expect(
-      decide(p, selected("devnet", USDC_DEVNET, 100_000n, RECIPIENT_B, RESOURCE_URL), RESOURCE_URL, emptySpendSnapshot())
-        .reasonCode(),
+      decide(
+        p,
+        selected("devnet", USDC_DEVNET, 100_000n, RECIPIENT_B, RESOURCE_URL),
+        RESOURCE_URL,
+        emptySpendSnapshot(),
+      ).reasonCode(),
     ).toBe(REASON_RECIPIENT_NOT_ALLOWED);
   });
 
   test("denies a challenge that redirects to a different resource", () => {
-    const auth = decide(validated(basePolicy()), devnetPayment(100_000n), "https://evil.example.net/paid/report", emptySpendSnapshot());
+    const auth = decide(
+      validated(basePolicy()),
+      devnetPayment(100_000n),
+      "https://evil.example.net/paid/report",
+      emptySpendSnapshot(),
+    );
     expect(auth.reasonCode()).toBe(REASON_RESOURCE_MISMATCH);
   });
 
@@ -222,17 +256,30 @@ describe("authorizeX402Payment — decision paths", () => {
   });
 
   test("binding ignores query and trailing slash but not path", () => {
-    const payment = selected("devnet", USDC_DEVNET, 100_000n, RECIPIENT_A, "https://api.example.com/paid/report/?ref=1");
-    const auth = decide(validated(basePolicy()), payment, "https://api.example.com/paid/report#frag", emptySpendSnapshot());
+    const payment = selected(
+      "devnet",
+      USDC_DEVNET,
+      100_000n,
+      RECIPIENT_A,
+      "https://api.example.com/paid/report/?ref=1",
+    );
+    const auth = decide(
+      validated(basePolicy()),
+      payment,
+      "https://api.example.com/paid/report#frag",
+      emptySpendSnapshot(),
+    );
     expect(auth.decision().kind).toBe("allow");
   });
 
   test("atomic bounds: below min and over the hard cap", () => {
     const p = validated(basePolicy());
-    expect(decide(p, devnetPayment(5n), RESOURCE_URL, emptySpendSnapshot()).reasonCode()).toBe(REASON_AMOUNT_BELOW_MIN);
-    expect(decide(p, devnetPayment(2_000_001n), RESOURCE_URL, emptySpendSnapshot()).reasonCode()).toBe(
-      REASON_ATOMIC_CAP_EXCEEDED,
+    expect(decide(p, devnetPayment(5n), RESOURCE_URL, emptySpendSnapshot()).reasonCode()).toBe(
+      REASON_AMOUNT_BELOW_MIN,
     );
+    expect(
+      decide(p, devnetPayment(2_000_001n), RESOURCE_URL, emptySpendSnapshot()).reasonCode(),
+    ).toBe(REASON_ATOMIC_CAP_EXCEEDED);
   });
 
   test("per-payment credit cap is a boundary at the cap value", () => {
@@ -241,22 +288,33 @@ describe("authorizeX402Payment — decision paths", () => {
     raw.caps.minAtomicPerPayment = undefined;
     raw.caps.maxAtomicPerPayment = undefined;
     const p = validated(raw);
-    expect(decide(p, devnetPayment(1_000_000n), RESOURCE_URL, emptySpendSnapshot()).decision().kind).toBe("allow");
-    expect(decide(p, devnetPayment(1_000_001n), RESOURCE_URL, emptySpendSnapshot()).reasonCode()).toBe(
-      REASON_OVER_PER_PAYMENT_CAP,
-    );
+    expect(
+      decide(p, devnetPayment(1_000_000n), RESOURCE_URL, emptySpendSnapshot()).decision().kind,
+    ).toBe("allow");
+    expect(
+      decide(p, devnetPayment(1_000_001n), RESOURCE_URL, emptySpendSnapshot()).reasonCode(),
+    ).toBe(REASON_OVER_PER_PAYMENT_CAP);
   });
 
   test("per-run and per-window caps count already-spent credits", () => {
     const p = validated(basePolicy());
     expect(
-      decide(p, devnetPayment(100_000n), RESOURCE_URL, { runSpentCredits: 4_900n, windowSpentCredits: 0n }).decision().kind,
+      decide(p, devnetPayment(100_000n), RESOURCE_URL, {
+        runSpentCredits: 4_900n,
+        windowSpentCredits: 0n,
+      }).decision().kind,
     ).toBe("allow");
     expect(
-      decide(p, devnetPayment(100_000n), RESOURCE_URL, { runSpentCredits: 4_901n, windowSpentCredits: 0n }).reasonCode(),
+      decide(p, devnetPayment(100_000n), RESOURCE_URL, {
+        runSpentCredits: 4_901n,
+        windowSpentCredits: 0n,
+      }).reasonCode(),
     ).toBe(REASON_OVER_RUN_CAP);
     expect(
-      decide(p, devnetPayment(100_000n), RESOURCE_URL, { runSpentCredits: 0n, windowSpentCredits: 9_950n }).reasonCode(),
+      decide(p, devnetPayment(100_000n), RESOURCE_URL, {
+        runSpentCredits: 0n,
+        windowSpentCredits: 9_950n,
+      }).reasonCode(),
     ).toBe(REASON_OVER_WINDOW_CAP);
   });
 
@@ -269,7 +327,12 @@ describe("authorizeX402Payment — decision paths", () => {
   });
 
   test("a payment above the approval threshold but within caps needs approval", () => {
-    const auth = decide(validated(basePolicy()), devnetPayment(600_000n), RESOURCE_URL, emptySpendSnapshot());
+    const auth = decide(
+      validated(basePolicy()),
+      devnetPayment(600_000n),
+      RESOURCE_URL,
+      emptySpendSnapshot(),
+    );
     expect(auth.decision()).toEqual({ kind: "approval_required", thresholdCredits: 500n });
     expect(auth.reasonCode()).toBe(REASON_APPROVAL_REQUIRED);
     expect(auth.computedCredits()).toBe(600n);
@@ -282,18 +345,30 @@ describe("payment-intent binding", () => {
     const payment = devnetPayment(100_000n);
     const read = authorizeX402Payment(
       policy,
-      req(payment, PaymentIntent.fromSelected(payment, "GET", RESOURCE_URL, new Uint8Array(0), {
-        tenantId: "tenant-1",
-        requestId: "req-1",
-      })),
+      req(
+        payment,
+        PaymentIntent.fromSelected(payment, "GET", RESOURCE_URL, new Uint8Array(0), {
+          tenantId: "tenant-1",
+          requestId: "req-1",
+        }),
+      ),
       emptySpendSnapshot(),
     );
     const write = authorizeX402Payment(
       policy,
-      req(payment, PaymentIntent.fromSelected(payment, "POST", RESOURCE_URL, new TextEncoder().encode('{"drain":true}'), {
-        tenantId: "tenant-1",
-        requestId: "req-1",
-      })),
+      req(
+        payment,
+        PaymentIntent.fromSelected(
+          payment,
+          "POST",
+          RESOURCE_URL,
+          new TextEncoder().encode('{"drain":true}'),
+          {
+            tenantId: "tenant-1",
+            requestId: "req-1",
+          },
+        ),
+      ),
       emptySpendSnapshot(),
     );
     expect(read.decision().kind).toBe("allow");
@@ -325,7 +400,12 @@ describe("payment-intent binding", () => {
   });
 
   test("a decision carries the scope it was evaluated at", () => {
-    const auth = decide(validated(basePolicy()), devnetPayment(100_000n), RESOURCE_URL, emptySpendSnapshot());
+    const auth = decide(
+      validated(basePolicy()),
+      devnetPayment(100_000n),
+      RESOURCE_URL,
+      emptySpendSnapshot(),
+    );
     expect(auth.scope()).toEqual({
       tenantId: "tenant-1",
       projectId: "proj-1",
@@ -342,8 +422,11 @@ describe("conversion staleness", () => {
     raw.conversion.expiresAtUnix = 1_800_000_000;
     const policy = validated(raw);
     expect(
-      decide(policy, devnetPayment(100_000n), RESOURCE_URL, { runSpentCredits: 0n, windowSpentCredits: 0n, nowUnix: 1_799_999_999 })
-        .decision().kind,
+      decide(policy, devnetPayment(100_000n), RESOURCE_URL, {
+        runSpentCredits: 0n,
+        windowSpentCredits: 0n,
+        nowUnix: 1_799_999_999,
+      }).decision().kind,
     ).toBe("allow");
     for (const now of [1_800_000_000, 1_900_000_000]) {
       const stale = decide(policy, devnetPayment(100_000n), RESOURCE_URL, {
@@ -359,13 +442,18 @@ describe("conversion staleness", () => {
     const raw = basePolicy();
     raw.conversion.expiresAtUnix = 1_800_000_000;
     const policy = validated(raw);
-    expect(decide(policy, devnetPayment(100_000n), RESOURCE_URL, emptySpendSnapshot()).reasonCode()).toBe(
-      REASON_CONVERSION_EXPIRED,
-    );
+    expect(
+      decide(policy, devnetPayment(100_000n), RESOURCE_URL, emptySpendSnapshot()).reasonCode(),
+    ).toBe(REASON_CONVERSION_EXPIRED);
     // A policy with NO declared window is unaffected by a missing clock.
-    expect(decide(validated(basePolicy()), devnetPayment(100_000n), RESOURCE_URL, emptySpendSnapshot()).decision().kind).toBe(
-      "allow",
-    );
+    expect(
+      decide(
+        validated(basePolicy()),
+        devnetPayment(100_000n),
+        RESOURCE_URL,
+        emptySpendSnapshot(),
+      ).decision().kind,
+    ).toBe("allow");
   });
 });
 
@@ -400,7 +488,10 @@ describe("config validation", () => {
   test("zero caps, zero approval threshold, and inverted atomic band are rejected", () => {
     const zeroCap = basePolicy();
     zeroCap.caps.maxCreditsPerPayment = 0n;
-    expect(validateX402SpendPolicy(zeroCap)).toMatchObject({ ok: false, error: { kind: "zero_cap" } });
+    expect(validateX402SpendPolicy(zeroCap)).toMatchObject({
+      ok: false,
+      error: { kind: "zero_cap" },
+    });
 
     const zeroApproval = basePolicy();
     zeroApproval.approval.thresholdCredits = 0n;
@@ -412,7 +503,10 @@ describe("config validation", () => {
     const inverted = basePolicy();
     inverted.caps.minAtomicPerPayment = 100n;
     inverted.caps.maxAtomicPerPayment = 10n;
-    expect(validateX402SpendPolicy(inverted)).toMatchObject({ ok: false, error: { kind: "inverted_atomic_band" } });
+    expect(validateX402SpendPolicy(inverted)).toMatchObject({
+      ok: false,
+      error: { kind: "inverted_atomic_band" },
+    });
   });
 
   test("duplicate recipient/asset rules and non-base58 recipients are rejected", () => {
@@ -425,13 +519,19 @@ describe("config validation", () => {
 
     const badRecip = basePolicy();
     badRecip.allowedRecipients = ["merchant@example.com"];
-    expect(validateX402SpendPolicy(badRecip)).toMatchObject({ ok: false, error: { kind: "invalid_recipient" } });
+    expect(validateX402SpendPolicy(badRecip)).toMatchObject({
+      ok: false,
+      error: { kind: "invalid_recipient" },
+    });
   });
 
   test("an impossible conversion ratio is rejected even when disabled", () => {
     const p = disabledX402SpendPolicy();
     p.conversion.denominator = 0n;
-    expect(validateX402SpendPolicy(p)).toMatchObject({ ok: false, error: { kind: "impossible_conversion" } });
+    expect(validateX402SpendPolicy(p)).toMatchObject({
+      ok: false,
+      error: { kind: "impossible_conversion" },
+    });
     const p2 = disabledX402SpendPolicy();
     p2.conversion.numerator = 0n;
     expect(validateX402SpendPolicy(p2)).toMatchObject({
@@ -465,12 +565,18 @@ describe("config validation", () => {
 
 describe("URL canonicalisation (security-load-bearing)", () => {
   test("path-prefix matching respects segment boundaries", () => {
-    const url = canonicalUrl("https://api.example.com/payment")!;
-    expect(resourceRuleMatches({ origin: "https://api.example.com", pathPrefix: "/pay" }, url)).toBe(false);
-    expect(resourceRuleMatches({ origin: "https://api.example.com", pathPrefix: "/payment" }, url)).toBe(true);
+    const url = nn(canonicalUrl("https://api.example.com/payment"));
+    expect(
+      resourceRuleMatches({ origin: "https://api.example.com", pathPrefix: "/pay" }, url),
+    ).toBe(false);
+    expect(
+      resourceRuleMatches({ origin: "https://api.example.com", pathPrefix: "/payment" }, url),
+    ).toBe(true);
   });
 
   test("default https port and host case are canonicalised away", () => {
-    expect(canonicalUrl("https://api.example.com:443/paid")).toEqual(canonicalUrl("https://API.example.com/paid"));
+    expect(canonicalUrl("https://api.example.com:443/paid")).toEqual(
+      canonicalUrl("https://API.example.com/paid"),
+    );
   });
 });

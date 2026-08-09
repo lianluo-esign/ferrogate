@@ -25,7 +25,9 @@ async function tenantDatabase(): Promise<D1Database> {
     )
     .bind(TENANT)
     .run();
-  const handle = await resolveTenantDatabases(env as unknown as ControlPlaneBindings).forTenant(TENANT);
+  const handle = await resolveTenantDatabases(env as unknown as ControlPlaneBindings).forTenant(
+    TENANT,
+  );
   expect(handle.source).toBe("durable_object");
   return handle.db;
 }

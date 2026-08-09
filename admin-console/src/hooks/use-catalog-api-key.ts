@@ -16,5 +16,5 @@ export function useCatalogApiKey(): string {
   if (scope === "platform" && canUsePlatform && session?.platformOperatorApiKey) {
     return session.platformOperatorApiKey;
   }
-  return session!.gatewayApiKey;
+  return (session as NonNullable<typeof session>).gatewayApiKey;
 }

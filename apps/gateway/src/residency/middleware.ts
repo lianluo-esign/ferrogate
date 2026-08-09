@@ -73,6 +73,8 @@
  *     it needs a column and an admin reader, and it is deliberately not in this
  *     slice rather than half-done inside it.
  */
+
+import { locationHintFromCloudflareSignal } from "@ferrogate/storage";
 import type { Context, MiddlewareHandler, Next } from "hono";
 import { HttpError } from "../middleware/errors.js";
 import type { GatewayEnv } from "../ports.js";
@@ -83,11 +85,10 @@ import {
   tenantObjectAddressFor,
 } from "./carrier.js";
 import {
+  type ResidencyPolicy,
   jurisdictionForPolicyAndAddress,
   jurisdictionForResidencyPolicy,
-  type ResidencyPolicy,
 } from "./policy.js";
-import { locationHintFromCloudflareSignal } from "@ferrogate/storage";
 import {
   type ResidencyBindings,
   type ResidencyPolicySource,
@@ -122,9 +123,7 @@ export const RESIDENCY_GOVERNED_OPERATION_IDS: readonly string[] = [
 
 export interface ResidencyMiddlewareOptions {
   /** Override the policy source. Production reads it from `env`. */
-  readonly policies?:
-    | ResidencyPolicySource
-    | ((env: ResidencyBindings) => ResidencyPolicySource);
+  readonly policies?: ResidencyPolicySource | ((env: ResidencyBindings) => ResidencyPolicySource);
   /** Override the governed operation set (tests narrow it). */
   readonly operationIds?: readonly string[];
 }
@@ -160,10 +159,7 @@ export function logPlacementMessage(
     declared === undefined || declared === ""
       ? "this deployment declares no log region (GATEWAY_LOG_REGION is unset)"
       : `this deployment declares its request log in region ${declared}`;
-  return (
-    `tenant residency policy requires the durable request log to stay within ` +
-    `[${[...policy.allowedRegions].join(", ")}], but ${stated}`
-  );
+  return `tenant residency policy requires the durable request log to stay within [${[...policy.allowedRegions].join(", ")}], but ${stated}`;
 }
 
 /**
@@ -172,9 +168,7 @@ export function logPlacementMessage(
  * Inert — one cached lookup and `next()` — for every deployment that has
  * configured no policy, which is every deployment until an operator opts in.
  */
-export function residency(
-  options: ResidencyMiddlewareOptions = {},
-): MiddlewareHandler<GatewayEnv> {
+export function residency(options: ResidencyMiddlewareOptions = {}): MiddlewareHandler<GatewayEnv> {
   const governed = new Set(options.operationIds ?? RESIDENCY_GOVERNED_OPERATION_IDS);
 
   return async function residencyMiddleware(c, next: Next): Promise<void> {
@@ -225,9 +219,11 @@ export function residency(
         error instanceof Error ? error.message : String(error),
       );
     }
-    const cf = (c.req.raw as Request & {
-      readonly cf?: { readonly continent?: unknown; readonly colo?: unknown };
-    }).cf;
+    const cf = (
+      c.req.raw as Request & {
+        readonly cf?: { readonly continent?: unknown; readonly colo?: unknown };
+      }
+    ).cf;
     const placement = locationHintFromCloudflareSignal({
       continent: cf?.continent,
       colo: cf?.colo,

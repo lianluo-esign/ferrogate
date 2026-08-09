@@ -16,7 +16,6 @@
  * revision bump, an env leg where a platform leg exists).
  */
 import { describe, expect, it } from "vitest";
-import { controlNamespaceOverD1 } from "../support/control-namespace.js";
 import { InMemoryModelResolver } from "../../src/inference/defaults.js";
 import {
   ControlDataPlatformModelCatalogSource,
@@ -24,6 +23,7 @@ import {
 } from "../../src/inference/platform-catalog.js";
 import type { ModelResolver, PhysicalRoute } from "../../src/inference/ports.js";
 import { D1TenantModelCatalogSource } from "../../src/inference/tenant-catalog.js";
+import { controlNamespaceOverD1 } from "../support/control-namespace.js";
 
 type CatalogRow = Record<string, unknown>;
 

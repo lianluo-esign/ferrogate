@@ -1,5 +1,5 @@
 import { adminGet } from "@/lib/gateway-client";
-import { booleanColumn, type ResourceConfig } from "@/lib/resource-config";
+import { type ResourceConfig, booleanColumn } from "@/lib/resource-config";
 
 export type ModelCapability =
   | "chat"
@@ -81,7 +81,10 @@ export const modelsConfig: ResourceConfig<AdminModel> = {
       options: [
         { labelKey: "resource.models.option.routingStrategy.priority", value: "priority" },
         { labelKey: "resource.models.option.routingStrategy.lowestCost", value: "lowest_cost" },
-        { labelKey: "resource.models.option.routingStrategy.lowestLatency", value: "lowest_latency" },
+        {
+          labelKey: "resource.models.option.routingStrategy.lowestLatency",
+          value: "lowest_latency",
+        },
         { labelKey: "resource.models.option.routingStrategy.balanced", value: "balanced" },
       ],
     },

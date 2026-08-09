@@ -8,12 +8,7 @@
  * ($/GB) dimension (issue #262).
  */
 import { z } from "zod";
-import {
-  modelPriceSchema,
-  modelPriceUsd,
-  withCacheMultipliers,
-  type ModelPrice,
-} from "./usage.js";
+import { type ModelPrice, modelPriceSchema, modelPriceUsd, withCacheMultipliers } from "./usage.js";
 
 /** 1 USD == 1_000_000 credits (1 credit == 1 micro-USD). */
 export const DEFAULT_CREDITS_PER_USD = 1_000_000.0;
@@ -78,7 +73,10 @@ export function priceEntry(provider: string, model: string, price: ModelPrice): 
 const priceBookObjectSchema = z.object({
   entries: z.array(priceEntrySchema).default([]),
   credits_per_usd: z.number().default(DEFAULT_CREDITS_PER_USD),
-  egress_price_per_gb: z.number().nullish().transform((v) => v ?? undefined),
+  egress_price_per_gb: z
+    .number()
+    .nullish()
+    .transform((v) => v ?? undefined),
 });
 
 export class PriceBook {
@@ -233,24 +231,12 @@ export class PriceBook {
       priceEntry("*", "gpt-5", withCacheMultipliers(modelPriceUsd(5.0, 15.0), 0.1)),
       priceEntry("*", "gpt-4o", withCacheMultipliers(modelPriceUsd(2.5, 10.0), 0.5)),
       priceEntry("*", "gpt-4o-mini", withCacheMultipliers(modelPriceUsd(0.15, 0.6), 0.5)),
-      priceEntry(
-        "*",
-        "claude-sonnet-4",
-        withCacheMultipliers(modelPriceUsd(3.0, 15.0), 0.1, 1.25),
-      ),
-      priceEntry(
-        "*",
-        "claude-opus-4",
-        withCacheMultipliers(modelPriceUsd(15.0, 75.0), 0.1, 1.25),
-      ),
+      priceEntry("*", "claude-sonnet-4", withCacheMultipliers(modelPriceUsd(3.0, 15.0), 0.1, 1.25)),
+      priceEntry("*", "claude-opus-4", withCacheMultipliers(modelPriceUsd(15.0, 75.0), 0.1, 1.25)),
       priceEntry("*", "gemini-2.5-pro", withCacheMultipliers(modelPriceUsd(1.25, 10.0), 0.25)),
       priceEntry("*", "gemini-2.5-flash", withCacheMultipliers(modelPriceUsd(0.3, 2.5), 0.25)),
       priceEntry("*", "grok-4", withCacheMultipliers(modelPriceUsd(3.0, 15.0), 0.25)),
-      priceEntry(
-        "*",
-        "deepseek-chat",
-        withCacheMultipliers(modelPriceUsd(0.27, 1.1), 0.07 / 0.27),
-      ),
+      priceEntry("*", "deepseek-chat", withCacheMultipliers(modelPriceUsd(0.27, 1.1), 0.07 / 0.27)),
       priceEntry(
         "*",
         "deepseek-reasoner",

@@ -1,4 +1,4 @@
-import { booleanColumn, type ResourceConfig } from "@/lib/resource-config";
+import { type ResourceConfig, booleanColumn } from "@/lib/resource-config";
 
 interface AgentWorkflowPolicy {
   id: string;
@@ -43,9 +43,21 @@ export const agentWorkflowsConfig: ResourceConfig<AdminAgentWorkflowRow> = {
   resolveDetailPath: (row) => workflowOf(row)?.id ?? "",
   unwrapRow: (row) => (workflowOf(row) as unknown as Record<string, unknown>) ?? {},
   columns: [
-    { key: "name", headerKey: "resource.agentWorkflows.col.name", render: (row) => workflowOf(row)?.name ?? "" },
-    { key: "id", headerKey: "resource.agentWorkflows.col.id", render: (row) => workflowOf(row)?.id ?? "" },
-    { key: "version", headerKey: "resource.agentWorkflows.col.version", render: (row) => String(workflowOf(row)?.version ?? "") },
+    {
+      key: "name",
+      headerKey: "resource.agentWorkflows.col.name",
+      render: (row) => workflowOf(row)?.name ?? "",
+    },
+    {
+      key: "id",
+      headerKey: "resource.agentWorkflows.col.id",
+      render: (row) => workflowOf(row)?.id ?? "",
+    },
+    {
+      key: "version",
+      headerKey: "resource.agentWorkflows.col.version",
+      render: (row) => String(workflowOf(row)?.version ?? ""),
+    },
     booleanColumn<AdminAgentWorkflowRow>({
       key: "enabled",
       headerKey: "resource.agentWorkflows.col.enabled",
@@ -58,16 +70,31 @@ export const agentWorkflowsConfig: ResourceConfig<AdminAgentWorkflowRow> = {
     },
   ],
   fields: [
-    { name: "id", labelKey: "resource.agentWorkflows.field.id", type: "text", required: true, createOnly: true },
+    {
+      name: "id",
+      labelKey: "resource.agentWorkflows.field.id",
+      type: "text",
+      required: true,
+      createOnly: true,
+    },
     { name: "name", labelKey: "resource.agentWorkflows.field.name", type: "text", required: true },
-    { name: "version", labelKey: "resource.agentWorkflows.field.version", type: "number", placeholder: "1" },
+    {
+      name: "version",
+      labelKey: "resource.agentWorkflows.field.version",
+      type: "number",
+      placeholder: "1",
+    },
     { name: "enabled", labelKey: "resource.agentWorkflows.field.enabled", type: "boolean" },
     // organization_ids and api_key_ids scope a workflow to the raw identifiers a
     // caller presents at request time (ferrogate-cli agent-workflow evaluation),
     // which are not guaranteed to be admin-console tenant/key rows, so they stay
     // free-text rather than being force-mapped to an entity source (mirrors the
     // policies.ts decision from #341).
-    { name: "organization_ids", labelKey: "resource.agentWorkflows.field.organizationIds", type: "csv" },
+    {
+      name: "organization_ids",
+      labelKey: "resource.agentWorkflows.field.organizationIds",
+      type: "csv",
+    },
     {
       name: "project_ids",
       labelKey: "resource.agentWorkflows.field.projects",
@@ -103,10 +130,26 @@ export const agentWorkflowsConfig: ResourceConfig<AdminAgentWorkflowRow> = {
       type: "json",
       placeholder: '[{"from":"n1","to":"n2"}]',
     },
-    { name: "max_model_calls", labelKey: "resource.agentWorkflows.field.maxModelCalls", type: "number" },
-    { name: "max_tool_calls", labelKey: "resource.agentWorkflows.field.maxToolCalls", type: "number" },
-    { name: "max_parallelism", labelKey: "resource.agentWorkflows.field.maxParallelism", type: "number" },
-    { name: "max_iterations", labelKey: "resource.agentWorkflows.field.maxIterations", type: "number" },
+    {
+      name: "max_model_calls",
+      labelKey: "resource.agentWorkflows.field.maxModelCalls",
+      type: "number",
+    },
+    {
+      name: "max_tool_calls",
+      labelKey: "resource.agentWorkflows.field.maxToolCalls",
+      type: "number",
+    },
+    {
+      name: "max_parallelism",
+      labelKey: "resource.agentWorkflows.field.maxParallelism",
+      type: "number",
+    },
+    {
+      name: "max_iterations",
+      labelKey: "resource.agentWorkflows.field.maxIterations",
+      type: "number",
+    },
     { name: "timeout_millis", labelKey: "resource.agentWorkflows.field.timeout", type: "number" },
     { name: "token_budget", labelKey: "resource.agentWorkflows.field.tokenBudget", type: "number" },
   ],

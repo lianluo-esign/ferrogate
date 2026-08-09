@@ -14,14 +14,14 @@
  *    a rule that protects nobody.
  */
 import {
-  type DelegationClaims,
   DELEGATION_FORMAT_VERSION,
   DELEGATION_JWS_HEADER,
+  type DelegationClaims,
+  bytesToBase64Url,
   encodeDelegationChain,
   encodeSegment,
   importDelegationKey,
   mintDelegationLink,
-  bytesToBase64Url,
   signingInput,
 } from "@ferrogate/identity";
 

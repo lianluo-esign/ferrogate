@@ -16,15 +16,11 @@
  * mistake is enough to turn it on.
  */
 import { env } from "cloudflare:test";
-import { controlNamespace } from "./support/control-namespace.js";
 import { describe, expect, it } from "vitest";
+import { DEV_API_KEY_PREFIX, DEV_API_KEY_SCOPES, developmentApiKeys } from "../src/adapters.js";
 import app from "../src/index.js";
-import {
-  DEV_API_KEY_PREFIX,
-  DEV_API_KEY_SCOPES,
-  developmentApiKeys,
-} from "../src/adapters.js";
 import { isPrivilegedScope } from "../src/ports.js";
+import { controlNamespace } from "./support/control-namespace.js";
 
 const BASE = "https://gw.test";
 
@@ -67,7 +63,7 @@ describe("the development key path is off in the shipped configuration", () => {
     expect(res.status).toBe(401);
   });
 
-  it("requires the literal string \"true\" — no truthy near-misses", async () => {
+  it('requires the literal string "true" — no truthy near-misses', async () => {
     for (const value of ["TRUE", "True", "1", "yes", " true ", "true\n", ""]) {
       const res = await withDevKey({ GATEWAY_DEV_AUTH: value, GATEWAY_DEV_API_KEY: DEV_KEY });
       expect(res.status, `GATEWAY_DEV_AUTH=${JSON.stringify(value)}`).toBe(401);
@@ -121,7 +117,12 @@ describe("the development key, once all three conditions hold", () => {
     const res = await app.request(
       `${BASE}/v1/models`,
       { headers: { authorization: `Bearer ${DEV_KEY}` } },
-      { ...ENABLED, CONTROL_DB: real.CONTROL_DB, CONTROL_DATA: controlNamespace(), TENANT_DATA: real.TENANT_DATA },
+      {
+        ...ENABLED,
+        CONTROL_DB: real.CONTROL_DB,
+        CONTROL_DATA: controlNamespace(),
+        TENANT_DATA: real.TENANT_DATA,
+      },
     );
     expect(res.status).toBe(200);
     // No models are configured in this env, so the listing is empty — the point

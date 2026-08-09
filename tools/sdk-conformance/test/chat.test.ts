@@ -56,9 +56,7 @@ describe("openai SDK — chat.completions.create", () => {
       const call = upstream.last();
       expect(call.url).toBe("https://api.openai.conformance.test/v1/chat/completions");
       expect((call.body as { model: string }).model).toBe("gpt-4o-mini-2024-07-18");
-      expect(call.headers["authorization"]).toBe(
-        "Bearer upstream-key-placeholder-not-a-credential",
-      );
+      expect(call.headers.authorization).toBe("Bearer upstream-key-placeholder-not-a-credential");
     } finally {
       upstream.restore();
     }

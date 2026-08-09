@@ -89,7 +89,7 @@ describe("POST /v1/responses — continuing a conversation (#689)", () => {
       });
       expect(first.status).toBe(200);
       const firstBody = (await first.json()) as Record<string, unknown>;
-      firstId = String(firstBody["id"]);
+      firstId = String(firstBody.id);
       // The id is OURS, not the provider's — see `conversation.ts::mintResponseId`.
       expect(firstId).toMatch(/^resp_[0-9a-f]{32}$/);
       expect(firstBody["x-ferrogate-upstream-response-id"]).toBe("resp_upstream_1");
@@ -105,7 +105,7 @@ describe("POST /v1/responses — continuing a conversation (#689)", () => {
 
       const upstream = provider.lastRequest().body as Record<string, unknown>;
       // THE assertion: turn 1's question, turn 1's answer, then turn 2.
-      expect(upstream["input"]).toEqual([
+      expect(upstream.input).toEqual([
         { role: "user", content: "What is the capital of France?" },
         {
           type: "message",
@@ -117,8 +117,8 @@ describe("POST /v1/responses — continuing a conversation (#689)", () => {
       ]);
       // Our id space is not the provider's, and FerroGate is the store of
       // record — neither member may reach the upstream.
-      expect(upstream["previous_response_id"]).toBeUndefined();
-      expect(upstream["store"]).toBeUndefined();
+      expect(upstream.previous_response_id).toBeUndefined();
+      expect(upstream.store).toBeUndefined();
     } finally {
       provider.restore();
     }
@@ -220,7 +220,7 @@ describe("POST /v1/responses — continuing a conversation (#689)", () => {
         store: true,
       });
       expect(first.status).toBe(200);
-      const firstId = String(((await first.json()) as Record<string, unknown>)["id"]);
+      const firstId = String(((await first.json()) as Record<string, unknown>).id);
       const stored = await store.chain({ tenantId: "acme", projectId: "" }, firstId, 0);
       expect(stored.ok && stored.turns[0]?.screeningApiKeyId).toBe("key_a");
       expect(stored.ok && stored.turns[0]?.screeningPolicyRevision).toBe("[]");
@@ -255,7 +255,7 @@ describe("POST /v1/responses — continuing a conversation (#689)", () => {
         input: "hi",
         store: true,
       });
-      const id = String(((await first.json()) as Record<string, unknown>)["id"]);
+      const id = String(((await first.json()) as Record<string, unknown>).id);
 
       now = 1_100;
       const res = await h.post("/v1/responses", {
@@ -280,7 +280,7 @@ describe("POST /v1/responses — continuing a conversation (#689)", () => {
         input: "root question",
         store: true,
       });
-      const rootId = String(((await root.json()) as Record<string, unknown>)["id"]);
+      const rootId = String(((await root.json()) as Record<string, unknown>).id);
 
       const [left, right] = await Promise.all([
         h.post("/v1/responses", {
@@ -298,8 +298,8 @@ describe("POST /v1/responses — continuing a conversation (#689)", () => {
       ]);
       expect(left.status).toBe(200);
       expect(right.status).toBe(200);
-      const leftId = String(((await left.json()) as Record<string, unknown>)["id"]);
-      const rightId = String(((await right.json()) as Record<string, unknown>)["id"]);
+      const leftId = String(((await left.json()) as Record<string, unknown>).id);
+      const rightId = String(((await right.json()) as Record<string, unknown>).id);
       expect(leftId).not.toBe(rightId);
 
       // Each branch replays ONLY its own history: three rows, two chains of two.
@@ -363,7 +363,7 @@ describe("POST /v1/responses — the tenant fence (#689)", () => {
         input: "acme's confidential question",
         store: true,
       });
-      const acmeId = String(((await first.json()) as Record<string, unknown>)["id"]);
+      const acmeId = String(((await first.json()) as Record<string, unknown>).id);
 
       // A DIFFERENT tenant presents acme's id — the whole point being that
       // `previous_response_id` is caller-supplied and therefore forgeable.
@@ -393,7 +393,7 @@ describe("POST /v1/responses — the tenant fence (#689)", () => {
         input: "acme's confidential question",
         store: true,
       });
-      const acmeId = String(((await first.json()) as Record<string, unknown>)["id"]);
+      const acmeId = String(((await first.json()) as Record<string, unknown>).id);
 
       const other = conversationHarness(store, "globex");
       const read = await other.get(`/v1/responses/${acmeId}`);
@@ -548,7 +548,7 @@ describe("GET/DELETE /v1/responses/{id} (#689)", () => {
         store: true,
       });
       const body = (await created.json()) as Record<string, unknown>;
-      const id = String(body["id"]);
+      const id = String(body.id);
 
       const read = await h.get(`/v1/responses/${id}`);
       expect(read.status).toBe(200);
@@ -576,14 +576,14 @@ describe("GET/DELETE /v1/responses/{id} (#689)", () => {
         input: "turn one",
         store: true,
       });
-      const rootId = String(((await root.json()) as Record<string, unknown>)["id"]);
+      const rootId = String(((await root.json()) as Record<string, unknown>).id);
       const child = await h.post("/v1/responses", {
         model: "gpt-4o-mini",
         input: "turn two",
         previous_response_id: rootId,
         store: true,
       });
-      const childId = String(((await child.json()) as Record<string, unknown>)["id"]);
+      const childId = String(((await child.json()) as Record<string, unknown>).id);
 
       await h.router.request(`https://gw.test/v1/responses/${rootId}`, { method: "DELETE" });
 
@@ -632,7 +632,7 @@ describe("POST /v1/responses — streaming turns (#689)", () => {
 
       const stored = await store.get({ tenantId: "acme", projectId: "" }, String(id), 0);
       expect(stored).not.toBeNull();
-      expect(stored?.response["output"]).toEqual([
+      expect(stored?.response.output).toEqual([
         {
           type: "message",
           role: "assistant",

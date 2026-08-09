@@ -71,12 +71,7 @@ export function ensureAuthPostureIsDeclared(config: Config): AuthPostureVerdict 
     if (config.auth_service.enabled) declared.push("[auth_service] enabled = true");
     if (declared.length > 0) {
       return {
-        refusal:
-          "refusing to start: [auth] disabled = true switches authentication off for every " +
-          `request, but this config also declares a credential source (${declared.join(", ")}) ` +
-          "that would then never be consulted -- every caller, credentialed or not, would be " +
-          "admitted as an unrestricted platform operator; remove [auth] disabled or remove the " +
-          "credential source",
+        refusal: `refusing to start: [auth] disabled = true switches authentication off for every request, but this config also declares a credential source (${declared.join(", ")}) that would then never be consulted -- every caller, credentialed or not, would be admitted as an unrestricted platform operator; remove [auth] disabled or remove the credential source`,
         warnings: [],
       };
     }
@@ -86,14 +81,7 @@ export function ensureAuthPostureIsDeclared(config: Config): AuthPostureVerdict 
     if (store !== null) {
       return {
         warnings: [
-          "[auth] disabled = true switches authentication off for every request, but " +
-            `[storage] provider = "${store}" is a durable control plane that holds virtual API ` +
-            "keys: every key in it is IGNORED and every caller -- credentialed or not -- is " +
-            "admitted as an unrestricted platform operator over whatever that control plane " +
-            "contains. This is allowed because a durable backend also stores request logs, " +
-            "audit events and routes, so having one is not by itself a statement about " +
-            "authentication; if that control plane is shared with anything you care about, " +
-            "remove [auth] disabled",
+          `[auth] disabled = true switches authentication off for every request, but [storage] provider = "${store}" is a durable control plane that holds virtual API keys: every key in it is IGNORED and every caller -- credentialed or not -- is admitted as an unrestricted platform operator over whatever that control plane contains. This is allowed because a durable backend also stores request logs, audit events and routes, so having one is not by itself a statement about authentication; if that control plane is shared with anything you care about, remove [auth] disabled`,
         ],
       };
     }

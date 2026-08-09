@@ -455,10 +455,7 @@ export class CustomHostnamesClient {
       const existing = await this.findCustomHostname(hostname);
       if (existing === null) {
         throw CloudflareError.config(
-          `custom hostname ${JSON.stringify(hostname)} is already registered on Cloudflare but ` +
-            `is not on zone ${JSON.stringify(this.zoneId)}: it is held by another Cloudflare ` +
-            "account or zone, and no certificate can be issued for it here until that record is " +
-            "released",
+          `custom hostname ${JSON.stringify(hostname)} is already registered on Cloudflare but is not on zone ${JSON.stringify(this.zoneId)}: it is held by another Cloudflare account or zone, and no certificate can be issued for it here until that record is released`,
         );
       }
       row = existing;
@@ -543,8 +540,7 @@ function assertCustomHostname(hostname: string): void {
     /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(hostname);
   if (!legal) {
     throw CloudflareError.config(
-      `invalid custom hostname ${JSON.stringify(hostname)}: expected a lowercase, fully ` +
-        "qualified DNS name with no wildcard, scheme, port or path",
+      `invalid custom hostname ${JSON.stringify(hostname)}: expected a lowercase, fully qualified DNS name with no wildcard, scheme, port or path`,
     );
   }
 }

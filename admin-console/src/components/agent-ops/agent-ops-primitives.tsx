@@ -1,3 +1,7 @@
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { type I18nContextValue, useI18n } from "@/i18n";
+import type { AdminSchema } from "@/lib/gateway-client";
 // Shared building blocks for the Agent Ops pages (issue #317): evidence-chain
 // badges for run/timeline rendering plus fingerprint truncation + copy.
 //
@@ -10,10 +14,6 @@
 // `audit_events` array and are rendered as the `audit` family.
 import { Copy } from "lucide-react";
 import { toast } from "sonner";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { useI18n, type I18nContextValue } from "@/i18n";
-import type { AdminSchema } from "@/lib/gateway-client";
 
 export type TimelineEventFamily = "capability" | "guardrail" | "audit" | "lifecycle";
 

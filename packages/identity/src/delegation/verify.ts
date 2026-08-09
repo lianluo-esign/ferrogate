@@ -54,6 +54,8 @@
  * chain is an authorisation record; behavioural assurance is guardrails' job
  * and is a different control.
  */
+
+import { decodeBase64UrlJson } from "../oidc/base64url.js";
 import {
   DELEGATION_CLOCK_SKEW_SECONDS,
   DELEGATION_LINK_SEPARATOR,
@@ -65,7 +67,6 @@ import {
   parseDelegationClaims,
   splitDelegationLink,
 } from "./link.js";
-import { decodeBase64UrlJson } from "../oidc/base64url.js";
 import type { DelegationRevocationSource } from "./revocation.js";
 import { NO_DELEGATION_REVOCATIONS } from "./revocation.js";
 import { delegationScopeSubset, verifyDelegationSignature } from "./sign.js";

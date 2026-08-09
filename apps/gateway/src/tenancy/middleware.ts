@@ -34,8 +34,8 @@
 import type { TenantDatabaseHandle } from "@ferrogate/storage";
 import type { Context, MiddlewareHandler } from "hono";
 import { HttpError } from "../middleware/errors.js";
-import { tenantObjectAddressFor } from "../residency/carrier.js";
 import { type AuthContext, type GatewayEnv, callerScope } from "../ports.js";
+import { tenantObjectAddressFor } from "../residency/carrier.js";
 import {
   TENANT_DATABASE_UNSCOPED,
   TENANT_DATABASE_VAR,
@@ -112,8 +112,7 @@ class RequestTenantDatabaseAccessor implements TenantDatabaseAccessor {
     // of `handle()`, because every caller awaits this and a mixed
     // throw/reject surface is how one of them ends up unhandled.
     this.#resolved ??= (async () =>
-      this.resolver().forTenant(this.tenantId as string, this.address)
-    )();
+      this.resolver().forTenant(this.tenantId as string, this.address))();
     return this.#resolved;
   }
 

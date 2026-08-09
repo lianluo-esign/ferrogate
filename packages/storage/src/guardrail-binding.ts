@@ -78,7 +78,11 @@ export function nextGuardrailActivationBinding(
   }
   let archived = previous ? [...previous.archivedRevisions] : [];
   const activeRevision = previous?.activeRevision;
-  if (activeRevision !== undefined && activeRevision !== revision && !archived.includes(activeRevision)) {
+  if (
+    activeRevision !== undefined &&
+    activeRevision !== revision &&
+    !archived.includes(activeRevision)
+  ) {
     archived.push(activeRevision);
   }
   archived = archived.filter((r) => r !== revision);
@@ -189,7 +193,13 @@ export class MemoryGuardrailBindingStore {
       );
     }
     const previous = this.getBinding(policyId);
-    const current = nextGuardrailArchiveBinding(previous, policyId, revision, updatedBy, updatedAtUnix);
+    const current = nextGuardrailArchiveBinding(
+      previous,
+      policyId,
+      revision,
+      updatedBy,
+      updatedAtUnix,
+    );
     this.bindings.set(policyId, cloneBinding(current));
     return { previous, current };
   }

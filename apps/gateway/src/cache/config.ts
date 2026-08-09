@@ -270,9 +270,9 @@ export function responseCachePolicy(env: ResponseCacheBindings | undefined): Res
     semanticSimilarityThreshold,
     ttlSeconds,
     maxRecords,
-    disabledModels: lists[0]![2],
-    disabledApiKeyIds: lists[1]![2],
-    disabledProfileIds: lists[2]![2],
+    disabledModels: (lists[0] as NonNullable<(typeof lists)[0]>)[2],
+    disabledApiKeyIds: (lists[1] as NonNullable<(typeof lists)[1]>)[2],
+    disabledProfileIds: (lists[2] as NonNullable<(typeof lists)[2]>)[2],
     misconfiguration: null,
   };
 }

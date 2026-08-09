@@ -268,11 +268,7 @@ export const TENANT_BACKFILL_TABLES: readonly TenantBackfillTable[] = Object.fre
   table("observed_agent_presence", ["tenant_id", "api_key_id"], DIRECT_TENANT_ID),
   table("agent_cost_burn", ["tenant_id", "agent_key", "period"], DIRECT_TENANT_ID),
   table("asset_bundle_files", ["asset_id", "path"], DIRECT_TENANT_ID),
-  table(
-    "responses_conversations",
-    ["tenant_id", "project_id", "response_id"],
-    DIRECT_TENANT_ID,
-  ),
+  table("responses_conversations", ["tenant_id", "project_id", "response_id"], DIRECT_TENANT_ID),
   table("tenant_database_identity", ["id"], DIRECT_TENANT_ID),
   table("provider_channels", ["id"], DIRECT_TENANT_ID),
   table("catalog_models", ["id"], DIRECT_TENANT_ID),
@@ -450,8 +446,8 @@ function canonicalValue(value: unknown, seen: Set<object>): string {
     case "number":
       if (Number.isNaN(value)) return "number:NaN";
       if (Object.is(value, -0)) return "number:-0";
-      if (value === Infinity) return "number:+Infinity";
-      if (value === -Infinity) return "number:-Infinity";
+      if (value === Number.POSITIVE_INFINITY) return "number:+Infinity";
+      if (value === Number.NEGATIVE_INFINITY) return "number:-Infinity";
       return frame("number", String(value));
     case "bigint":
       return frame("bigint", value.toString(10));
@@ -555,20 +551,19 @@ export async function checksumRows(
     ...canonicalRows.map((row) => frame("entry", row)),
   ].join("\n");
 
-  const runtimeCrypto = (globalThis as unknown as {
-    crypto?: {
-      subtle: {
-        digest(algorithm: string, data: Uint8Array): Promise<ArrayBuffer>;
+  const runtimeCrypto = (
+    globalThis as unknown as {
+      crypto?: {
+        subtle: {
+          digest(algorithm: string, data: Uint8Array): Promise<ArrayBuffer>;
+        };
       };
-    };
-  }).crypto;
+    }
+  ).crypto;
   if (runtimeCrypto === undefined) {
     throw new Error("Web Crypto is required for tenant backfill checksums");
   }
-  const digest = await runtimeCrypto.subtle.digest(
-    "SHA-256",
-    new TextEncoder().encode(payload),
-  );
+  const digest = await runtimeCrypto.subtle.digest("SHA-256", new TextEncoder().encode(payload));
   return bytesToHex(new Uint8Array(digest));
 }
 
@@ -630,7 +625,7 @@ export function compareTableReceipts(
       mismatches.push({
         table: tableName,
         reason: "missing_source",
-        destination: destinationReceipt!,
+        destination: destinationReceipt as NonNullable<typeof destinationReceipt>,
       });
       continue;
     }

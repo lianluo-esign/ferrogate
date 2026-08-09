@@ -115,7 +115,7 @@ describe("GATEWAY_RESPONSES_STORE decides what a caller may persist (#689)", () 
       expect(res.status).toBe(200);
       expect(res.headers.get("x-ferrogate-response-stored")).toBe("false");
 
-      const id = String(((await res.json()) as Record<string, unknown>)["id"]);
+      const id = String(((await res.json()) as Record<string, unknown>).id);
       const read = await h.get(`/v1/responses/${id}`);
       expect(read.status).toBe(404);
     } finally {
@@ -133,7 +133,7 @@ describe("GATEWAY_RESPONSES_STORE decides what a caller may persist (#689)", () 
       const unasked = await h.post("/v1/responses", { model: "gpt-4o-mini", input: "hi" });
       expect(unasked.status).toBe(200);
       expect(unasked.headers.get("x-ferrogate-response-stored")).toBe("false");
-      const unaskedId = String(((await unasked.json()) as Record<string, unknown>)["id"]);
+      const unaskedId = String(((await unasked.json()) as Record<string, unknown>).id);
       expect((await h.get(`/v1/responses/${unaskedId}`)).status).toBe(404);
 
       const asked = await h.post("/v1/responses", {
@@ -142,7 +142,7 @@ describe("GATEWAY_RESPONSES_STORE decides what a caller may persist (#689)", () 
         store: true,
       });
       expect(asked.headers.get("x-ferrogate-response-stored")).toBe("true");
-      const askedId = String(((await asked.json()) as Record<string, unknown>)["id"]);
+      const askedId = String(((await asked.json()) as Record<string, unknown>).id);
       expect((await h.get(`/v1/responses/${askedId}`)).status).toBe(200);
     } finally {
       provider.restore();
@@ -160,7 +160,7 @@ describe("GATEWAY_RESPONSES_STORE decides what a caller may persist (#689)", () 
       // resolver that ignored the var would answer `false` here.
       expect(res.headers.get("x-ferrogate-response-stored")).toBe("true");
 
-      const id = String(((await res.json()) as Record<string, unknown>)["id"]);
+      const id = String(((await res.json()) as Record<string, unknown>).id);
       const read = await h.get(`/v1/responses/${id}`);
       expect(read.status).toBe(200);
 
@@ -173,7 +173,7 @@ describe("GATEWAY_RESPONSES_STORE decides what a caller may persist (#689)", () 
       });
       expect(second.status).toBe(200);
       const replayed = provider.lastRequest().body as Record<string, unknown>;
-      expect(replayed["input"]).toEqual([
+      expect(replayed.input).toEqual([
         { role: "user", content: "hi" },
         {
           type: "message",
@@ -232,8 +232,8 @@ describe("GATEWAY_RESPONSES_RETENTION is honoured PER TENANT (#689)", () => {
       });
       expect(acmeFirst.headers.get("x-ferrogate-response-stored")).toBe("true");
       expect(globexFirst.headers.get("x-ferrogate-response-stored")).toBe("true");
-      const acmeId = String(((await acmeFirst.json()) as Record<string, unknown>)["id"]);
-      const globexId = String(((await globexFirst.json()) as Record<string, unknown>)["id"]);
+      const acmeId = String(((await acmeFirst.json()) as Record<string, unknown>).id);
+      const globexId = String(((await globexFirst.json()) as Record<string, unknown>).id);
 
       // Two hours later: past `acme`'s one-hour override, far short of the
       // 24-hour default `globex` gets.
@@ -283,7 +283,7 @@ describe("GATEWAY_RESPONSES_RETENTION is honoured PER TENANT (#689)", () => {
         input: "remember",
         store: true,
       });
-      const id = String(((await first.json()) as Record<string, unknown>)["id"]);
+      const id = String(((await first.json()) as Record<string, unknown>).id);
 
       // One hour on: inside the window a resolver that ignored the var would
       // NOT have produced (the default is 24h, so this leg alone proves little)

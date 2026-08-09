@@ -1,12 +1,12 @@
-import { screen, waitFor } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
-import { HttpResponse, http } from "msw";
-import { describe, expect, it } from "vitest";
 import { ResourcePage } from "@/components/resource/resource-page";
 import { modelsConfig } from "@/resources/models";
 import { providersConfig } from "@/resources/providers";
 import { gatewayUrl, server } from "@/test/msw";
-import { renderWithProviders, seedSession, TEST_GATEWAY_API_KEY } from "@/test/test-utils";
+import { TEST_GATEWAY_API_KEY, renderWithProviders, seedSession } from "@/test/test-utils";
+import { screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { http, HttpResponse } from "msw";
+import { describe, expect, it } from "vitest";
 
 const OPERATOR_KEY = "fg-platform-operator-key";
 

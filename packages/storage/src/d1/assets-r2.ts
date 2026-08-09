@@ -40,8 +40,9 @@
  * makes a byte-level divergence a DIFFERENT key rather than an overwrite of a
  * published artifact.
  */
-import { StorageError } from "../errors.js";
+
 import type { StoredAsset } from "../assets.js";
+import { StorageError } from "../errors.js";
 
 /** Percent-encode a key segment so `/` in a name cannot forge a key path. */
 function segment(value: string): string {
@@ -138,7 +139,7 @@ export class R2AssetBlobStore {
     return {
       body: new Uint8Array(await object.arrayBuffer()),
       contentType: object.httpMetadata?.contentType ?? "application/octet-stream",
-      contentHash: object.customMetadata?.["contentHash"] ?? "",
+      contentHash: object.customMetadata?.contentHash ?? "",
     };
   }
 

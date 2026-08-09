@@ -63,6 +63,7 @@ import {
   validateX402SpendPolicies,
 } from "./validate/sections.js";
 import { x402ConfirmationWindowSecs, x402HoldTtlFloorSecs } from "./x402-hold.js";
+const nn = <T>(v: T): NonNullable<T> => v as NonNullable<T>;
 
 // Re-exported so `@ferrogate/config` keeps ONE validation surface (the Rust
 // `Config::validate` + its `pub` helpers), whichever module implements it.
@@ -301,7 +302,7 @@ export function validateCloudflare(config: Config): void {
 /** Cloudflare managed MCP upstream guardrails (issue #408). */
 export function validateCloudflareMcpServers(config: Config): void {
   for (let index = 0; index < config.mcp_servers.length; index += 1) {
-    const server = config.mcp_servers[index]!;
+    const server = nn(config.mcp_servers[index]);
     if (server.transport !== "streamable_http" && server.transport !== "sse") continue;
     const url = server.url;
     if (url === null) continue;

@@ -1,14 +1,14 @@
-import { render, screen, within } from "@testing-library/react";
-import { HttpResponse, http } from "msw";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { QueryClientProvider } from "@tanstack/react-query";
-import { beforeEach, describe, expect, it } from "vitest";
 import { AuthProvider } from "@/hooks/use-auth";
 import { I18nProvider } from "@/i18n";
-import PluginToolsPage from "@/pages/plugin-tools";
 import type { AdminSchema } from "@/lib/gateway-client";
+import PluginToolsPage from "@/pages/plugin-tools";
 import { gatewayUrl, server } from "@/test/msw";
 import { createTestQueryClient, seedSession } from "@/test/test-utils";
+import { QueryClientProvider } from "@tanstack/react-query";
+import { render, screen, within } from "@testing-library/react";
+import { http, HttpResponse } from "msw";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { beforeEach, describe, expect, it } from "vitest";
 
 type AdminTool = AdminSchema<"AdminTool">;
 

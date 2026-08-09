@@ -40,8 +40,9 @@
  * turn on the floor. Every leg states the SURVIVING text as well, so a fix that
  * empties the row cannot pass.
  */
-import { PROBE_SECRET } from "@ferrogate/guardrails";
+
 import { SELF, env } from "cloudflare:test";
+import { PROBE_SECRET } from "@ferrogate/guardrails";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { FINGERPRINT_SECRET_REF, secretScanPolicy } from "../guardrails/fixtures.js";
 
@@ -160,7 +161,12 @@ function stubUpstream(body: Record<string, unknown>): Upstream {
       headers: { "content-type": "application/json" },
     });
   }) as typeof fetch;
-  return { calls: () => calls, restore: () => void (globalThis.fetch = original) };
+  return {
+    calls: () => calls,
+    restore: () => {
+      globalThis.fetch = original;
+    },
+  };
 }
 
 let upstream: Upstream | undefined;
@@ -226,7 +232,7 @@ describe("a REDACTED turn is stored redacted (#689)", () => {
     });
     expect(created.status).toBe(200);
     const createdBody = (await created.json()) as Record<string, unknown>;
-    const responseId = String(createdBody["id"]);
+    const responseId = String(createdBody.id);
     expect(responseId).toMatch(/^resp_[0-9a-f]{32}$/);
 
     // What the caller was served: the card is gone AND the sentence survives.
@@ -258,7 +264,7 @@ describe("a REDACTED turn is stored redacted (#689)", () => {
       input: "what did you charge",
       store: true,
     });
-    const responseId = String(((await created.json()) as Record<string, unknown>)["id"]);
+    const responseId = String(((await created.json()) as Record<string, unknown>).id);
     upstream.restore();
 
     // Turn two replays turn one as `input`. Before the fix the un-redacted card
@@ -277,7 +283,12 @@ describe("a REDACTED turn is stored redacted (#689)", () => {
         headers: { "content-type": "application/json" },
       });
     }) as typeof fetch;
-    upstream = { calls: () => 1, restore: () => void (globalThis.fetch = original) };
+    upstream = {
+      calls: () => 1,
+      restore: () => {
+        globalThis.fetch = original;
+      },
+    };
 
     const second = await createResponse({
       model: "guard-probe",
@@ -347,7 +358,7 @@ describe("a CLEAN turn is unaffected (#689)", () => {
     const createdBody = (await created.json()) as Record<string, unknown>;
     expect(created.headers.get("x-ferrogate-response-stored")).toBe("true");
 
-    const read = await getResponse(String(createdBody["id"]));
+    const read = await getResponse(String(createdBody.id));
     expect(read.status).toBe(200);
     expect(outputText(await read.json())).toBe("nothing was charged");
   });

@@ -8,34 +8,35 @@
  * (High), and — since spans are known — redacts each span on mutable text
  * segments (non-overlapping). CustomerVpc residency.
  */
-import { byteLen, byteSlice } from "../bytes.js";
+
 import { TIMED_OUT, withTimeout } from "../async.js";
+import { byteLen, byteSlice } from "../bytes.js";
+import {
+  type ContentPatch,
+  type ContentSegment,
+  type ContentSource,
+  type DetectorDescriptor,
+  DetectorError,
+  type DetectorHealth,
+  type DetectorInput,
+  type DetectorResult,
+  type DetectorSecret,
+  type Finding,
+  type GuardrailDetector,
+  MAX_DETECTOR_TIMEOUT_MS,
+} from "../contract.js";
+import { validateCustomHttpEndpoint } from "../custom_http.js";
+import { isMutableTextSegment } from "../deterministic.js";
 import {
   AdapterCounters,
+  type DetectorTransport,
   HttpJsonTransport,
   adapterStatusError,
   charIndexToByteOffset,
   configDigest,
   hmacEvidenceFingerprint,
   nativeAdapterFailureModes,
-  type DetectorTransport,
 } from "./transport.js";
-import { isMutableTextSegment } from "../deterministic.js";
-import {
-  DetectorError,
-  DetectorSecret,
-  MAX_DETECTOR_TIMEOUT_MS,
-  type ContentPatch,
-  type ContentSegment,
-  type ContentSource,
-  type DetectorDescriptor,
-  type DetectorHealth,
-  type DetectorInput,
-  type DetectorResult,
-  type Finding,
-  type GuardrailDetector,
-} from "../contract.js";
-import { validateCustomHttpEndpoint } from "../custom_http.js";
 
 const PRESIDIO_ADAPTER_VERSION = "presidio-analyzer-adapter/1";
 const REDACTION = "[REDACTED]";
@@ -67,7 +68,10 @@ function validateConfig(config: PresidioDetectorConfig): URL {
   try {
     endpoint = new URL(config.endpoint);
   } catch {
-    throw DetectorError.new("invalid_configuration", "presidio detector endpoint is not a valid URL");
+    throw DetectorError.new(
+      "invalid_configuration",
+      "presidio detector endpoint is not a valid URL",
+    );
   }
   validateCustomHttpEndpoint(endpoint, config.allowPrivateNetwork);
   if (
@@ -99,7 +103,11 @@ export class PresidioDetector implements GuardrailDetector {
   private version: string;
   private counters = new AdapterCounters();
 
-  private constructor(config: PresidioDetectorConfig, transport: DetectorTransport, version: string) {
+  private constructor(
+    config: PresidioDetectorConfig,
+    transport: DetectorTransport,
+    version: string,
+  ) {
     this.config = config;
     this.transport = transport;
     this.version = version;
@@ -117,7 +125,10 @@ export class PresidioDetector implements GuardrailDetector {
     return PresidioDetector.withTransport(config, transport);
   }
 
-  static withTransport(config: PresidioDetectorConfig, transport: DetectorTransport): PresidioDetector {
+  static withTransport(
+    config: PresidioDetectorConfig,
+    transport: DetectorTransport,
+  ): PresidioDetector {
     validateConfig(config);
     const digest = configDigest([
       config.language,
@@ -182,7 +193,10 @@ export class PresidioDetector implements GuardrailDetector {
         throw new Error("not an array");
       }
     } catch {
-      throw DetectorError.new("invalid_response", "presidio detector returned a malformed analyze response");
+      throw DetectorError.new(
+        "invalid_response",
+        "presidio detector returned a malformed analyze response",
+      );
     }
 
     const threshold = this.scoreThreshold();
@@ -194,7 +208,10 @@ export class PresidioDetector implements GuardrailDetector {
       const byteStart = charIndexToByteOffset(segment.text, result.start);
       const byteEnd = charIndexToByteOffset(segment.text, result.end);
       if (byteStart === undefined || byteEnd === undefined) {
-        throw DetectorError.new("invalid_response", "presidio detector returned an out-of-range entity span");
+        throw DetectorError.new(
+          "invalid_response",
+          "presidio detector returned an out-of-range entity span",
+        );
       }
       if (byteStart >= byteEnd) {
         throw DetectorError.new(
@@ -238,7 +255,10 @@ export class PresidioDetector implements GuardrailDetector {
     const selected = input.segments.filter((s) => this.config.supportedSources.includes(s.source));
     const totalBytes = selected.reduce((acc, s) => acc + byteLen(s.text), 0);
     if (totalBytes > this.config.maxPayloadBytes) {
-      throw DetectorError.new("payload_too_large", "presidio detector request exceeds configured limit");
+      throw DetectorError.new(
+        "payload_too_large",
+        "presidio detector request exceeds configured limit",
+      );
     }
     const findings: Finding[] = [];
     const patches: ContentPatch[] = [];

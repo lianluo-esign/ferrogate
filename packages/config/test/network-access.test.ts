@@ -48,20 +48,35 @@ describe("resolveClientIp", () => {
   });
 
   test("uses the rightmost untrusted XFF entry with one hop (anti-spoof)", () => {
-    const resolved = resolveClientIp({ "x-forwarded-for": "10.0.0.1, 203.0.113.66" }, peer, true, 1);
+    const resolved = resolveClientIp(
+      { "x-forwarded-for": "10.0.0.1, 203.0.113.66" },
+      peer,
+      true,
+      1,
+    );
     expect(resolved).toBe("203.0.113.66");
     expect(resolved).not.toBe("10.0.0.1");
   });
 
   test("selects the client by hop count through a proxy chain", () => {
     expect(
-      resolveClientIp({ "x-forwarded-for": "203.0.113.7, 198.51.100.9, 192.0.2.10" }, peer, true, 2),
+      resolveClientIp(
+        { "x-forwarded-for": "203.0.113.7, 198.51.100.9, 192.0.2.10" },
+        peer,
+        true,
+        2,
+      ),
     ).toBe("198.51.100.9");
   });
 
   test("fails closed to X-Real-IP / peer when the chain is shorter than the hop count", () => {
     expect(
-      resolveClientIp({ "x-forwarded-for": "203.0.113.7", "x-real-ip": "198.51.100.9" }, peer, true, 2),
+      resolveClientIp(
+        { "x-forwarded-for": "203.0.113.7", "x-real-ip": "198.51.100.9" },
+        peer,
+        true,
+        2,
+      ),
     ).toBe("198.51.100.9");
     expect(resolveClientIp({ "x-forwarded-for": "203.0.113.7" }, peer, true, 2)).toBe(peer);
   });

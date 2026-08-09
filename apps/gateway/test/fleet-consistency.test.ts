@@ -511,8 +511,7 @@ describe("FC-2 one suspension reaches every Worker that spends on the credential
       expect(ports, `${app} src/ports.ts`).toBeDefined();
       expect(
         (ports as [string, string])[1],
-        `${app} does not MOUNT the durable tenancy lifecycle gate — the module exists and the ` +
-          "composition root ignores it, which is FC-2 with an extra file",
+        `${app} does not MOUNT the durable tenancy lifecycle gate — the module exists and the composition root ignores it, which is FC-2 with an extra file`,
       ).toMatch(pattern);
     }
   });

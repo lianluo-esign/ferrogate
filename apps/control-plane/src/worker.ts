@@ -23,8 +23,8 @@
  * lesson, same shape, as `gatewayScheduled` in `apps/gateway/src/worker.ts`.
  */
 import app from "./index.js";
-import { scheduled } from "./schedule/scheduled.js";
 import { consumeTenantScheduleAlarmBatch } from "./schedule/alarm-queue.js";
+import { scheduled } from "./schedule/scheduled.js";
 
 const handler: ExportedHandler<Parameters<typeof scheduled>[1]> = {
   fetch: (request, env, ctx) => app.fetch(request, env, ctx),

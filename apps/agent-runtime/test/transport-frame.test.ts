@@ -29,6 +29,7 @@ import {
   RUST_FRAME_HKDF_INFO,
   RUST_FRAME_HKDF_SALT,
   RUST_FRAME_SECRET_MIN_LEN,
+  type WorkerFrameHeader,
   XCHACHA20_NONCE_BYTES,
   deriveFrameKey,
   deriveRustFrameKey,
@@ -41,7 +42,6 @@ import {
   sealRustWorkerFrame,
   sealWorkerFrame,
   toRustTransportFrame,
-  type WorkerFrameHeader,
 } from "../src/workers/frame.js";
 import { xchacha20poly1305Open } from "../src/workers/xchacha20poly1305.js";
 import {
@@ -144,14 +144,19 @@ describe("sealed transport frame — crypto", () => {
       expect((await openWorkerFrame(tampered, WORKER_A.token_secret)).outcome).toBe("rejected");
     }
     const versionTampered = { ...frame, header: { ...header, protocol_version: 2 } };
-    expect((await openWorkerFrame(versionTampered, WORKER_A.token_secret)).outcome).toBe("rejected");
+    expect((await openWorkerFrame(versionTampered, WORKER_A.token_secret)).outcome).toBe(
+      "rejected",
+    );
   });
 
   it("REFUSES a flipped ciphertext bit", async () => {
     const frame = await sealWorkerFrame(header, WORKER_A.token_secret, { hello: "world" });
     const raw = atob(frame.ciphertext);
     const flipped = String.fromCharCode(raw.charCodeAt(0) ^ 0x01) + raw.slice(1);
-    const opened = await openWorkerFrame({ ...frame, ciphertext: btoa(flipped) }, WORKER_A.token_secret);
+    const opened = await openWorkerFrame(
+      { ...frame, ciphertext: btoa(flipped) },
+      WORKER_A.token_secret,
+    );
     expect(opened.outcome).toBe("rejected");
   });
 
@@ -383,8 +388,8 @@ describe("Rust SelfHostedWorkerTransportFrame — wire parity", () => {
     });
     const read = readRustTransportFrame(wire);
     expect(read?.format).toBe("xchacha20poly1305");
-    expect(atob(read!.nonce).length).toBe(XCHACHA20_NONCE_BYTES);
-    const opened = await openWorkerFrame(read!, WORKER_A.token_secret);
+    expect(atob((read as NonNullable<typeof read>).nonce).length).toBe(XCHACHA20_NONCE_BYTES);
+    const opened = await openWorkerFrame(read as NonNullable<typeof read>, WORKER_A.token_secret);
     expect(opened.outcome === "opened" && opened.envelope).toEqual({ hello: "world" });
   });
 
@@ -421,13 +426,19 @@ describe("Rust SelfHostedWorkerTransportFrame — wire parity", () => {
     const frame = await sealRustWorkerFrame(header, WORKER_A.token_secret, { hello: "world" });
     const raw = atob(frame.ciphertext);
     const flipped = String.fromCharCode(raw.charCodeAt(0) ^ 0x01) + raw.slice(1);
-    const opened = await openWorkerFrame({ ...frame, ciphertext: btoa(flipped) }, WORKER_A.token_secret);
+    const opened = await openWorkerFrame(
+      { ...frame, ciphertext: btoa(flipped) },
+      WORKER_A.token_secret,
+    );
     expect(opened.outcome === "rejected" && opened.failure.reason).toBe("unopenable");
   });
 
   it("REFUSES a nonce that is not 24 bytes under this format", async () => {
     const frame = await sealRustWorkerFrame(header, WORKER_A.token_secret, { hello: "world" });
-    const opened = await openWorkerFrame({ ...frame, nonce: btoa("x".repeat(12)) }, WORKER_A.token_secret);
+    const opened = await openWorkerFrame(
+      { ...frame, nonce: btoa("x".repeat(12)) },
+      WORKER_A.token_secret,
+    );
     expect(opened.outcome === "rejected" && opened.failure.reason).toBe("invalid_shape");
     expect(opened.outcome === "rejected" && opened.failure.detail).toContain("24 bytes");
   });

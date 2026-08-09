@@ -51,6 +51,7 @@
  * remain outside its scope because they are neither source trees nor test trees.
  */
 import { describe, expect, it } from "vitest";
+const nn = <T>(v: T): NonNullable<T> => v as NonNullable<T>;
 
 /**
  * The byte itself, built at RUNTIME.
@@ -240,9 +241,7 @@ describe("source hygiene", () => {
     // stopped matching (a moved directory, a changed vite root).
     const names = Object.keys(SOURCES);
     expect(names.length).toBeGreaterThan(50);
-    expect(names.some((name) => name.endsWith("/middleware/network.ts"))).toBe(
-      true,
-    );
+    expect(names.some((name) => name.endsWith("/middleware/network.ts"))).toBe(true);
     expect(names.some((name) => name.endsWith("/cache/config.ts"))).toBe(true);
   });
 
@@ -269,14 +268,7 @@ describe("source hygiene", () => {
         }),
       ),
     ].sort();
-    expect(members).toEqual([
-      "..",
-      "agent-runtime",
-      "cli",
-      "control-plane",
-      "mcp",
-      "telemetry",
-    ]);
+    expect(members).toEqual(["..", "agent-runtime", "cli", "control-plane", "mcp", "telemetry"]);
   });
 
   it("contains no raw NUL byte anywhere in the seven scanned source and test trees", () => {
@@ -297,10 +289,7 @@ describe("source hygiene", () => {
       .filter((name) => /\p{Cc}/u.test(name))
       // Report the FIRST line only: printing the whole name re-injects the
       // newline into the failure message and makes the report unreadable.
-      .map(
-        (name) =>
-          `${name.split(/\p{Cc}/u)[0]} …(+${name.split(/\p{Cc}/u).length - 1} lines)`,
-      );
+      .map((name) => `${name.split(/\p{Cc}/u)[0]} …(+${name.split(/\p{Cc}/u).length - 1} lines)`);
     expect(offenders).toEqual([]);
   });
 
@@ -320,7 +309,7 @@ describe("source hygiene", () => {
   // -----------------------------------------------------------------------
 
   function extractMember(path: string, tree: string): string {
-    return path.match(new RegExp(`/${tree}/([^/]+)`))![1] as string;
+    return nn(path.match(new RegExp(`/${tree}/([^/]+)`)))[1] as string;
   }
 
   it("scanned every package — a packages glob that matched nothing would assert nothing", () => {
@@ -328,9 +317,7 @@ describe("source hygiene", () => {
     // ~95% of 447 tracked files: tight enough to catch a partial glob loss,
     // loose enough to not churn on every new file added to a package.
     expect(names.length).toBeGreaterThan(425);
-    const members = [
-      ...new Set(names.map((k) => extractMember(k, "packages"))),
-    ].sort();
+    const members = [...new Set(names.map((k) => extractMember(k, "packages")))].sort();
     expect(members).toEqual([
       "billing",
       "cloudflare",
@@ -355,18 +342,12 @@ describe("source hygiene", () => {
     // ~95% of 23 tracked files: tight enough to catch a partial glob loss,
     // loose enough to not churn on every new file added to a tool.
     expect(names.length).toBeGreaterThan(21);
-    const members = [
-      ...new Set(names.map((k) => extractMember(k, "tools"))),
-    ].sort();
+    const members = [...new Set(names.map((k) => extractMember(k, "tools")))].sort();
     // `openapi-client-smoke` was retired and `sdk-packaging` (a single
     // root-level check.mjs) took its place in the tree — re-derived from the
     // committed tools/ directory, which today holds exactly these three
     // members across 23 tracked files.
-    expect(members).toEqual([
-      "generated-clients",
-      "sdk-conformance",
-      "sdk-packaging",
-    ]);
+    expect(members).toEqual(["generated-clients", "sdk-conformance", "sdk-packaging"]);
   });
 
   it("scanned every SDK — an SDK glob that matched nothing would assert nothing", () => {
@@ -374,9 +355,7 @@ describe("source hygiene", () => {
     // ~93% of 14 tracked files: close to the shared ~95% floor while remaining
     // loose enough to not churn on every new file added to an SDK.
     expect(names.length).toBeGreaterThan(12);
-    const members = [
-      ...new Set(names.map((k) => extractMember(k, "sdks"))),
-    ].sort();
+    const members = [...new Set(names.map((k) => extractMember(k, "sdks")))].sort();
     expect(members).toEqual(["python", "typescript"]);
   });
 
@@ -385,9 +364,7 @@ describe("source hygiene", () => {
     // ~95% of 288 tracked files: tight enough to catch a partial glob loss,
     // loose enough to not churn on every new file added to admin-console.
     expect(names.length).toBeGreaterThan(273);
-    const topLevel = [
-      ...new Set(names.map((k) => extractMember(k, "admin-console"))),
-    ].sort();
+    const topLevel = [...new Set(names.map((k) => extractMember(k, "admin-console")))].sort();
     expect(topLevel).toEqual([
       ".dockerignore",
       ".env.example",
@@ -423,9 +400,7 @@ describe("source hygiene", () => {
     // ~95% of 39 tracked files: tight enough to catch a partial glob loss,
     // loose enough to not churn on every new repository-level test fixture.
     expect(names.length).toBeGreaterThan(37);
-    const members = [
-      ...new Set(names.map((k) => extractMember(k, "tests"))),
-    ].sort();
+    const members = [...new Set(names.map((k) => extractMember(k, "tests")))].sort();
     expect(members).toEqual(["fixtures"]);
   });
 
@@ -434,9 +409,7 @@ describe("source hygiene", () => {
     // All 7 tracked files are required because this tree is too small for a
     // useful ~95% floor; its explicit census makes additions readable.
     expect(names.length).toBeGreaterThan(6);
-    const members = [
-      ...new Set(names.map((k) => extractMember(k, "e2e"))),
-    ].sort();
+    const members = [...new Set(names.map((k) => extractMember(k, "e2e")))].sort();
     expect(members).toEqual([
       "README.md",
       "fixtures.ts",

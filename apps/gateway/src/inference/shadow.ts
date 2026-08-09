@@ -320,7 +320,7 @@ const isolateShadowBudget: AsyncShadowBudgetLedger = {
  * one the deployed path takes.
  */
 export function shadowBudgetFor(env: InferenceBindings): AsyncShadowBudgetLedger {
-  const namespace = env["SHADOW_BUDGET"];
+  const namespace = env.SHADOW_BUDGET;
   if (
     typeof namespace === "object" &&
     namespace !== null &&

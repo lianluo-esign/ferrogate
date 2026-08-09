@@ -9,8 +9,8 @@ import { sseParseStream } from "../../src/streaming/sse.js";
 import {
   OPENAI_TEXT_STREAM,
   OPENAI_TOOL_STREAM,
-  chunkBytes,
   bytes,
+  chunkBytes,
   drainFrames,
   streamOf,
 } from "./helpers.js";
@@ -21,8 +21,12 @@ describe("chatSseToCompletion (buffered/governed leg)", () => {
     expect(completion.id).toBe("chatcmpl-1");
     expect(completion.model).toBe("gpt-4o");
     expect(completion.object).toBe("chat.completion");
-    expect(completion.choices[0]!.message["content"]).toBe("Hello");
-    expect(completion.choices[0]!.finish_reason).toBe("stop");
+    expect(
+      (completion.choices[0] as NonNullable<(typeof completion.choices)[0]>).message.content,
+    ).toBe("Hello");
+    expect(
+      (completion.choices[0] as NonNullable<(typeof completion.choices)[0]>).finish_reason,
+    ).toBe("stop");
     expect(completion.usage).toEqual({
       prompt_tokens: 5,
       completion_tokens: 2,
@@ -32,22 +36,29 @@ describe("chatSseToCompletion (buffered/governed leg)", () => {
 
   test("accumulates streamed tool calls into a single arguments string", () => {
     const completion = chatSseToCompletion(OPENAI_TOOL_STREAM);
-    const toolCalls = completion.choices[0]!.message["tool_calls"] as {
+    const toolCalls = (completion.choices[0] as NonNullable<(typeof completion.choices)[0]>).message
+      .tool_calls as {
       id: string;
       function: { name: string; arguments: string };
     }[];
     expect(toolCalls).toHaveLength(1);
-    expect(toolCalls[0]!.id).toBe("call_1");
-    expect(toolCalls[0]!.function.name).toBe("lookup");
-    expect(toolCalls[0]!.function.arguments).toBe('{"q":"x"}');
-    expect(completion.choices[0]!.finish_reason).toBe("tool_calls");
+    expect((toolCalls[0] as NonNullable<(typeof toolCalls)[0]>).id).toBe("call_1");
+    expect((toolCalls[0] as NonNullable<(typeof toolCalls)[0]>).function.name).toBe("lookup");
+    expect((toolCalls[0] as NonNullable<(typeof toolCalls)[0]>).function.arguments).toBe(
+      '{"q":"x"}',
+    );
+    expect(
+      (completion.choices[0] as NonNullable<(typeof completion.choices)[0]>).finish_reason,
+    ).toBe("tool_calls");
   });
 
   test("content is null (not empty string) when no chunk carried text", () => {
     const completion = chatSseToCompletion(
       'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"c","function":{"name":"n","arguments":"{}"}}]}}]}\n\n',
     );
-    expect(completion.choices[0]!.message["content"]).toBeNull();
+    expect(
+      (completion.choices[0] as NonNullable<(typeof completion.choices)[0]>).message.content,
+    ).toBeNull();
   });
 
   test("the [DONE] sentinel and unparsable frames are skipped, not fatal", () => {
@@ -55,16 +66,18 @@ describe("chatSseToCompletion (buffered/governed leg)", () => {
       "data: [DONE]\n\ndata: not json at all\n\n" +
         'data: {"choices":[{"delta":{"content":"ok"}}]}\n\n',
     );
-    expect(completion.choices[0]!.message["content"]).toBe("ok");
+    expect(
+      (completion.choices[0] as NonNullable<(typeof completion.choices)[0]>).message.content,
+    ).toBe("ok");
   });
 
   test("falls back to the Rust literal id when no chunk carries one", () => {
-    const completion = chatSseToCompletion(
-      'data: {"choices":[{"delta":{"content":"x"}}]}\n\n',
-    );
+    const completion = chatSseToCompletion('data: {"choices":[{"delta":{"content":"x"}}]}\n\n');
     expect(completion.id).toBe(FALLBACK_COMPLETION_ID);
     expect(completion.model).toBeUndefined();
-    expect(completion.choices[0]!.finish_reason).toBeNull();
+    expect(
+      (completion.choices[0] as NonNullable<(typeof completion.choices)[0]>).finish_reason,
+    ).toBeNull();
   });
 
   test("a later usage frame replaces an earlier one; nulls do not clobber", () => {
@@ -86,9 +99,11 @@ describe("chatAggregateStream (live fold)", () => {
         .pipeThrough(stream),
     );
     expect(frames).toHaveLength(4);
-    expect(frames[3]!.data).toBe("[DONE]");
+    expect((frames[3] as NonNullable<(typeof frames)[3]>).data).toBe("[DONE]");
     const aggregate = await completion;
-    expect(aggregate.choices[0]!.message["content"]).toBe("Hello");
+    expect(
+      (aggregate.choices[0] as NonNullable<(typeof aggregate.choices)[0]>).message.content,
+    ).toBe("Hello");
     expect(aggregate.id).toBe("chatcmpl-1");
   });
 });

@@ -60,11 +60,7 @@ import type {
   AuthContext,
   GatewayBindings,
 } from "../ports.js";
-import {
-  ApiKeyResolutionCache,
-  DEFAULT_API_KEY_CACHE_TTL_SECONDS,
-  type Clock,
-} from "./cache.js";
+import { ApiKeyResolutionCache, type Clock, DEFAULT_API_KEY_CACHE_TTL_SECONDS } from "./cache.js";
 import { sha256Hex, verifyStoredKeyHash, virtualApiKeyPrefix } from "./hash.js";
 import {
   type ApiKeyStore,

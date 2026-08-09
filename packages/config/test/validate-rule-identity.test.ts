@@ -177,9 +177,7 @@ describe("validate_models — fallback, canary and shadow routes", () => {
       "a canary route on an unknown provider",
       {
         providers: [provider()],
-        models: [
-          model({ canary: { provider: "ghost", provider_model: "gpt-4o", percent: 5 } }),
-        ],
+        models: [model({ canary: { provider: "ghost", provider_model: "gpt-4o", percent: 5 } })],
       },
       "field models[0].canary.provider: model gpt references unknown canary provider ghost",
     ],
@@ -195,9 +193,7 @@ describe("validate_models — fallback, canary and shadow routes", () => {
       "a blank shadow provider_model",
       {
         providers: [provider()],
-        models: [
-          model({ shadow: { provider: "openai", provider_model: "", sample_percent: 5 } }),
-        ],
+        models: [model({ shadow: { provider: "openai", provider_model: "", sample_percent: 5 } })],
       },
       "field models[0].shadow.provider_model: cannot be empty",
     ],

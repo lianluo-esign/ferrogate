@@ -1,14 +1,5 @@
-// Virtual-key lifecycle console (#321): list + create + delete plus the
-// enable / disable / rotate / revoke ACTION endpoints
-// (`/admin/v1/virtual-keys/{key_id}/{action}`). This is a bespoke page rather
-// than a generic resource because those actions need per-action confirmation
-// and rotate returns a fresh secret shown ONCE. Columns/fields are reused from
-// the shared virtual-keys resource config so the create form and table stay in
-// sync with the OpenAPI contract (#314).
-import { useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { MoreHorizontal, Plus } from "lucide-react";
-import { toast } from "sonner";
+import { ResourceForm } from "@/components/resource/resource-form";
+import { ResourceTable } from "@/components/resource/resource-table";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -26,26 +17,25 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import {
-  Sheet,
-  SheetContent,
-  SheetHeader,
-  SheetTitle,
-} from "@/components/ui/sheet";
-import { ResourceForm } from "@/components/resource/resource-form";
-import { ResourceTable } from "@/components/resource/resource-table";
+import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { useAuth } from "@/hooks/use-auth";
-import { useI18n } from "@/i18n";
 import { useOperatorError } from "@/hooks/use-operator-error";
+import { useI18n } from "@/i18n";
 import type { TranslationKey } from "@/i18n";
-import {
-  adminDelete,
-  adminGet,
-  adminPost,
-  type AdminSchema,
-} from "@/lib/gateway-client";
+import { type AdminSchema, adminDelete, adminGet, adminPost } from "@/lib/gateway-client";
 import { defaultFieldValues } from "@/lib/resource-config";
-import { virtualKeysConfig, type AdminVirtualApiKey } from "@/resources/virtual-keys";
+import { type AdminVirtualApiKey, virtualKeysConfig } from "@/resources/virtual-keys";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { MoreHorizontal, Plus } from "lucide-react";
+// Virtual-key lifecycle console (#321): list + create + delete plus the
+// enable / disable / rotate / revoke ACTION endpoints
+// (`/admin/v1/virtual-keys/{key_id}/{action}`). This is a bespoke page rather
+// than a generic resource because those actions need per-action confirmation
+// and rotate returns a fresh secret shown ONCE. Columns/fields are reused from
+// the shared virtual-keys resource config so the create form and table stay in
+// sync with the OpenAPI contract (#314).
+import { useState } from "react";
+import { toast } from "sonner";
 
 type KeyAction = "enable" | "disable" | "rotate" | "revoke" | "delete";
 
@@ -110,11 +100,7 @@ function extractSecret(response: unknown): string | null {
   return null;
 }
 
-function runAction(
-  apiKey: string,
-  action: KeyAction,
-  keyId: string,
-): Promise<unknown> {
+function runAction(apiKey: string, action: KeyAction, keyId: string): Promise<unknown> {
   const options = { params: { key_id: keyId } };
   switch (action) {
     case "enable":
@@ -134,7 +120,7 @@ export default function VirtualKeysPage() {
   const { session } = useAuth();
   const { t } = useI18n();
   const { toastError } = useOperatorError();
-  const apiKey = session!.gatewayApiKey;
+  const apiKey = (session as NonNullable<typeof session>).gatewayApiKey;
   const queryClient = useQueryClient();
   const queryKey = ["resource", "virtual-keys"];
 
@@ -145,7 +131,11 @@ export default function VirtualKeysPage() {
   } | null>(null);
   const [revealedSecret, setRevealedSecret] = useState<string | null>(null);
 
-  const { data, isLoading, error: listError } = useQuery({
+  const {
+    data,
+    isLoading,
+    error: listError,
+  } = useQuery({
     queryKey,
     queryFn: () => adminGet(apiKey, "/admin/v1/virtual-keys"),
   });
@@ -195,20 +185,19 @@ export default function VirtualKeysPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-lg font-semibold">{t("page.virtualKeys.title")}</h1>
-          <p className="text-sm text-muted-foreground">
-            {t("page.virtualKeys.description")}
-          </p>
+          <p className="text-sm text-muted-foreground">{t("page.virtualKeys.description")}</p>
         </div>
-        <Button
-          onClick={() => setFormOpen(true)}
-        >
+        <Button onClick={() => setFormOpen(true)}>
           <Plus className="mr-1 h-4 w-4" />
           {t("resource.action.new")}
         </Button>
       </div>
 
       {listError ? (
-        <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <p
+          role="alert"
+          className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+        >
           {t("page.virtualKeys.loadError", { message: (listError as Error).message })}
         </p>
       ) : null}
@@ -336,13 +325,9 @@ export default function VirtualKeysPage() {
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>{t("resource.secret.title")}</AlertDialogTitle>
-            <AlertDialogDescription>
-              {t("resource.secret.description")}
-            </AlertDialogDescription>
+            <AlertDialogDescription>{t("resource.secret.description")}</AlertDialogDescription>
           </AlertDialogHeader>
-          <code className="block break-all rounded-md bg-muted p-3 text-sm">
-            {revealedSecret}
-          </code>
+          <code className="block break-all rounded-md bg-muted p-3 text-sm">{revealedSecret}</code>
           <AlertDialogFooter>
             <AlertDialogAction
               onClick={() => {

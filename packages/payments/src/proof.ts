@@ -11,12 +11,12 @@
 
 import { PaymentError } from "./error.js";
 import {
-  caip2ForNetwork,
-  encodeHeaderBytes,
   MAX_SVM_TRANSACTION_BYTES,
   type SelectedPayment,
   type SolanaNetwork,
   X402_VERSION,
+  caip2ForNetwork,
+  encodeHeaderBytes,
 } from "./wire.js";
 
 const INSPECT = Symbol.for("nodejs.util.inspect.custom");
@@ -178,7 +178,7 @@ export function buildPaymentSignature(
   // delete or overwrite what the server advertised, and never invent an empty
   // object when the server sent none.
   if (selected.extensions !== null && selected.extensions !== undefined) {
-    payload["extensions"] = selected.extensions;
+    payload.extensions = selected.extensions;
   }
 
   const json = JSON.stringify(payload);

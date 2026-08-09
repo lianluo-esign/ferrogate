@@ -1,15 +1,16 @@
-import { render, screen, within } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
-import { HttpResponse, http } from "msw";
-import { MemoryRouter } from "react-router-dom";
-import { QueryClientProvider } from "@tanstack/react-query";
-import { beforeEach, describe, expect, it } from "vitest";
 import { AuthProvider } from "@/hooks/use-auth";
 import { I18nProvider } from "@/i18n";
-import ManagedWorkerSessionsPage from "@/pages/managed-worker-sessions";
 import type { AdminSchema } from "@/lib/gateway-client";
+import ManagedWorkerSessionsPage from "@/pages/managed-worker-sessions";
 import { gatewayUrl, server } from "@/test/msw";
 import { createTestQueryClient, seedSession } from "@/test/test-utils";
+import { QueryClientProvider } from "@tanstack/react-query";
+import { render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { http, HttpResponse } from "msw";
+import { MemoryRouter } from "react-router-dom";
+import { beforeEach, describe, expect, it } from "vitest";
+const nn = <T,>(v: T): NonNullable<T> => v as NonNullable<T>;
 
 type Session = AdminSchema<"AdminManagedWorkerSession">;
 
@@ -93,7 +94,7 @@ describe("ManagedWorkerSessionsPage", () => {
     renderPage();
 
     expect(await screen.findByText("mws-1")).toBeInTheDocument();
-    const row = screen.getByText("mws-1").closest("tr")!;
+    const row = nn(screen.getByText("mws-1").closest("tr"));
     expect(within(row).getByText("completed")).toBeInTheDocument();
     expect(within(row).getByText("firecracker_microvm")).toBeInTheDocument();
   });
@@ -102,9 +103,7 @@ describe("ManagedWorkerSessionsPage", () => {
     mockSessions([]);
     renderPage();
 
-    expect(
-      await screen.findByText("No managed worker sessions recorded yet."),
-    ).toBeInTheDocument();
+    expect(await screen.findByText("No managed worker sessions recorded yet.")).toBeInTheDocument();
   });
 
   it("opens a session's lifecycle event detail", async () => {

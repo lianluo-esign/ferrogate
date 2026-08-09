@@ -65,17 +65,18 @@
  * `docs/rewrite/parity-audit-storage.md` §4.11 on the duplication — it closes
  * when the whole durable half of `@ferrogate/storage` is mounted, not before.
  */
-import { randomHex128 } from "./hash.js";
-import { controlDatabaseFrom } from "../control-data.js";
+
 import {
-  requireAtomicBatch,
   type TenantDataStub,
   type TenantDatabaseHandle,
   type TenantDatabaseRouter,
+  requireAtomicBatch,
 } from "@ferrogate/storage";
+import { controlDatabaseFrom } from "../control-data.js";
 import { evidenceProjectionKey } from "../requestlog/d1.js";
 import { tenantObjectAddressForEnv } from "../residency/carrier.js";
-import { tenantDataObjectFor, type TenantDataBindings } from "../tenancy/tenant-data.js";
+import { type TenantDataBindings, tenantDataObjectFor } from "../tenancy/tenant-data.js";
+import { randomHex128 } from "./hash.js";
 import type {
   AssetAuditEvent,
   AssetAuditSink,
@@ -86,8 +87,8 @@ import type {
   AssetVisibilityPromotionOutcome,
   ChannelMoveOutcome,
   StoredAsset,
-  StoredAssetMetadata,
   StoredAssetChannel,
+  StoredAssetMetadata,
   StoredBundleFile,
   VariantDeleteOutcome,
   VersionYankOutcome,
@@ -948,11 +949,13 @@ export class D1AssetAuditSink implements AssetAuditSink {
       if (stub?.query === undefined) {
         throw new Error(`tenant audit object is unavailable for ${tenantId}`);
       }
-      rows = (await stub.query({
-        tenantId,
-        sql: AUDIT_SCREENING_EVIDENCE_SQL,
-        params: [tenantId, AUDIT_EVIDENCE_SCAN_LIMIT],
-      })).results as unknown as Row[];
+      rows = (
+        await stub.query({
+          tenantId,
+          sql: AUDIT_SCREENING_EVIDENCE_SQL,
+          params: [tenantId, AUDIT_EVIDENCE_SCAN_LIMIT],
+        })
+      ).results as unknown as Row[];
     }
     const evidence = new Map<string, string>();
     for (const row of rows) {
@@ -1002,8 +1005,7 @@ export async function sweepAssetAuditProjections(
   tenantIds: readonly string[],
   limit = 500,
 ): Promise<void> {
-  const candidate =
-    controlDatabaseFrom(env);
+  const candidate = controlDatabaseFrom(env);
   if (!isAssetDatabase(candidate)) return;
   const projection = candidate;
   const pageSize = Math.max(1, Math.trunc(limit));

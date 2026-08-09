@@ -1,4 +1,4 @@
-import { booleanColumn, type ResourceConfig } from "@/lib/resource-config";
+import { type ResourceConfig, booleanColumn } from "@/lib/resource-config";
 
 export interface AdminSelfHostedWorkerRecord extends Record<string, unknown> {
   id: string;
@@ -26,10 +26,34 @@ export const selfHostedWorkersConfig: ResourceConfig<AdminSelfHostedWorkerRecord
   readOnly: true,
   rowLabel: (row) => row.worker_name,
   columns: [
-    { key: "worker_name", headerKey: "resource.selfHostedWorkers.col.name", priority: "primary", minWidth: 200, mobileVisibility: "always" },
-    { key: "status", headerKey: "resource.selfHostedWorkers.col.status", priority: "secondary", minWidth: 110, mobileVisibility: "always" },
-    { key: "trust_level", headerKey: "resource.selfHostedWorkers.col.trustLevel", priority: "detail", minWidth: 230, mobileVisibility: "details" },
-    booleanColumn<AdminSelfHostedWorkerRecord>({ key: "stale", headerKey: "resource.selfHostedWorkers.col.stale", priority: "secondary", minWidth: 90, mobileVisibility: "always" }),
+    {
+      key: "worker_name",
+      headerKey: "resource.selfHostedWorkers.col.name",
+      priority: "primary",
+      minWidth: 200,
+      mobileVisibility: "always",
+    },
+    {
+      key: "status",
+      headerKey: "resource.selfHostedWorkers.col.status",
+      priority: "secondary",
+      minWidth: 110,
+      mobileVisibility: "always",
+    },
+    {
+      key: "trust_level",
+      headerKey: "resource.selfHostedWorkers.col.trustLevel",
+      priority: "detail",
+      minWidth: 230,
+      mobileVisibility: "details",
+    },
+    booleanColumn<AdminSelfHostedWorkerRecord>({
+      key: "stale",
+      headerKey: "resource.selfHostedWorkers.col.stale",
+      priority: "secondary",
+      minWidth: 90,
+      mobileVisibility: "always",
+    }),
     booleanColumn<AdminSelfHostedWorkerRecord>({
       key: "orchestration_enabled",
       headerKey: "resource.selfHostedWorkers.col.orchestration",
@@ -39,7 +63,13 @@ export const selfHostedWorkersConfig: ResourceConfig<AdminSelfHostedWorkerRecord
       trueKey: "common.enabled",
       falseKey: "common.disabled",
     }),
-    { key: "telemetry_event_count", headerKey: "resource.selfHostedWorkers.col.telemetryEvents", priority: "detail", minWidth: 140, mobileVisibility: "details" },
+    {
+      key: "telemetry_event_count",
+      headerKey: "resource.selfHostedWorkers.col.telemetryEvents",
+      priority: "detail",
+      minWidth: 140,
+      mobileVisibility: "details",
+    },
   ],
   fields: [],
 };

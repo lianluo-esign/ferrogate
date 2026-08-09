@@ -466,7 +466,7 @@ export function estimateAudioUploadUsage(body: unknown): EstimatedUsage {
     bytes instanceof Uint8Array
       ? bytes.byteLength
       : typeof (bytes as { byteLength?: unknown } | undefined)?.byteLength === "number"
-        ? ((bytes as { byteLength: number }).byteLength)
+        ? (bytes as { byteLength: number }).byteLength
         : 0;
   const seconds = byteLength / AUDIO_UPLOAD_BYTES_PER_SECOND;
   const hint = get(body, "prompt");

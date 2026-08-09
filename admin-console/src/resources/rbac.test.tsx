@@ -1,16 +1,16 @@
+import { ResourcePage } from "@/components/resource/resource-page";
+import { type AdminApiKey, apiKeysConfig } from "@/resources/api-keys";
+import { permissionsConfig } from "@/resources/permissions";
+import { policiesConfig } from "@/resources/policies";
+import { type AdminRole, rolesConfig } from "@/resources/roles";
+import { gatewayUrl, mockAdminError, mockAdminList, server } from "@/test/msw";
+import { renderWithProviders, seedSession } from "@/test/test-utils";
 // IAM completion (#321): generic-resource RBAC surfaces (roles, permissions,
 // policies) and native api-keys, exercised through ResourcePage + MSW.
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { HttpResponse, http } from "msw";
+import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it } from "vitest";
-import { ResourcePage } from "@/components/resource/resource-page";
-import { apiKeysConfig, type AdminApiKey } from "@/resources/api-keys";
-import { permissionsConfig } from "@/resources/permissions";
-import { policiesConfig } from "@/resources/policies";
-import { rolesConfig, type AdminRole } from "@/resources/roles";
-import { gatewayUrl, mockAdminError, mockAdminList, server } from "@/test/msw";
-import { renderWithProviders, seedSession } from "@/test/test-utils";
 
 function role(overrides: Partial<AdminRole> = {}): AdminRole {
   return {
@@ -82,9 +82,7 @@ describe("RBAC roles resource", () => {
     await user.type(screen.getByLabelText("Slug *"), "auditor");
     await user.click(screen.getByRole("button", { name: "Create" }));
 
-    await waitFor(() =>
-      expect(createdBody).toMatchObject({ name: "Auditor", slug: "auditor" }),
-    );
+    await waitFor(() => expect(createdBody).toMatchObject({ name: "Auditor", slug: "auditor" }));
   });
 
   it("offers delete but not edit (roles have no update endpoint)", async () => {
@@ -102,9 +100,7 @@ describe("RBAC roles resource", () => {
     mockAdminError("get", "/admin/v1/roles", 403, "forbidden", "missing rbac.read");
     renderWithProviders(<ResourcePage config={rolesConfig} />);
 
-    expect(
-      await screen.findByText(/Failed to load roles: missing rbac.read/),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(/Failed to load roles: missing rbac.read/)).toBeInTheDocument();
   });
 });
 

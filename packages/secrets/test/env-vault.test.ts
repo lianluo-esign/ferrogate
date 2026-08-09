@@ -22,16 +22,16 @@ describe("EnvSecretResolver", () => {
 
   it("refuses a non-env:// reference", async () => {
     const resolver = new EnvSecretResolver({});
-    await expect(
-      resolver.resolve(parseSecretRef("vault://secret/data/x#f")),
-    ).rejects.toThrow(/non-env/);
+    await expect(resolver.resolve(parseSecretRef("vault://secret/data/x#f"))).rejects.toThrow(
+      /non-env/,
+    );
   });
 });
 
 /** A fetch stub that returns a canned JSON body for any request. */
 function jsonFetch(status: number, body: unknown): typeof fetch {
-  return vi.fn(async () =>
-    new Response(JSON.stringify(body), { status }),
+  return vi.fn(
+    async () => new Response(JSON.stringify(body), { status }),
   ) as unknown as typeof fetch;
 }
 
@@ -52,8 +52,10 @@ describe("VaultSecretResolver", () => {
     // Assert the call happened before indexing it: a `?.` here would turn a
     // "never called" bug into two silently-skipped assertions.
     expect(call).toBeDefined();
-    expect(call![0]).toBe("https://vault.test/v1/secret/data/data/openai");
-    expect((call![1] as RequestInit).headers).toMatchObject({
+    expect((call as NonNullable<typeof call>)[0]).toBe(
+      "https://vault.test/v1/secret/data/data/openai",
+    );
+    expect(((call as NonNullable<typeof call>)[1] as RequestInit).headers).toMatchObject({
       "X-Vault-Token": "test-token",
     });
   });
@@ -95,8 +97,8 @@ describe("SecretResolverRegistry env + vault dispatch", () => {
 
   it("errors on a vault:// reference without Vault configured", async () => {
     const registry = SecretResolverRegistry.new({});
-    await expect(
-      registry.resolve("vault://secret/data/openai#api_key"),
-    ).rejects.toThrow(/VAULT_ADDR/);
+    await expect(registry.resolve("vault://secret/data/openai#api_key")).rejects.toThrow(
+      /VAULT_ADDR/,
+    );
   });
 });

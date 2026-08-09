@@ -1,7 +1,7 @@
 /**
  * Schema helpers shared across the `Config` schema tree.
  */
-import { z } from "zod";
+import type { z } from "zod";
 
 /**
  * Default an object field to its own fully-defaulted value on omission.

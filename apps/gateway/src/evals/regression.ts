@@ -61,20 +61,21 @@
  * does not outlive its invocation, so "check then insert" has a window in which
  * two scheduled runs both alert.
  */
+
+import { evidenceProjectionKey } from "../requestlog/d1.js";
 import {
   ONLINE_EVAL_REGRESSION_CLAIM_SQL,
   ONLINE_EVAL_REGRESSION_PROJECTION_SQL,
   ONLINE_EVAL_SCORE_TABLE,
   ONLINE_EVAL_WINDOW_AGGREGATE_SQL,
-  TENANT_ONLINE_EVAL_REGRESSION_CLAIM_SQL,
   type OnlineEvalScoreDatabase,
+  TENANT_ONLINE_EVAL_REGRESSION_CLAIM_SQL,
   onlineEvalDatabaseFrom,
   onlineEvalRegressionBindings,
   onlineEvalTenantDatabaseFrom,
 } from "./d1.js";
-import { evidenceProjectionKey } from "../requestlog/d1.js";
-import { ONLINE_EVAL_REGRESSION_METRIC, publishOnlineEvalScorePoints } from "./metrics.js";
 import { refreshOnlineEvalLegQuality } from "./leg-quality.js";
+import { ONLINE_EVAL_REGRESSION_METRIC, publishOnlineEvalScorePoints } from "./metrics.js";
 import type { OnlineEvalPolicy } from "./policy.js";
 import { type OnlineEvalBindings, onlineEvalPolicySourceFromEnv } from "./source.js";
 
@@ -185,13 +186,13 @@ export async function onlineEvalWindowAggregates(
   const rows = result?.results ?? [];
   return rows.map((row) => ({
     tenantId,
-    criterionId: String(row["criterion_id"] ?? ""),
-    judgeModel: String(row["judge_model"] ?? ""),
-    logicalModel: stringColumn(row["logical_model"]),
-    recentTotal: numberColumn(row["recent_total"]),
-    recentCount: numberColumn(row["recent_count"]),
-    baselineTotal: numberColumn(row["baseline_total"]),
-    baselineCount: numberColumn(row["baseline_count"]),
+    criterionId: String(row.criterion_id ?? ""),
+    judgeModel: String(row.judge_model ?? ""),
+    logicalModel: stringColumn(row.logical_model),
+    recentTotal: numberColumn(row.recent_total),
+    recentCount: numberColumn(row.recent_count),
+    baselineTotal: numberColumn(row.baseline_total),
+    baselineCount: numberColumn(row.baseline_count),
   }));
 }
 
@@ -356,7 +357,7 @@ export async function sweepAllOnlineEvalRegressions(
       .bind(nowUnix - BASELINE_WINDOW_SECONDS)
       .all()) as { results?: Record<string, unknown>[] } | undefined;
     tenants = (result?.results ?? [])
-      .map((row) => row["tenant"])
+      .map((row) => row.tenant)
       .filter((tenant): tenant is string => typeof tenant === "string" && tenant !== "");
   } catch {
     // A schema that predates `0009_online_eval.sql`, or a D1 blip. Nothing to

@@ -30,7 +30,13 @@ export const promptTemplatesConfig: ResourceConfig<AdminPromptTemplate> = {
     { key: "active_revision", headerKey: "resource.promptTemplates.col.activeRevision" },
   ],
   fields: [
-    { name: "id", labelKey: "resource.promptTemplates.field.id", type: "text", required: true, createOnly: true },
+    {
+      name: "id",
+      labelKey: "resource.promptTemplates.field.id",
+      type: "text",
+      required: true,
+      createOnly: true,
+    },
     { name: "name", labelKey: "resource.promptTemplates.field.name", type: "text", required: true },
     {
       name: "status",
@@ -47,7 +53,10 @@ export const promptTemplatesConfig: ResourceConfig<AdminPromptTemplate> = {
       labelKey: "resource.promptTemplates.field.target",
       type: "select",
       options: [
-        { labelKey: "resource.promptTemplates.option.target.chatCompletions", value: "chat_completions" },
+        {
+          labelKey: "resource.promptTemplates.option.target.chatCompletions",
+          value: "chat_completions",
+        },
         { labelKey: "resource.promptTemplates.option.target.responses", value: "responses" },
       ],
     },
@@ -72,8 +81,7 @@ export const promptTemplatesConfig: ResourceConfig<AdminPromptTemplate> = {
       name: "version",
       labelKey: "resource.promptTemplates.field.version",
       type: "json",
-      placeholder:
-        '{"messages":[{"role":"system","content":"You are..."}],"temperature":0.7}',
+      placeholder: '{"messages":[{"role":"system","content":"You are..."}],"temperature":0.7}',
       descriptionKey: "resource.promptTemplates.field.version.desc",
     },
   ],

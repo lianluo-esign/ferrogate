@@ -74,9 +74,7 @@ describe("chatCompletionToMessage delegates to @ferrogate/providers", () => {
         finish_reason: "tool_calls",
         message: {
           content: "partial",
-          tool_calls: [
-            { id: "call_1", function: { name: "lookup", arguments: '{"q":"a"}' } },
-          ],
+          tool_calls: [{ id: "call_1", function: { name: "lookup", arguments: '{"q":"a"}' } }],
         },
       },
     ],
@@ -91,14 +89,14 @@ describe("chatCompletionToMessage delegates to @ferrogate/providers", () => {
 
   test("carries the Rust field shape through the port", () => {
     const message = chatCompletionToMessage(completion, "fallback");
-    expect(message["id"]).toBe("msg-77");
-    expect(message["type"]).toBe("message");
-    expect(message["role"]).toBe("assistant");
-    expect(message["model"]).toBe("gpt-4o-mini");
-    expect(message["stop_reason"]).toBe("tool_use");
-    expect(message["stop_sequence"]).toBeNull();
-    expect(message["usage"]).toStrictEqual({ input_tokens: 11, output_tokens: 5 });
-    expect(message["content"]).toStrictEqual([
+    expect(message.id).toBe("msg-77");
+    expect(message.type).toBe("message");
+    expect(message.role).toBe("assistant");
+    expect(message.model).toBe("gpt-4o-mini");
+    expect(message.stop_reason).toBe("tool_use");
+    expect(message.stop_sequence).toBeNull();
+    expect(message.usage).toStrictEqual({ input_tokens: 11, output_tokens: 5 });
+    expect(message.content).toStrictEqual([
       { type: "text", text: "partial" },
       { type: "tool_use", id: "call_1", name: "lookup", input: { q: "a" } },
     ]);

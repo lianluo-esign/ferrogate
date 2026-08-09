@@ -19,16 +19,17 @@ import type { Config, GuardrailRule, SkillPackage } from "../schema/index.js";
 import {
   fail,
   isBlank,
+  isPromptVariableName,
   isSetAndBlank,
   isSetAndEmpty,
-  isPromptVariableName,
+  usesRegexCrateUnsupportedSyntax,
   validatePositiveOptional,
   validatePromptMessageRole,
   validatePromptPlaceholders,
   validateSecretRef,
-  usesRegexCrateUnsupportedSyntax,
 } from "./helpers.js";
 import { pluginRegistrationsForValidation } from "./plugins.js";
+const nn = <T>(v: T): NonNullable<T> => v as NonNullable<T>;
 
 /** `struct WorkflowToolNames` — the executable tool vocabulary a workflow may name. */
 export interface WorkflowToolNames {
@@ -71,7 +72,7 @@ export function validateAgentWorkflows(
 ): void {
   const workflowVersions = new Set<string>();
   for (let index = 0; index < config.agent_workflows.length; index += 1) {
-    const workflow = config.agent_workflows[index]!;
+    const workflow = nn(config.agent_workflows[index]);
     const at = (field: string) => `agent_workflows[${index}].${field}`;
     if (isBlank(workflow.id)) fail(at("id"), "cannot be empty");
     const versionKey = `${workflow.id}@${workflow.version}`;
@@ -98,7 +99,7 @@ export function validateAgentWorkflows(
 
     const nodeIds = new Set<string>();
     for (let nodeIndex = 0; nodeIndex < workflow.nodes.length; nodeIndex += 1) {
-      const node = workflow.nodes[nodeIndex]!;
+      const node = nn(workflow.nodes[nodeIndex]);
       const atNode = (field: string) => `${at("nodes")}[${nodeIndex}].${field}`;
       if (isBlank(node.id)) fail(atNode("id"), "cannot be empty");
       if (nodeIds.has(node.id)) fail(atNode("id"), `duplicate node id ${node.id}`);
@@ -147,7 +148,7 @@ export function validateAgentWorkflows(
       validatePositiveOptional(node.token_budget, `field ${atNode("token_budget")}`);
     }
     for (let edgeIndex = 0; edgeIndex < workflow.edges.length; edgeIndex += 1) {
-      const edge = workflow.edges[edgeIndex]!;
+      const edge = nn(workflow.edges[edgeIndex]);
       const atEdge = (field: string) => `${at("edges")}[${edgeIndex}].${field}`;
       if (!nodeIds.has(edge.from)) fail(atEdge("from"), `unknown node ${edge.from}`);
       if (!nodeIds.has(edge.to)) fail(atEdge("to"), `unknown node ${edge.to}`);
@@ -160,7 +161,7 @@ export function validateAgentWorkflows(
 export function validatePromptTemplates(config: Config, modelNames: Set<string>): void {
   const ids = new Set<string>();
   for (let index = 0; index < config.prompt_templates.length; index += 1) {
-    const template = config.prompt_templates[index]!;
+    const template = nn(config.prompt_templates[index]);
     const at = (field: string) => `prompt_templates[${index}].${field}`;
     if (isBlank(template.id)) fail(at("id"), "cannot be empty");
     if (ids.has(template.id)) fail(at("id"), `duplicate prompt template id ${template.id}`);
@@ -177,7 +178,7 @@ export function validatePromptTemplates(config: Config, modelNames: Set<string>)
 
     const variableNames = new Set<string>();
     for (let variableIndex = 0; variableIndex < template.variables.length; variableIndex += 1) {
-      const variable = template.variables[variableIndex]!;
+      const variable = nn(template.variables[variableIndex]);
       const atVariable = (field: string) => `${at("variables")}[${variableIndex}].${field}`;
       if (isBlank(variable.name)) fail(atVariable("name"), "cannot be empty");
       if (!isPromptVariableName(variable.name)) {
@@ -192,7 +193,7 @@ export function validatePromptTemplates(config: Config, modelNames: Set<string>)
 
     const revisions = new Set<number>();
     for (let versionIndex = 0; versionIndex < template.versions.length; versionIndex += 1) {
-      const version = template.versions[versionIndex]!;
+      const version = nn(template.versions[versionIndex]);
       const atVersion = (field: string) => `${at("versions")}[${versionIndex}].${field}`;
       if (version.revision === 0) fail(atVersion("revision"), "must be greater than zero");
       if (revisions.has(version.revision)) {
@@ -203,7 +204,7 @@ export function validatePromptTemplates(config: Config, modelNames: Set<string>)
         fail(atVersion("messages"), "at least one message is required");
       }
       for (let messageIndex = 0; messageIndex < version.messages.length; messageIndex += 1) {
-        const message = version.messages[messageIndex]!;
+        const message = nn(version.messages[messageIndex]);
         validatePromptMessageRole(index, versionIndex, messageIndex, message.role);
         if (isBlank(message.content)) {
           fail(`${atVersion("messages")}[${messageIndex}].content`, "cannot be empty");
@@ -240,7 +241,7 @@ function skillPackageHasCapability(
 function validateSkillPackageResourceCapabilities(packageIndex: number, pkg: SkillPackage): void {
   const at = (field: string) => `skill_packages[${packageIndex}].resources.${field}`;
   for (let resourceIndex = 0; resourceIndex < pkg.resources.plugins.length; resourceIndex += 1) {
-    const plugin = pkg.resources.plugins[resourceIndex]!;
+    const plugin = nn(pkg.resources.plugins[resourceIndex]);
     if (!skillPackageHasCapability(pkg, "plugin", plugin.id)) {
       fail(
         at(`plugins[${resourceIndex}].id`),
@@ -248,8 +249,12 @@ function validateSkillPackageResourceCapabilities(packageIndex: number, pkg: Ski
       );
     }
   }
-  for (let resourceIndex = 0; resourceIndex < pkg.resources.mcp_servers.length; resourceIndex += 1) {
-    const server = pkg.resources.mcp_servers[resourceIndex]!;
+  for (
+    let resourceIndex = 0;
+    resourceIndex < pkg.resources.mcp_servers.length;
+    resourceIndex += 1
+  ) {
+    const server = nn(pkg.resources.mcp_servers[resourceIndex]);
     if (!skillPackageHasCapability(pkg, "mcp_server", server.name)) {
       fail(
         at(`mcp_servers[${resourceIndex}].name`),
@@ -262,7 +267,7 @@ function validateSkillPackageResourceCapabilities(packageIndex: number, pkg: Ski
     resourceIndex < pkg.resources.prompt_templates.length;
     resourceIndex += 1
   ) {
-    const template = pkg.resources.prompt_templates[resourceIndex]!;
+    const template = nn(pkg.resources.prompt_templates[resourceIndex]);
     if (!skillPackageHasCapability(pkg, "prompt_template", template.id)) {
       fail(
         at(`prompt_templates[${resourceIndex}].id`),
@@ -275,7 +280,7 @@ function validateSkillPackageResourceCapabilities(packageIndex: number, pkg: Ski
     resourceIndex < pkg.resources.agent_workflows.length;
     resourceIndex += 1
   ) {
-    const workflow = pkg.resources.agent_workflows[resourceIndex]!;
+    const workflow = nn(pkg.resources.agent_workflows[resourceIndex]);
     if (!skillPackageHasCapability(pkg, "agent_workflow", workflow.id)) {
       fail(
         at(`agent_workflows[${resourceIndex}].id`),
@@ -316,7 +321,7 @@ export function validateSkillPackages(
 
   const ids = new Set<string>();
   for (let index = 0; index < config.skill_packages.length; index += 1) {
-    const pkg = config.skill_packages[index]!;
+    const pkg = nn(config.skill_packages[index]);
     const at = (field: string) => `skill_packages[${index}].${field}`;
     if (isBlank(pkg.id)) fail(at("id"), "cannot be empty");
     if (ids.has(pkg.id)) fail(at("id"), `duplicate skill package id ${pkg.id}`);
@@ -332,24 +337,31 @@ export function validateSkillPackages(
       }
     }
     validateExtensionPermissionNamesForPackage(index, "permissions.tools", pkg.permissions.tools);
-    validateExtensionPermissionNamesForPackage(index, "permissions.network", pkg.permissions.network);
+    validateExtensionPermissionNamesForPackage(
+      index,
+      "permissions.network",
+      pkg.permissions.network,
+    );
     for (
       let runtimeIndex = 0;
       runtimeIndex < pkg.compatibility.agent_runtimes.length;
       runtimeIndex += 1
     ) {
-      if (isBlank(pkg.compatibility.agent_runtimes[runtimeIndex]!)) {
+      if (isBlank(nn(pkg.compatibility.agent_runtimes[runtimeIndex]))) {
         fail(at(`compatibility.agent_runtimes[${runtimeIndex}]`), "cannot be empty");
       }
     }
     validateSkillPackageResourceCapabilities(index, pkg);
     for (let capabilityIndex = 0; capabilityIndex < pkg.capabilities.length; capabilityIndex += 1) {
-      const capability = pkg.capabilities[capabilityIndex]!;
+      const capability = nn(pkg.capabilities[capabilityIndex]);
       const atCapability = at(`capabilities[${capabilityIndex}].id`);
       if (isBlank(capability.id)) fail(atCapability, "cannot be empty");
       const known = (label: string, present: boolean) => {
         if (!present) {
-          fail(atCapability, `skill package ${pkg.id} references unknown ${label} ${capability.id}`);
+          fail(
+            atCapability,
+            `skill package ${pkg.id} references unknown ${label} ${capability.id}`,
+          );
         }
       };
       switch (capability.kind) {
@@ -392,13 +404,10 @@ function validateExtensionPermissionNamesForPackage(
 ): void {
   const seen = new Set<string>();
   for (let nameIndex = 0; nameIndex < names.length; nameIndex += 1) {
-    const name = names[nameIndex]!;
+    const name = nn(names[nameIndex]);
     if (isBlank(name)) fail(`skill_packages[${index}].${field}[${nameIndex}]`, "cannot be empty");
     if (seen.has(name)) {
-      fail(
-        `skill_packages[${index}].${field}[${nameIndex}]`,
-        `duplicate permission value ${name}`,
-      );
+      fail(`skill_packages[${index}].${field}[${nameIndex}]`, `duplicate permission value ${name}`);
     }
     seen.add(name);
   }
@@ -434,10 +443,15 @@ function providerRuntimeIsDefault(rule: GuardrailRule): boolean {
  * ceiling the Rust runtime's detector concurrency gate cannot exceed. Kept as the
  * same numeric bound for parity; a Worker has no semaphore to overflow.
  */
+// biome-ignore lint/correctness/noPrecisionLoss: this is a documented parity ceiling used only as an unreachable upper bound in a comparison, so f64 rounding of the exact value is immaterial
 const SEMAPHORE_MAX_PERMITS = 2_305_843_009_213_693_951;
 
 /** `validate_custom_http_endpoint` + `SecretRef` legs shared by every non-`none` provider. */
-function validateDetectorEndpoint(index: number, endpoint: string, allowPrivateNetwork: boolean): void {
+function validateDetectorEndpoint(
+  index: number,
+  endpoint: string,
+  allowPrivateNetwork: boolean,
+): void {
   const field = `guardrails[${index}].provider_endpoint`;
   let url: URL;
   try {
@@ -448,10 +462,7 @@ function validateDetectorEndpoint(index: number, endpoint: string, allowPrivateN
   try {
     validateCustomHttpEndpoint(url, allowPrivateNetwork);
   } catch (error) {
-    fail(
-      field,
-      error instanceof DetectorError ? error.safeMessage() : String(error),
-    );
+    fail(field, error instanceof DetectorError ? error.safeMessage() : String(error));
   }
 }
 
@@ -464,7 +475,7 @@ export function validateGuardrails(
 ): void {
   const ids = new Set<string>();
   for (let index = 0; index < config.guardrails.length; index += 1) {
-    const guardrail = config.guardrails[index]!;
+    const guardrail = nn(config.guardrails[index]);
     const at = (field: string) => `guardrails[${index}].${field}`;
     if (isBlank(guardrail.id)) fail(at("id"), "cannot be empty");
     if (ids.has(guardrail.id)) fail(at("id"), `duplicate guardrail id ${guardrail.id}`);
@@ -485,12 +496,12 @@ export function validateGuardrails(
       );
     }
     for (let keywordIndex = 0; keywordIndex < guardrail.keywords.length; keywordIndex += 1) {
-      if (isBlank(guardrail.keywords[keywordIndex]!)) {
+      if (isBlank(nn(guardrail.keywords[keywordIndex]))) {
         fail(at(`keywords[${keywordIndex}]`), "cannot be empty");
       }
     }
     for (let regexIndex = 0; regexIndex < guardrail.regex.length; regexIndex += 1) {
-      const pattern = guardrail.regex[regexIndex]!;
+      const pattern = nn(guardrail.regex[regexIndex]);
       if (isBlank(pattern)) fail(at(`regex[${regexIndex}]`), "cannot be empty");
       // Rust: `regex::Regex::new(pattern).with_context(|| "... invalid regex")`.
       // anyhow's `Display` renders only the outermost context, so the observable
@@ -535,10 +546,7 @@ export function validateGuardrails(
       guardrail.provider !== "presidio" &&
       (guardrail.provider_language !== null || guardrail.provider_entities !== null)
     ) {
-      fail(
-        at("provider_language/provider_entities"),
-        "only valid when provider is presidio",
-      );
+      fail(at("provider_language/provider_entities"), "only valid when provider is presidio");
     }
     if (
       !isSemanticProvider &&

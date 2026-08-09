@@ -42,7 +42,6 @@
  * end-to-end harness cannot.
  */
 import { createExecutionContext, env as poolEnv, waitOnExecutionContext } from "cloudflare:test";
-import { controlNamespace } from "../support/control-namespace.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { OnlineEvalSample } from "../../src/evals/index.js";
 import {
@@ -60,6 +59,7 @@ import {
   interceptProviderFetch,
   providerJson,
 } from "../inference/provider-mock.js";
+import { controlNamespace } from "../support/control-namespace.js";
 import { controlDb, resetOnlineEvalTables, storedScores } from "./harness.js";
 
 const BASE = "https://gw.test";
@@ -248,7 +248,7 @@ function gatewayEnv(queue: QueueDouble, policy: Record<string, unknown>): Record
     GATEWAY_NATIVE_API_KEYS: JSON.stringify(KEYS),
     GATEWAY_ONLINE_EVAL_POLICIES: JSON.stringify([policy]),
     ONLINE_EVAL: queue,
-    AI: (poolEnv as unknown as Record<string, unknown>)["AI"],
+    AI: (poolEnv as unknown as Record<string, unknown>).AI,
   };
 }
 
@@ -276,38 +276,38 @@ describe("candidate coverage buys a score for a leg that never served", () => {
     expect(((await response.json()) as { id: string }).id).toBe("chatcmpl-primary");
 
     expect(recorder.bodies).toHaveLength(2);
-    const served = recorder.bodies.find((body) => body["experiment_arm"] === undefined);
-    const coverage = recorder.bodies.find((body) => body["experiment_arm"] === "coverage");
+    const served = recorder.bodies.find((body) => body.experiment_arm === undefined);
+    const coverage = recorder.bodies.find((body) => body.experiment_arm === "coverage");
     expect(served, "no served-arm sample").toBeDefined();
     expect(coverage, "no coverage sample — the fallback candidate has no score").toBeDefined();
     if (served === undefined || coverage === undefined) return;
 
     // The coverage sample is a sample OF THE COVERED LEG: its provider, its
     // model, its answer.
-    expect(coverage["provider"]).toBe("azure-eu");
-    expect(coverage["provider_model"]).toBe("gpt-4o-mini-azure");
-    expect(coverage["completion"]).toBe(FALLBACK_ANSWER);
-    expect(served["provider"]).toBe("openai-main");
-    expect(served["completion"]).toBe(PRIMARY_ANSWER);
+    expect(coverage.provider).toBe("azure-eu");
+    expect(coverage.provider_model).toBe("gpt-4o-mini-azure");
+    expect(coverage.completion).toBe(FALLBACK_ANSWER);
+    expect(served.provider).toBe("openai-main");
+    expect(served.completion).toBe(PRIMARY_ANSWER);
 
     // The leg id encodes the covered candidate, so two coverage legs on one
     // request cannot collide on `(request_id, criterion_id)`.
-    expect(coverage["request_id"]).toBe(
-      `${String(served["request_id"])}~coverage~azure-eu:gpt-4o-mini-azure`,
+    expect(coverage.request_id).toBe(
+      `${String(served.request_id)}~coverage~azure-eu:gpt-4o-mini-azure`,
     );
 
     // ONE INSTRUMENT, two populations — inherited by value from the served
     // sample, never re-resolved.
-    expect(coverage["judge_model"]).toBe(served["judge_model"]);
-    expect(coverage["criteria"]).toEqual(served["criteria"]);
-    expect(coverage["prompt"]).toBe(served["prompt"]);
-    expect(coverage["sampling_key"]).toBe(served["sampling_key"]);
-    expect(coverage["sample_rate"]).toBe(served["sample_rate"]);
-    expect(coverage["tenant_id"]).toBe("tenant_optin");
+    expect(coverage.judge_model).toBe(served.judge_model);
+    expect(coverage.criteria).toEqual(served.criteria);
+    expect(coverage.prompt).toBe(served.prompt);
+    expect(coverage.sampling_key).toBe(served.sampling_key);
+    expect(coverage.sample_rate).toBe(served.sample_rate);
+    expect(coverage.tenant_id).toBe("tenant_optin");
     // And it belongs to NO experiment: `admin_experiment.ts` groups on
     // `experiment_arm`, and a coverage row inside a real experiment's
     // comparison would be a phantom third arm.
-    expect(coverage["experiment_id"]).toBeUndefined();
+    expect(coverage.experiment_id).toBeUndefined();
 
     // Now the DEPLOYED consumer, on the bytes the DEPLOYED producer emitted.
     provider.restore();
@@ -334,11 +334,11 @@ describe("candidate coverage buys a score for a leg that never served", () => {
 
     const rows = await storedScores();
     expect(rows).toHaveLength(2);
-    const providers = rows.map((row) => row["provider"]).sort();
+    const providers = rows.map((row) => row.provider).sort();
     // THE ASSERTION THIS FILE EXISTS FOR: `azure-eu` has a score, and no client
     // was ever routed to it.
     expect(providers).toEqual(["azure-eu", "openai-main"]);
-    expect(rows.find((row) => row["provider"] === "azure-eu")?.["experiment_arm"]).toBe("coverage");
+    expect(rows.find((row) => row.provider === "azure-eu")?.experiment_arm).toBe("coverage");
 
     // And the per-leg aggregate can now see BOTH legs of the one ladder — which
     // is the thing the router consumes.
@@ -423,7 +423,7 @@ describe("candidate coverage buys a score for a leg that never served", () => {
     const { response } = await h.call();
     expect(response.status).toBe(200);
     expect(recorder.bodies).toHaveLength(1);
-    expect(recorder.bodies[0]?.["provider"]).toBe("openai-main");
+    expect(recorder.bodies[0]?.provider).toBe("openai-main");
     expect(
       provider.requests.some((call) => new URL(call.url).host.startsWith("api.fallback")),
       "a tenant that did not opt into coverage must not have a second provider dialled",

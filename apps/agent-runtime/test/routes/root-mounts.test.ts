@@ -36,8 +36,8 @@
  * a future change that starts challenging them fails here.
  */
 import { SELF } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
 import { PUBLIC_API_MAJOR } from "@ferrogate/core";
+import { describe, expect, it } from "vitest";
 import { EXPECTED_OWNED_OPERATION_COUNT } from "../../src/contract.js";
 
 const BASE = "https://agent-runtime.test";

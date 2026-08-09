@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 import {
+  type ContentPatch,
   applyContentPatchesToDocument,
   contentFingerprint,
   normalizeRequest,
@@ -7,8 +8,8 @@ import {
   parseProtocolPath,
   validateContentPatchPermissions,
   validateContentPatchesForSegments,
-  type ContentPatch,
 } from "../src/index.js";
+const nn = <T>(v: T): NonNullable<T> => v as NonNullable<T>;
 
 describe("normalizeRequest (chat)", () => {
   test("walks messages, tool_calls, tools, metadata into segments", () => {
@@ -61,7 +62,7 @@ describe("normalizeResponse (chat SSE)", () => {
 describe("content patches", () => {
   const doc = { messages: [{ role: "user", content: "leak AKIA1234 here" }] };
   const env = normalizeRequest("chat_completions", doc);
-  const segment = env.segments[0]!;
+  const segment = env.segments[0] as NonNullable<(typeof env.segments)[0]>;
   const start = 5; // byte offset of AKIA...
   const end = 13;
 
@@ -96,7 +97,7 @@ describe("content patches", () => {
   test("immutable JSON source is a protected path", () => {
     const jsonDoc = { messages: [{ role: "user", content: "hi" }], metadata: { k: "v" } };
     const jsonEnv = normalizeRequest("chat_completions", jsonDoc);
-    const metaSeg = jsonEnv.segments.find((s) => s.source === "metadata")!;
+    const metaSeg = nn(jsonEnv.segments.find((s) => s.source === "metadata"));
     const metaPatch: ContentPatch = {
       segment_id: metaSeg.segment_id,
       expected_fingerprint: metaSeg.fingerprint,

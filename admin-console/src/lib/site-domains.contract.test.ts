@@ -1,3 +1,10 @@
+import {
+  contractOperation,
+  contractSchema,
+  fieldShapes,
+  responseSchemaRef,
+  sortedRequired,
+} from "@/lib/contract-pin";
 // Wire-contract drift alarm for the site-domain admin surface (issues #345,
 // #488, #738), modelled on overview.contract.test.ts (#343).
 //
@@ -35,13 +42,6 @@
 //    mutation responses (`AdminSiteDomainResponse`) still carry `acme` and the
 //    optional `verification` block. Both envelopes are pinned.
 import { describe, expect, it } from "vitest";
-import {
-  contractOperation,
-  contractSchema,
-  fieldShapes,
-  responseSchemaRef,
-  sortedRequired,
-} from "@/lib/contract-pin";
 
 /**
  * The serialized shapes the console parses: `field -> descriptor` (see
@@ -187,12 +187,12 @@ describe("site-domain admin wire contract", () => {
   }
 
   it("every site-domain operation still answers with the pinned envelopes", () => {
-    expect(
-      responseSchemaRef(contractOperation("/admin/v1/site-domains", "get"), "200"),
-    ).toBe("#/components/schemas/AdminSiteDomainList");
-    expect(
-      responseSchemaRef(contractOperation("/admin/v1/site-domains", "post"), "201"),
-    ).toBe("#/components/schemas/AdminSiteDomainResponse");
+    expect(responseSchemaRef(contractOperation("/admin/v1/site-domains", "get"), "200")).toBe(
+      "#/components/schemas/AdminSiteDomainList",
+    );
+    expect(responseSchemaRef(contractOperation("/admin/v1/site-domains", "post"), "201")).toBe(
+      "#/components/schemas/AdminSiteDomainResponse",
+    );
     // #738: the detail read is the ONE surface that carries the certificate.
     expect(
       responseSchemaRef(contractOperation("/admin/v1/site-domains/{hostname}", "get"), "200"),

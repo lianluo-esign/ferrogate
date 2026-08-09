@@ -1,16 +1,24 @@
 import { describe, expect, test } from "vitest";
 
 import {
-  challengeHashHex,
-  parsePaymentRequired,
   PaymentIntent,
   PaymentIntentError,
   type PaymentIntentIdentity,
   RequestBodyHash,
   type SelectedPayment,
+  challengeHashHex,
+  parsePaymentRequired,
   selectRequirement,
 } from "../src/index.js";
-import { CAIP2_DEVNET, FEE_PAYER, OTHER_MERCHANT, PAY_TO, RESOURCE, USDC_DEVNET, toHeader } from "./fixtures.js";
+import {
+  CAIP2_DEVNET,
+  FEE_PAYER,
+  OTHER_MERCHANT,
+  PAY_TO,
+  RESOURCE,
+  USDC_DEVNET,
+  toHeader,
+} from "./fixtures.js";
 
 const enc = new TextEncoder();
 
@@ -210,10 +218,16 @@ describe("method + body binding (#351)", () => {
       new Uint8Array(0),
       identity(),
     );
-    const otherRun = PaymentIntent.fromSelected(selected(2500, PAY_TO), "GET", RESOURCE, new Uint8Array(0), {
-      ...identity(),
-      runId: "run-2",
-    });
+    const otherRun = PaymentIntent.fromSelected(
+      selected(2500, PAY_TO),
+      "GET",
+      RESOURCE,
+      new Uint8Array(0),
+      {
+        ...identity(),
+        runId: "run-2",
+      },
+    );
     for (const other of [otherAmount, otherRecipient, otherUrl, otherRun]) {
       expect(baseline).not.toBe(other.intentHashHex());
     }

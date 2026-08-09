@@ -1,3 +1,53 @@
+import { TruncatedCopyable } from "@/components/agent-ops/agent-ops-primitives";
+import { ResourceTable } from "@/components/resource/resource-table";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { useAuth } from "@/hooks/use-auth";
+import { useOperatorError } from "@/hooks/use-operator-error";
+import { type TranslationKey, useI18n } from "@/i18n";
+import {
+  type AdminSchema,
+  PresignedUploadRejectedError,
+  adminDelete,
+  adminGet,
+  adminPost,
+  gatewayDelete,
+  gatewayGetBinary,
+  gatewayPost,
+  gatewayPut,
+  gatewayPutBinary,
+  putPresignedObject,
+} from "@/lib/gateway-client";
+import { LocalizedError } from "@/lib/localized-error";
+import type { ColumnConfig } from "@/lib/resource-config";
+import { ApiError } from "@/types/auth";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 // Static-resource registry (issue #344). Rebuilds the former thin push/list/
 // download/delete screen into a REGISTRY: a type/search/filter list of logical
 // resources (an asset_type + name package, collapsed from the per-version
@@ -26,71 +76,9 @@
 //     never claims a publish, a partially-purged version reports exactly how
 //     many variant rows were removed, and every mutation's error surfaces in
 //     the dialog that fired it instead of a toast that vanishes.
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
-import { TruncatedCopyable } from "@/components/agent-ops/agent-ops-primitives";
-import { ResourceTable } from "@/components/resource/resource-table";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
-import { useAuth } from "@/hooks/use-auth";
-import { useI18n, type TranslationKey } from "@/i18n";
-import { LocalizedError } from "@/lib/localized-error";
-import { useOperatorError } from "@/hooks/use-operator-error";
-import type { ColumnConfig } from "@/lib/resource-config";
-import { ApiError } from "@/types/auth";
-import {
-  adminDelete,
-  adminGet,
-  adminPost,
-  type AdminSchema,
-  gatewayDelete,
-  gatewayGetBinary,
-  gatewayPost,
-  gatewayPut,
-  gatewayPutBinary,
-  PresignedUploadRejectedError,
-  putPresignedObject,
-} from "@/lib/gateway-client";
 
 type AssetSummary = AdminSchema<"AssetSummary">;
 type AssetManifestVersion = AdminSchema<"AssetManifestVersion">;
@@ -218,12 +206,7 @@ async function sha256Hex(bytes: ArrayBuffer): Promise<string> {
 }
 
 /** Presigned-upload phases, in the order the flow drives them. */
-type UploadPhase =
-  | "idle"
-  | "hashing"
-  | "registering"
-  | "uploading"
-  | "committing";
+type UploadPhase = "idle" | "hashing" | "registering" | "uploading" | "committing";
 
 const UPLOAD_PHASE_PROGRESS: Record<UploadPhase, number> = {
   idle: 0,
@@ -233,10 +216,7 @@ const UPLOAD_PHASE_PROGRESS: Record<UploadPhase, number> = {
   committing: 90,
 };
 
-const UPLOAD_PHASE_KEY: Record<
-  Exclude<UploadPhase, "idle">,
-  TranslationKey
-> = {
+const UPLOAD_PHASE_KEY: Record<Exclude<UploadPhase, "idle">, TranslationKey> = {
   hashing: "page.assets.presign.phaseHashing",
   registering: "page.assets.presign.phaseRegistering",
   uploading: "page.assets.presign.phaseUploading",
@@ -411,7 +391,10 @@ function AssetDetailDialog({
     enabled: open,
     queryFn: () =>
       adminGet(apiKey, "/v1/assets/{asset_type}/{name}/manifest", {
-        params: { asset_type: resource!.assetType, name: resource!.name },
+        params: {
+          asset_type: (resource as NonNullable<typeof resource>).assetType,
+          name: (resource as NonNullable<typeof resource>).name,
+        },
       }),
   });
 
@@ -422,7 +405,7 @@ function AssetDetailDialog({
 
   const yankMutation = useMutation({
     mutationFn: ({ version, yank }: { version: string; yank: boolean }) => {
-      const path = `${assetPath(resource!.assetType, resource!.name, version)}/yank`;
+      const path = `${assetPath((resource as NonNullable<typeof resource>).assetType, (resource as NonNullable<typeof resource>).name, version)}/yank`;
       return yank
         ? gatewayPost<AdminSchema<"AssetYankMutationResponse">>(apiKey, path)
         : gatewayDelete<AdminSchema<"AssetYankMutationResponse">>(apiKey, path);
@@ -430,9 +413,7 @@ function AssetDetailDialog({
     onMutate: () => setPendingError(null),
     onSuccess: (_result, variables) => {
       toast.success(
-        variables.yank
-          ? t("page.assets.yank.success")
-          : t("page.assets.unyank.success"),
+        variables.yank ? t("page.assets.yank.success") : t("page.assets.unyank.success"),
       );
       setPending(null);
       refresh();
@@ -446,7 +427,7 @@ function AssetDetailDialog({
 
   const setChannelMutation = useMutation({
     mutationFn: ({ channel, version }: { channel: string; version: string }) => {
-      const path = `/v1/assets/${encodeURIComponent(resource!.assetType)}/${encodeURIComponent(resource!.name)}/channels/${encodeURIComponent(channel)}?version=${encodeURIComponent(version)}`;
+      const path = `/v1/assets/${encodeURIComponent((resource as NonNullable<typeof resource>).assetType)}/${encodeURIComponent((resource as NonNullable<typeof resource>).name)}/channels/${encodeURIComponent(channel)}?version=${encodeURIComponent(version)}`;
       return gatewayPut<AdminSchema<"AssetChannelMutationResponse">>(apiKey, path);
     },
     onMutate: () => setChannelError(null),
@@ -476,34 +457,28 @@ function AssetDetailDialog({
    */
   const deleteVersionMutation = useMutation({
     mutationFn: async (version: string) => {
-      const target = manifest?.versions.find(
-        (entry) => entry.version === version,
-      );
+      const target = manifest?.versions.find((entry) => entry.version === version);
       const variants = (target?.variants ?? []).map((entry) => entry.variant);
       // No manifest variant rows (a manifest that raced the delete) still means
       // one call against the default variant — never zero calls reported as a
       // successful purge.
-      const ordered = (variants.length > 0 ? variants : [""]).slice().sort(
-        (a, b) => (a === "" ? 1 : 0) - (b === "" ? 1 : 0),
-      );
+      const ordered = (variants.length > 0 ? variants : [""])
+        .slice()
+        .sort((a, b) => (a === "" ? 1 : 0) - (b === "" ? 1 : 0));
       let deleted = 0;
       for (const variant of ordered) {
         try {
           await adminDelete(apiKey, "/v1/assets/{asset_type}/{name}/{version}", {
             params: {
-              asset_type: resource!.assetType,
-              name: resource!.name,
+              asset_type: (resource as NonNullable<typeof resource>).assetType,
+              name: (resource as NonNullable<typeof resource>).name,
               version,
             },
             query: variant === "" ? undefined : { platform: variant },
           });
           deleted += 1;
         } catch (error) {
-          throw new VersionPurgeError(
-            apiErrorText(error),
-            deleted,
-            ordered.length,
-          );
+          throw new VersionPurgeError(apiErrorText(error), deleted, ordered.length);
         }
       }
       return deleted;
@@ -535,7 +510,7 @@ function AssetDetailDialog({
 
   const deleteChannelMutation = useMutation({
     mutationFn: (channel: string) => {
-      const path = `/v1/assets/${encodeURIComponent(resource!.assetType)}/${encodeURIComponent(resource!.name)}/channels/${encodeURIComponent(channel)}`;
+      const path = `/v1/assets/${encodeURIComponent((resource as NonNullable<typeof resource>).assetType)}/${encodeURIComponent((resource as NonNullable<typeof resource>).name)}/channels/${encodeURIComponent(channel)}`;
       return gatewayDelete<AdminSchema<"DeleteResponse">>(apiKey, path);
     },
     onMutate: () => setPendingError(null),
@@ -547,19 +522,14 @@ function AssetDetailDialog({
     onError: (error: unknown) => setPendingError(apiErrorText(error)),
   });
 
-  async function handleDownload(
-    version: string,
-    variant: AssetManifestVariant,
-  ) {
+  async function handleDownload(version: string, variant: AssetManifestVariant) {
     if (!resource) return;
     try {
       // `platform` selects the variant; the contract documents it as required
       // when resolution is otherwise ambiguous, and a multi-variant version is
       // exactly that case.
       const query =
-        variant.variant === ""
-          ? ""
-          : `?platform=${encodeURIComponent(variant.variant)}`;
+        variant.variant === "" ? "" : `?platform=${encodeURIComponent(variant.variant)}`;
       const blob = await gatewayGetBinary(
         apiKey,
         `${assetPath(resource.assetType, resource.name, version)}${query}`,
@@ -581,17 +551,12 @@ function AssetDetailDialog({
     }
   }
 
-  async function handlePreview(
-    version: string,
-    variant: AssetManifestVariant,
-  ) {
+  async function handlePreview(version: string, variant: AssetManifestVariant) {
     if (!resource) return;
     setPreview({ version, variant: variant.variant, body: null, error: null });
     try {
       const query =
-        variant.variant === ""
-          ? ""
-          : `?platform=${encodeURIComponent(variant.variant)}`;
+        variant.variant === "" ? "" : `?platform=${encodeURIComponent(variant.variant)}`;
       const blob = await gatewayGetBinary(
         apiKey,
         `${assetPath(resource.assetType, resource.name, version)}${query}`,
@@ -627,8 +592,7 @@ function AssetDetailDialog({
   );
 
   // Exact identifier the operator must retype to arm the permanent delete.
-  const deleteToken =
-    resource && deleteVersion ? `${resource.name}@${deleteVersion}` : "";
+  const deleteToken = resource && deleteVersion ? `${resource.name}@${deleteVersion}` : "";
   const deleteArmed = deleteToken !== "" && deleteConfirmText === deleteToken;
   const deleteBlockers = deleteVersion ? channelsReferencing(deleteVersion) : [];
   const deleteIsLastVersion = deleteVersion !== null && versions.length === 1;
@@ -653,9 +617,7 @@ function AssetDetailDialog({
           {resource ? (
             <>
               <DialogHeader>
-                <DialogTitle className="font-mono text-base">
-                  {resourceLabel}
-                </DialogTitle>
+                <DialogTitle className="font-mono text-base">{resourceLabel}</DialogTitle>
                 <DialogDescription>
                   {t("page.assets.detail.description", {
                     created: format.date(resource.createdAtUnix * 1000, {
@@ -676,16 +638,12 @@ function AssetDetailDialog({
                   {t("page.assets.detail.error", { message: manifestError.message })}
                 </p>
               ) : isLoading || !manifest ? (
-                <p className="text-sm text-muted-foreground">
-                  {t("resource.table.loading")}
-                </p>
+                <p className="text-sm text-muted-foreground">{t("resource.table.loading")}</p>
               ) : (
                 <div className="flex flex-col gap-6">
                   <section className="flex flex-col gap-2">
                     <div className="flex items-center justify-between">
-                      <h3 className="text-sm font-semibold">
-                        {t("page.assets.detail.channels")}
-                      </h3>
+                      <h3 className="text-sm font-semibold">{t("page.assets.detail.channels")}</h3>
                       <Button
                         size="sm"
                         variant="outline"
@@ -720,7 +678,10 @@ function AssetDetailDialog({
                         <TableBody>
                           {channels.length === 0 ? (
                             <TableRow>
-                              <TableCell colSpan={5} className="h-16 text-center text-sm text-muted-foreground">
+                              <TableCell
+                                colSpan={5}
+                                className="h-16 text-center text-sm text-muted-foreground"
+                              >
                                 {t("resource.table.empty")}
                               </TableCell>
                             </TableRow>
@@ -777,15 +738,9 @@ function AssetDetailDialog({
 
                   <section className="flex flex-col gap-2">
                     <div className="flex items-center justify-between gap-2">
-                      <h3 className="text-sm font-semibold">
-                        {t("page.assets.detail.versions")}
-                      </h3>
+                      <h3 className="text-sm font-semibold">{t("page.assets.detail.versions")}</h3>
                       {selectedVersion !== null ? (
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          onClick={() => onSelectVersion(null)}
-                        >
+                        <Button size="sm" variant="ghost" onClick={() => onSelectVersion(null)}>
                           {t("page.assets.action.clearVersion")}
                         </Button>
                       ) : null}
@@ -821,7 +776,10 @@ function AssetDetailDialog({
                         <TableBody>
                           {versions.length === 0 ? (
                             <TableRow>
-                              <TableCell colSpan={8} className="h-16 text-center text-sm text-muted-foreground">
+                              <TableCell
+                                colSpan={8}
+                                className="h-16 text-center text-sm text-muted-foreground"
+                              >
                                 {t("resource.table.empty")}
                               </TableCell>
                             </TableRow>
@@ -831,14 +789,10 @@ function AssetDetailDialog({
                                 <TableRow
                                   key={compositeKey(version.version, variant.variant)}
                                   aria-current={
-                                    version.version === selectedVersion
-                                      ? "true"
-                                      : undefined
+                                    version.version === selectedVersion ? "true" : undefined
                                   }
                                   className={
-                                    version.version === selectedVersion
-                                      ? "bg-muted/60"
-                                      : undefined
+                                    version.version === selectedVersion ? "bg-muted/60" : undefined
                                   }
                                 >
                                   <TableCell className="font-mono text-xs">
@@ -912,9 +866,7 @@ function AssetDetailDialog({
                                       <Button
                                         size="sm"
                                         variant="outline"
-                                        onClick={() =>
-                                          handleDownload(version.version, variant)
-                                        }
+                                        onClick={() => handleDownload(version.version, variant)}
                                       >
                                         {t("page.assets.action.download")}
                                       </Button>
@@ -922,9 +874,7 @@ function AssetDetailDialog({
                                         <Button
                                           size="sm"
                                           variant="ghost"
-                                          onClick={() =>
-                                            handlePreview(version.version, variant)
-                                          }
+                                          onClick={() => handlePreview(version.version, variant)}
                                         >
                                           {t("page.assets.action.preview")}
                                         </Button>
@@ -1038,9 +988,7 @@ function AssetDetailDialog({
                   className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive"
                 >
                   {t("page.assets.yank.blocked", {
-                    channels: pendingBlockers
-                      .map((channel) => channel.channel)
-                      .join(", "),
+                    channels: pendingBlockers.map((channel) => channel.channel).join(", "),
                   })}
                 </p>
               ) : null}
@@ -1049,9 +997,7 @@ function AssetDetailDialog({
                   role="alert"
                   className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive"
                 >
-                  <span className="font-medium">
-                    {t("page.assets.action.errorHeading")}
-                  </span>{" "}
+                  <span className="font-medium">{t("page.assets.action.errorHeading")}</span>{" "}
                   <span className="break-all font-mono text-xs">{pendingError}</span>
                 </p>
               ) : null}
@@ -1107,8 +1053,7 @@ function AssetDetailDialog({
             <form
               onSubmit={(event) => {
                 event.preventDefault();
-                if (channelForm.channel.trim() === "" || channelForm.version === "")
-                  return;
+                if (channelForm.channel.trim() === "" || channelForm.version === "") return;
                 setChannelMutation.mutate({
                   channel: channelForm.channel.trim(),
                   version: channelForm.version,
@@ -1123,9 +1068,7 @@ function AssetDetailDialog({
               </DialogHeader>
               <div className="grid gap-4 py-4">
                 <div className="grid gap-2">
-                  <Label htmlFor="asset-channel-name">
-                    {t("page.assets.col.channel")}
-                  </Label>
+                  <Label htmlFor="asset-channel-name">{t("page.assets.col.channel")}</Label>
                   <Input
                     id="asset-channel-name"
                     value={channelForm.channel}
@@ -1139,9 +1082,7 @@ function AssetDetailDialog({
                   />
                 </div>
                 <div className="grid gap-2">
-                  <Label htmlFor="asset-channel-version">
-                    {t("page.assets.col.version")}
-                  </Label>
+                  <Label htmlFor="asset-channel-version">{t("page.assets.col.version")}</Label>
                   <Select
                     value={channelForm.version}
                     onValueChange={(value) =>
@@ -1167,9 +1108,7 @@ function AssetDetailDialog({
                     role="alert"
                     className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive"
                   >
-                    <span className="font-medium">
-                      {t("page.assets.action.errorHeading")}
-                    </span>{" "}
+                    <span className="font-medium">{t("page.assets.action.errorHeading")}</span>{" "}
                     <span className="break-all font-mono text-xs">{channelError}</span>
                   </p>
                 ) : null}
@@ -1218,9 +1157,7 @@ function AssetDetailDialog({
               }}
             >
               <DialogHeader>
-                <DialogTitle>
-                  {t("page.assets.delete.title", { asset: deleteToken })}
-                </DialogTitle>
+                <DialogTitle>{t("page.assets.delete.title", { asset: deleteToken })}</DialogTitle>
                 <DialogDescription>
                   {t("page.assets.delete.body", { asset: deleteToken })}
                 </DialogDescription>
@@ -1233,14 +1170,13 @@ function AssetDetailDialog({
                   >
                     {t("page.assets.delete.blocked", {
                       asset: deleteToken,
-                      channels: deleteBlockers
-                        .map((channel) => channel.channel)
-                        .join(", "),
+                      channels: deleteBlockers.map((channel) => channel.channel).join(", "),
                     })}
                   </p>
                 ) : null}
                 {deleteIsLastVersion ? (
                   <p
+                    // biome-ignore lint/a11y/useSemanticElements: ARIA live region for the last-version delete warning; keeping the block <p> preserves layout that <output>'s inline default would change
                     role="status"
                     className="rounded-md border border-amber-500/50 bg-amber-500/10 px-3 py-2 text-sm"
                   >
@@ -1264,9 +1200,7 @@ function AssetDetailDialog({
                     role="alert"
                     className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive"
                   >
-                    <span className="font-medium">
-                      {t("page.assets.delete.errorHeading")}
-                    </span>{" "}
+                    <span className="font-medium">{t("page.assets.delete.errorHeading")}</span>{" "}
                     <span className="break-all font-mono text-xs">{deleteError}</span>
                   </p>
                 ) : null}
@@ -1301,9 +1235,7 @@ function AssetDetailDialog({
                     asset: `${resourceLabel}@${preview.version}`,
                   })}
                 </DialogTitle>
-                <DialogDescription>
-                  {t("page.assets.preview.description")}
-                </DialogDescription>
+                <DialogDescription>{t("page.assets.preview.description")}</DialogDescription>
               </DialogHeader>
               {preview.error ? (
                 <p
@@ -1313,9 +1245,7 @@ function AssetDetailDialog({
                   {preview.error}
                 </p>
               ) : preview.body === null ? (
-                <p className="text-sm text-muted-foreground">
-                  {t("resource.table.loading")}
-                </p>
+                <p className="text-sm text-muted-foreground">{t("resource.table.loading")}</p>
               ) : (
                 <pre className="max-h-[50vh] overflow-auto rounded-md border bg-muted/40 p-3 text-xs">
                   {preview.body}
@@ -1374,9 +1304,7 @@ function PresignedUploadCard({
   // The staging disposition is reported as one of three OBSERVED states, never
   // assumed: no intent was ever registered, the intent was released, or the
   // release could not be confirmed.
-  const [cancelled, setCancelled] = useState<
-    null | "no-intent" | "released" | "unconfirmed"
-  >(null);
+  const [cancelled, setCancelled] = useState<null | "no-intent" | "released" | "unconfirmed">(null);
   const abortRef = useRef<AbortController | null>(null);
   // Set inside the run so the error handler can say what actually happened to
   // the intent, instead of asserting a cleanup it never observed.
@@ -1546,20 +1474,14 @@ function PresignedUploadCard({
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">
-          {t("page.assets.presign.title")}
-        </CardTitle>
+        <CardTitle className="text-base">{t("page.assets.presign.title")}</CardTitle>
         <CardDescription>{t("page.assets.presign.description")}</CardDescription>
       </CardHeader>
       <CardContent>
         {isLoading || !storageSummary ? (
-          <p className="text-sm text-muted-foreground">
-            {t("resource.table.loading")}
-          </p>
+          <p className="text-sm text-muted-foreground">{t("resource.table.loading")}</p>
         ) : !presign?.enabled ? (
-          <p className="text-sm text-muted-foreground">
-            {t("page.assets.presign.disabled")}
-          </p>
+          <p className="text-sm text-muted-foreground">{t("page.assets.presign.disabled")}</p>
         ) : (
           <div className="flex flex-col gap-2">
             {maxObjectBytes !== null ? (
@@ -1595,15 +1517,11 @@ function PresignedUploadCard({
           >
             <DialogHeader>
               <DialogTitle>{t("page.assets.presign.title")}</DialogTitle>
-              <DialogDescription>
-                {t("page.assets.presign.description")}
-              </DialogDescription>
+              <DialogDescription>{t("page.assets.presign.description")}</DialogDescription>
             </DialogHeader>
             <div className="grid gap-4 py-4">
               <div className="grid gap-2">
-                <Label htmlFor="presign-asset-type">
-                  {t("page.assets.field.assetType")}
-                </Label>
+                <Label htmlFor="presign-asset-type">{t("page.assets.field.assetType")}</Label>
                 <Select value={assetType} onValueChange={setAssetType}>
                   <SelectTrigger id="presign-asset-type">
                     <SelectValue />
@@ -1618,9 +1536,7 @@ function PresignedUploadCard({
                 </Select>
               </div>
               <div className="grid gap-2">
-                <Label htmlFor="presign-asset-name">
-                  {t("page.assets.field.name")}
-                </Label>
+                <Label htmlFor="presign-asset-name">{t("page.assets.field.name")}</Label>
                 <Input
                   id="presign-asset-name"
                   value={name}
@@ -1631,9 +1547,7 @@ function PresignedUploadCard({
                 />
               </div>
               <div className="grid gap-2">
-                <Label htmlFor="presign-asset-version">
-                  {t("page.assets.field.version")}
-                </Label>
+                <Label htmlFor="presign-asset-version">{t("page.assets.field.version")}</Label>
                 <Input
                   id="presign-asset-version"
                   value={version}
@@ -1643,9 +1557,7 @@ function PresignedUploadCard({
                 />
               </div>
               <div className="grid gap-2">
-                <Label htmlFor="presign-asset-file">
-                  {t("page.assets.field.file")}
-                </Label>
+                <Label htmlFor="presign-asset-file">{t("page.assets.field.file")}</Label>
                 <Input
                   id="presign-asset-file"
                   type="file"
@@ -1660,7 +1572,11 @@ function PresignedUploadCard({
                   forms a file belongs in, so it is stated here instead of
                   leaving the operator to guess. */}
               {file && inlineMaxBytes !== null && file.size <= inlineMaxBytes ? (
-                <p role="status" className="text-sm text-muted-foreground">
+                <p
+                  // biome-ignore lint/a11y/useSemanticElements: ARIA live region hinting inline upload; keeping <p> preserves the surrounding text flow that <output>'s inline-block box model would alter
+                  role="status"
+                  className="text-sm text-muted-foreground"
+                >
                   {t("page.assets.presign.inlineWouldDo", {
                     size: format.bytes(file.size),
                     max: format.bytes(inlineMaxBytes),
@@ -1670,9 +1586,14 @@ function PresignedUploadCard({
 
               {running ? (
                 <div className="grid gap-2" aria-live="polite">
-                  <p role="status" className="text-sm text-muted-foreground">
+                  <p
+                    // biome-ignore lint/a11y/useSemanticElements: ARIA live region for the upload phase label; keeping <p> preserves the grid layout that <output>'s inline default would change
+                    role="status"
+                    className="text-sm text-muted-foreground"
+                  >
                     {t(UPLOAD_PHASE_KEY[phase as Exclude<UploadPhase, "idle">])}
                   </p>
+                  {/* biome-ignore lint/a11y/useFocusableInteractive: a progressbar is a non-interactive status indicator, not a tab stop */}
                   <div
                     className="h-2 w-full overflow-hidden rounded-full bg-secondary"
                     role="progressbar"
@@ -1706,12 +1627,8 @@ function PresignedUploadCard({
                   role="alert"
                   className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive"
                 >
-                  <span className="font-medium">
-                    {t("page.assets.presign.errorHeading")}
-                  </span>{" "}
-                  <span className="break-all font-mono text-xs">
-                    {errorMessage}
-                  </span>
+                  <span className="font-medium">{t("page.assets.presign.errorHeading")}</span>{" "}
+                  <span className="break-all font-mono text-xs">{errorMessage}</span>
                 </p>
               ) : null}
             </div>
@@ -1727,9 +1644,7 @@ function PresignedUploadCard({
                   else closeDialog();
                 }}
               >
-                {running
-                  ? t("page.assets.presign.cancelUpload")
-                  : t("common.cancel")}
+                {running ? t("page.assets.presign.cancelUpload") : t("common.cancel")}
               </Button>
               <Button type="submit" disabled={running}>
                 {running
@@ -1748,7 +1663,7 @@ export default function AssetsPage() {
   const { session } = useAuth();
   const { t, format } = useI18n();
   const { toastError } = useOperatorError();
-  const apiKey = session!.gatewayApiKey;
+  const apiKey = (session as NonNullable<typeof session>).gatewayApiKey;
   const queryClient = useQueryClient();
 
   const [assetType, setAssetType] = useState("cli_tool");
@@ -1785,7 +1700,11 @@ export default function AssetsPage() {
     [searchParams, setSearchParams],
   );
 
-  const { data, isLoading, error: listError } = useQuery({
+  const {
+    data,
+    isLoading,
+    error: listError,
+  } = useQuery({
     queryKey: ASSETS_QUERY_KEY,
     queryFn: () => adminGet(apiKey, "/v1/assets"),
   });
@@ -1800,8 +1719,7 @@ export default function AssetsPage() {
   });
 
   const inlineMaxBytes = storageSummary?.inline_upload_max_bytes ?? null;
-  const inlineTooLarge =
-    file !== null && inlineMaxBytes !== null && file.size > inlineMaxBytes;
+  const inlineTooLarge = file !== null && inlineMaxBytes !== null && file.size > inlineMaxBytes;
 
   const uploadMutation = useMutation({
     mutationFn: async () => {
@@ -1849,10 +1767,7 @@ export default function AssetsPage() {
   // and are grouped here. Fixing that needs a paginated/filterable list
   // endpoint on the gateway first; the console cannot paper over its absence
   // without lying about totals.
-  const allResources = useMemo(
-    () => groupResources(data?.data ?? []),
-    [data],
-  );
+  const allResources = useMemo(() => groupResources(data?.data ?? []), [data]);
 
   const resources = useMemo(() => {
     const needle = search.trim().toLowerCase();
@@ -1867,8 +1782,7 @@ export default function AssetsPage() {
     if (!selectedType || !selectedName) return null;
     return (
       allResources.find(
-        (resource) =>
-          resource.assetType === selectedType && resource.name === selectedName,
+        (resource) => resource.assetType === selectedType && resource.name === selectedName,
       ) ?? null
     );
   }, [allResources, selectedType, selectedName]);
@@ -1957,9 +1871,7 @@ export default function AssetsPage() {
     <div className="flex flex-col gap-4">
       <div>
         <h1 className="text-lg font-semibold">{t("page.assets.title")}</h1>
-        <p className="text-sm text-muted-foreground">
-          {t("page.assets.description")}
-        </p>
+        <p className="text-sm text-muted-foreground">{t("page.assets.description")}</p>
       </div>
 
       <Card>
@@ -1986,6 +1898,7 @@ export default function AssetsPage() {
                     })}
               </p>
               {usedRatio !== null ? (
+                // biome-ignore lint/a11y/useFocusableInteractive: a progressbar is a non-interactive status indicator, not a tab stop
                 <div
                   className="h-2 w-full overflow-hidden rounded-full bg-secondary"
                   role="progressbar"
@@ -2109,10 +2022,7 @@ export default function AssetsPage() {
               </p>
             ) : null}
             <div className="sm:col-span-2">
-              <Button
-                type="submit"
-                disabled={uploadMutation.isPending || inlineTooLarge}
-              >
+              <Button type="submit" disabled={uploadMutation.isPending || inlineTooLarge}>
                 {uploadMutation.isPending
                   ? t("page.assets.push.submitting")
                   : t("page.assets.push.submit")}
@@ -2139,17 +2049,13 @@ export default function AssetsPage() {
           <Label htmlFor="asset-filter-type">{t("page.assets.field.assetType")}</Label>
           <Select
             value={filterType}
-            onValueChange={(value) =>
-              setBrowseParam("type", value === ALL_TYPES ? null : value)
-            }
+            onValueChange={(value) => setBrowseParam("type", value === ALL_TYPES ? null : value)}
           >
             <SelectTrigger id="asset-filter-type" className="w-48">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value={ALL_TYPES}>
-                {t("page.withheldAssets.filter.allTypes")}
-              </SelectItem>
+              <SelectItem value={ALL_TYPES}>{t("page.withheldAssets.filter.allTypes")}</SelectItem>
               {ASSET_TYPES.map((option) => (
                 <SelectItem key={option.value} value={option.value}>
                   {t(option.labelKey)}
@@ -2159,9 +2065,7 @@ export default function AssetsPage() {
           </Select>
         </div>
         <div className="grid gap-2">
-          <Label htmlFor="asset-search">
-            {t("page.withheldAssets.filter.search")}
-          </Label>
+          <Label htmlFor="asset-search">{t("page.withheldAssets.filter.search")}</Label>
           <Input
             id="asset-search"
             className="w-64"
@@ -2172,7 +2076,10 @@ export default function AssetsPage() {
       </div>
 
       {listError ? (
-        <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <p
+          role="alert"
+          className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+        >
           {t("page.assets.list.error", { message: listError.message })}
         </p>
       ) : null}

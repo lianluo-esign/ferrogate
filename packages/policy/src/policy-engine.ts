@@ -9,9 +9,7 @@
 import type { RequestContext, TenantContext } from "@ferrogate/core";
 
 /** The two-valued policy outcome (Rust `PolicyDecision`). */
-export type PolicyDecision =
-  | { kind: "allow" }
-  | { kind: "deny"; code: string; message: string };
+export type PolicyDecision = { kind: "allow" } | { kind: "deny"; code: string; message: string };
 
 /** The Allow singleton. */
 export const ALLOW: PolicyDecision = { kind: "allow" };

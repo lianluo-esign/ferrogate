@@ -36,9 +36,9 @@
  * database really would be the one the id named.
  */
 import {
-  tenantObjectStubFor,
   type TenantObjectAddress,
   type TenantObjectNamespaceLike,
+  tenantObjectStubFor,
 } from "@ferrogate/storage";
 import type { TenantDataNamespace, TenantDataObject } from "@ferrogate/storage/durable-objects";
 import { HttpError } from "../middleware/errors.js";
@@ -125,9 +125,7 @@ function requestSafeTenantDataStub(
         if (typeof method !== "function") {
           // Unreachable while namespaces answer the same shape for the same
           // address; refusing beats invoking undefined on a billing path.
-          throw new TypeError(
-            `tenant data object stub exposes no callable ${String(property)}`,
-          );
+          throw new TypeError(`tenant data object stub exposes no callable ${String(property)}`);
         }
         // Member-style invocation (receiver = the fresh stub), so an RPC
         // property proxy behaves exactly as `stub.method(...)` would.

@@ -111,9 +111,7 @@ async function dispatch(
   const app = harness(deps, routes);
   const response = await app.post("/v1/chat/completions", CHAT_BODY, { headers });
   const authorization =
-    interceptor.requests.length === 0
-      ? undefined
-      : interceptor.lastRequest().headers["authorization"];
+    interceptor.requests.length === 0 ? undefined : interceptor.lastRequest().headers.authorization;
   return { response, authorization };
 }
 

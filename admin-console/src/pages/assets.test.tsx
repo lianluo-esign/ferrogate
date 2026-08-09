@@ -1,9 +1,3 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
-import { QueryClientProvider } from "@tanstack/react-query";
-import { HttpResponse, http } from "msw";
-import { MemoryRouter, useLocation } from "react-router-dom";
-import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthProvider } from "@/hooks/use-auth";
 import { I18nProvider, type Locale } from "@/i18n";
 import { en } from "@/i18n/locales/en";
@@ -12,6 +6,12 @@ import type { AdminSchema } from "@/lib/gateway-client";
 import AssetsPage from "@/pages/assets";
 import { gatewayUrl, server } from "@/test/msw";
 import { createTestQueryClient, seedSession } from "@/test/test-utils";
+import { QueryClientProvider } from "@tanstack/react-query";
+import { render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { http, HttpResponse } from "msw";
+import { MemoryRouter, useLocation } from "react-router-dom";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 type AssetSummary = AdminSchema<"AssetSummary">;
 type AssetStorageSummary = AdminSchema<"AssetStorageSummary">;
@@ -36,9 +36,7 @@ function asset(overrides: Partial<AssetSummary> = {}): AssetSummary {
   };
 }
 
-function storageSummary(
-  overrides: Partial<AssetStorageSummary> = {},
-): AssetStorageSummary {
+function storageSummary(overrides: Partial<AssetStorageSummary> = {}): AssetStorageSummary {
   return {
     object: "asset_storage_summary",
     used_bytes: 4096,
@@ -111,9 +109,7 @@ function seedList() {
         ],
       }),
     ),
-    http.get(gatewayUrl("/v1/assets/storage/summary"), () =>
-      HttpResponse.json(storageSummary()),
-    ),
+    http.get(gatewayUrl("/v1/assets/storage/summary"), () => HttpResponse.json(storageSummary())),
   );
 }
 
@@ -172,9 +168,7 @@ describe("AssetsPage registry list", () => {
       http.get(gatewayUrl("/v1/assets"), () =>
         HttpResponse.json({ object: "list", data: [asset()] }),
       ),
-      http.get(gatewayUrl("/v1/assets/storage/summary"), () =>
-        HttpResponse.json(storageSummary()),
-      ),
+      http.get(gatewayUrl("/v1/assets/storage/summary"), () => HttpResponse.json(storageSummary())),
     );
 
     renderPage();
@@ -197,15 +191,10 @@ describe("AssetsPage registry list", () => {
 
     // Filtering to cli_tool hides the mcp_manifest resource. Two controls share
     // the "Asset type" label (push form + registry filter); the filter is second.
-    const filterType = () =>
-      screen.getAllByLabelText(en["page.assets.field.assetType"])[1];
+    const filterType = () => screen.getAllByLabelText(en["page.assets.field.assetType"])[1];
     await user.click(filterType());
-    await user.click(
-      await screen.findByRole("option", { name: en["page.assets.type.cliTool"] }),
-    );
-    await waitFor(() =>
-      expect(screen.queryByText("widget")).not.toBeInTheDocument(),
-    );
+    await user.click(await screen.findByRole("option", { name: en["page.assets.type.cliTool"] }));
+    await waitFor(() => expect(screen.queryByText("widget")).not.toBeInTheDocument());
 
     // Reset filter, then search narrows by name.
     await user.click(filterType());
@@ -214,13 +203,8 @@ describe("AssetsPage registry list", () => {
         name: en["page.withheldAssets.filter.allTypes"],
       }),
     );
-    await user.type(
-      screen.getByLabelText(en["page.withheldAssets.filter.search"]),
-      "widget",
-    );
-    await waitFor(() =>
-      expect(screen.queryByText("ferrogate")).not.toBeInTheDocument(),
-    );
+    await user.type(screen.getByLabelText(en["page.withheldAssets.filter.search"]), "widget");
+    await waitFor(() => expect(screen.queryByText("ferrogate")).not.toBeInTheDocument());
     expect(screen.getByText("widget")).toBeInTheDocument();
   });
 
@@ -232,9 +216,9 @@ describe("AssetsPage registry list", () => {
     expect(
       await screen.findByRole("heading", { name: zhCN["page.assets.title"] }),
     ).toBeInTheDocument();
-    expect(
-      (await screen.findAllByText(zhCN["page.assets.col.versions"])).length,
-    ).toBeGreaterThan(0);
+    expect((await screen.findAllByText(zhCN["page.assets.col.versions"])).length).toBeGreaterThan(
+      0,
+    );
   });
 });
 
@@ -260,10 +244,7 @@ describe("AssetsPage URL browse state", () => {
 
     // The list is filtered to mcp_manifest (hiding ferrogate), yet the shared
     // link still resolves ferrogate against the full registry and opens it.
-    renderPage(
-      "en",
-      "/app/assets?type=mcp_manifest&rtype=cli_tool&rname=ferrogate",
-    );
+    renderPage("en", "/app/assets?type=mcp_manifest&rtype=cli_tool&rname=ferrogate");
 
     const dialog = await screen.findByRole("dialog");
     expect(within(dialog).getByText("cli_tool/ferrogate")).toBeInTheDocument();
@@ -297,24 +278,14 @@ describe("AssetsPage URL browse state", () => {
     expect(currentSearch).toBe("");
 
     // Search is mirrored into ?q=.
-    await user.type(
-      screen.getByLabelText(en["page.withheldAssets.filter.search"]),
-      "ferro",
-    );
-    await waitFor(() =>
-      expect(new URLSearchParams(currentSearch).get("q")).toBe("ferro"),
-    );
+    await user.type(screen.getByLabelText(en["page.withheldAssets.filter.search"]), "ferro");
+    await waitFor(() => expect(new URLSearchParams(currentSearch).get("q")).toBe("ferro"));
 
     // Type filter is mirrored into ?type=.
-    const filterType = () =>
-      screen.getAllByLabelText(en["page.assets.field.assetType"])[1];
+    const filterType = () => screen.getAllByLabelText(en["page.assets.field.assetType"])[1];
     await user.click(filterType());
-    await user.click(
-      await screen.findByRole("option", { name: en["page.assets.type.cliTool"] }),
-    );
-    await waitFor(() =>
-      expect(new URLSearchParams(currentSearch).get("type")).toBe("cli_tool"),
-    );
+    await user.click(await screen.findByRole("option", { name: en["page.assets.type.cliTool"] }));
+    await waitFor(() => expect(new URLSearchParams(currentSearch).get("type")).toBe("cli_tool"));
 
     // Opening a resource records rtype+rname; closing clears them.
     const ferrogateRow = await findRegistryRecord("ferrogate");
@@ -335,9 +306,7 @@ describe("AssetsPage URL browse state", () => {
     // Escape closes the panel (the footer + built-in dismiss both read "Close");
     // dismissing it must strip rtype/rname while leaving the filter/search.
     await user.keyboard("{Escape}");
-    await waitFor(() =>
-      expect(new URLSearchParams(currentSearch).has("rtype")).toBe(false),
-    );
+    await waitFor(() => expect(new URLSearchParams(currentSearch).has("rtype")).toBe(false));
     expect(new URLSearchParams(currentSearch).has("rname")).toBe(false);
   });
 });
@@ -371,9 +340,7 @@ describe("AssetsPage detail + lifecycle", () => {
     expect(within(dialog).getByText("linux-x64")).toBeInTheDocument();
     expect(within(dialog).getByText(`${"b".repeat(12)}…`)).toBeInTheDocument();
     expect(within(dialog).getByText(`${"c".repeat(12)}…`)).toBeInTheDocument();
-    expect(
-      within(dialog).getAllByText(en["page.assets.state.active"]).length,
-    ).toBe(2);
+    expect(within(dialog).getAllByText(en["page.assets.state.active"]).length).toBe(2);
   });
 
   it("yanks a version behind a destructive confirm and refreshes the manifest", async () => {
@@ -385,13 +352,10 @@ describe("AssetsPage detail + lifecycle", () => {
         manifestRequests += 1;
         return HttpResponse.json(ferrogateManifest);
       }),
-      http.post(
-        gatewayUrl("/v1/assets/cli_tool/ferrogate/1.0.0/yank"),
-        ({ request }) => {
-          yankUrl = request.url;
-          return HttpResponse.json({ object: "list", data: [] });
-        },
-      ),
+      http.post(gatewayUrl("/v1/assets/cli_tool/ferrogate/1.0.0/yank"), ({ request }) => {
+        yankUrl = request.url;
+        return HttpResponse.json({ object: "list", data: [] });
+      }),
     );
     const user = userEvent.setup();
     renderPage("en");
@@ -406,10 +370,7 @@ describe("AssetsPage detail + lifecycle", () => {
 
     // Consequence-aware confirm names the exact resource@version.
     const confirm = await screen.findByText(
-      en["page.assets.yank.title"].replace(
-        "{asset}",
-        "cli_tool/ferrogate@1.0.0",
-      ),
+      en["page.assets.yank.title"].replace("{asset}", "cli_tool/ferrogate@1.0.0"),
     );
     const confirmDialog = confirm.closest("[role='dialog']") as HTMLElement;
     await user.click(
@@ -431,18 +392,15 @@ describe("AssetsPage detail + lifecycle", () => {
       http.get(gatewayUrl("/v1/assets/cli_tool/ferrogate/manifest"), () =>
         HttpResponse.json(ferrogateManifest),
       ),
-      http.put(
-        gatewayUrl("/v1/assets/cli_tool/ferrogate/channels/canary"),
-        ({ request }) => {
-          channelUrl = request.url;
-          return HttpResponse.json({
-            object: "asset_channel",
-            asset_type: "cli_tool",
-            name: "ferrogate",
-            channel: { channel: "canary", version: "2.0.0", updated_at_unix: 3000 },
-          });
-        },
-      ),
+      http.put(gatewayUrl("/v1/assets/cli_tool/ferrogate/channels/canary"), ({ request }) => {
+        channelUrl = request.url;
+        return HttpResponse.json({
+          object: "asset_channel",
+          asset_type: "cli_tool",
+          name: "ferrogate",
+          channel: { channel: "canary", version: "2.0.0", updated_at_unix: 3000 },
+        });
+      }),
     );
     const user = userEvent.setup();
     renderPage("en");
@@ -455,13 +413,10 @@ describe("AssetsPage detail + lifecycle", () => {
       }),
     );
 
-    const formDialog = (
-      await screen.findByText(en["page.assets.channel.title"])
-    ).closest("[role='dialog']") as HTMLElement;
-    await user.type(
-      within(formDialog).getByLabelText(en["page.assets.col.channel"]),
-      "canary",
-    );
+    const formDialog = (await screen.findByText(en["page.assets.channel.title"])).closest(
+      "[role='dialog']",
+    ) as HTMLElement;
+    await user.type(within(formDialog).getByLabelText(en["page.assets.col.channel"]), "canary");
     // Pick a non-yanked target version.
     await user.click(within(formDialog).getByRole("combobox"));
     await user.click(await screen.findByRole("option", { name: "2.0.0" }));
@@ -488,21 +443,12 @@ describe("AssetsPage presigned large-object upload", () => {
       }),
     );
     const dialog = await screen.findByRole("dialog");
-    await user.type(
-      within(dialog).getByLabelText(en["page.assets.field.name"]),
-      "big-tool",
-    );
-    await user.type(
-      within(dialog).getByLabelText(en["page.assets.field.version"]),
-      "9.0.0",
-    );
+    await user.type(within(dialog).getByLabelText(en["page.assets.field.name"]), "big-tool");
+    await user.type(within(dialog).getByLabelText(en["page.assets.field.version"]), "9.0.0");
     const file = new File(["a very large bundle payload"], "big.tar.gz", {
       type: "application/gzip",
     });
-    await user.upload(
-      within(dialog).getByLabelText(en["page.assets.field.file"]),
-      file,
-    );
+    await user.upload(within(dialog).getByLabelText(en["page.assets.field.file"]), file);
     await user.click(
       within(dialog).getByRole("button", {
         name: en["page.assets.presign.submit"],
@@ -570,15 +516,15 @@ describe("AssetsPage presigned large-object upload", () => {
 
     const { file } = await fillPresignDialog(user);
 
-    await waitFor(() =>
-      expect(calls).toEqual(["intent", "put", "commit"]),
-    );
+    await waitFor(() => expect(calls).toEqual(["intent", "put", "commit"]));
     expect(commitBody).not.toBeNull();
     // The commit re-declares the same identity the intent registered so the
     // gateway can verify size + SHA-256 over the staged bytes.
-    expect(commitBody!.upload_id).toMatch(/^upl_[0-9a-f]{32}$/);
-    expect(commitBody!.size_bytes).toBe(file.size);
-    expect(commitBody!.sha256).toMatch(/^[a-f0-9]{64}$/);
+    // biome-ignore lint/style/noNonNullAssertion: commitBody is assigned only inside the mock fetch callback, so TS control-flow narrows the outer binding to null and no cast can name its declared payload type; ! reads the capture the expect() above just asserted is present
+    const commitReq = commitBody!;
+    expect(commitReq.upload_id).toMatch(/^upl_[0-9a-f]{32}$/);
+    expect(commitReq.size_bytes).toBe(file.size);
+    expect(commitReq.sha256).toMatch(/^[a-f0-9]{64}$/);
     // #368: the direct PUT carries the intent's signed payload-hash header
     // verbatim. Drop it and a real bucket returns 403 -- before this assertion
     // the console sent only Content-Type and nothing in the repo noticed.
@@ -699,19 +645,20 @@ describe("AssetsPage presigned large-object upload", () => {
     await waitFor(() => expect(abortBody).not.toBeNull());
     // The staging key is server-derived from all three declarations, so an
     // abort that names them wrongly would release nothing.
-    expect(abortBody!.upload_id).toBe(UPLOAD_ID);
-    expect(abortBody!.size_bytes).toBe(intentSize);
-    expect(abortBody!.sha256).toBe(declaredSha256);
+    // biome-ignore lint/style/noNonNullAssertion: abortBody is assigned only inside the mock fetch callback, so TS control-flow narrows the outer binding to null and no cast can name its declared payload type; ! reads the capture the expect() above just asserted is present
+    const abortReq = abortBody!;
+    expect(abortReq.upload_id).toBe(UPLOAD_ID);
+    expect(abortReq.size_bytes).toBe(intentSize);
+    expect(abortReq.sha256).toBe(declaredSha256);
     // The PUT never left the browser, so claiming the bucket refused it would
     // fabricate a "corroborated" bucket rejection in the gateway's audit trail
     // and counter — a class any caller can otherwise mint at will.
-    expect(abortBody!.reason).toBe("abandoned");
+    expect(abortReq.reason).toBe("abandoned");
   });
 
   it("surfaces a gateway commit error verbatim in an alert", async () => {
     seedList();
-    const verbatim =
-      "sha256 mismatch: declared aaa… but staged bytes hash to bbb…";
+    const verbatim = "sha256 mismatch: declared aaa… but staged bytes hash to bbb…";
     server.use(
       http.post(
         gatewayUrl("/v1/assets/presign/upload/cli_tool/big-tool/9.0.0"),
@@ -733,13 +680,11 @@ describe("AssetsPage presigned large-object upload", () => {
         },
       ),
       http.put(UPLOAD_URL, () => new HttpResponse(null, { status: 200 })),
-      http.post(
-        gatewayUrl("/v1/assets/presign/commit/cli_tool/big-tool/9.0.0"),
-        () =>
-          HttpResponse.json(
-            { error: { code: "asset_size_mismatch", message: verbatim } },
-            { status: 422 },
-          ),
+      http.post(gatewayUrl("/v1/assets/presign/commit/cli_tool/big-tool/9.0.0"), () =>
+        HttpResponse.json(
+          { error: { code: "asset_size_mismatch", message: verbatim } },
+          { status: 422 },
+        ),
       ),
     );
     const user = userEvent.setup();
@@ -758,9 +703,7 @@ describe("AssetsPage permanent version deletion", () => {
     moreDetailsLabel: string = en["resource.table.moreDetails"],
   ) {
     const ferrogateRow = await findRegistryRecord("ferrogate");
-    await user.click(
-      within(ferrogateRow).getByRole("button", { name: moreDetailsLabel }),
-    );
+    await user.click(within(ferrogateRow).getByRole("button", { name: moreDetailsLabel }));
     return screen.findByRole("dialog");
   }
 
@@ -771,17 +714,14 @@ describe("AssetsPage permanent version deletion", () => {
       http.get(gatewayUrl("/v1/assets/cli_tool/ferrogate/manifest"), () =>
         HttpResponse.json(ferrogateManifest),
       ),
-      http.delete(
-        gatewayUrl("/v1/assets/cli_tool/ferrogate/1.0.0"),
-        ({ request }) => {
-          deleteUrl = request.url;
-          return HttpResponse.json({
-            object: "asset",
-            id: "org-acme:cli_tool:ferrogate:1.0.0",
-            deleted: true,
-          });
-        },
-      ),
+      http.delete(gatewayUrl("/v1/assets/cli_tool/ferrogate/1.0.0"), ({ request }) => {
+        deleteUrl = request.url;
+        return HttpResponse.json({
+          object: "asset",
+          id: "org-acme:cli_tool:ferrogate:1.0.0",
+          deleted: true,
+        });
+      }),
     );
     const user = userEvent.setup();
     renderPage("en");
@@ -794,9 +734,7 @@ describe("AssetsPage permanent version deletion", () => {
     await user.click(deleteButtons[deleteButtons.length - 1]);
 
     const confirmDialog = (
-      await screen.findByText(
-        en["page.assets.delete.title"].replace("{asset}", "ferrogate@1.0.0"),
-      )
+      await screen.findByText(en["page.assets.delete.title"].replace("{asset}", "ferrogate@1.0.0"))
     ).closest("[role='dialog']") as HTMLElement;
     const confirmButton = within(confirmDialog).getByRole("button", {
       name: en["page.assets.delete.action"],
@@ -821,7 +759,9 @@ describe("AssetsPage permanent version deletion", () => {
     // (`deleteAsset`'s `platform` query). ferrogate@1.0.0 has a single
     // linux-x64 variant, so an unqualified DELETE addresses a row that does not
     // exist and 404s: the purge must name the variant it is removing.
-    expect(new URL(deleteUrl!).searchParams.get("platform")).toBe("linux-x64");
+    expect(new URL(deleteUrl as NonNullable<typeof deleteUrl>).searchParams.get("platform")).toBe(
+      "linux-x64",
+    );
   });
 
   it("renders the large-object upload and permanent-delete affordances in zh-CN", async () => {
@@ -834,9 +774,7 @@ describe("AssetsPage permanent version deletion", () => {
     const user = userEvent.setup();
     renderPage("zh-CN");
 
-    expect(
-      await screen.findByText(zhCN["page.assets.presign.title"]),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(zhCN["page.assets.presign.title"])).toBeInTheDocument();
 
     const dialog = await openDetail(user, zhCN["resource.table.moreDetails"]);
     expect(
@@ -887,10 +825,7 @@ const multiVariantManifest: AssetManifest = {
 const yankedManifest: AssetManifest = {
   ...ferrogateManifest,
   channels: [],
-  versions: [
-    { ...ferrogateManifest.versions[0], yanked: true },
-    ferrogateManifest.versions[1],
-  ],
+  versions: [{ ...ferrogateManifest.versions[0], yanked: true }, ferrogateManifest.versions[1]],
 };
 
 function seedManifest(manifest: AssetManifest) {
@@ -960,22 +895,17 @@ describe("AssetsPage lifecycle mutations without prior coverage", () => {
     let unyankMethod: string | null = null;
     let unyankUrl: string | null = null;
     server.use(
-      http.delete(
-        gatewayUrl("/v1/assets/cli_tool/ferrogate/2.0.0/yank"),
-        ({ request }) => {
-          unyankMethod = request.method;
-          unyankUrl = request.url;
-          return HttpResponse.json({ object: "list", data: [] });
-        },
-      ),
+      http.delete(gatewayUrl("/v1/assets/cli_tool/ferrogate/2.0.0/yank"), ({ request }) => {
+        unyankMethod = request.method;
+        unyankUrl = request.url;
+        return HttpResponse.json({ object: "list", data: [] });
+      }),
     );
     const user = userEvent.setup();
     renderPage("en");
 
     const dialog = await openFerrogateDetail(user);
-    await user.click(
-      within(dialog).getByRole("button", { name: en["page.assets.action.unyank"] }),
-    );
+    await user.click(within(dialog).getByRole("button", { name: en["page.assets.action.unyank"] }));
 
     // Unyank is confirmed too, and its confirm names the exact resource.
     const confirm = dialogWith(
@@ -998,14 +928,11 @@ describe("AssetsPage lifecycle mutations without prior coverage", () => {
     let channelMethod: string | null = null;
     let channelUrl: string | null = null;
     server.use(
-      http.delete(
-        gatewayUrl("/v1/assets/cli_tool/ferrogate/channels/stable"),
-        ({ request }) => {
-          channelMethod = request.method;
-          channelUrl = request.url;
-          return HttpResponse.json({ object: "asset_channel", id: "stable", deleted: true });
-        },
-      ),
+      http.delete(gatewayUrl("/v1/assets/cli_tool/ferrogate/channels/stable"), ({ request }) => {
+        channelMethod = request.method;
+        channelUrl = request.url;
+        return HttpResponse.json({ object: "asset_channel", id: "stable", deleted: true });
+      }),
     );
     const user = userEvent.setup();
     renderPage("en");
@@ -1016,12 +943,8 @@ describe("AssetsPage lifecycle mutations without prior coverage", () => {
       within(channelRow).getByRole("button", { name: en["resource.action.delete"] }),
     );
 
-    const confirm = dialogWith(
-      renderKey("page.assets.channel.deleteTitle", { channel: "stable" }),
-    );
-    await user.click(
-      within(confirm).getByRole("button", { name: en["resource.action.delete"] }),
-    );
+    const confirm = dialogWith(renderKey("page.assets.channel.deleteTitle", { channel: "stable" }));
+    await user.click(within(confirm).getByRole("button", { name: en["resource.action.delete"] }));
 
     await waitFor(() => expect(channelUrl).not.toBeNull());
     expect(channelMethod).toBe("DELETE");
@@ -1046,9 +969,7 @@ describe("AssetsPage permanent delete reports blockers and failures", () => {
     });
     await user.click(deleteButtons[0]);
 
-    const confirm = dialogWith(
-      renderKey("page.assets.delete.title", { asset: "ferrogate@2.0.0" }),
-    );
+    const confirm = dialogWith(renderKey("page.assets.delete.title", { asset: "ferrogate@2.0.0" }));
     const blocker = await within(confirm).findByRole("alert");
     // The blocker is stated, with the channel named and the gateway's own error
     // code, so the operator knows the remedy before burning a destructive call.
@@ -1068,9 +989,7 @@ describe("AssetsPage permanent delete reports blockers and failures", () => {
     });
     await user.click(deleteButtons[deleteButtons.length - 1]); // 1.0.0
 
-    const confirm = dialogWith(
-      renderKey("page.assets.delete.title", { asset: "ferrogate@1.0.0" }),
-    );
+    const confirm = dialogWith(renderKey("page.assets.delete.title", { asset: "ferrogate@1.0.0" }));
     // An unconditional warning would be noise that teaches operators to ignore
     // the real one, so the absence is part of the contract.
     expect(within(confirm).queryByRole("alert")).not.toBeInTheDocument();
@@ -1102,9 +1021,7 @@ describe("AssetsPage permanent delete reports blockers and failures", () => {
         name: en["page.assets.delete.action"],
       })[0],
     );
-    const confirm = dialogWith(
-      renderKey("page.assets.delete.title", { asset: "ferrogate@2.0.0" }),
-    );
+    const confirm = dialogWith(renderKey("page.assets.delete.title", { asset: "ferrogate@2.0.0" }));
     await user.type(
       within(confirm).getByLabelText(
         renderKey("page.assets.delete.confirmLabel", { asset: "ferrogate@2.0.0" }),
@@ -1121,9 +1038,7 @@ describe("AssetsPage permanent delete reports blockers and failures", () => {
       expect(
         within(confirm)
           .getAllByRole("alert")
-          .some((alert) =>
-            alert.textContent?.includes("move or delete the channel first"),
-          ),
+          .some((alert) => alert.textContent?.includes("move or delete the channel first")),
       ).toBe(true),
     );
     expect(within(confirm).getByRole("button", { name: en["common.cancel"] })).toBeVisible();
@@ -1162,9 +1077,7 @@ describe("AssetsPage permanent delete reports blockers and failures", () => {
         name: en["page.assets.delete.action"],
       })[0],
     );
-    const confirm = dialogWith(
-      renderKey("page.assets.delete.title", { asset: "ferrogate@3.0.0" }),
-    );
+    const confirm = dialogWith(renderKey("page.assets.delete.title", { asset: "ferrogate@3.0.0" }));
     await user.type(
       within(confirm).getByLabelText(
         renderKey("page.assets.delete.confirmLabel", { asset: "ferrogate@3.0.0" }),
@@ -1226,29 +1139,18 @@ describe("AssetsPage presigned upload cancellation", () => {
             });
           }),
       ),
-      http.post(
-        gatewayUrl("/v1/assets/presign/commit/cli_tool/big-tool/9.0.0"),
-        () => {
-          commitCalls += 1;
-          return HttpResponse.json({ object: "asset", asset: asset() });
-        },
-      ),
+      http.post(gatewayUrl("/v1/assets/presign/commit/cli_tool/big-tool/9.0.0"), () => {
+        commitCalls += 1;
+        return HttpResponse.json({ object: "asset", asset: asset() });
+      }),
     );
     const user = userEvent.setup();
     renderPage("en");
 
-    await user.click(
-      await screen.findByRole("button", { name: en["page.assets.presign.submit"] }),
-    );
+    await user.click(await screen.findByRole("button", { name: en["page.assets.presign.submit"] }));
     const dialog = await screen.findByRole("dialog");
-    await user.type(
-      within(dialog).getByLabelText(en["page.assets.field.name"]),
-      "big-tool",
-    );
-    await user.type(
-      within(dialog).getByLabelText(en["page.assets.field.version"]),
-      "9.0.0",
-    );
+    await user.type(within(dialog).getByLabelText(en["page.assets.field.name"]), "big-tool");
+    await user.type(within(dialog).getByLabelText(en["page.assets.field.version"]), "9.0.0");
     await user.upload(
       within(dialog).getByLabelText(en["page.assets.field.file"]),
       new File(["a very large bundle payload"], "big.tar.gz", {
@@ -1271,9 +1173,7 @@ describe("AssetsPage presigned upload cancellation", () => {
     const alert = await within(dialog).findByRole("alert");
     expect(alert).toHaveTextContent(en["page.assets.presign.cancelledNoIntent"]);
     // ...the success copy never appears, and nothing was committed.
-    expect(
-      screen.queryByText(en["page.assets.presign.success"]),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByText(en["page.assets.presign.success"])).not.toBeInTheDocument();
     expect(commitCalls).toBe(0);
     void UPLOAD_ID;
   });
@@ -1302,9 +1202,7 @@ describe("AssetsPage inline vs presigned upload selection", () => {
 
     // The limit is stated up front, from the summary.
     expect(
-      await screen.findByText(
-        renderKey("page.assets.push.inlineLimit", { max: "8 B" }),
-      ),
+      await screen.findByText(renderKey("page.assets.push.inlineLimit", { max: "8 B" })),
     ).toBeInTheDocument();
 
     await user.type(screen.getByLabelText(en["page.assets.field.name"]), "big");
@@ -1316,9 +1214,7 @@ describe("AssetsPage inline vs presigned upload selection", () => {
 
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent(/over the 8 B inline push limit/);
-    expect(
-      screen.getByRole("button", { name: en["page.assets.push.submit"] }),
-    ).toBeDisabled();
+    expect(screen.getByRole("button", { name: en["page.assets.push.submit"] })).toBeDisabled();
     expect(pushCalls).toBe(0);
   });
 });
@@ -1342,9 +1238,7 @@ describe("AssetsPage typed download, references, and version URL state", () => {
       renderPage("en");
 
       const dialog = await openFerrogateDetail(user);
-      const arm64Row = within(dialog)
-        .getByText("linux-arm64")
-        .closest("tr") as HTMLElement;
+      const arm64Row = within(dialog).getByText("linux-arm64").closest("tr") as HTMLElement;
       // A per-variant Download button: with one button per VERSION, the
       // linux-arm64 artifact was unreachable from this page entirely.
       await user.click(
@@ -1354,12 +1248,12 @@ describe("AssetsPage typed download, references, and version URL state", () => {
       );
 
       await waitFor(() => expect(downloadUrl).not.toBeNull());
-      expect(new URL(downloadUrl!).searchParams.get("platform")).toBe("linux-arm64");
+      expect(
+        new URL(downloadUrl as NonNullable<typeof downloadUrl>).searchParams.get("platform"),
+      ).toBe("linux-arm64");
       // "Typed download": the saved name carries the variant and an extension
       // derived from the manifest's own content type, not a bare `name-version`.
-      await waitFor(() =>
-        expect(plumbing.saved).toEqual(["ferrogate-3.0.0-linux-arm64.tar.gz"]),
-      );
+      await waitFor(() => expect(plumbing.saved).toEqual(["ferrogate-3.0.0-linux-arm64.tar.gz"]));
     } finally {
       plumbing.restore();
     }
@@ -1378,9 +1272,7 @@ describe("AssetsPage typed download, references, and version URL state", () => {
     renderPage("en");
 
     const dialog = await openFerrogateDetail(user);
-    const arm64Row = within(dialog)
-      .getByText("linux-arm64")
-      .closest("tr") as HTMLElement;
+    const arm64Row = within(dialog).getByText("linux-arm64").closest("tr") as HTMLElement;
     await user.click(
       within(arm64Row).getByRole("button", {
         name: renderKey("common.copyLabel", {
@@ -1439,18 +1331,14 @@ describe("AssetsPage typed download, references, and version URL state", () => {
         name: renderKey("page.assets.action.focusVersion", { version: "2.0.0" }),
       }),
     );
-    await waitFor(() =>
-      expect(new URLSearchParams(currentSearch).get("rver")).toBe("2.0.0"),
-    );
+    await waitFor(() => expect(new URLSearchParams(currentSearch).get("rver")).toBe("2.0.0"));
     // Clearing it prunes the param rather than leaving an empty one behind.
     await user.click(
       within(dialog).getByRole("button", {
         name: en["page.assets.action.clearVersion"],
       }),
     );
-    await waitFor(() =>
-      expect(new URLSearchParams(currentSearch).has("rver")).toBe(false),
-    );
+    await waitFor(() => expect(new URLSearchParams(currentSearch).has("rver")).toBe(false));
   });
 });
 
@@ -1470,9 +1358,7 @@ describe("AssetsPage localized types and quota pressure", () => {
           ],
         }),
       ),
-      http.get(gatewayUrl("/v1/assets/storage/summary"), () =>
-        HttpResponse.json(storageSummary()),
-      ),
+      http.get(gatewayUrl("/v1/assets/storage/summary"), () => HttpResponse.json(storageSummary())),
     );
 
     renderPage("zh-CN");
@@ -1508,9 +1394,7 @@ describe("AssetsPage localized types and quota pressure", () => {
 
     // remaining_bytes is the gateway's own saturating headroom, not a
     // subtraction this page performs.
-    expect(
-      await screen.findByText(/500 B remaining/),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(/500 B remaining/)).toBeInTheDocument();
     const meter = screen.getByRole("progressbar", {
       name: en["page.assets.storage.title"],
     });
@@ -1524,9 +1408,7 @@ describe("AssetsPage localized types and quota pressure", () => {
         HttpResponse.json({ object: "list", data: [asset()] }),
       ),
       http.get(gatewayUrl("/v1/assets/storage/summary"), () =>
-        HttpResponse.json(
-          storageSummary({ quota_bytes: null, remaining_bytes: null }),
-        ),
+        HttpResponse.json(storageSummary({ quota_bytes: null, remaining_bytes: null })),
       ),
     );
 

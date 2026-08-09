@@ -38,13 +38,14 @@
  * context. A gateway that returns 500 because its audit log was full has
  * turned a compliance feature into an outage.
  */
+
+import { controlDatabaseFrom } from "../control-data.js";
 import {
-  requestLogTenantDatabaseFrom,
   type RequestLogDatabase,
+  requestLogTenantDatabaseFrom,
   writeRequestLogs,
   writeTenantRequestLogs,
 } from "./d1.js";
-import { controlDatabaseFrom } from "../control-data.js";
 import type { RequestLogRecord } from "./record.js";
 import { requestLogToWire } from "./record.js";
 
@@ -164,10 +165,7 @@ export const requestLogBindingsFromEnv: Required<
 export class RequestLogSink {
   readonly #queueOf: (env: unknown) => RequestLogQueue | undefined;
   readonly #databaseOf: (env: unknown) => RequestLogDatabase | undefined;
-  readonly #tenantDatabaseOf: (
-    env: unknown,
-    tenantId: string,
-  ) => RequestLogDatabase | undefined;
+  readonly #tenantDatabaseOf: (env: unknown, tenantId: string) => RequestLogDatabase | undefined;
   readonly #diagnostics: RequestLogDiagnostics | undefined;
   #queued = 0;
   #written = 0;

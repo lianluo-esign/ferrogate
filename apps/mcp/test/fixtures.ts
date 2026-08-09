@@ -6,18 +6,19 @@
  * assets) and then drives the real Worker over HTTP — no mocking of the app's
  * own code, and the exact production routing/auth/governance path runs.
  */
-import type { JsonValue } from "@ferrogate/core";
+
 import { env } from "cloudflare:test";
+import type { JsonValue } from "@ferrogate/core";
 
 import {
-  inMemoryPorts,
-  resetInMemoryPorts,
   type AuthContext,
   type DispatchContext,
   type McpDispatchHeaders,
   type McpEnv,
   type McpServerConfig,
   type McpTool,
+  inMemoryPorts,
+  resetInMemoryPorts,
 } from "../src/ports.js";
 
 export const READ_KEY = "fg_test_read_key";

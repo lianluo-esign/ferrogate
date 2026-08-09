@@ -41,12 +41,12 @@ import {
   d1DelegationRevocationSource,
   importDelegationKey,
 } from "@ferrogate/identity";
-import { controlDatabaseFrom } from "../control-data.js";
 import {
   DurableObjectTenantDatabaseRouter,
   backfillTenantConfigurationPolicy,
 } from "@ferrogate/storage";
 import type { TenantDataNamespace } from "@ferrogate/storage/durable-objects";
+import { controlDatabaseFrom } from "../control-data.js";
 
 /** The Worker vars/bindings this slice reads. */
 export interface DelegationBindings {

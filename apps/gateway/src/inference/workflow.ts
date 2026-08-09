@@ -151,8 +151,8 @@ import {
   applyWorkflowProviderConstraint,
   enforceWorkflowGraphPolicy,
 } from "@ferrogate/policy";
-import { controlDatabaseFrom } from "../control-data.js";
 import { DurableObjectTenantDatabaseRouter, type TenantDatabaseRouter } from "@ferrogate/storage";
+import { controlDatabaseFrom } from "../control-data.js";
 import { reject } from "./errors.js";
 import type { InferenceRejection } from "./errors.js";
 import type { Caller } from "./ports.js";
@@ -295,9 +295,7 @@ export function workflowHeadersFrom(headers: Headers): WorkflowHeaderResult {
   ) {
     return {
       kind: "invalid",
-      detail:
-        `${WORKFLOW_ID_HEADER} is required when workflow version, node, or iteration ` +
-        "headers are set",
+      detail: `${WORKFLOW_ID_HEADER} is required when workflow version, node, or iteration headers are set`,
     };
   }
   if (workflowId === undefined) return { kind: "absent" };
@@ -395,38 +393,38 @@ const NODE_KINDS: readonly WorkflowNodeKind[] = ["model", "tool", "router", "hum
  */
 export function decodeWorkflowDocument(value: unknown): WorkflowGraph | undefined {
   if (!isObject(value)) return undefined;
-  const id = value["id"];
+  const id = value.id;
   if (typeof id !== "string" || id === "") return undefined;
 
-  const version = value["version"] === undefined ? 1 : positiveInt(value["version"]);
+  const version = value.version === undefined ? 1 : positiveInt(value.version);
   if (version === undefined) return undefined;
 
-  const enabled = value["enabled"] === undefined ? true : value["enabled"];
+  const enabled = value.enabled === undefined ? true : value.enabled;
   if (typeof enabled !== "boolean") return undefined;
 
-  const organizationIds = stringList(value["organization_ids"]);
-  const projectIds = stringList(value["project_ids"]);
-  const apiKeyIds = stringList(value["api_key_ids"]);
+  const organizationIds = stringList(value.organization_ids);
+  const projectIds = stringList(value.project_ids);
+  const apiKeyIds = stringList(value.api_key_ids);
   if (organizationIds === undefined || projectIds === undefined || apiKeyIds === undefined) {
     return undefined;
   }
 
-  const rawNodes = value["nodes"];
+  const rawNodes = value.nodes;
   if (!Array.isArray(rawNodes)) return undefined;
   const nodes: WorkflowGraphNode[] = [];
   for (const raw of rawNodes) {
     if (!isObject(raw)) return undefined;
-    const nodeId = raw["id"];
+    const nodeId = raw.id;
     if (typeof nodeId !== "string" || nodeId === "") return undefined;
-    const kind = raw["kind"] === undefined ? "model" : raw["kind"];
+    const kind = raw.kind === undefined ? "model" : raw.kind;
     if (typeof kind !== "string" || !NODE_KINDS.includes(kind as WorkflowNodeKind)) {
       return undefined;
     }
-    const providers = stringList(raw["providers"]);
+    const providers = stringList(raw.providers);
     if (providers === undefined) return undefined;
-    const model = raw["model"];
+    const model = raw.model;
     if (model !== undefined && model !== null && typeof model !== "string") return undefined;
-    const tool = raw["tool"];
+    const tool = raw.tool;
     if (tool !== undefined && tool !== null && typeof tool !== "string") return undefined;
     nodes.push({
       id: nodeId,
@@ -434,22 +432,22 @@ export function decodeWorkflowDocument(value: unknown): WorkflowGraph | undefine
       ...(typeof model === "string" ? { model } : {}),
       providers,
       ...(typeof tool === "string" ? { tool } : {}),
-      ...(raw["max_iterations"] === undefined || raw["max_iterations"] === null
+      ...(raw.max_iterations === undefined || raw.max_iterations === null
         ? {}
-        : { max_iterations: positiveInt(raw["max_iterations"]) }),
-      ...(raw["token_budget"] === undefined || raw["token_budget"] === null
+        : { max_iterations: positiveInt(raw.max_iterations) }),
+      ...(raw.token_budget === undefined || raw.token_budget === null
         ? {}
-        : { token_budget: positiveInt(raw["token_budget"]) }),
+        : { token_budget: positiveInt(raw.token_budget) }),
     });
   }
 
-  const rawEdges = value["edges"];
+  const rawEdges = value.edges;
   if (rawEdges !== undefined && rawEdges !== null && !Array.isArray(rawEdges)) return undefined;
   const edges: { from: string; to: string }[] = [];
   for (const raw of (rawEdges as unknown[] | undefined) ?? []) {
     if (!isObject(raw)) return undefined;
-    const from = raw["from"];
-    const to = raw["to"];
+    const from = raw.from;
+    const to = raw.to;
     if (typeof from !== "string" || typeof to !== "string") return undefined;
     edges.push({ from, to });
   }
@@ -523,10 +521,10 @@ export function workflowsFromSkillPackages(raw: string | undefined): readonly Wo
   const out: WorkflowGraph[] = [];
   for (const entry of decoded) {
     if (!isObject(entry)) continue;
-    if (entry["enabled"] === false) continue;
-    const resources = entry["resources"];
+    if (entry.enabled === false) continue;
+    const resources = entry.resources;
     if (!isObject(resources)) continue;
-    const workflows = resources["agent_workflows"];
+    const workflows = resources.agent_workflows;
     if (!Array.isArray(workflows)) continue;
     for (const document of workflows) {
       const decodedWorkflow = decodeWorkflowDocument(document);
@@ -561,7 +559,7 @@ export function d1WorkflowCatalog(
       } catch {
         continue;
       }
-      if (tenantId !== undefined && (!isObject(parsed) || parsed["tenant_id"] !== tenantId)) {
+      if (tenantId !== undefined && (!isObject(parsed) || parsed.tenant_id !== tenantId)) {
         continue;
       }
       const decoded = decodeWorkflowDocument(parsed);

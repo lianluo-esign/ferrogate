@@ -1,9 +1,9 @@
-import { adminGet, type AdminSchema } from "@/lib/gateway-client";
+import { type AdminSchema, adminGet } from "@/lib/gateway-client";
 import {
-  booleanColumn,
   DISABLED_WHEN_NOT_ENABLED,
   DISABLED_WHEN_STATUS_NOT_ACTIVE,
   type ResourceConfig,
+  booleanColumn,
 } from "@/lib/resource-config";
 
 /**
@@ -11,8 +11,7 @@ import {
  * docs/openapi/admin-api.openapi.json changes this resource, the columns/
  * fetcher below stop type-checking. Regenerate via `npm run generate:api`.
  */
-export type AdminVirtualApiKey = AdminSchema<"AdminVirtualApiKey"> &
-  Record<string, unknown>;
+export type AdminVirtualApiKey = AdminSchema<"AdminVirtualApiKey"> & Record<string, unknown>;
 
 // Per-resource operator copy partially migrated onto the typed i18n catalog
 // (#348): column `headerKey` and field `labelKey`/`placeholderKey` resolve under
@@ -33,14 +32,53 @@ export const virtualKeysConfig: ResourceConfig<AdminVirtualApiKey> = {
   secretResponseKey: "secret",
   rowLabel: (row) => row.name,
   columns: [
-    { key: "name", headerKey: "resource.virtualKeys.col.name", priority: "primary", minWidth: 190, mobileVisibility: "always" },
-    { key: "key_prefix", headerKey: "resource.virtualKeys.col.prefix", priority: "secondary", minWidth: 150, mobileVisibility: "always", render: (row) => `${row.key_prefix}...${row.last4}` },
-    { key: "workspace_id", headerKey: "resource.virtualKeys.col.workspace", priority: "detail", minWidth: 190, copyable: true, mobileVisibility: "details" },
-    booleanColumn<AdminVirtualApiKey>({ key: "enabled", headerKey: "resource.virtualKeys.col.enabled", priority: "secondary", minWidth: 100, mobileVisibility: "always" }),
-    { key: "scopes", headerKey: "resource.virtualKeys.col.scopes", priority: "detail", minWidth: 220, mobileVisibility: "details", render: (row) => row.scopes.join(", ") },
+    {
+      key: "name",
+      headerKey: "resource.virtualKeys.col.name",
+      priority: "primary",
+      minWidth: 190,
+      mobileVisibility: "always",
+    },
+    {
+      key: "key_prefix",
+      headerKey: "resource.virtualKeys.col.prefix",
+      priority: "secondary",
+      minWidth: 150,
+      mobileVisibility: "always",
+      render: (row) => `${row.key_prefix}...${row.last4}`,
+    },
+    {
+      key: "workspace_id",
+      headerKey: "resource.virtualKeys.col.workspace",
+      priority: "detail",
+      minWidth: 190,
+      copyable: true,
+      mobileVisibility: "details",
+    },
+    booleanColumn<AdminVirtualApiKey>({
+      key: "enabled",
+      headerKey: "resource.virtualKeys.col.enabled",
+      priority: "secondary",
+      minWidth: 100,
+      mobileVisibility: "always",
+    }),
+    {
+      key: "scopes",
+      headerKey: "resource.virtualKeys.col.scopes",
+      priority: "detail",
+      minWidth: 220,
+      mobileVisibility: "details",
+      render: (row) => row.scopes.join(", "),
+    },
   ],
   fields: [
-    { name: "name", labelKey: "resource.virtualKeys.field.name", type: "text", required: true, createOnly: true },
+    {
+      name: "name",
+      labelKey: "resource.virtualKeys.field.name",
+      type: "text",
+      required: true,
+      createOnly: true,
+    },
     {
       // #340: workspace_id was a raw text field. A virtual key is issued against
       // a workspace row, so it now uses the shared single-entity picker.
@@ -103,7 +141,15 @@ export const virtualKeysConfig: ResourceConfig<AdminVirtualApiKey> = {
         disabledWhen: DISABLED_WHEN_NOT_ENABLED,
       },
     },
-    { name: "monthly_token_budget", labelKey: "resource.virtualKeys.field.monthlyTokenBudget", type: "number" },
-    { name: "request_limit_per_minute", labelKey: "resource.virtualKeys.field.requestLimitPerMinute", type: "number" },
+    {
+      name: "monthly_token_budget",
+      labelKey: "resource.virtualKeys.field.monthlyTokenBudget",
+      type: "number",
+    },
+    {
+      name: "request_limit_per_minute",
+      labelKey: "resource.virtualKeys.field.requestLimitPerMinute",
+      type: "number",
+    },
   ],
 };

@@ -1,22 +1,22 @@
-import { render, screen, waitFor } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
-import { QueryClientProvider } from "@tanstack/react-query";
-import { HttpResponse, http } from "msw";
-import { MemoryRouter, useLocation } from "react-router-dom";
-import { beforeEach, describe, expect, it } from "vitest";
 import { ResourcePage } from "@/components/resource/resource-page";
 import { AuthProvider } from "@/hooks/use-auth";
 import { CatalogScopeProvider } from "@/hooks/use-catalog-scope";
 import { I18nProvider } from "@/i18n";
 import type { ResourceConfig } from "@/lib/resource-config";
-import { plansConfig, type AdminPlan } from "@/resources/plans";
+import { type AdminPlan, plansConfig } from "@/resources/plans";
+import { gatewayUrl, mockAdminError, mockAdminList, server } from "@/test/msw";
 import {
-  gatewayUrl,
-  mockAdminError,
-  mockAdminList,
-  server,
-} from "@/test/msw";
-import { createTestQueryClient, renderWithProviders, seedSession, TEST_GATEWAY_API_KEY } from "@/test/test-utils";
+  TEST_GATEWAY_API_KEY,
+  createTestQueryClient,
+  renderWithProviders,
+  seedSession,
+} from "@/test/test-utils";
+import { QueryClientProvider } from "@tanstack/react-query";
+import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { http, HttpResponse } from "msw";
+import { MemoryRouter, useLocation } from "react-router-dom";
+import { beforeEach, describe, expect, it } from "vitest";
 
 interface WidgetRow extends Record<string, unknown> {
   id: string;
@@ -98,7 +98,10 @@ describe("ResourcePage", () => {
   });
 
   it("lists rows via the typed OpenAPI fetchList exemplar (plans)", async () => {
-    mockAdminList("/admin/v1/plans", [plan({ name: "Free" }), plan({ id: "p2", name: "Pro", slug: "pro" })]);
+    mockAdminList("/admin/v1/plans", [
+      plan({ name: "Free" }),
+      plan({ id: "p2", name: "Pro", slug: "pro" }),
+    ]);
 
     renderWithProviders(<ResourcePage config={plansConfig} />);
 

@@ -1,3 +1,18 @@
+import {
+  fetchAdminMe,
+  loginAdminAccount,
+  logoutAdminSession,
+  refreshAdminSession,
+  registerAdminAccount,
+} from "@/lib/auth-client";
+import { baseUrlForRequestPath } from "@/lib/config";
+import {
+  gatewayDelete,
+  gatewayGet,
+  gatewayPatch,
+  gatewayPost,
+  gatewayPut,
+} from "@/lib/gateway-client";
 // Control-plane requests stay on the console's own origin (#696).
 //
 // THE DEFECT THIS PINS
@@ -33,21 +48,6 @@
 // URLs outside the shared client). So the spy sits on `fetch` and the subject
 // is the URL that actually goes out.
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  fetchAdminMe,
-  loginAdminAccount,
-  logoutAdminSession,
-  refreshAdminSession,
-  registerAdminAccount,
-} from "@/lib/auth-client";
-import {
-  gatewayDelete,
-  gatewayGet,
-  gatewayPatch,
-  gatewayPost,
-  gatewayPut,
-} from "@/lib/gateway-client";
-import { baseUrlForRequestPath } from "@/lib/config";
 
 describe("every control-plane request the console makes is same-origin", () => {
   /** Absolute URLs `fetch` was called with, in order, for the current test. */
@@ -62,8 +62,7 @@ describe("every control-plane request the console makes is same-origin", () => {
     // gate, src/lib/typecheck.gate.test.ts, fails on it).
     requested = [];
     vi.spyOn(globalThis, "fetch").mockImplementation((input: RequestInfo | URL) => {
-      const raw =
-        typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      const raw = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
       // A relative path IS the same-origin answer; resolve it the way the
       // browser would so the assertion reads one way for both spellings.
       requested.push(new URL(raw, window.location.href).href);
@@ -130,7 +129,6 @@ describe("every control-plane request the console makes is same-origin", () => {
   });
 });
 
-
 describe("routes each request to the service that owns its path", () => {
   const controlPlane = "https://control-plane.example.test";
   const gateway = "https://gateway.example.test";
@@ -147,10 +145,7 @@ describe("routes each request to the service that owns its path", () => {
     ["/v1/mcp/identity/github", gateway],
     ["/v1/tools", gateway],
     ["/sites/acme/docs/", gateway],
-  ] satisfies readonly [string, string][]) (
-    "%s uses its owning backend",
-    (path, expected) => {
-      expect(baseUrlForRequestPath(path, controlPlane, gateway)).toBe(expected);
-    },
-  );
+  ] satisfies readonly [string, string][])("%s uses its owning backend", (path, expected) => {
+    expect(baseUrlForRequestPath(path, controlPlane, gateway)).toBe(expected);
+  });
 });

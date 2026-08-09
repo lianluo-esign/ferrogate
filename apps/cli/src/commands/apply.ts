@@ -138,9 +138,7 @@ const QUOTA_POLICIES: ApplyKind = {
       const scopeId = requiredString(record, "scope_id");
       if (scopeType === undefined || scopeId === undefined) {
         return {
-          error:
-            "every entry needs a non-empty scope_type (tenant|project|workspace|key) and " +
-            `scope_id -- they ARE the resource's identity; got ${JSON.stringify(record)}`,
+          error: `every entry needs a non-empty scope_type (tenant|project|workspace|key) and scope_id -- they ARE the resource's identity; got ${JSON.stringify(record)}`,
         };
       }
       return { id: `${scopeType}:${scopeId}` };
@@ -416,9 +414,7 @@ export function decodeDesiredStateText(
   if (lowered.endsWith(".yaml") || lowered.endsWith(".yml")) {
     if (parsers.yaml === undefined) {
       throw new DesiredStateError(
-        `cannot read ${path}: this runtime provides no YAML parser. The shipped 'ferrogate' ` +
-          "binary is a Bun binary and uses Bun.YAML; under a non-Bun runtime pass the desired " +
-          "state as JSON rather than have the CLI guess at it",
+        `cannot read ${path}: this runtime provides no YAML parser. The shipped 'ferrogate' binary is a Bun binary and uses Bun.YAML; under a non-Bun runtime pass the desired state as JSON rather than have the CLI guess at it`,
       );
     }
     try {
@@ -622,8 +618,7 @@ async function runApply(runtime: CliRuntime, args: Args): Promise<number> {
   const orphans = changes.filter((change) => change.action === "orphan");
   if (orphans.length > 0) {
     runtime.io.stderr(
-      `note: ${orphans.length} resource(s) exist on the server and are absent from ${path}; ` +
-        "they were KEPT. Pass --prune to delete them, or declare them in the file.\n",
+      `note: ${orphans.length} resource(s) exist on the server and are absent from ${path}; they were KEPT. Pass --prune to delete them, or declare them in the file.\n`,
     );
   }
 

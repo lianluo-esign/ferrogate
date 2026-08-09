@@ -140,7 +140,10 @@ describe("shadow mirroring uses @ferrogate/routing sampling", () => {
 
     // BOTH providers were dialled for ONE client request — that is the mirror.
     await waitFor(
-      () => provider!.requests.some((request) => providerOf(request.url) === "mirror"),
+      () =>
+        (provider as NonNullable<typeof provider>).requests.some(
+          (request) => providerOf(request.url) === "mirror",
+        ),
       "the shadow mirror to be dispatched",
     );
     expect(new Set(provider.requests.map((request) => providerOf(request.url)))).toEqual(
@@ -221,7 +224,10 @@ describe("shadow mirroring uses @ferrogate/routing sampling", () => {
     await res.text();
 
     await waitFor(
-      () => provider!.requests.some((request) => providerOf(request.url) === "mirror"),
+      () =>
+        (provider as NonNullable<typeof provider>).requests.some(
+          (request) => providerOf(request.url) === "mirror",
+        ),
       "the shadow mirror to be dispatched",
     );
     const mirrored = provider.requests.find((request) => providerOf(request.url) === "mirror");
@@ -296,7 +302,10 @@ describe("a mirror never affects the client's response", () => {
     expect(res.status).toBe(200);
     expect((await res.json<{ id: string }>()).id).toBe("chatcmpl-ok");
     await waitFor(
-      () => provider!.requests.some((request) => providerOf(request.url) === "mirror"),
+      () =>
+        (provider as NonNullable<typeof provider>).requests.some(
+          (request) => providerOf(request.url) === "mirror",
+        ),
       "the failing shadow mirror to be attempted",
     );
   });
@@ -330,7 +339,10 @@ describe("a mirror never affects the client's response", () => {
     );
     expect((await app.post("/v1/chat/completions", CHAT_BODY)).status).toBe(200);
     await waitFor(
-      () => provider!.requests.some((request) => providerOf(request.url) === "mirror"),
+      () =>
+        (provider as NonNullable<typeof provider>).requests.some(
+          (request) => providerOf(request.url) === "mirror",
+        ),
       "the failing shadow mirror to be attempted",
     );
 
@@ -351,7 +363,10 @@ describe("a mirror never double-bills", () => {
 
     expect((await app.post("/v1/chat/completions", CHAT_BODY)).status).toBe(200);
     await waitFor(
-      () => provider!.requests.some((request) => providerOf(request.url) === "mirror"),
+      () =>
+        (provider as NonNullable<typeof provider>).requests.some(
+          (request) => providerOf(request.url) === "mirror",
+        ),
       "the shadow mirror to be dispatched",
     );
     // Let any (nonexistent) mirror metering land before counting.
@@ -375,7 +390,10 @@ describe("a mirror never double-bills", () => {
     // The client is refused — the mirror is not a fallback.
     expect((await app.post("/v1/chat/completions", CHAT_BODY)).status).toBe(503);
     await waitFor(
-      () => provider!.requests.some((request) => providerOf(request.url) === "mirror"),
+      () =>
+        (provider as NonNullable<typeof provider>).requests.some(
+          (request) => providerOf(request.url) === "mirror",
+        ),
       "the shadow mirror to be dispatched",
     );
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -420,7 +438,10 @@ describe("the shadow budget caps mirrored dispatches", () => {
       expect((await app.post("/v1/chat/completions", CHAT_BODY)).status).toBe(200);
     }
     await waitFor(
-      () => provider!.requests.filter((r) => providerOf(r.url) === "mirror").length === 2,
+      () =>
+        (provider as NonNullable<typeof provider>).requests.filter(
+          (r) => providerOf(r.url) === "mirror",
+        ).length === 2,
       "exactly two mirrors to be admitted",
     );
     await new Promise((resolve) => setTimeout(resolve, 20));

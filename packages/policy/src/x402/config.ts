@@ -11,9 +11,9 @@
  */
 import {
   MAX_TIMEOUT_SECONDS,
+  type SolanaNetwork,
   isValidSolanaAddress,
   networkCaip2,
-  type SolanaNetwork,
 } from "./wire.js";
 
 /** Largest representable `u64` — the range bound for the credit conversion. */
@@ -215,7 +215,11 @@ function validateCaps(caps: X402SpendCaps): X402PolicyConfigError | undefined {
   }
   if (caps.minAtomicPerPayment !== undefined && caps.maxAtomicPerPayment !== undefined) {
     if (caps.minAtomicPerPayment > caps.maxAtomicPerPayment) {
-      return { kind: "inverted_atomic_band", min: caps.minAtomicPerPayment, max: caps.maxAtomicPerPayment };
+      return {
+        kind: "inverted_atomic_band",
+        min: caps.minAtomicPerPayment,
+        max: caps.maxAtomicPerPayment,
+      };
     }
   }
   return undefined;
@@ -226,13 +230,20 @@ function validateEnabled(p: X402SpendPolicy): X402PolicyConfigError | undefined 
   if (p.allowedAssets.length === 0) return { kind: "empty_allowlist", field: "assets" };
   if (p.allowedRecipients.length === 0) return { kind: "empty_allowlist", field: "recipients" };
 
-  const dupNet = rejectDuplicates(p.allowedNetworks.map((n) => policyNetworkCaip2(n)), "network");
+  const dupNet = rejectDuplicates(
+    p.allowedNetworks.map((n) => policyNetworkCaip2(n)),
+    "network",
+  );
   if (dupNet !== undefined) return dupNet;
 
   for (const asset of p.allowedAssets) {
     if (!isValidSolanaAddress(asset.mint)) return { kind: "token_symbol_mint", value: asset.mint };
     if (!p.allowedNetworks.some((n) => policyNetworkEquals(n, asset.network))) {
-      return { kind: "asset_network_not_allowed", network: policyNetworkCaip2(asset.network), mint: asset.mint };
+      return {
+        kind: "asset_network_not_allowed",
+        network: policyNetworkCaip2(asset.network),
+        mint: asset.mint,
+      };
     }
   }
   const dupAsset = rejectDuplicates(
@@ -290,10 +301,16 @@ function validateEnabled(p: X402SpendPolicy): X402PolicyConfigError | undefined 
  */
 export function validateX402SpendPolicy(policy: X402SpendPolicy): ValidateResult {
   if (policy.conversion.numerator === 0n) {
-    return { ok: false, error: { kind: "impossible_conversion", reason: "conversion numerator is zero" } };
+    return {
+      ok: false,
+      error: { kind: "impossible_conversion", reason: "conversion numerator is zero" },
+    };
   }
   if (policy.conversion.denominator === 0n) {
-    return { ok: false, error: { kind: "impossible_conversion", reason: "conversion denominator is zero" } };
+    return {
+      ok: false,
+      error: { kind: "impossible_conversion", reason: "conversion denominator is zero" },
+    };
   }
   if (policy.conversion.expiresAtUnix !== undefined && policy.conversion.expiresAtUnix <= 0) {
     return {

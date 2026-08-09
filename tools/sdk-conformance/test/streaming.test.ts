@@ -16,13 +16,7 @@
  *    shape is wrong even when iteration would have survived it.
  */
 import { describe, expect, it } from "vitest";
-import {
-  DONE_FRAME,
-  dataFrame,
-  interceptUpstream,
-  openaiClient,
-  upstreamSse,
-} from "./harness.js";
+import { DONE_FRAME, dataFrame, interceptUpstream, openaiClient, upstreamSse } from "./harness.js";
 
 const CHUNK_BASE = {
   id: "chatcmpl-stream",

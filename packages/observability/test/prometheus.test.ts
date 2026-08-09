@@ -1,10 +1,10 @@
 import { describe, expect, test } from "vitest";
 import {
+  type GatewayMetricsSnapshot,
+  type UnjoinableActionMetricTotal,
   defaultGatewayMetricsSnapshot,
   renderPrometheusText,
   renderUnjoinableActionsText,
-  type GatewayMetricsSnapshot,
-  type UnjoinableActionMetricTotal,
 } from "../src/index.js";
 
 function fullSnapshot(): GatewayMetricsSnapshot {
@@ -57,9 +57,7 @@ function fullSnapshot(): GatewayMetricsSnapshot {
         totalTokens: 8,
       },
     ],
-    mcpMethodTotals: [
-      { method: "tools/call", name: "srv-search", requests: 3 },
-    ],
+    mcpMethodTotals: [{ method: "tools/call", name: "srv-search", requests: 3 }],
     networkAccessDeniedTotal: 3,
     networkAccessRateLimitedTotal: 4,
     assetLifecycleScannedTotal: 7,
@@ -164,9 +162,7 @@ describe("renderUnjoinableActionsText", () => {
     const text = renderUnjoinableActionsText(totals);
 
     expect(text).toContain("# TYPE ferrogate_unjoinable_actions_total counter");
-    expect(text).toContain(
-      'ferrogate_unjoinable_actions_total{tenant="tenant-a",surface="mcp"} 2',
-    );
+    expect(text).toContain('ferrogate_unjoinable_actions_total{tenant="tenant-a",surface="mcp"} 2');
     expect(text).toContain(
       'ferrogate_unjoinable_actions_total{tenant="tenant-b",surface="asset"} 5',
     );
@@ -178,13 +174,8 @@ describe("renderUnjoinableActionsText", () => {
     expect(text).not.toMatch(/\{[^}]*run[_-]?id\s*=/);
     for (const line of text.split("\n")) {
       if (line.startsWith("ferrogate_unjoinable_actions_total{")) {
-        const labels = line.slice(
-          line.indexOf("{") + 1,
-          line.indexOf("}"),
-        );
-        const keys = labels
-          .split(",")
-          .map((pair) => pair.split("=")[0]?.trim());
+        const labels = line.slice(line.indexOf("{") + 1, line.indexOf("}"));
+        const keys = labels.split(",").map((pair) => pair.split("=")[0]?.trim());
         expect(keys).toEqual(["tenant", "surface"]);
       }
     }

@@ -53,10 +53,8 @@ import {
  * defines the general fleet fan-out and freshness contract.
  */
 
-const AGENT_RUN_COLUMNS =
-  "id, request_id, tenant, started_at_unix, completed_at_unix, run_json";
-const AGENT_RUN_EVENT_COLUMNS =
-  "id, run_id, request_id, tenant, occurred_at_unix, event_json";
+const AGENT_RUN_COLUMNS = "id, request_id, tenant, started_at_unix, completed_at_unix, run_json";
+const AGENT_RUN_EVENT_COLUMNS = "id, run_id, request_id, tenant, occurred_at_unix, event_json";
 
 function documentOf(raw: unknown): Record<string, unknown> {
   if (typeof raw !== "string") return {};
@@ -70,6 +68,7 @@ function documentOf(raw: unknown): Record<string, unknown> {
 
 function runDocument(row: Record<string, unknown>): StoreRecord {
   const { run_json: raw, ...columns } = row;
+  // biome-ignore lint/performance/noDelete: removes the own-property key entirely; assigning undefined would leave an enumerable undefined-valued key and change JSON serialization, the 'in' operator, and Object.keys semantics
   delete columns.total;
   return {
     ...documentOf(raw),
@@ -81,6 +80,7 @@ function runDocument(row: Record<string, unknown>): StoreRecord {
 
 function eventDocument(row: Record<string, unknown>): StoreRecord {
   const { event_json: raw, ...columns } = row;
+  // biome-ignore lint/performance/noDelete: removes the own-property key entirely; assigning undefined would leave an enumerable undefined-valued key and change JSON serialization, the 'in' operator, and Object.keys semantics
   delete columns.total;
   return {
     ...documentOf(raw),
@@ -140,18 +140,8 @@ function listAgentRunsHandler(): Handler {
 
     const page =
       scope.kind === "tenant"
-        ? await tenantAgentRunPage(
-            deps.tenantDatabases,
-            scope.tenantId,
-            query.limit,
-            query.offset,
-          )
-        : await agentRunPage(
-            deps.controlDatabase as D1Database,
-            scope,
-            query.limit,
-            query.offset,
-          );
+        ? await tenantAgentRunPage(deps.tenantDatabases, scope.tenantId, query.limit, query.offset)
+        : await agentRunPage(deps.controlDatabase as D1Database, scope, query.limit, query.offset);
     const body =
       scope.kind === "platform_operator"
         ? adminListPaginatedWithMetadata(
@@ -228,21 +218,20 @@ function agentRunTimelineHandler(): Handler {
       )
       .bind(...eventParams, query.limit, query.offset)
       .all<Record<string, unknown> & { total?: number }>();
-    const body =
-      projectionBacked
-        ? adminListPaginatedWithMetadata(
-            events.results.map(eventDocument),
-            events.results[0]?.total ?? 0,
-            query.offset,
-            query.limit,
-            derivedControlProjectionMetadata(),
-          )
-        : adminListPaginated(
-            events.results.map(eventDocument),
-            events.results[0]?.total ?? 0,
-            query.offset,
-            query.limit,
-          );
+    const body = projectionBacked
+      ? adminListPaginatedWithMetadata(
+          events.results.map(eventDocument),
+          events.results[0]?.total ?? 0,
+          query.offset,
+          query.limit,
+          derivedControlProjectionMetadata(),
+        )
+      : adminListPaginated(
+          events.results.map(eventDocument),
+          events.results[0]?.total ?? 0,
+          query.offset,
+          query.limit,
+        );
     return json(c, 200, body);
   };
 }

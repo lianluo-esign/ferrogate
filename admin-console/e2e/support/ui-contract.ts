@@ -1,11 +1,5 @@
 import AxeBuilder from "@axe-core/playwright";
-import {
-  expect,
-  test as base,
-  type Locator,
-  type Page,
-  type TestInfo,
-} from "@playwright/test";
+import { type Locator, type Page, type TestInfo, test as base, expect } from "@playwright/test";
 
 type AxeImpact = "minor" | "moderate" | "serious" | "critical";
 interface UiContractOptions {
@@ -26,7 +20,9 @@ function browserContext(page: Page, testInfo: TestInfo): string {
 function normalizePatterns(value: unknown): RegExp[] {
   if (value instanceof RegExp) return [value];
   if (Array.isArray(value)) {
-    return value.flat(Infinity).filter((entry): entry is RegExp => entry instanceof RegExp);
+    return value
+      .flat(Number.POSITIVE_INFINITY)
+      .filter((entry): entry is RegExp => entry instanceof RegExp);
   }
   return [];
 }
@@ -70,10 +66,7 @@ export const test = base.extend<UiContractOptions>({
 
 export { expect };
 
-export async function expectNoDocumentOverflow(
-  page: Page,
-  testInfo: TestInfo,
-): Promise<void> {
+export async function expectNoDocumentOverflow(page: Page, testInfo: TestInfo): Promise<void> {
   const dimensions = await page.evaluate(() => ({
     bodyClientWidth: document.body.clientWidth,
     bodyScrollWidth: document.body.scrollWidth,
@@ -100,7 +93,7 @@ async function settleTransientAnimations(page: Page): Promise<void> {
   await page.evaluate(async () => {
     const finite = document.getAnimations().filter((animation) => {
       const timing = animation.effect?.getTiming();
-      return Boolean(timing) && timing?.iterations !== Infinity;
+      return Boolean(timing) && timing?.iterations !== Number.POSITIVE_INFINITY;
     });
     await Promise.race([
       Promise.all(finite.map((animation) => animation.finished.catch(() => undefined))),
@@ -145,10 +138,7 @@ export async function expectNoAxeViolations(
     )
     .join("\n");
 
-  expect(
-    violations,
-    `axe violations (${browserContext(page, testInfo)})\n${details}`,
-  ).toEqual([]);
+  expect(violations, `axe violations (${browserContext(page, testInfo)})\n${details}`).toEqual([]);
 }
 
 export async function expectKeyboardFocus(

@@ -28,17 +28,16 @@
  * with no pointer of its own must get the loud refusal even while another
  * tenant's pointer exists under the same name.
  */
-import { promptLabelPointerKey } from "@ferrogate/config";
+
 import { SELF, env } from "cloudflare:test";
+import { promptLabelPointerKey } from "@ferrogate/config";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { resetSharedApiKeyCache } from "../../src/keys/index.js";
 import { resetApiKeysTable, seedApiKey, testSecret } from "../keys/seed.js";
 
 const BASE = "https://ferrogate.test";
 
-const PROVIDERS = [
-  { name: "primary", kind: "openai", base_url: "https://api.primary.example/v1" },
-];
+const PROVIDERS = [{ name: "primary", kind: "openai", base_url: "https://api.primary.example/v1" }];
 
 const MODELS = [{ name: "prompt-model", provider: "primary", provider_model: "physical-1" }];
 
@@ -316,13 +315,20 @@ function interceptUpstream(): { last: () => Record<string, unknown>; restore: ()
         id: "chatcmpl-1",
         object: "chat.completion",
         model: "physical-1",
-        choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+        choices: [
+          { index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" },
+        ],
         usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
       }),
       { status: 200, headers: { "content-type": "application/json" } },
     );
   }) as typeof globalThis.fetch;
-  return { last: () => body, restore: () => { globalThis.fetch = original; } };
+  return {
+    last: () => body,
+    restore: () => {
+      globalThis.fetch = original;
+    },
+  };
 }
 
 function chat(secret: string, body: unknown): Promise<Response> {
@@ -346,8 +352,8 @@ describe("EDGE: an inference request references a prompt BY LABEL", () => {
       const sent = upstream.last();
       // The PHYSICAL model name, i.e. the request really went through the whole
       // inference path after expansion — not just through a renderer.
-      expect(sent["model"]).toBe("physical-1");
-      expect(sent["messages"]).toEqual([{ role: "system", content: "revision one, Ada" }]);
+      expect(sent.model).toBe("physical-1");
+      expect(sent.messages).toEqual([{ role: "system", content: "revision one, Ada" }]);
     } finally {
       upstream.restore();
     }
@@ -402,7 +408,7 @@ describe("EDGE: an inference request references a prompt BY LABEL", () => {
         temperature: 0.9,
       });
       expect(res.status).toBe(200);
-      expect(upstream.last()["temperature"]).toBe(0.9);
+      expect(upstream.last().temperature).toBe(0.9);
     } finally {
       upstream.restore();
     }

@@ -34,26 +34,23 @@ async function tableExists(db: D1Database, table: string): Promise<boolean> {
   return row !== null;
 }
 
-async function sourceTable(
-  db: D1Database,
-  legacy: string,
-  active: string,
-): Promise<string | null> {
+async function sourceTable(db: D1Database, legacy: string, active: string): Promise<string | null> {
   if (await tableExists(db, legacy)) return legacy;
   if (await tableExists(db, active)) return active;
   return null;
 }
 
 async function sources(db: D1Database): Promise<BackfillSources> {
-  const [provider, sso, bindings, cache, revocations, replayFloors, budgetAlerts] = await Promise.all([
-    sourceTable(db, "tenant_provider_credentials_legacy", "tenant_provider_credentials"),
-    sourceTable(db, "sso_provider_configs_legacy", "sso_provider_configs"),
-    sourceTable(db, "tenant_role_bindings_legacy", "tenant_role_bindings"),
-    sourceTable(db, "semantic_cache_policies_legacy", "semantic_cache_policies"),
-    sourceTable(db, "delegation_revocations_legacy", "delegation_revocations"),
-    sourceTable(db, "control_plane_replay_floors_legacy", "control_plane_replay_floors"),
-    sourceTable(db, "budget_alert_notifications_legacy", "budget_alert_notifications"),
-  ]);
+  const [provider, sso, bindings, cache, revocations, replayFloors, budgetAlerts] =
+    await Promise.all([
+      sourceTable(db, "tenant_provider_credentials_legacy", "tenant_provider_credentials"),
+      sourceTable(db, "sso_provider_configs_legacy", "sso_provider_configs"),
+      sourceTable(db, "tenant_role_bindings_legacy", "tenant_role_bindings"),
+      sourceTable(db, "semantic_cache_policies_legacy", "semantic_cache_policies"),
+      sourceTable(db, "delegation_revocations_legacy", "delegation_revocations"),
+      sourceTable(db, "control_plane_replay_floors_legacy", "control_plane_replay_floors"),
+      sourceTable(db, "budget_alert_notifications_legacy", "budget_alert_notifications"),
+    ]);
   return { provider, sso, bindings, cache, revocations, replayFloors, budgetAlerts };
 }
 
@@ -162,7 +159,11 @@ function jsonObject(row: Row, key: string, context: string): string {
   return value;
 }
 
-function add(statements: TenantDataStatement[], sql: string, params: readonly TenantDataValue[]): void {
+function add(
+  statements: TenantDataStatement[],
+  sql: string,
+  params: readonly TenantDataValue[],
+): void {
   statements.push({ sql, params });
 }
 
@@ -233,7 +234,11 @@ export async function backfillTenantConfigurationPolicy(
   }
 
   if (source.sso !== null) {
-    for (const row of await all(controlDb, `SELECT * FROM ${source.sso} WHERE tenant_id = ?`, tenantId)) {
+    for (const row of await all(
+      controlDb,
+      `SELECT * FROM ${source.sso} WHERE tenant_id = ?`,
+      tenantId,
+    )) {
       add(
         statements,
         "INSERT OR IGNORE INTO sso_provider_configs " +
@@ -311,7 +316,12 @@ export async function backfillTenantConfigurationPolicy(
   }
 
   if (source.cache !== null) {
-    for (const row of await all(controlDb, `SELECT * FROM ${source.cache} WHERE scope_id = ? OR scope_id LIKE ?`, tenantId, `${tenantId}:%`)) {
+    for (const row of await all(
+      controlDb,
+      `SELECT * FROM ${source.cache} WHERE scope_id = ? OR scope_id LIKE ?`,
+      tenantId,
+      `${tenantId}:%`,
+    )) {
       add(
         statements,
         "INSERT OR IGNORE INTO semantic_cache_policies " +
@@ -335,7 +345,11 @@ export async function backfillTenantConfigurationPolicy(
   }
 
   if (source.revocations !== null) {
-    for (const row of await all(controlDb, `SELECT * FROM ${source.revocations} WHERE tenant = ?`, tenantId)) {
+    for (const row of await all(
+      controlDb,
+      `SELECT * FROM ${source.revocations} WHERE tenant = ?`,
+      tenantId,
+    )) {
       add(
         statements,
         "INSERT OR IGNORE INTO delegation_revocations " +
@@ -353,7 +367,11 @@ export async function backfillTenantConfigurationPolicy(
   }
 
   if (source.replayFloors !== null) {
-    for (const row of await all(controlDb, `SELECT * FROM ${source.replayFloors} WHERE tenant_id = ?`, tenantId)) {
+    for (const row of await all(
+      controlDb,
+      `SELECT * FROM ${source.replayFloors} WHERE tenant_id = ?`,
+      tenantId,
+    )) {
       add(
         statements,
         "INSERT OR IGNORE INTO control_plane_replay_floors " +
@@ -369,7 +387,12 @@ export async function backfillTenantConfigurationPolicy(
   }
 
   if (source.budgetAlerts !== null) {
-    for (const row of await all(controlDb, `SELECT * FROM ${source.budgetAlerts} WHERE scope_id = ? OR scope_id LIKE ?`, tenantId, `${tenantId}:%`)) {
+    for (const row of await all(
+      controlDb,
+      `SELECT * FROM ${source.budgetAlerts} WHERE scope_id = ? OR scope_id LIKE ?`,
+      tenantId,
+      `${tenantId}:%`,
+    )) {
       add(
         statements,
         "INSERT OR IGNORE INTO budget_alert_notifications " +

@@ -66,7 +66,16 @@ describe("normalizePromptLabel", () => {
   test("THROWS rather than returning null for an illegal name", () => {
     // The throw is the point: a normalizer that answered `null` would let an
     // illegal name flow onward as an empty string and match a key nobody wrote.
-    for (const bad of ["", "   ", "-leading", ".dot", "has space", "sla/sh", "co:lon", "a".repeat(65)]) {
+    for (const bad of [
+      "",
+      "   ",
+      "-leading",
+      ".dot",
+      "has space",
+      "sla/sh",
+      "co:lon",
+      "a".repeat(65),
+    ]) {
       expect(() => normalizePromptLabel(bad)).toThrow(PromptLabelError);
     }
   });
@@ -89,9 +98,9 @@ describe("promptLabelPointerKey — the scope is part of the KEY", () => {
     // Including the literal id `operator`, which is the obvious collision to
     // try: it escapes to the same text but sits behind the `tenant` segment.
     for (const tenantId of ["operator", "", "/operator", "..", "%2Foperator"]) {
-      expect(
-        promptLabelPointerKey({ tenantId, templateId: "tpl", label: "production" }),
-      ).not.toBe(operator);
+      expect(promptLabelPointerKey({ tenantId, templateId: "tpl", label: "production" })).not.toBe(
+        operator,
+      );
     }
   });
 
@@ -184,7 +193,11 @@ describe("readPromptLabelPointer — every failure is LOUD", () => {
     // Unreachable while the key derivation is the only writer — which is why it
     // is checked. If a future key-format change ever collided two scopes, this
     // is the assertion that turns a cross-tenant prompt swap into a failure.
-    for (const wrong of [{ tenant_id: "other" }, { template_id: "elsewhere" }, { label: "staging" }]) {
+    for (const wrong of [
+      { tenant_id: "other" },
+      { template_id: "elsewhere" },
+      { label: "staging" },
+    ]) {
       const kv = fakeKv({ [promptLabelPointerKey(ref)]: pointer(wrong) });
       await expect(readPromptLabelPointer(kv, ref)).rejects.toMatchObject({
         reason: "scope_mismatch",

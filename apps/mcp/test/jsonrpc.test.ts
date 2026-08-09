@@ -9,14 +9,14 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  JSONRPC_VERSION,
+  JsonRpcErrorCode,
   callToolParams,
   decodeMcpRequest,
   decodeMcpRequestValue,
   decodeStrictRequest,
   ensureNoJsonRpcError,
   isNotification,
-  JSONRPC_VERSION,
-  JsonRpcErrorCode,
   jsonRpcError,
   jsonRpcResult,
   mcpErrorCode,
@@ -118,7 +118,7 @@ describe("JSON-RPC response encoding", () => {
 
   it("omits `data` when absent", () => {
     const rendered = renderJsonRpcResponse(jsonRpcError(1, -32601, "nope"));
-    expect(rendered["error"]).toEqual({ code: -32601, message: "nope" });
+    expect(rendered.error).toEqual({ code: -32601, message: "nope" });
   });
 });
 

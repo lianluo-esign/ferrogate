@@ -26,7 +26,7 @@
  * check still "works". 32 bytes is the SHA-256 block-security level and the
  * length `crypto.randomUUID()`-style generators already produce.
  */
-import { bytesToBase64Url, base64UrlToBytes } from "../oidc/base64url.js";
+import { base64UrlToBytes, bytesToBase64Url } from "../oidc/base64url.js";
 import {
   DELEGATION_CLOCK_SKEW_SECONDS,
   DELEGATION_FORMAT_VERSION,
@@ -64,10 +64,7 @@ export async function importDelegationKey(secret: string): Promise<DelegationKey
   if (bytes.byteLength < MIN_DELEGATION_KEY_BYTES) {
     return {
       ok: false,
-      detail:
-        `DELEGATION_SIGNING_KEY is ${bytes.byteLength} bytes; at least ` +
-        `${MIN_DELEGATION_KEY_BYTES} are required, because a shorter shared secret is ` +
-        "recoverable offline from one captured link and every forgery after that verifies",
+      detail: `DELEGATION_SIGNING_KEY is ${bytes.byteLength} bytes; at least ${MIN_DELEGATION_KEY_BYTES} are required, because a shorter shared secret is recoverable offline from one captured link and every forgery after that verifies`,
     };
   }
   try {

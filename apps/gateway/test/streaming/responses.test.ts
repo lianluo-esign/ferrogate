@@ -76,10 +76,10 @@ describe("Responses normalizer — OpenAI-compatible upstream", () => {
       delta: string;
     }[];
     expect(deltas).toHaveLength(2);
-    expect(deltas[0]!.name).toBe("lookup");
-    expect(deltas[0]!.call_id).toBe("call_1");
-    expect(deltas[0]!.delta).toBe('{"query":"');
-    expect(deltas[1]!.delta).toBe('ferrogate"}');
+    expect((deltas[0] as NonNullable<(typeof deltas)[0]>).name).toBe("lookup");
+    expect((deltas[0] as NonNullable<(typeof deltas)[0]>).call_id).toBe("call_1");
+    expect((deltas[0] as NonNullable<(typeof deltas)[0]>).delta).toBe('{"query":"');
+    expect((deltas[1] as NonNullable<(typeof deltas)[1]>).delta).toBe('ferrogate"}');
 
     const done = jsonEvents(sse, "response.function_call_arguments.done") as {
       name: string;
@@ -87,8 +87,8 @@ describe("Responses normalizer — OpenAI-compatible upstream", () => {
       arguments: string;
     }[];
     expect(done).toHaveLength(1);
-    expect(done[0]!.arguments).toBe('{"query":"ferrogate"}');
-    expect(done[0]!.call_id).toBe("call_1");
+    expect((done[0] as NonNullable<(typeof done)[0]>).arguments).toBe('{"query":"ferrogate"}');
+    expect((done[0] as NonNullable<(typeof done)[0]>).call_id).toBe("call_1");
   });
 
   test("the deprecated function_call shape is accumulated too", async () => {
@@ -101,17 +101,15 @@ describe("Responses normalizer — OpenAI-compatible upstream", () => {
       arguments: string;
       name: string;
     }[];
-    expect(done[0]!.arguments).toBe('{"a":1}');
-    expect(done[0]!.name).toBe("legacy");
+    expect((done[0] as NonNullable<(typeof done)[0]>).arguments).toBe('{"a":1}');
+    expect((done[0] as NonNullable<(typeof done)[0]>).name).toBe("legacy");
   });
 
   test("output_text and delta.text are accepted as text carriers", async () => {
-    expect(await normalize('data: {"output_text":"whole"}\n\n')).toContain(
-      '"delta":"whole"',
+    expect(await normalize('data: {"output_text":"whole"}\n\n')).toContain('"delta":"whole"');
+    expect(await normalize('data: {"choices":[{"delta":{"text":"alt"}}]}\n\n')).toContain(
+      '"delta":"alt"',
     );
-    expect(
-      await normalize('data: {"choices":[{"delta":{"text":"alt"}}]}\n\n'),
-    ).toContain('"delta":"alt"');
   });
 
   test("no output_text.done is emitted when no text ever flowed", async () => {
@@ -124,7 +122,7 @@ describe("Responses normalizer — Anthropic upstream", () => {
   test("content_block_delta becomes an output_text delta and message_stop ends it", async () => {
     const sse = await normalize(
       'event: content_block_delta\ndata: {"delta":{"text":"ok"}}\n\n' +
-        'event: message_stop\ndata: {}\n\n',
+        "event: message_stop\ndata: {}\n\n",
       "anthropic",
     );
     expect(sse).toContain("event: response.output_text.delta");
@@ -147,7 +145,7 @@ describe("Responses normalizer — Anthropic upstream", () => {
       delta: string;
     }[];
     expect(calls).toHaveLength(1);
-    expect(calls[0]!.delta).toBe("ok");
+    expect((calls[0] as NonNullable<(typeof calls)[0]>).delta).toBe("ok");
   });
 
   test("message_start input tokens and message_delta output tokens are reported", async () => {
@@ -213,9 +211,7 @@ describe("Responses normalizer — failures and terminators", () => {
     expect(isDoneEvent(undefined, { type: "response.completed" })).toBe(true);
     // Key PRESENCE ends the stream, even when the value is null.
     expect(isDoneEvent(undefined, { finish_reason: null })).toBe(true);
-    expect(isDoneEvent(undefined, { choices: [{ finish_reason: "stop" }] })).toBe(
-      false,
-    );
+    expect(isDoneEvent(undefined, { choices: [{ finish_reason: "stop" }] })).toBe(false);
     expect(isDoneEvent("content_block_delta", { delta: {} })).toBe(false);
   });
 
@@ -296,7 +292,7 @@ describe("Responses normalizer — chunking robustness", () => {
     const deltas = jsonEvents(sse, "response.output_text.delta") as {
       delta: string;
     }[];
-    expect(deltas[0]!.delta).toBe("héllo \u{1F680}");
+    expect((deltas[0] as NonNullable<(typeof deltas)[0]>).delta).toBe("héllo \u{1F680}");
     expect(sse).not.toContain("�");
   });
 });

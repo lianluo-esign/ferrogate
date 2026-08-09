@@ -8,8 +8,9 @@
  * schedule is deterministic (no jitter): the schedule is *asserted*, not merely
  * observed to have happened.
  */
-import type { Clock } from "../src/retry.js";
+
 import type { HttpRequest, HttpResponse, HttpTransport } from "../src/client.js";
+import type { Clock } from "../src/retry.js";
 
 /** A scripted response, or a thrown transport failure. */
 export type ScriptEntry = HttpResponse | { readonly throws: unknown };

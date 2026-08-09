@@ -28,10 +28,7 @@ import {
   type RbacDatabase,
   depsFromEnv,
 } from "../src/adapters.js";
-import {
-  CONTROL_STORAGE_MISCONFIGURED,
-  controlDatabaseFrom,
-} from "../src/control-data.js";
+import { CONTROL_STORAGE_MISCONFIGURED, controlDatabaseFrom } from "../src/control-data.js";
 import type { AuthContext, RbacDecision } from "../src/ports.js";
 import {
   seedTenantRosterRows,

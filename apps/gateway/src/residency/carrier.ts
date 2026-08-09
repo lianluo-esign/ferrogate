@@ -14,8 +14,8 @@
  * and the `Request` object is per-request by construction.
  */
 
-import type { ResidencyPolicy } from "./policy.js";
 import type { TenantObjectAddress } from "@ferrogate/storage";
+import type { ResidencyPolicy } from "./policy.js";
 
 const POLICIES = new WeakMap<Request, ResidencyPolicy>();
 const ADDRESSES = new WeakMap<Request, TenantObjectAddress>();

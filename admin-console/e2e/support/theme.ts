@@ -1,4 +1,4 @@
-import { expect, type Page } from "@playwright/test";
+import { type Page, expect } from "@playwright/test";
 
 export const THEME_STORAGE_KEY = "ferrogate-admin-theme-v1";
 

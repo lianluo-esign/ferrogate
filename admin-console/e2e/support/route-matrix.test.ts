@@ -1,3 +1,5 @@
+import { APP_ROUTES } from "@/lib/app-routes";
+import { RESOURCE_ROUTE_PATHS } from "@/resources/route-paths";
 // The route sweep's coverage claim, checked WITHOUT a browser.
 //
 // `i18n-route-sweep.spec.ts` asserts the #348 box "every registered route is
@@ -8,14 +10,12 @@
 // from, so an unswept route fails `npx vitest run` on the machine that added it,
 // long before the chromium pass runs.
 import { describe, expect, it } from "vitest";
-import { APP_ROUTES } from "@/lib/app-routes";
-import { RESOURCE_ROUTE_PATHS } from "@/resources/route-paths";
 import {
   PROTECTED_ROUTES,
   PUBLIC_ROUTE_PATHS,
   REGISTERED_ROUTES,
-  resolveRoutePath,
   ROUTE_PARAM_SAMPLES,
+  resolveRoutePath,
 } from "./route-matrix";
 
 describe("i18n route-sweep inventory", () => {
@@ -31,9 +31,7 @@ describe("i18n route-sweep inventory", () => {
   it("visits a concrete path for every route — no unsubstituted parameter", () => {
     for (const route of REGISTERED_ROUTES) {
       expect(route.path, `${route.key} still contains a :param`).not.toMatch(/\/:/);
-      expect(route.path.startsWith("/"), `${route.key} is not an absolute path`).toBe(
-        true,
-      );
+      expect(route.path.startsWith("/"), `${route.key} is not an absolute path`).toBe(true);
     }
   });
 
@@ -54,9 +52,7 @@ describe("i18n route-sweep inventory", () => {
   });
 
   it("classifies exactly the auth routes as public and everything else as shell-bearing", () => {
-    const publicPaths = REGISTERED_ROUTES.filter((r) => r.kind === "public").map(
-      (r) => r.path,
-    );
+    const publicPaths = REGISTERED_ROUTES.filter((r) => r.kind === "public").map((r) => r.path);
     expect(publicPaths).toEqual([...PUBLIC_ROUTE_PATHS]);
     expect(PROTECTED_ROUTES).toHaveLength(
       Object.keys(APP_ROUTES).length + Object.keys(RESOURCE_ROUTE_PATHS).length,

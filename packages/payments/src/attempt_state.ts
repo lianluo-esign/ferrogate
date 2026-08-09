@@ -49,9 +49,7 @@ export function parsePaymentAttemptState(value: string): PaymentAttemptState | u
 
 /** True for the four states no transition may leave. */
 export function isTerminal(state: PaymentAttemptState): boolean {
-  return (
-    state === "settled" || state === "denied" || state === "released" || state === "failed"
-  );
+  return state === "settled" || state === "denied" || state === "released" || state === "failed";
 }
 
 /**

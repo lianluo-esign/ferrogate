@@ -38,7 +38,7 @@ describe("streamed /v1/messages usage carries the cache split", () => {
     // `input_tokens` excludes them. Emitting 9012 alongside a 9000 cache read
     // would make an Anthropic-native client bill ~18000 input tokens for a
     // 9012-token prompt.
-    expect(delta!.usage).toEqual({
+    expect((delta as NonNullable<typeof delta>).usage).toEqual({
       input_tokens: 12,
       output_tokens: 3,
       cache_read_input_tokens: 9_000,
@@ -58,6 +58,9 @@ describe("streamed /v1/messages usage carries the cache split", () => {
     // An absent counter stays ABSENT rather than becoming a zero — the same
     // rule #667 applies on the metering side, and what keeps a pre-cache-era
     // provider response indistinguishable from what it was before.
-    expect(delta!.usage).toEqual({ input_tokens: 5, output_tokens: 2 });
+    expect((delta as NonNullable<typeof delta>).usage).toEqual({
+      input_tokens: 5,
+      output_tokens: 2,
+    });
   });
 });

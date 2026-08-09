@@ -18,6 +18,7 @@ import {
   type TenantDatabaseRouter,
   type TenantObjectAddress,
 } from "@ferrogate/storage";
+import { controlDatabaseFrom } from "../control-data.js";
 import { HttpError } from "../middleware/errors.js";
 import {
   TENANT_DATABASE_ROUTING_DISABLED,
@@ -29,7 +30,6 @@ import {
   type TenantDatabaseRoutingMode,
 } from "./ports.js";
 import { tenantDataNamespace } from "./tenant-data.js";
-import { controlDatabaseFrom } from "../control-data.js";
 
 /**
  * Parse `GATEWAY_TENANT_DB_ROUTING`.
@@ -126,10 +126,7 @@ class RoutedTenantDatabaseResolver implements TenantDatabaseResolver {
     return this.router.control();
   }
 
-  async forTenant(
-    tenantId: string,
-    address?: TenantObjectAddress,
-  ): Promise<TenantDatabaseHandle> {
+  async forTenant(tenantId: string, address?: TenantObjectAddress): Promise<TenantDatabaseHandle> {
     try {
       return await this.router.forTenant(tenantId, address);
     } catch (error) {

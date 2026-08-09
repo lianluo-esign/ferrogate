@@ -42,18 +42,18 @@
  *     operator had just performed.
  */
 import { env } from "cloudflare:test";
-import { beforeEach, describe, expect, it } from "vitest";
 import type { TenantDataNamespace } from "@ferrogate/storage/durable-objects";
-import { SemanticResponseCache } from "../../src/cache/semantic.js";
+import { beforeEach, describe, expect, it } from "vitest";
 import { cacheGovernanceSourceFromEnv } from "../../src/cache/governance.js";
+import { SemanticResponseCache } from "../../src/cache/semantic.js";
 import { MemoryResponseCacheStore } from "../../src/cache/store.js";
 import { InMemoryModelResolver, inferenceRouteModule } from "../../src/inference/index.js";
 import { CACHE_STATUS_HEADER, responseCache } from "../../src/middleware/response-cache.js";
 import { createGatewayApp } from "../../src/routes/index.js";
 import { ALL_ROUTES, fixedRequestIds } from "../inference/fixtures.js";
 import { interceptProviderFetch, providerJson } from "../inference/provider-mock.js";
-import { resetTenantObjectState, tenantObjectDb } from "../tenant-object.js";
 import { controlNamespace } from "../support/control-namespace.js";
+import { resetTenantObjectState, tenantObjectDb } from "../tenant-object.js";
 
 const BASE = "https://gw.test";
 const CHAT = `${BASE}/v1/chat/completions`;
@@ -168,17 +168,18 @@ async function setPolicy(
     invalidationEpoch?: number;
   },
 ): Promise<void> {
-  await tenantObjectDb(scopeId).prepare(
-    "INSERT INTO semantic_cache_policies " +
-      "(scope_type, scope_id, enabled, mode, similarity_threshold, ttl_seconds, scoped_models, " +
-      " invalidation_epoch, updated_at_unix, updated_by, generation) " +
-      "VALUES ('tenant', ?1, ?2, ?3, ?4, ?5, ?6, ?7, 1000, 'test', 1) " +
-      "ON CONFLICT (scope_type, scope_id) DO UPDATE SET " +
-      "enabled = excluded.enabled, mode = excluded.mode, " +
-      "similarity_threshold = excluded.similarity_threshold, ttl_seconds = excluded.ttl_seconds, " +
-      "scoped_models = excluded.scoped_models, invalidation_epoch = excluded.invalidation_epoch, " +
-      "generation = semantic_cache_policies.generation + 1",
-  )
+  await tenantObjectDb(scopeId)
+    .prepare(
+      "INSERT INTO semantic_cache_policies " +
+        "(scope_type, scope_id, enabled, mode, similarity_threshold, ttl_seconds, scoped_models, " +
+        " invalidation_epoch, updated_at_unix, updated_by, generation) " +
+        "VALUES ('tenant', ?1, ?2, ?3, ?4, ?5, ?6, ?7, 1000, 'test', 1) " +
+        "ON CONFLICT (scope_type, scope_id) DO UPDATE SET " +
+        "enabled = excluded.enabled, mode = excluded.mode, " +
+        "similarity_threshold = excluded.similarity_threshold, ttl_seconds = excluded.ttl_seconds, " +
+        "scoped_models = excluded.scoped_models, invalidation_epoch = excluded.invalidation_epoch, " +
+        "generation = semantic_cache_policies.generation + 1",
+    )
     .bind(
       scopeId,
       row.enabled ?? null,

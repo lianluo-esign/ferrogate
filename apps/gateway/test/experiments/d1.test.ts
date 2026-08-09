@@ -1,11 +1,11 @@
 import { env } from "cloudflare:test";
-import { controlNamespace } from "../support/control-namespace.js";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
   D1ExperimentObserver,
-  sweepExperimentProjections,
   type ShadowLegRecord,
+  sweepExperimentProjections,
 } from "../../src/experiments/index.js";
+import { controlNamespace } from "../support/control-namespace.js";
 import { tenantObjectDb } from "../tenant-object.js";
 import { controlDb, resetExperimentTables, storedShadowLegs } from "./harness.js";
 

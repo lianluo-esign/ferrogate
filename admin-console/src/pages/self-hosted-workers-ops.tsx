@@ -1,20 +1,6 @@
-// Self-hosted worker registry + lifecycle (issue #320). The existing
-// read-only records page (src/resources/self-hosted-workers.ts) only lists;
-// this richer page adds the CRUD lifecycle the console lacked: register a new
-// worker identity (the mTLS identity fingerprint #249 is shown ONCE on
-// success like a virtual key), then drill into a worker for its telemetry
-// events / heartbeat / checkpoint / artifact evidence.
-//
-// Registry rows are read from /admin/v1/self-hosted-worker-records (the same
-// storage-backed projection the read-only page uses) — registration POSTs to
-// /admin/v1/self-hosted-workers. Both surface customer-reported evidence
-// (trust_level: reported_by_self_hosted_worker), never managed-worker proof.
-import { useMemo, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link } from "react-router-dom";
+import { TruncatedCopyable, formatUnix } from "@/components/agent-ops/agent-ops-primitives";
 import { EntityReferencePicker } from "@/components/resource/entity-reference-picker";
 import { ResourceTable } from "@/components/resource/resource-table";
-import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -28,17 +14,31 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
-import { formatUnix, TruncatedCopyable } from "@/components/agent-ops/agent-ops-primitives";
 import {
   CredentialRevealDialog,
   ReportedTrustBadge,
   workerStatusVariant,
 } from "@/components/worker-ops/worker-ops-primitives";
 import { useAuth } from "@/hooks/use-auth";
-import { useI18n } from "@/i18n";
 import { useOperatorError } from "@/hooks/use-operator-error";
-import { adminGet, adminPost, type AdminSchema } from "@/lib/gateway-client";
+import { useI18n } from "@/i18n";
+import { type AdminSchema, adminGet, adminPost } from "@/lib/gateway-client";
 import type { ColumnConfig } from "@/lib/resource-config";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+// Self-hosted worker registry + lifecycle (issue #320). The existing
+// read-only records page (src/resources/self-hosted-workers.ts) only lists;
+// this richer page adds the CRUD lifecycle the console lacked: register a new
+// worker identity (the mTLS identity fingerprint #249 is shown ONCE on
+// success like a virtual key), then drill into a worker for its telemetry
+// events / heartbeat / checkpoint / artifact evidence.
+//
+// Registry rows are read from /admin/v1/self-hosted-worker-records (the same
+// storage-backed projection the read-only page uses) — registration POSTs to
+// /admin/v1/self-hosted-workers. Both surface customer-reported evidence
+// (trust_level: reported_by_self_hosted_worker), never managed-worker proof.
+import { useMemo, useState } from "react";
+import { Link } from "react-router-dom";
+import { toast } from "sonner";
 
 type SelfHostedWorkerRecord = AdminSchema<"AdminSelfHostedWorkerRecord">;
 
@@ -85,16 +85,14 @@ export default function SelfHostedWorkersOpsPage() {
   const { t } = useI18n();
   const { toastError } = useOperatorError();
   const { session } = useAuth();
-  const apiKey = session!.gatewayApiKey;
+  const apiKey = (session as NonNullable<typeof session>).gatewayApiKey;
   const queryClient = useQueryClient();
   const queryKey = ["self-hosted-worker-records"];
 
   const [registerOpen, setRegisterOpen] = useState(false);
   const [form, setForm] = useState<RegisterForm>(EMPTY_FORM);
   const [formError, setFormError] = useState<string | null>(null);
-  const [revealed, setRevealed] = useState<{ name: string; fingerprint: string } | null>(
-    null,
-  );
+  const [revealed, setRevealed] = useState<{ name: string; fingerprint: string } | null>(null);
 
   const { data, isLoading, error } = useQuery({
     queryKey,
@@ -226,9 +224,7 @@ export default function SelfHostedWorkersOpsPage() {
     <div className="flex flex-col gap-4">
       <div className="flex items-start justify-between gap-4">
         <div>
-          <h1 className="text-lg font-semibold">
-            {t("page.selfHostedWorkersOps.title")}
-          </h1>
+          <h1 className="text-lg font-semibold">{t("page.selfHostedWorkersOps.title")}</h1>
           <div className="text-sm text-muted-foreground">
             {t("page.selfHostedWorkersOps.subtitle.before")}
             <ReportedTrustBadge />
@@ -241,7 +237,10 @@ export default function SelfHostedWorkersOpsPage() {
       </div>
 
       {error ? (
-        <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <p
+          role="alert"
+          className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+        >
           {t("page.selfHostedWorkersOps.error", { message: error.message })}
         </p>
       ) : null}
@@ -281,9 +280,7 @@ export default function SelfHostedWorkersOpsPage() {
           </DialogHeader>
           <div className="grid gap-3">
             <div className="grid gap-1.5">
-              <Label htmlFor="worker-name">
-                {t("page.selfHostedWorkersOps.field.workerName")}
-              </Label>
+              <Label htmlFor="worker-name">{t("page.selfHostedWorkersOps.field.workerName")}</Label>
               <Input
                 id="worker-name"
                 value={form.workerName}
@@ -329,12 +326,8 @@ export default function SelfHostedWorkersOpsPage() {
               <Input
                 id="identity-fingerprint"
                 value={form.identityFingerprint}
-                onChange={(e) =>
-                  setForm({ ...form, identityFingerprint: e.target.value })
-                }
-                placeholder={t(
-                  "page.selfHostedWorkersOps.placeholder.identityFingerprint",
-                )}
+                onChange={(e) => setForm({ ...form, identityFingerprint: e.target.value })}
+                placeholder={t("page.selfHostedWorkersOps.placeholder.identityFingerprint")}
               />
             </div>
             <div className="grid grid-cols-2 gap-3">
@@ -351,18 +344,12 @@ export default function SelfHostedWorkersOpsPage() {
                 <Input
                   id="organization-id"
                   value={form.organizationId}
-                  onChange={(e) =>
-                    setForm({ ...form, organizationId: e.target.value })
-                  }
-                  placeholder={t(
-                    "page.selfHostedWorkersOps.placeholder.organizationId",
-                  )}
+                  onChange={(e) => setForm({ ...form, organizationId: e.target.value })}
+                  placeholder={t("page.selfHostedWorkersOps.placeholder.organizationId")}
                 />
               </div>
               <div className="grid gap-1.5">
-                <Label htmlFor="project-id">
-                  {t("page.selfHostedWorkersOps.field.projectId")}
-                </Label>
+                <Label htmlFor="project-id">{t("page.selfHostedWorkersOps.field.projectId")}</Label>
                 {/* #342: the worker's project scope is entity-backed — pick a
                     known project by name. Optional, so it is an independent picker
                     (no forced dependency). The project `id` is submitted
@@ -395,12 +382,8 @@ export default function SelfHostedWorkersOpsPage() {
               <Input
                 id="identity-expires"
                 value={form.identityExpiresAt}
-                onChange={(e) =>
-                  setForm({ ...form, identityExpiresAt: e.target.value })
-                }
-                placeholder={t(
-                  "page.selfHostedWorkersOps.placeholder.identityExpires",
-                )}
+                onChange={(e) => setForm({ ...form, identityExpiresAt: e.target.value })}
+                placeholder={t("page.selfHostedWorkersOps.placeholder.identityExpires")}
               />
             </div>
             <div className="flex items-center justify-between rounded-md border px-3 py-2">
@@ -410,30 +393,23 @@ export default function SelfHostedWorkersOpsPage() {
               <Switch
                 id="orchestration-enabled"
                 checked={form.orchestrationEnabled}
-                onCheckedChange={(checked) =>
-                  setForm({ ...form, orchestrationEnabled: checked })
-                }
+                onCheckedChange={(checked) => setForm({ ...form, orchestrationEnabled: checked })}
               />
             </div>
             {formError ? (
-              <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+              <p
+                role="alert"
+                className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+              >
                 {formError}
               </p>
             ) : null}
           </div>
           <DialogFooter>
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => setRegisterOpen(false)}
-            >
+            <Button type="button" variant="outline" onClick={() => setRegisterOpen(false)}>
               {t("common.cancel")}
             </Button>
-            <Button
-              type="button"
-              disabled={registerMutation.isPending}
-              onClick={submitRegister}
-            >
+            <Button type="button" disabled={registerMutation.isPending} onClick={submitRegister}>
               {registerMutation.isPending
                 ? t("page.selfHostedWorkersOps.submitting")
                 : t("page.selfHostedWorkersOps.submit")}
@@ -447,8 +423,7 @@ export default function SelfHostedWorkersOpsPage() {
         onClose={() => setRevealed(null)}
         title={t("page.selfHostedWorkersOps.reveal.title")}
         description={t("page.selfHostedWorkersOps.reveal.description", {
-          name:
-            revealed?.name ?? t("page.selfHostedWorkersOps.reveal.fallbackName"),
+          name: revealed?.name ?? t("page.selfHostedWorkersOps.reveal.fallbackName"),
         })}
         credentialLabel={t("page.selfHostedWorkersOps.field.identityFingerprint")}
         credential={revealed?.fingerprint ?? null}

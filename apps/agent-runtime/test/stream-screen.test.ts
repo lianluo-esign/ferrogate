@@ -31,13 +31,13 @@
  */
 import { describe, expect, it } from "vitest";
 
+import { a2aReplyText } from "../src/agents/ingress.js";
 import {
   GUARDRAIL_STREAM_BLOCK_EVENT,
   MAX_STREAM_FRAME_BYTES,
   type StreamBlock,
   screenSseStream,
 } from "../src/agents/stream-screen.js";
-import { a2aReplyText } from "../src/agents/ingress.js";
 import type { GuardrailDecision } from "../src/ports.js";
 
 const encoder = new TextEncoder();

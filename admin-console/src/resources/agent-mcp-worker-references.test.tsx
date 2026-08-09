@@ -1,13 +1,13 @@
-import { HttpResponse, http } from "msw";
-import { screen, waitFor } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
 import { ResourceForm } from "@/components/resource/resource-form";
-import { defaultFieldValues, type FieldConfig } from "@/lib/resource-config";
+import { type FieldConfig, defaultFieldValues } from "@/lib/resource-config";
 import { agentWorkflowsConfig } from "@/resources/agent-workflows";
 import { skillPackagesConfig } from "@/resources/skill-packages";
 import { gatewayUrl, mockAdminList, server } from "@/test/msw";
 import { renderWithProviders, seedSession } from "@/test/test-utils";
+import { screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { http, HttpResponse } from "msw";
+import { describe, expect, it, vi } from "vitest";
 
 // #342: agent/MCP/worker surfaces adopt the shared #337 entity-reference
 // pickers for their relationship fields. These tests prove a converted form
@@ -113,15 +113,11 @@ describe("agent/MCP/worker entity-reference conversions", () => {
 // list endpoint, and flags an unresolved reference.
 
 function installCapabilityCatalogs() {
-  mockAdminList("/admin/v1/plugins", [
-    { id: "plugin-a", kind: "tool_provider", version: "1.0.0" },
-  ]);
+  mockAdminList("/admin/v1/plugins", [{ id: "plugin-a", kind: "tool_provider", version: "1.0.0" }]);
   mockAdminList("/admin/v1/tools", [
     { name: "search", extension_id: "plugin-a", description: null },
   ]);
-  mockAdminList("/admin/v1/mcp-servers", [
-    { name: "weather", transport: "stdio", enabled: true },
-  ]);
+  mockAdminList("/admin/v1/mcp-servers", [{ name: "weather", transport: "stdio", enabled: true }]);
   mockAdminList("/admin/v1/prompt-templates", [
     { id: "pt-1", name: "Welcome", model: "gpt-4o", status: "active" },
   ]);

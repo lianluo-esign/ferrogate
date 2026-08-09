@@ -5,7 +5,22 @@
  * embeddings) APIs, authenticating via SigV4 ({@link ./sigv4}). `extractHost`
  * is shared with the Vertex adapter.
  */
+
+import { applyPromptCacheToBedrockConverse, promptCacheFromBody } from "./caching.js";
 import { utf8 } from "./crypto.js";
+import {
+  embeddingsTextInputs,
+  openaiEmbeddingsResponse,
+  parseEmbeddingsResponseBody,
+} from "./gemini.js";
+import { asStr, asU64, getField, isArray, isObject, ownBody, parseJson } from "./json.js";
+import type { Json, JsonObject } from "./json.js";
+import { sign } from "./sigv4.js";
+import type { AwsCredentials, SigningRequest } from "./sigv4.js";
+import {
+  applyStructuredOutputToBedrockConverse,
+  structuredOutputFromChatBody,
+} from "./structured.js";
 import { AdapterError, BaseProviderAdapter, SecretValue } from "./types.js";
 import type {
   AwsProviderCredentials,
@@ -17,20 +32,6 @@ import type {
   ProviderHttpRequest,
   ProviderUsage,
 } from "./types.js";
-import {
-  embeddingsTextInputs,
-  openaiEmbeddingsResponse,
-  parseEmbeddingsResponseBody,
-} from "./gemini.js";
-import {
-  applyStructuredOutputToBedrockConverse,
-  structuredOutputFromChatBody,
-} from "./structured.js";
-import { applyPromptCacheToBedrockConverse, promptCacheFromBody } from "./caching.js";
-import { sign } from "./sigv4.js";
-import type { AwsCredentials, SigningRequest } from "./sigv4.js";
-import { asStr, asU64, getField, isArray, isObject, ownBody, parseJson } from "./json.js";
-import type { Json, JsonObject } from "./json.js";
 
 export class BedrockAdapter extends BaseProviderAdapter {
   override kind(): string {
@@ -50,9 +51,9 @@ export class BedrockAdapter extends BaseProviderAdapter {
 
     const draft: JsonObject = { messages: openaiMessagesToBedrockMessages(body) };
     const system = systemBlocks(body);
-    if (system !== undefined) draft["system"] = system;
+    if (system !== undefined) draft.system = system;
     const config = inferenceConfig(body);
-    if (config !== undefined) draft["inferenceConfig"] = config;
+    if (config !== undefined) draft.inferenceConfig = config;
     // Converse's shape is rebuilt block by block above, so nothing here aliases
     // the caller today — but the `apply*` helpers below take an owned body by
     // TYPE, and passing through the same boundary as every other family is what
@@ -87,11 +88,19 @@ export class BedrockAdapter extends BaseProviderAdapter {
     const body = ensureObjectBody(request.body);
     const inputs = embeddingsTextInputs(body);
     if (inputs.length !== 1) {
-      throw AdapterError.invalidRequest("bedrock embeddings adapter supports a single string input");
+      throw AdapterError.invalidRequest(
+        "bedrock embeddings adapter supports a single string input",
+      );
     }
 
     const path = `/model/${percentEncodePathSegment(request.providerModel)}/invoke`;
-    return signBedrockRequest(provider, credentials, path, { inputText: inputs[0]! }, false);
+    return signBedrockRequest(
+      provider,
+      credentials,
+      path,
+      { inputText: inputs[0] as NonNullable<(typeof inputs)[0]> },
+      false,
+    );
   }
 
   override translateEmbeddingsResponse(body: Uint8Array, model: string): Json | null {
@@ -104,7 +113,9 @@ export class BedrockAdapter extends BaseProviderAdapter {
     } else if (isArray(embeddings)) {
       vectors = embeddings;
     } else {
-      throw AdapterError.invalidRequest("Bedrock embeddings response is missing an embedding vector");
+      throw AdapterError.invalidRequest(
+        "Bedrock embeddings response is missing an embedding vector",
+      );
     }
     const promptTokens = asU64(getField(value, "inputTextTokenCount"));
     return openaiEmbeddingsResponse(vectors, model, promptTokens);
@@ -206,7 +217,10 @@ function signBedrockRequest(
     { name: "authorization", value: new SecretValue(signed.authorization) },
   ];
   if (signed.xAmzSecurityToken !== undefined) {
-    headers.push({ name: "x-amz-security-token", value: new SecretValue(signed.xAmzSecurityToken) });
+    headers.push({
+      name: "x-amz-security-token",
+      value: new SecretValue(signed.xAmzSecurityToken),
+    });
   }
 
   return { provider: provider.name, endpoint, body, stream, headers };
@@ -265,9 +279,9 @@ function contentBlocks(content: Json | undefined): Json[] {
   if (isArray(content)) {
     return content.map((block) => {
       if (isObject(block)) {
-        if (asStr(block["type"]) === "text") return { text: asStr(block["text"]) ?? "" };
+        if (asStr(block.type) === "text") return { text: asStr(block.text) ?? "" };
         throw AdapterError.invalidRequest(
-          `unsupported Bedrock content block type ${JSON.stringify(block["type"] ?? null)}`,
+          `unsupported Bedrock content block type ${JSON.stringify(block.type ?? null)}`,
         );
       }
       throw AdapterError.invalidRequest("Bedrock content blocks must be objects");
@@ -283,8 +297,8 @@ function inferenceConfig(body: Json): Json | undefined {
   copyConfig(body, config, "temperature", "temperature");
   copyConfig(body, config, "top_p", "topP");
   const stop = getField(body, "stop");
-  if (typeof stop === "string") config["stopSequences"] = [stop];
-  else if (isArray(stop)) config["stopSequences"] = [...stop];
+  if (typeof stop === "string") config.stopSequences = [stop];
+  else if (isArray(stop)) config.stopSequences = [...stop];
   return Object.keys(config).length > 0 ? config : undefined;
 }
 
@@ -319,7 +333,9 @@ function percentEncodePathSegment(segment: string): string {
       byte === 0x5f ||
       byte === 0x2e ||
       byte === 0x7e;
-    out += keep ? String.fromCharCode(byte) : `%${byte.toString(16).toUpperCase().padStart(2, "0")}`;
+    out += keep
+      ? String.fromCharCode(byte)
+      : `%${byte.toString(16).toUpperCase().padStart(2, "0")}`;
   }
   return out;
 }

@@ -1,3 +1,4 @@
+const nn = <T>(v: T): NonNullable<T> => v as NonNullable<T>;
 /**
  * W3C trace-context INGRESS — Rust `server/mod.rs:156 ingress_trace_context`.
  *
@@ -96,7 +97,7 @@ export function ingressTraceContext(
   const rawParent = headers.get("traceparent")?.trim();
   const traceparent = rawParent === undefined ? undefined : validTraceparent(rawParent);
 
-  const traceId = traceparent === undefined ? fallbackTraceId : traceparent.split("-")[1]!;
+  const traceId = traceparent === undefined ? fallbackTraceId : nn(traceparent.split("-")[1]);
 
   let tracestate: string | undefined;
   if (traceparent !== undefined) {

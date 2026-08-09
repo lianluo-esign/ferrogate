@@ -1,13 +1,13 @@
+import BillingMeteringPage from "@/pages/billing-metering";
+import { gatewayUrl, server } from "@/test/msw";
+import { renderWithProviders, seedSession } from "@/test/test-utils";
 // Component tests for the metering & usage read-only views (#319): metering
 // events (paginated), export status, and usage aggregates each render from the
 // typed client.
 import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { HttpResponse, http } from "msw";
+import { http, HttpResponse } from "msw";
 import { beforeEach, expect, it } from "vitest";
-import BillingMeteringPage from "@/pages/billing-metering";
-import { gatewayUrl, server } from "@/test/msw";
-import { renderWithProviders, seedSession } from "@/test/test-utils";
 
 function meteringEvent() {
   return {

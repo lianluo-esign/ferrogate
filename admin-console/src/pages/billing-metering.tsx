@@ -1,14 +1,6 @@
-// Metering & usage read-only views (issue #319): three operator-facing lenses
-// over the metering pipeline —
-//   • Metering events  (/admin/v1/metering-events)        paginated raw events
-//   • Export status    (/admin/v1/metering-export-status) per-request export outcomes
-//   • Usage aggregates (/admin/v1/usage-aggregates)       rolled-up token totals
-// All read-only; every call goes through the typed client.
-import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { tenantLabel } from "@/components/agent-ops/agent-ops-primitives";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Table,
   TableBody,
@@ -17,11 +9,19 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useAuth } from "@/hooks/use-auth";
-import { useI18n } from "@/i18n";
 import { useFormatUnix } from "@/hooks/use-format-unix";
+import { useI18n } from "@/i18n";
 import { adminGet } from "@/lib/gateway-client";
-import { tenantLabel } from "@/components/agent-ops/agent-ops-primitives";
+import { useQuery } from "@tanstack/react-query";
+// Metering & usage read-only views (issue #319): three operator-facing lenses
+// over the metering pipeline —
+//   • Metering events  (/admin/v1/metering-events)        paginated raw events
+//   • Export status    (/admin/v1/metering-export-status) per-request export outcomes
+//   • Usage aggregates (/admin/v1/usage-aggregates)       rolled-up token totals
+// All read-only; every call goes through the typed client.
+import { useState } from "react";
 
 const PAGE_SIZE = 50;
 
@@ -29,7 +29,7 @@ function MeteringEventsTab() {
   const { session } = useAuth();
   const { t, format } = useI18n();
   const formatUnix = useFormatUnix("—");
-  const apiKey = session!.gatewayApiKey;
+  const apiKey = (session as NonNullable<typeof session>).gatewayApiKey;
   const [offset, setOffset] = useState(0);
 
   const { data, isLoading, error } = useQuery({
@@ -46,7 +46,10 @@ function MeteringEventsTab() {
   return (
     <div className="flex flex-col gap-3">
       {error ? (
-        <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <p
+          role="alert"
+          className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+        >
           {t("page.billingMetering.events.loadError", {
             message: (error as Error).message,
           })}
@@ -59,15 +62,11 @@ function MeteringEventsTab() {
               <TableHead>{t("page.billingMetering.col.when")}</TableHead>
               <TableHead>{t("common.tenant")}</TableHead>
               <TableHead>{t("page.billingMetering.col.model")}</TableHead>
-              <TableHead className="text-right">
-                {t("page.billingMetering.col.prompt")}
-              </TableHead>
+              <TableHead className="text-right">{t("page.billingMetering.col.prompt")}</TableHead>
               <TableHead className="text-right">
                 {t("page.billingMetering.col.completion")}
               </TableHead>
-              <TableHead className="text-right">
-                {t("page.billingMetering.col.total")}
-              </TableHead>
+              <TableHead className="text-right">{t("page.billingMetering.col.total")}</TableHead>
               <TableHead>{t("page.billingMetering.col.source")}</TableHead>
               <TableHead>{t("common.status")}</TableHead>
             </TableRow>
@@ -88,9 +87,7 @@ function MeteringEventsTab() {
             ) : (
               events.map((event) => (
                 <TableRow key={event.request_id}>
-                  <TableCell className="text-xs">
-                    {formatUnix(event.occurred_at_unix)}
-                  </TableCell>
+                  <TableCell className="text-xs">{formatUnix(event.occurred_at_unix)}</TableCell>
                   <TableCell className="text-xs">{tenantLabel(event.tenant)}</TableCell>
                   <TableCell className="text-xs font-medium">
                     {event.logical_model}
@@ -152,7 +149,7 @@ function ExportStatusTab() {
   const { session } = useAuth();
   const { t } = useI18n();
   const formatUnix = useFormatUnix("—");
-  const apiKey = session!.gatewayApiKey;
+  const apiKey = (session as NonNullable<typeof session>).gatewayApiKey;
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["metering-export-status"],
@@ -164,7 +161,10 @@ function ExportStatusTab() {
   return (
     <div className="flex flex-col gap-3">
       {error ? (
-        <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <p
+          role="alert"
+          className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+        >
           {t("page.billingMetering.export.loadError", {
             message: (error as Error).message,
           })}
@@ -198,20 +198,14 @@ function ExportStatusTab() {
             ) : (
               rows.map((row) => (
                 <TableRow key={row.request_id}>
-                  <TableCell className="text-xs">
-                    {formatUnix(row.occurred_at_unix)}
-                  </TableCell>
+                  <TableCell className="text-xs">{formatUnix(row.occurred_at_unix)}</TableCell>
                   <TableCell className="text-xs">{row.provider}</TableCell>
                   <TableCell className="font-mono text-xs">{row.endpoint}</TableCell>
                   <TableCell>
-                    <Badge variant={row.success ? "secondary" : "destructive"}>
-                      {row.status}
-                    </Badge>
+                    <Badge variant={row.success ? "secondary" : "destructive"}>{row.status}</Badge>
                   </TableCell>
                   <TableCell className="font-mono text-xs">{row.request_id}</TableCell>
-                  <TableCell className="text-xs text-destructive">
-                    {row.error ?? "—"}
-                  </TableCell>
+                  <TableCell className="text-xs text-destructive">{row.error ?? "—"}</TableCell>
                 </TableRow>
               ))
             )}
@@ -225,7 +219,7 @@ function ExportStatusTab() {
 function UsageAggregatesTab() {
   const { session } = useAuth();
   const { t, format } = useI18n();
-  const apiKey = session!.gatewayApiKey;
+  const apiKey = (session as NonNullable<typeof session>).gatewayApiKey;
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["usage-aggregates"],
@@ -237,7 +231,10 @@ function UsageAggregatesTab() {
   return (
     <div className="flex flex-col gap-3">
       {error ? (
-        <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <p
+          role="alert"
+          className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+        >
           {t("page.billingMetering.aggregates.loadError", {
             message: (error as Error).message,
           })}
@@ -251,15 +248,11 @@ function UsageAggregatesTab() {
               <TableHead>{t("page.billingMetering.col.project")}</TableHead>
               <TableHead>{t("page.billingMetering.col.apiKey")}</TableHead>
               <TableHead>{t("page.billingMetering.col.model")}</TableHead>
-              <TableHead className="text-right">
-                {t("page.billingMetering.col.prompt")}
-              </TableHead>
+              <TableHead className="text-right">{t("page.billingMetering.col.prompt")}</TableHead>
               <TableHead className="text-right">
                 {t("page.billingMetering.col.completion")}
               </TableHead>
-              <TableHead className="text-right">
-                {t("page.billingMetering.col.total")}
-              </TableHead>
+              <TableHead className="text-right">{t("page.billingMetering.col.total")}</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -310,22 +303,14 @@ export default function BillingMeteringPage() {
     <div className="flex flex-col gap-4">
       <div>
         <h1 className="text-lg font-semibold">{t("page.billingMetering.title")}</h1>
-        <p className="text-sm text-muted-foreground">
-          {t("page.billingMetering.description")}
-        </p>
+        <p className="text-sm text-muted-foreground">{t("page.billingMetering.description")}</p>
       </div>
 
       <Tabs defaultValue="events">
         <TabsList>
-          <TabsTrigger value="events">
-            {t("page.billingMetering.tab.events")}
-          </TabsTrigger>
-          <TabsTrigger value="export">
-            {t("page.billingMetering.tab.export")}
-          </TabsTrigger>
-          <TabsTrigger value="aggregates">
-            {t("page.billingMetering.tab.aggregates")}
-          </TabsTrigger>
+          <TabsTrigger value="events">{t("page.billingMetering.tab.events")}</TabsTrigger>
+          <TabsTrigger value="export">{t("page.billingMetering.tab.export")}</TabsTrigger>
+          <TabsTrigger value="aggregates">{t("page.billingMetering.tab.aggregates")}</TabsTrigger>
         </TabsList>
         <TabsContent value="events">
           <MeteringEventsTab />

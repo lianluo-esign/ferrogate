@@ -1,12 +1,4 @@
-// Stored gateway config profiles (issue #322): CRUD over
-// /admin/v1/gateway-configs (+ /{id}). These are reusable per-api-key config
-// overlays (e.g. toggling exact-match response caching for an agent
-// workflow); creating, replacing or deleting one applies through a
-// process-local reload, so mutations are confirmed and the list refetches.
-import { useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { toast } from "sonner";
-import { Badge } from "@/components/ui/badge";
+import { BoolBadge } from "@/components/ops/ops-primitives";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -17,6 +9,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -37,17 +30,18 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { BoolBadge } from "@/components/ops/ops-primitives";
 import { useAuth } from "@/hooks/use-auth";
-import { useI18n, type TranslationKey } from "@/i18n";
 import { useOperatorError } from "@/hooks/use-operator-error";
-import {
-  adminDelete,
-  adminGet,
-  adminPost,
-  adminPut,
-  type AdminSchema,
-} from "@/lib/gateway-client";
+import { type TranslationKey, useI18n } from "@/i18n";
+import { type AdminSchema, adminDelete, adminGet, adminPost, adminPut } from "@/lib/gateway-client";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+// Stored gateway config profiles (issue #322): CRUD over
+// /admin/v1/gateway-configs (+ /{id}). These are reusable per-api-key config
+// overlays (e.g. toggling exact-match response caching for an agent
+// workflow); creating, replacing or deleting one applies through a
+// process-local reload, so mutations are confirmed and the list refetches.
+import { useState } from "react";
+import { toast } from "sonner";
 
 type GatewayConfigProfile = AdminSchema<"AdminGatewayConfigProfile">;
 
@@ -59,9 +53,7 @@ const CACHE_LABEL_KEYS: Record<CacheOverride, TranslationKey> = {
   off: "page.opsGatewayConfigs.cache.off",
 };
 
-function cacheOverrideOf(
-  cacheEnabled: boolean | null | undefined,
-): CacheOverride {
+function cacheOverrideOf(cacheEnabled: boolean | null | undefined): CacheOverride {
   if (cacheEnabled === null || cacheEnabled === undefined) return "inherit";
   return cacheEnabled ? "on" : "off";
 }
@@ -118,16 +110,14 @@ export default function OpsGatewayConfigsPage() {
   const { session } = useAuth();
   const { t } = useI18n();
   const { toastError } = useOperatorError();
-  const apiKey = session!.gatewayApiKey;
+  const apiKey = (session as NonNullable<typeof session>).gatewayApiKey;
   const queryClient = useQueryClient();
   const queryKey = ["ops-gateway-configs"];
 
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
-  const [deleteTarget, setDeleteTarget] = useState<GatewayConfigProfile | null>(
-    null,
-  );
+  const [deleteTarget, setDeleteTarget] = useState<GatewayConfigProfile | null>(null);
 
   const { data, isLoading, error } = useQuery({
     queryKey,
@@ -189,15 +179,16 @@ export default function OpsGatewayConfigsPage() {
       <div className="flex items-start justify-between gap-4">
         <div>
           <h1 className="text-lg font-semibold">{t("page.opsGatewayConfigs.title")}</h1>
-          <p className="text-sm text-muted-foreground">
-            {t("page.opsGatewayConfigs.description")}
-          </p>
+          <p className="text-sm text-muted-foreground">{t("page.opsGatewayConfigs.description")}</p>
         </div>
         <Button onClick={openCreate}>{t("page.opsGatewayConfigs.new")}</Button>
       </div>
 
       {error ? (
-        <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <p
+          role="alert"
+          className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+        >
           {t("page.opsGatewayConfigs.loadError", { message: (error as Error).message })}
         </p>
       ) : null}
@@ -242,9 +233,7 @@ export default function OpsGatewayConfigsPage() {
                     />
                   </TableCell>
                   <TableCell className="text-xs">
-                    {profile.api_key_ids.length > 0
-                      ? profile.api_key_ids.join(", ")
-                      : "-"}
+                    {profile.api_key_ids.length > 0 ? profile.api_key_ids.join(", ") : "-"}
                   </TableCell>
                   <TableCell>
                     <Badge variant="outline">
@@ -253,11 +242,7 @@ export default function OpsGatewayConfigsPage() {
                   </TableCell>
                   <TableCell>
                     <div className="flex justify-end gap-2">
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => openEdit(profile)}
-                      >
+                      <Button variant="outline" size="sm" onClick={() => openEdit(profile)}>
                         {t("resource.action.edit")}
                       </Button>
                       <Button
@@ -284,9 +269,7 @@ export default function OpsGatewayConfigsPage() {
                 ? t("page.opsGatewayConfigs.dialog.editTitle")
                 : t("page.opsGatewayConfigs.dialog.newTitle")}
             </DialogTitle>
-            <DialogDescription>
-              {t("page.opsGatewayConfigs.dialog.description")}
-            </DialogDescription>
+            <DialogDescription>{t("page.opsGatewayConfigs.dialog.description")}</DialogDescription>
           </DialogHeader>
           <div className="grid gap-4">
             <div className="grid gap-2">
@@ -295,9 +278,7 @@ export default function OpsGatewayConfigsPage() {
                 id="gc-id"
                 value={form.id}
                 disabled={editingId !== null}
-                onChange={(event) =>
-                  setForm((prev) => ({ ...prev, id: event.target.value }))
-                }
+                onChange={(event) => setForm((prev) => ({ ...prev, id: event.target.value }))}
               />
             </div>
             <div className="grid gap-2">
@@ -305,9 +286,7 @@ export default function OpsGatewayConfigsPage() {
               <Input
                 id="gc-name"
                 value={form.name}
-                onChange={(event) =>
-                  setForm((prev) => ({ ...prev, name: event.target.value }))
-                }
+                onChange={(event) => setForm((prev) => ({ ...prev, name: event.target.value }))}
               />
             </div>
             <div className="grid gap-2">
@@ -341,9 +320,7 @@ export default function OpsGatewayConfigsPage() {
               <Switch
                 id="gc-enabled"
                 checked={form.enabled}
-                onCheckedChange={(checked) =>
-                  setForm((prev) => ({ ...prev, enabled: checked }))
-                }
+                onCheckedChange={(checked) => setForm((prev) => ({ ...prev, enabled: checked }))}
               />
             </div>
             <div className="flex items-center justify-between">

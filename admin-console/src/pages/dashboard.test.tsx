@@ -1,10 +1,7 @@
-import { screen, within } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
-import { HttpResponse, http } from "msw";
-import { beforeEach, describe, expect, it } from "vitest";
-import DashboardPage from "@/pages/dashboard";
 import { translate } from "@/i18n";
 import { formatNumber } from "@/i18n/format";
+import type { AdminSchema } from "@/lib/gateway-client";
+import DashboardPage from "@/pages/dashboard";
 import {
   adminOverview,
   overviewControlPlaneData,
@@ -15,7 +12,10 @@ import {
 } from "@/test/fixtures/ops";
 import { gatewayUrl, server } from "@/test/msw";
 import { renderWithProviders, seedSession } from "@/test/test-utils";
-import type { AdminSchema } from "@/lib/gateway-client";
+import { screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { http, HttpResponse } from "msw";
+import { beforeEach, describe, expect, it } from "vitest";
 
 type AdminOverview = AdminSchema<"AdminOverview">;
 
@@ -131,7 +131,9 @@ describe("DashboardPage cockpit", () => {
     expect(screen.getByText("Fresh")).toBeInTheDocument();
     // Lifetime is the default period, labelled explicitly (never a "latest report").
     expect(within(traffic).getByText("12,000,000")).toBeInTheDocument();
-    expect(within(traffic).getAllByText("All-time totals across the scope").length).toBeGreaterThan(0);
+    expect(within(traffic).getAllByText("All-time totals across the scope").length).toBeGreaterThan(
+      0,
+    );
     expect(within(traffic).getByText("$4,210.50")).toBeInTheDocument();
     expect(within(traffic).getByText("3 / 4")).toBeInTheDocument(); // providers enabled/total
     expect(within(traffic).getByText("4 / 5")).toBeInTheDocument(); // mcp connected/total
@@ -140,9 +142,10 @@ describe("DashboardPage cockpit", () => {
     expect(within(traffic).getByText("9 / 12")).toBeInTheDocument();
 
     // Core counts link to their filtered management views.
-    expect(
-      within(traffic).getByRole("link", { name: "View MCP servers" }),
-    ).toHaveAttribute("href", "/app/mcp-servers");
+    expect(within(traffic).getByRole("link", { name: "View MCP servers" })).toHaveAttribute(
+      "href",
+      "/app/mcp-servers",
+    );
     expect(within(traffic).getByRole("link", { name: "View Static assets" })).toHaveAttribute(
       "href",
       "/app/assets",
@@ -151,9 +154,10 @@ describe("DashboardPage cockpit", () => {
       "href",
       "/app/agent-runs",
     );
-    expect(
-      within(traffic).getByRole("link", { name: "View Self-hosted workers" }),
-    ).toHaveAttribute("href", "/app/workers/self-hosted");
+    expect(within(traffic).getByRole("link", { name: "View Self-hosted workers" })).toHaveAttribute(
+      "href",
+      "/app/workers/self-hosted",
+    );
 
     // Alerts region: critical first, with evidence and a link to the source page.
     const alerts = screen.getByRole("region", { name: "Alerts" });
@@ -225,7 +229,9 @@ describe("DashboardPage cockpit", () => {
     expect(within(row).getByText("N/A")).toBeInTheDocument();
     expect(screen.queryByText("NaN")).not.toBeInTheDocument();
     // Sibling rows of the same section stay populated.
-    expect(within(screen.getByRole("row", { name: /Tenants/ })).getByText("24")).toBeInTheDocument();
+    expect(
+      within(screen.getByRole("row", { name: /Tenants/ })).getByText("24"),
+    ).toBeInTheDocument();
   });
 
   it("shows the #458 breakdowns the backend reports", async () => {
@@ -236,13 +242,12 @@ describe("DashboardPage cockpit", () => {
     // Virtual keys enabled/disabled split and asset reference counts. The row
     // total is the object's `total`, never the object itself — passing the
     // `{total,enabled}` payload to a number formatter prints "NaN" on screen.
-    expect(within(screen.getByRole("row", { name: /Virtual keys/ })).getByText("15"))
-      .toBeInTheDocument();
+    expect(
+      within(screen.getByRole("row", { name: /Virtual keys/ })).getByText("15"),
+    ).toBeInTheDocument();
     expect(screen.queryByText("NaN")).not.toBeInTheDocument();
     expect(screen.getByText("11 enabled / 15 total")).toBeInTheDocument();
-    expect(
-      screen.getByText("96 channel-referenced / 32 unreferenced"),
-    ).toBeInTheDocument();
+    expect(screen.getByText("96 channel-referenced / 32 unreferenced")).toBeInTheDocument();
     // Global-scope policy governance counts are real numbers, and pending
     // approvals appear in the inventory with a link to their page.
     expect(
@@ -337,7 +342,9 @@ describe("DashboardPage cockpit", () => {
 
   it("keeps healthy sections visible when one section is unavailable (not zero)", async () => {
     mockOverview(
-      adminOverview({ control_plane: overviewSectionUnavailable("control-plane store unreachable") }),
+      adminOverview({
+        control_plane: overviewSectionUnavailable("control-plane store unreachable"),
+      }),
     );
     renderWithProviders(<DashboardPage />);
 
@@ -353,9 +360,7 @@ describe("DashboardPage cockpit", () => {
 
     // The partial failure is surfaced as a visible alert + inventory notice.
     expect(screen.getByText("Overview section unavailable")).toBeInTheDocument();
-    expect(
-      screen.getAllByText(/control-plane store unreachable/).length,
-    ).toBeGreaterThan(0);
+    expect(screen.getAllByText(/control-plane store unreachable/).length).toBeGreaterThan(0);
   });
 
   // GATE (#343 box 4/5): the usage section is the ONE section whose failure was
@@ -443,9 +448,9 @@ describe("DashboardPage cockpit", () => {
     expect(within(traffic).getAllByText("0").length).toBeGreaterThan(0); // token/count zeros
     // Nothing is Unavailable: an empty install is zeros, not a failed section.
     expect(screen.queryByText("Unavailable")).not.toBeInTheDocument();
-    expect(
-      screen.getByRole("region", { name: "Alerts" }).textContent,
-    ).toContain("No active control-plane alerts.");
+    expect(screen.getByRole("region", { name: "Alerts" }).textContent).toContain(
+      "No active control-plane alerts.",
+    );
   });
 
   it("flags a stale overview", async () => {

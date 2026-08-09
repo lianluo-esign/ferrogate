@@ -1,10 +1,3 @@
-// Accessible global language selector (#346).
-//
-// Mirrors `theme-switcher` (Radix dropdown + icon trigger) so auth pages and
-// the protected shell share one interaction pattern. Each option is labelled
-// with its autonym (`LOCALE_META.nativeName`), so a user can always find their
-// language regardless of the currently active locale.
-import { Languages } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -14,7 +7,14 @@ import {
   DropdownMenuRadioItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { LOCALE_META, LOCALES, isLocale } from "./catalog";
+// Accessible global language selector (#346).
+//
+// Mirrors `theme-switcher` (Radix dropdown + icon trigger) so auth pages and
+// the protected shell share one interaction pattern. Each option is labelled
+// with its autonym (`LOCALE_META.nativeName`), so a user can always find their
+// language regardless of the currently active locale.
+import { Languages } from "lucide-react";
+import { LOCALES, LOCALE_META, isLocale } from "./catalog";
 import { useI18n } from "./i18n-provider";
 
 export function LanguageSwitcher() {

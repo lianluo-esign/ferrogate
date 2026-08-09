@@ -47,11 +47,7 @@ export function formatTokens(locale: Locale, tokens: number): string {
 }
 
 /** `ratio` is a fraction: `0.42` -> `42%`. */
-export function formatPercent(
-  locale: Locale,
-  ratio: number,
-  fractionDigits = 0,
-): string {
+export function formatPercent(locale: Locale, ratio: number, fractionDigits = 0): string {
   return new Intl.NumberFormat(locale, {
     style: "percent",
     minimumFractionDigits: fractionDigits,

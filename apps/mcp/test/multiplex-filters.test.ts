@@ -413,14 +413,15 @@ describe("the exclude list survives the D1 catalogue round trip", () => {
 
   it("reaches the tenant's host through loadServerCatalog", async () => {
     await clearMcpIdentityTables(TENANT_DATA, TENANT);
-    await tenantDatabase(TENANT_DATA, TENANT).prepare(
-      `INSERT INTO mcp_servers
+    await tenantDatabase(TENANT_DATA, TENANT)
+      .prepare(
+        `INSERT INTO mcp_servers
          (tenant_id, name, transport, url, auth_type, tools_to_execute,
           tools_to_auto_execute, tools_to_exclude, headers, oauth,
           signed_jwt_audience, timeout_ms)
        VALUES (?, 'filtered', 'streamable_http', 'https://f.test/mcp', 'none', ?, ?, ?,
                NULL, NULL, NULL, 5000)`,
-    )
+      )
       .bind(
         TENANT,
         JSON.stringify(["search", "write"]),

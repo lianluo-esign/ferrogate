@@ -42,10 +42,15 @@
  */
 import type { ToolCall, ToolDef, ToolResult } from "@ferrogate/core";
 
-import {
-  AdapterError,
-  canonicalProviderAdapterFamily,
-} from "./types.js";
+import { AnthropicAdapter } from "./anthropic.js";
+import { AzureOpenAiAdapter } from "./azure.js";
+import { BedrockAdapter } from "./bedrock.js";
+import { GeminiAdapter } from "./gemini.js";
+import { GrokAdapter } from "./grok.js";
+import type { Json } from "./json.js";
+import { OpenAiCompatibleAdapter } from "./openai.js";
+import { OpenRouterAdapter } from "./openrouter.js";
+import { AdapterError, canonicalProviderAdapterFamily } from "./types.js";
 import type {
   ChatCompletionPlan,
   EmbeddingsPlan,
@@ -60,14 +65,6 @@ import type {
   ProviderUsage,
   ResponsesPlan,
 } from "./types.js";
-import type { Json } from "./json.js";
-import { OpenAiCompatibleAdapter } from "./openai.js";
-import { AnthropicAdapter } from "./anthropic.js";
-import { GeminiAdapter } from "./gemini.js";
-import { GrokAdapter } from "./grok.js";
-import { OpenRouterAdapter } from "./openrouter.js";
-import { AzureOpenAiAdapter } from "./azure.js";
-import { BedrockAdapter } from "./bedrock.js";
 import { VertexAiAdapter } from "./vertex.js";
 import { WorkersAiAdapter } from "./workers_ai.js";
 

@@ -1,3 +1,14 @@
+import { ResourceTable } from "@/components/resource/resource-table";
+import { translate } from "@/i18n";
+import { en } from "@/i18n/locales/en";
+import { zhCN } from "@/i18n/locales/zh-CN";
+import { type ColumnConfig, booleanColumn } from "@/lib/resource-config";
+import { agentWorkflowsConfig } from "@/resources/agent-workflows";
+import { plansConfig } from "@/resources/plans";
+import { quotaPoliciesConfig } from "@/resources/quota-policies";
+import { selfHostedWorkersConfig } from "@/resources/self-hosted-workers";
+import { virtualKeysConfig } from "@/resources/virtual-keys";
+import { renderWithProviders } from "@/test/test-utils";
 // Dual-locale coverage for localized boolean/derived cell renders (#385).
 //
 // Before this, the resource framework's column `render` callbacks received no
@@ -13,17 +24,6 @@
 //     the unwrapped nested workflow via `booleanColumn`'s `value` accessor).
 import { screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { ResourceTable } from "@/components/resource/resource-table";
-import { en } from "@/i18n/locales/en";
-import { zhCN } from "@/i18n/locales/zh-CN";
-import { translate } from "@/i18n";
-import { booleanColumn, type ColumnConfig } from "@/lib/resource-config";
-import { agentWorkflowsConfig } from "@/resources/agent-workflows";
-import { plansConfig } from "@/resources/plans";
-import { quotaPoliciesConfig } from "@/resources/quota-policies";
-import { selfHostedWorkersConfig } from "@/resources/self-hosted-workers";
-import { virtualKeysConfig } from "@/resources/virtual-keys";
-import { renderWithProviders } from "@/test/test-utils";
 
 function setDesktopViewport(matches: boolean) {
   Object.defineProperty(window, "matchMedia", {
@@ -75,10 +75,18 @@ describe("booleanColumn helper", () => {
     const col = booleanColumn<Row>({ key: "flag", headerKey: "resource.plans.col.mcp" });
     const tEn = (k: Parameters<typeof translate>[1]) => translate("en", k);
     const tZh = (k: Parameters<typeof translate>[1]) => translate("zh-CN", k);
-    expect(col.render!({ flag: true }, tEn)).toBe(en["common.yes"]);
-    expect(col.render!({ flag: false }, tEn)).toBe(en["common.no"]);
-    expect(col.render!({ flag: true }, tZh)).toBe(zhCN["common.yes"]);
-    expect(col.render!({ flag: false }, tZh)).toBe(zhCN["common.no"]);
+    expect((col.render as NonNullable<typeof col.render>)({ flag: true }, tEn)).toBe(
+      en["common.yes"],
+    );
+    expect((col.render as NonNullable<typeof col.render>)({ flag: false }, tEn)).toBe(
+      en["common.no"],
+    );
+    expect((col.render as NonNullable<typeof col.render>)({ flag: true }, tZh)).toBe(
+      zhCN["common.yes"],
+    );
+    expect((col.render as NonNullable<typeof col.render>)({ flag: false }, tZh)).toBe(
+      zhCN["common.no"],
+    );
   });
 
   it("honors custom true/false keys (Enabled/Disabled) and a `value` accessor", () => {
@@ -90,8 +98,12 @@ describe("booleanColumn helper", () => {
       falseKey: "common.disabled",
     });
     const tZh = (k: Parameters<typeof translate>[1]) => translate("zh-CN", k);
-    expect(col.render!({ flag: true }, tZh)).toBe(zhCN["common.enabled"]);
-    expect(col.render!({ flag: false }, tZh)).toBe(zhCN["common.disabled"]);
+    expect((col.render as NonNullable<typeof col.render>)({ flag: true }, tZh)).toBe(
+      zhCN["common.enabled"],
+    );
+    expect((col.render as NonNullable<typeof col.render>)({ flag: false }, tZh)).toBe(
+      zhCN["common.disabled"],
+    );
   });
 });
 
@@ -112,7 +124,12 @@ const quotaRow = {
 describe("routing/policy/quota: quota-policies `enabled` cell localizes", () => {
   it("renders English Yes", () => {
     renderWithProviders(
-      <ResourceTable columns={asColumns(quotaPoliciesConfig.columns)} rows={[quotaRow]} isLoading={false} readOnly />,
+      <ResourceTable
+        columns={asColumns(quotaPoliciesConfig.columns)}
+        rows={[quotaRow]}
+        isLoading={false}
+        readOnly
+      />,
       { locale: "en" },
     );
     expect(screen.getByRole("cell", { name: en["common.yes"] })).toBeInTheDocument();
@@ -120,7 +137,12 @@ describe("routing/policy/quota: quota-policies `enabled` cell localizes", () => 
 
   it("renders Simplified Chinese 是", () => {
     renderWithProviders(
-      <ResourceTable columns={asColumns(quotaPoliciesConfig.columns)} rows={[quotaRow]} isLoading={false} readOnly />,
+      <ResourceTable
+        columns={asColumns(quotaPoliciesConfig.columns)}
+        rows={[quotaRow]}
+        isLoading={false}
+        readOnly
+      />,
       { locale: "zh-CN" },
     );
     expect(screen.getByRole("cell", { name: zhCN["common.yes"] })).toBeInTheDocument();
@@ -141,7 +163,12 @@ const planRow = {
 describe("tenancy/IAM/billing: plans + virtual-keys boolean cells localize", () => {
   it("renders English Yes/No across the plan boolean columns", () => {
     renderWithProviders(
-      <ResourceTable columns={asColumns(plansConfig.columns)} rows={[planRow]} isLoading={false} readOnly />,
+      <ResourceTable
+        columns={asColumns(plansConfig.columns)}
+        rows={[planRow]}
+        isLoading={false}
+        readOnly
+      />,
       { locale: "en" },
     );
     const cells = screen.getAllByRole("cell").map((c) => c.textContent);
@@ -151,7 +178,12 @@ describe("tenancy/IAM/billing: plans + virtual-keys boolean cells localize", () 
 
   it("renders Simplified Chinese 是/否 across the plan boolean columns", () => {
     renderWithProviders(
-      <ResourceTable columns={asColumns(plansConfig.columns)} rows={[planRow]} isLoading={false} readOnly />,
+      <ResourceTable
+        columns={asColumns(plansConfig.columns)}
+        rows={[planRow]}
+        isLoading={false}
+        readOnly
+      />,
       { locale: "zh-CN" },
     );
     const cells = screen.getAllByRole("cell").map((c) => c.textContent);
@@ -170,7 +202,12 @@ describe("tenancy/IAM/billing: plans + virtual-keys boolean cells localize", () 
       scopes: ["admin.read"],
     };
     renderWithProviders(
-      <ResourceTable columns={asColumns(virtualKeysConfig.columns)} rows={[vkRow]} isLoading={false} readOnly />,
+      <ResourceTable
+        columns={asColumns(virtualKeysConfig.columns)}
+        rows={[vkRow]}
+        isLoading={false}
+        readOnly
+      />,
       { locale: "zh-CN" },
     );
     expect(screen.getByRole("cell", { name: zhCN["common.no"] })).toBeInTheDocument();
@@ -192,7 +229,12 @@ const workerRow = {
 describe("gateway/agent/MCP/worker: self-hosted-workers + agent-workflows cells localize", () => {
   it("renders English Enabled + No", () => {
     renderWithProviders(
-      <ResourceTable columns={asColumns(selfHostedWorkersConfig.columns)} rows={[workerRow]} isLoading={false} readOnly />,
+      <ResourceTable
+        columns={asColumns(selfHostedWorkersConfig.columns)}
+        rows={[workerRow]}
+        isLoading={false}
+        readOnly
+      />,
       { locale: "en" },
     );
     expect(screen.getByRole("cell", { name: en["common.enabled"] })).toBeInTheDocument();
@@ -201,7 +243,12 @@ describe("gateway/agent/MCP/worker: self-hosted-workers + agent-workflows cells 
 
   it("renders Simplified Chinese 已启用 + 否", () => {
     renderWithProviders(
-      <ResourceTable columns={asColumns(selfHostedWorkersConfig.columns)} rows={[workerRow]} isLoading={false} readOnly />,
+      <ResourceTable
+        columns={asColumns(selfHostedWorkersConfig.columns)}
+        rows={[workerRow]}
+        isLoading={false}
+        readOnly
+      />,
       { locale: "zh-CN" },
     );
     expect(screen.getByRole("cell", { name: zhCN["common.enabled"] })).toBeInTheDocument();
@@ -220,7 +267,12 @@ describe("gateway/agent/MCP/worker: self-hosted-workers + agent-workflows cells 
       },
     };
     renderWithProviders(
-      <ResourceTable columns={asColumns(agentWorkflowsConfig.columns)} rows={[wfRow]} isLoading={false} readOnly />,
+      <ResourceTable
+        columns={asColumns(agentWorkflowsConfig.columns)}
+        rows={[wfRow]}
+        isLoading={false}
+        readOnly
+      />,
       { locale: "zh-CN" },
     );
     expect(screen.getByRole("cell", { name: zhCN["common.yes"] })).toBeInTheDocument();

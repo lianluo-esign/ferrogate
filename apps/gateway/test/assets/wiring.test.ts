@@ -38,8 +38,10 @@ import {
   retentionPolicyId,
 } from "@ferrogate/storage";
 import { beforeEach, describe, expect, test } from "vitest";
-import { gatewayScheduled } from "../../src/index.js";
-import { gatewayMetricsSnapshot } from "../../src/routes/metrics.js";
+import tenantRegistryMigrationSql from "../../../../sql/d1-ts/control/0012_tenant_storage_provisioning.sql?raw";
+import tenantBackfillMigrationSql from "../../../../sql/d1-ts/control/0021_tenant_backfill.sql?raw";
+import tenantRegistryCleanupSql from "../../../../sql/d1-ts/control/0022_retire_legacy_d1_registry_columns.sql?raw";
+import tenantPlacementMigrationSql from "../../../../sql/d1-ts/control/0023_tenant_object_placement.sql?raw";
 import {
   D1AssetAuditSink,
   D1AssetBundleIndexStore,
@@ -49,13 +51,11 @@ import {
 import { assetDepsFromEnv } from "../../src/assets/handlers.js";
 import { tenantKeyPrefix } from "../../src/assets/keys.js";
 import { InMemoryAssetMetadataStore, type StoredBundleFile } from "../../src/assets/ports.js";
+import { gatewayScheduled } from "../../src/index.js";
+import { gatewayMetricsSnapshot } from "../../src/routes/metrics.js";
 import { seedApiKey } from "../keys/seed.js";
-import { tenantObjectDb, tenantObjectHandle } from "../tenant-object.js";
 import { applyControlMigrations } from "../requestlog/harness.js";
-import tenantRegistryMigrationSql from "../../../../sql/d1-ts/control/0012_tenant_storage_provisioning.sql?raw";
-import tenantBackfillMigrationSql from "../../../../sql/d1-ts/control/0021_tenant_backfill.sql?raw";
-import tenantRegistryCleanupSql from "../../../../sql/d1-ts/control/0022_retire_legacy_d1_registry_columns.sql?raw";
-import tenantPlacementMigrationSql from "../../../../sql/d1-ts/control/0023_tenant_object_placement.sql?raw";
+import { tenantObjectDb, tenantObjectHandle } from "../tenant-object.js";
 
 const TENANT = "tenant_asset_wiring";
 const PLAN = "plan_asset_wiring";
@@ -459,14 +459,22 @@ describe("the scheduled asset lifecycle sweeper", () => {
       .prepare("SELECT audit_json FROM audit_events WHERE tenant = ?1")
       .bind(TENANT)
       .all<{ audit_json: string }>();
-    expect(auditRows.results.some((row) => JSON.parse(row.audit_json).action === "asset.retention_prune")).toBe(
-      true,
-    );
+    expect(
+      auditRows.results.some(
+        (row) => JSON.parse(row.audit_json).action === "asset.retention_prune",
+      ),
+    ).toBe(true);
 
     const afterMetrics = gatewayMetricsSnapshot();
-    expect(afterMetrics.assetLifecycleScannedTotal - beforeMetrics.assetLifecycleScannedTotal).toBe(1);
-    expect(afterMetrics.assetLifecyclePrunedTotal - beforeMetrics.assetLifecyclePrunedTotal).toBe(2);
-    expect(afterMetrics.assetLifecycleFailedTotal - beforeMetrics.assetLifecycleFailedTotal).toBe(0);
+    expect(afterMetrics.assetLifecycleScannedTotal - beforeMetrics.assetLifecycleScannedTotal).toBe(
+      1,
+    );
+    expect(afterMetrics.assetLifecyclePrunedTotal - beforeMetrics.assetLifecyclePrunedTotal).toBe(
+      2,
+    );
+    expect(afterMetrics.assetLifecycleFailedTotal - beforeMetrics.assetLifecycleFailedTotal).toBe(
+      0,
+    );
   });
 
   test("reclaims an unreferenced object under the tenant prefix", async () => {
@@ -474,11 +482,9 @@ describe("the scheduled asset lifecycle sweeper", () => {
     await bindings().assets.put(orphan, "orphan-bytes");
     expect(await bindings().assets.head(orphan)).not.toBeNull();
 
-    await gatewayScheduled(
-      {},
-      scheduledEnv({ ASSET_RETENTION_ORPHAN_GRACE_SECS: "0" }),
-      { waitUntil: () => {} },
-    );
+    await gatewayScheduled({}, scheduledEnv({ ASSET_RETENTION_ORPHAN_GRACE_SECS: "0" }), {
+      waitUntil: () => {},
+    });
 
     expect(await bindings().assets.head(orphan)).toBeNull();
   });

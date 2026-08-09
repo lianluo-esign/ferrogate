@@ -1,3 +1,9 @@
+import { useOperatorError } from "@/hooks/use-operator-error";
+import { I18nProvider, type Locale } from "@/i18n";
+import { en } from "@/i18n/locales/en";
+import { zhCN } from "@/i18n/locales/zh-CN";
+import { LocalizedError } from "@/lib/localized-error";
+import { ApiError } from "@/types/auth";
 // #348 acceptance: "unknown backend errors fall back to localized generic copy
 // plus unchanged technical detail."
 //
@@ -11,12 +17,6 @@ import { render, screen } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { toast } from "sonner";
 import { describe, expect, it, vi } from "vitest";
-import { useOperatorError } from "@/hooks/use-operator-error";
-import { I18nProvider, type Locale } from "@/i18n";
-import { LocalizedError } from "@/lib/localized-error";
-import { ApiError } from "@/types/auth";
-import { en } from "@/i18n/locales/en";
-import { zhCN } from "@/i18n/locales/zh-CN";
 
 /** Renders nothing; fires `toastError(error)` once on mount. */
 function ToastOnMount({ error }: { error: unknown }) {
@@ -42,7 +42,7 @@ function toastFor(error: unknown, locale: Locale) {
 /** The description sonner was handed, rendered so its markup can be asserted. */
 function renderedDescription(spy: { mock: { calls: unknown[][] } }): HTMLElement {
   const options = spy.mock.calls[0][1] as { description?: ReactNode } | undefined;
-  const { container } = render(<>{options?.description}</>);
+  const { container } = render(options?.description);
   return container;
 }
 

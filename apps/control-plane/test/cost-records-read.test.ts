@@ -55,7 +55,7 @@ async function readCosts(secret: string, query = ""): Promise<ListBody> {
 }
 
 async function ids(secret: string, query = ""): Promise<unknown[]> {
-  return (await readCosts(secret, query)).data.map((row) => row["request_id"]);
+  return (await readCosts(secret, query)).data.map((row) => row.request_id);
 }
 
 async function exportCosts(secret: string, query = ""): Promise<Response> {
@@ -419,7 +419,7 @@ describe("GET /admin/v1/cost-records answers cost per REQUEST, joined not duplic
     expect(await ids(operatorKey.secret)).toEqual(["fg-c", "fg-a", "fg-b"]);
 
     const page = await readCosts(operatorKey.secret, "?limit=2&offset=1");
-    expect(page.data.map((row) => row["request_id"])).toEqual(["fg-a", "fg-b"]);
+    expect(page.data.map((row) => row.request_id)).toEqual(["fg-a", "fg-b"]);
     expect(page.total).toBe(3);
   });
 });
@@ -581,23 +581,23 @@ describe("the tenant fence on cost records", () => {
 
   it("fences every export format identically", async () => {
     const csv = csvRecords(await (await exportCosts("k-tenant")).text());
-    expect(csv.map((row) => row["request_id"])).toEqual(["fg-t1"]);
+    expect(csv.map((row) => row.request_id)).toEqual(["fg-t1"]);
 
     const jsonl = (await (await exportCosts("k-tenant", "?format=jsonl")).text())
       .split("\n")
       .filter((line) => line.trim() !== "")
       .map((line) => JSON.parse(line) as Record<string, unknown>);
-    expect(jsonl.map((row) => row["request_id"])).toEqual(["fg-t1"]);
+    expect(jsonl.map((row) => row.request_id)).toEqual(["fg-t1"]);
 
     const parquet = await (await exportCosts("k-tenant", "?format=parquet")).arrayBuffer();
     const rows = await parquetReadObjects({ file: parquet });
-    expect(rows.map((row) => row["request_id"])).toEqual(["fg-t1"]);
+    expect(rows.map((row) => row.request_id)).toEqual(["fg-t1"]);
   });
 
   it("cannot be paged past", async () => {
     const page = await readCosts("k-tenant", "?limit=100&offset=0");
     expect(page.total).toBe(1);
-    expect(page.data.map((row) => row["request_id"])).toEqual(["fg-t1"]);
+    expect(page.data.map((row) => row.request_id)).toEqual(["fg-t1"]);
   });
 });
 
@@ -644,14 +644,14 @@ describe("GET /admin/v1/cost-record-exports", () => {
     expect(header).toContain("tags");
 
     const records = csvRecords(text);
-    expect(records.map((row) => row["request_id"])).toEqual([REQUEST.requestId, "fg-cost-2"]);
-    expect(records[0]?.["cost_usd"]).toBe("0.5");
-    expect(JSON.parse(records[0]?.["tags"] ?? "{}")).toEqual({
+    expect(records.map((row) => row.request_id)).toEqual([REQUEST.requestId, "fg-cost-2"]);
+    expect(records[0]?.cost_usd).toBe("0.5");
+    expect(JSON.parse(records[0]?.tags ?? "{}")).toEqual({
       note: 'a "quoted", multi\nline tag',
     });
     // An UNKNOWN cost is an EMPTY cell, never `0` — the #663 distinction has to
     // survive the format that finance actually opens.
-    expect(records[1]?.["cost_usd"]).toBe("");
+    expect(records[1]?.cost_usd).toBe("");
   });
 
   it("answers JSON Lines on request", async () => {
@@ -692,8 +692,8 @@ describe("GET /admin/v1/cost-record-exports", () => {
     });
     // NULL survives the columnar encoding: an unpriced request must not read
     // as $0 in the format a data team joins against their warehouse.
-    expect(rows[1]?.["cost_usd"]).toBeNull();
-    expect(JSON.parse(String(rows[0]?.["tags"]))).toEqual({
+    expect(rows[1]?.cost_usd).toBeNull();
+    expect(JSON.parse(String(rows[0]?.tags))).toEqual({
       note: 'a "quoted", multi\nline tag',
     });
   });

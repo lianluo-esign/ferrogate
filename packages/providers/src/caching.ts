@@ -52,9 +52,10 @@
  * premium a breakpoint incurs is visible as `cache_write_tokens` for exactly
  * that reason.
  */
-import { AdapterError } from "./types.js";
+
 import { asObject, asStr, getField, isArray, isObject } from "./json.js";
 import type { Json, JsonObject, OwnedJsonObject } from "./json.js";
+import { AdapterError } from "./types.js";
 
 /** The body member a caller sets to state a caching intent. */
 export const PROMPT_CACHE_MEMBER = "prompt_cache";
@@ -86,13 +87,13 @@ export function promptCacheFromBody(body: Json | undefined): CanonicalPromptCach
   if (!object) {
     throw AdapterError.invalidRequest(`\`${PROMPT_CACHE_MEMBER}\` must be a JSON object`);
   }
-  const mode = asStr(object["mode"]);
+  const mode = asStr(object.mode);
   if (mode === undefined) {
     throw AdapterError.invalidRequest(
       `\`${PROMPT_CACHE_MEMBER}\` must carry a string \`mode\` ("auto", "explicit" or "off")`,
     );
   }
-  const ttl = readTtl(object["ttl"]);
+  const ttl = readTtl(object.ttl);
   switch (mode) {
     case "auto":
     case "off":
@@ -223,10 +224,10 @@ function assertBreakpointWasPlaceable(directive: CanonicalPromptCache): void {
 
 /** `system` as a string is promoted to a one-element block array to carry it. */
 function markLastAnthropicSystemBlock(body: JsonObject, marker: JsonObject): boolean {
-  const system = body["system"];
+  const system = body.system;
   if (typeof system === "string") {
     if (system.length === 0) return false;
-    body["system"] = [{ type: "text", text: system, [ANTHROPIC_CACHE_MEMBER]: marker }];
+    body.system = [{ type: "text", text: system, [ANTHROPIC_CACHE_MEMBER]: marker }];
     return true;
   }
   if (isArray(system) && system.length > 0) {
@@ -239,11 +240,11 @@ function markLastAnthropicSystemBlock(body: JsonObject, marker: JsonObject): boo
 }
 
 function markLastAnthropicSystemMessage(body: JsonObject, marker: JsonObject): boolean {
-  const messages = body["messages"];
+  const messages = body.messages;
   if (!isArray(messages)) return false;
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
-    if (!isObject(message) || asStr(message["role"]) !== "system") continue;
+    if (!isObject(message) || asStr(message.role) !== "system") continue;
     // Never the LAST message: a body whose final turn is the system prompt has
     // no volatile suffix, so a breakpoint there would cache the whole request
     // and read back nothing.
@@ -254,7 +255,7 @@ function markLastAnthropicSystemMessage(body: JsonObject, marker: JsonObject): b
 }
 
 function markLastAnthropicTool(body: JsonObject, marker: JsonObject): boolean {
-  const tools = body["tools"];
+  const tools = body.tools;
   if (!isArray(tools) || tools.length === 0) return false;
   const last = tools[tools.length - 1];
   if (!isObject(last)) return false;
@@ -263,7 +264,7 @@ function markLastAnthropicTool(body: JsonObject, marker: JsonObject): boolean {
 }
 
 function markLastAnthropicMessageBlock(body: JsonObject, marker: JsonObject): boolean {
-  const messages = body["messages"];
+  const messages = body.messages;
   if (!isArray(messages) || messages.length === 0) return false;
   const last = messages[messages.length - 1];
   // The return value is LOAD-BEARING: a degenerate last message (empty string
@@ -274,9 +275,9 @@ function markLastAnthropicMessageBlock(body: JsonObject, marker: JsonObject): bo
 
 /** Mark a message's final content block, promoting a string body to a block. */
 function markLastContentBlock(message: JsonObject, marker: JsonObject): boolean {
-  const content = message["content"];
+  const content = message.content;
   if (typeof content === "string") {
-    message["content"] = [{ type: "text", text: content, [ANTHROPIC_CACHE_MEMBER]: marker }];
+    message.content = [{ type: "text", text: content, [ANTHROPIC_CACHE_MEMBER]: marker }];
     return true;
   }
   if (isArray(content) && content.length > 0) {
@@ -345,19 +346,22 @@ export function applyPromptCacheToBedrockConverse(
     );
   }
   const point: JsonObject = { [BEDROCK_CACHE_MEMBER]: { type: "default" } };
-  if (appendBedrockCachePoint(body["system"], point)) return;
-  if (appendBedrockCachePoint(getField(body["toolConfig"], "tools"), point)) return;
-  if (appendBedrockLastMessageCachePoint(body["messages"], point)) return;
+  if (appendBedrockCachePoint(body.system, point)) return;
+  if (appendBedrockCachePoint(getField(body.toolConfig, "tools"), point)) return;
+  if (appendBedrockLastMessageCachePoint(body.messages, point)) return;
   // Same contract, same refusal as the Anthropic path: a Converse body with no
   // system, no tools and a degenerate last message has nowhere to hold a
   // checkpoint, and answering 200 having emitted none is the silent degrade.
   assertBreakpointWasPlaceable(directive);
 }
 
-function appendBedrockLastMessageCachePoint(messages: Json | undefined, point: JsonObject): boolean {
+function appendBedrockLastMessageCachePoint(
+  messages: Json | undefined,
+  point: JsonObject,
+): boolean {
   if (!isArray(messages) || messages.length === 0) return false;
   const last = messages[messages.length - 1];
-  return isObject(last) ? appendBedrockCachePoint(last["content"], point) : false;
+  return isObject(last) ? appendBedrockCachePoint(last.content, point) : false;
 }
 
 function appendBedrockCachePoint(target: Json | undefined, point: JsonObject): boolean {
@@ -414,7 +418,7 @@ export function applyPromptCacheToAutomaticFamily(
   if (directive.kind === "off") {
     if (cachesNothing) return;
     throw AdapterError.unsupportedCapability(
-      "prompt caching (this family caches prompts automatically and cannot be told not to; send mode \"auto\")",
+      'prompt caching (this family caches prompts automatically and cannot be told not to; send mode "auto")',
       providerKind,
     );
   }

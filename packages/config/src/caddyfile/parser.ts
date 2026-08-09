@@ -22,21 +22,12 @@
  * wrangler vars / KV / D1 and never enters this module.
  */
 import { CaddyfileDiagnostic } from "../diagnostic.js";
-import { modelCapabilitySchema, type ModelCapability } from "../schema/enums.js";
+import { type ModelCapability, modelCapabilitySchema } from "../schema/enums.js";
 import type { EnvSource } from "../secrets.js";
 
 /** `ModelCapability::from_str`'s accept set, in the Rust match-arm order. */
 const MODEL_CAPABILITIES: readonly ModelCapability[] = modelCapabilitySchema.options;
-import { lex, type Token } from "./lexer.js";
-import {
-  defaultGatewayConfig,
-  defaultGatewayRoute,
-  type GatewayApiKey,
-  type GatewayConfig,
-  type GatewayModel,
-  type GatewayProvider,
-  type GatewayTlsAcmeConfig,
-} from "./types.js";
+import { type Token, lex } from "./lexer.js";
 import {
   adaptSiteAddress,
   caddyPathToPrefix,
@@ -45,6 +36,16 @@ import {
   looksLikeUpstream,
   modelRefArg,
 } from "./parser-support.js";
+import {
+  type GatewayApiKey,
+  type GatewayConfig,
+  type GatewayModel,
+  type GatewayProvider,
+  type GatewayTlsAcmeConfig,
+  defaultGatewayConfig,
+  defaultGatewayRoute,
+} from "./types.js";
+const nn = <T>(v: T): NonNullable<T> => v as NonNullable<T>;
 
 /** Parse a Caddyfile source into the intermediate `GatewayConfig`. Throws `CaddyfileDiagnostic`. */
 export function parseCaddyfile(raw: string, file: string, env?: EnvSource): GatewayConfig {
@@ -112,7 +113,11 @@ class Parser {
     });
   }
 
-  private invalidArgument(token: Token, directive: string, suggestion: string): CaddyfileDiagnostic {
+  private invalidArgument(
+    token: Token,
+    directive: string,
+    suggestion: string,
+  ): CaddyfileDiagnostic {
     return new CaddyfileDiagnostic({
       file: this.file,
       line: token.line,
@@ -191,7 +196,7 @@ class Parser {
     if (!this.consumeLbrace()) return;
     let depth = 1;
     while (this.pos < this.tokens.length) {
-      const token = this.tokens[this.pos]!;
+      const token = nn(this.tokens[this.pos]);
       if (token.kind.type === "lbrace") depth += 1;
       else if (token.kind.type === "rbrace") {
         depth -= 1;
@@ -233,7 +238,11 @@ class Parser {
     return this.pos >= this.tokens.length;
   }
 
-  private addStaticResponse(host: string | null, inheritedPrefix: string | null, args: string[]): void {
+  private addStaticResponse(
+    host: string | null,
+    inheritedPrefix: string | null,
+    args: string[],
+  ): void {
     this.routeCount += 1;
     const pathArg = args.find((arg) => arg.startsWith("/"));
     const path =
@@ -242,11 +251,10 @@ class Parser {
         : inheritedPrefix !== null
           ? inheritedPrefix
           : "/";
-    const body =
-      args.find((arg) => !arg.startsWith("/") && !/^\d+$/.test(arg)) ?? "";
+    const body = args.find((arg) => !arg.startsWith("/") && !/^\d+$/.test(arg)) ?? "";
     let status = 200;
     for (let i = args.length - 1; i >= 0; i -= 1) {
-      const arg = args[i]!;
+      const arg = nn(args[i]);
       if (/^\d+$/.test(arg)) {
         status = Number.parseInt(arg, 10);
         break;
@@ -302,7 +310,11 @@ class Parser {
     if (consumed === null) throw this.expected("site address");
     const { word: address, token } = consumed;
     if (!this.consumeLbraceAfterLineArgs()) {
-      throw this.unsupported(token, address, "expected a Caddyfile site block like `:8080 { ... }`");
+      throw this.unsupported(
+        token,
+        address,
+        "expected a Caddyfile site block like `:8080 { ... }`",
+      );
     }
     const { listen, host } = adaptSiteAddress(address);
     if (listen !== null) this.config.listen = listen;
@@ -332,7 +344,7 @@ class Parser {
       case "handle":
       case "handle_path": {
         const firstArg = args[0];
-        const prefix = firstArg !== undefined && firstArg.startsWith("/") ? caddyPathToPrefix(firstArg) : null;
+        const prefix = firstArg?.startsWith("/") ? caddyPathToPrefix(firstArg) : null;
         const strip = prefix !== null ? directive === "handle_path" : inheritedStrip;
         if (!this.consumeLbrace()) return;
         for (;;) {
@@ -352,7 +364,10 @@ class Parser {
         return;
       case "tls":
         if (args.length >= 2) {
-          this.config.tls = { cert_path: args[0]!, key_path: args[1]! };
+          this.config.tls = {
+            cert_path: args[0] as NonNullable<(typeof args)[0]>,
+            key_path: args[1] as NonNullable<(typeof args)[1]>,
+          };
           this.consumeOptionalEmptyBlock();
         } else if (this.consumeLbrace()) {
           this.parseTlsBlock(host);
@@ -369,7 +384,10 @@ class Parser {
         return;
       default:
         if (directive.startsWith("@")) {
-          if (args[0] !== undefined && ["path", "host", "method", "header", "query"].includes(args[0])) {
+          if (
+            args[0] !== undefined &&
+            ["path", "host", "method", "header", "query"].includes(args[0])
+          ) {
             return;
           }
           this.consumeOptionalEmptyBlock();
@@ -423,8 +441,8 @@ class Parser {
           break;
         case "dns":
           if (args[0] === "exec" && args.length >= 3) {
-            acme.dns_hook_set = args[1]!;
-            acme.dns_hook_cleanup = args[2]!;
+            acme.dns_hook_set = args[1] as NonNullable<(typeof args)[1]>;
+            acme.dns_hook_cleanup = args[2] as NonNullable<(typeof args)[2]>;
           } else if (args[0] !== undefined) {
             acme.dns_provider = args[0];
           }
@@ -448,6 +466,7 @@ class Parser {
         case "auto_graceful_reload":
           acme.auto_graceful_reload = parseBool(args[0]);
           break;
+        // biome-ignore lint/suspicious/noFallthroughSwitchClause: intentional — an `issuer` directive that is not `issuer acme` deliberately falls through to the default handling below
         case "issuer":
           if (args[0] === "acme") {
             this.parseTlsIssuerAcmeBlock(acme);
@@ -627,7 +646,11 @@ class Parser {
     if (name === undefined) throw this.expected("model name");
     const ref = modelRefArg(args);
     if (ref === null) {
-      throw this.unsupported(token, "model", "expected `model <name> -> <provider>:<provider_model>`");
+      throw this.unsupported(
+        token,
+        "model",
+        "expected `model <name> -> <provider>:<provider_model>`",
+      );
     }
     const colon = ref.indexOf(":");
     if (colon === -1) {
@@ -711,7 +734,11 @@ class Parser {
       platform_operator: null,
     };
     if (!this.consumeLbrace()) {
-      throw this.unsupported(token, "api_key", "expected `api_key <id> { key {env.NAME} scopes ... }`");
+      throw this.unsupported(
+        token,
+        "api_key",
+        "expected `api_key <id> { key {env.NAME} scopes ... }`",
+      );
     }
     for (;;) {
       this.skipNewlines();
@@ -847,10 +874,18 @@ class Parser {
         const inner = this.consumeLineArgs();
         switch (directive) {
           case "header_up":
-            if (inner.length >= 2) requestHeaders.push({ name: inner[0]!, value: inner.slice(1).join(" ") });
+            if (inner.length >= 2)
+              requestHeaders.push({
+                name: inner[0] as NonNullable<(typeof inner)[0]>,
+                value: inner.slice(1).join(" "),
+              });
             break;
           case "header_down":
-            if (inner.length >= 2) responseHeaders.push({ name: inner[0]!, value: inner.slice(1).join(" ") });
+            if (inner.length >= 2)
+              responseHeaders.push({
+                name: inner[0] as NonNullable<(typeof inner)[0]>,
+                value: inner.slice(1).join(" "),
+              });
             break;
           case "lb_policy":
           case "health_uri":

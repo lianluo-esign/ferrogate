@@ -600,10 +600,7 @@ export class D1LedgerStore implements LedgerStore {
     const result =
       this.#tenantId === undefined
         ? await this.#db.prepare(BILLING_LEDGER_SELECT_SQL).bind(id).all()
-        : await this.#db
-            .prepare(TENANT_BILLING_LEDGER_SELECT_SQL)
-            .bind(id, this.#tenantId)
-            .all();
+        : await this.#db.prepare(TENANT_BILLING_LEDGER_SELECT_SQL).bind(id, this.#tenantId).all();
     const row = result.results?.[0];
     return row !== undefined && isLedgerRow(row) ? rowToCharge(row) : undefined;
   }

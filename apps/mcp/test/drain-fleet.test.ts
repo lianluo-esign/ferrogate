@@ -63,9 +63,9 @@
  * asserts that off the files' own source text rather than trusting this
  * paragraph.
  */
-import { SELF, applyD1Migrations, env } from "cloudflare:test";
-import { controlNamespace } from "./support/control-namespace.js";
+import { SELF, type applyD1Migrations, env } from "cloudflare:test";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { controlNamespace } from "./support/control-namespace.js";
 
 // --- apps/agent-runtime: the OTHER enforcer's real resolver ----------------
 import {

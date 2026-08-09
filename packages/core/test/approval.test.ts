@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { approvalPolicySchema, DEFAULT_APPROVAL_POLICY } from "../src/index";
+import { DEFAULT_APPROVAL_POLICY, approvalPolicySchema } from "../src/index";
 
 describe("ApprovalPolicy", () => {
   it("parses the snake_case wire forms", () => {

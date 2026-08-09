@@ -27,22 +27,22 @@ import { SELF } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
+  type DispatchContext,
+  type McpTool,
   deterministicManagedActionGuardrails,
   guardrailPayloadText,
   managedActionTarget,
   parseGuardrailVar,
-  type DispatchContext,
-  type McpTool,
 } from "../src/ports.js";
 import {
   EXEC_KEY,
+  type Fixture,
   getMcpEnvVar,
   rpcRequest,
   seedFixture,
   setMcpEnvVar,
   tenantAuth,
   upstreamConfig,
-  type Fixture,
 } from "./fixtures.js";
 
 /** A guardrail that matches the word `exfiltrate`. */

@@ -1,15 +1,15 @@
-import { render, screen, within } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
-import { HttpResponse, http } from "msw";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { QueryClientProvider } from "@tanstack/react-query";
-import { beforeEach, describe, expect, it } from "vitest";
 import { AuthProvider } from "@/hooks/use-auth";
 import { I18nProvider } from "@/i18n";
-import SelfHostedWorkerDetailPage from "@/pages/self-hosted-worker-detail";
 import type { AdminSchema } from "@/lib/gateway-client";
+import SelfHostedWorkerDetailPage from "@/pages/self-hosted-worker-detail";
 import { gatewayUrl, server } from "@/test/msw";
 import { createTestQueryClient, seedSession } from "@/test/test-utils";
+import { QueryClientProvider } from "@tanstack/react-query";
+import { render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { http, HttpResponse } from "msw";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { beforeEach, describe, expect, it } from "vitest";
 
 type WorkerRecord = AdminSchema<"AdminSelfHostedWorkerRecord">;
 
@@ -26,7 +26,12 @@ function worker(overrides: Partial<WorkerRecord> = {}): WorkerRecord {
     registered_at_unix: 100,
     last_seen_at_unix: 200,
     trust_level: "reported_by_self_hosted_worker",
-    latest_heartbeat: { id: "hb-1", status: "healthy", reported_at_unix: 200, observed_at_unix: 201 },
+    latest_heartbeat: {
+      id: "hb-1",
+      status: "healthy",
+      reported_at_unix: 200,
+      observed_at_unix: 201,
+    },
     telemetry_event_count: 4,
     artifact_count: 2,
     checkpoint_count: 3,
@@ -141,16 +146,11 @@ describe("SelfHostedWorkerDetailPage", () => {
 
     await screen.findByRole("heading", { name: "edge-runner-01" });
     await user.click(screen.getByRole("button", { name: "Rotate identity" }));
-    await user.type(
-      screen.getByLabelText("New identity fingerprint"),
-      "sha256:new-rotated-fp",
-    );
+    await user.type(screen.getByLabelText("New identity fingerprint"), "sha256:new-rotated-fp");
     await user.click(screen.getByRole("button", { name: "Rotate" }));
 
     expect(await screen.findByText("Identity rotated")).toBeInTheDocument();
-    expect(screen.getByTestId("revealed-credential")).toHaveTextContent(
-      "sha256:new-rotated-fp",
-    );
+    expect(screen.getByTestId("revealed-credential")).toHaveTextContent("sha256:new-rotated-fp");
     expect(
       screen.getByText("This value will not be shown again. Store it somewhere safe."),
     ).toBeInTheDocument();

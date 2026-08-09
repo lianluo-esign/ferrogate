@@ -1,11 +1,7 @@
 import { installAuthenticatedAdminApi } from "./support/admin-api";
 import { installGatewayAssets } from "./support/gateway-assets";
 import { chooseTheme } from "./support/theme";
-import {
-  expect,
-  expectNoAxeViolations,
-  test,
-} from "./support/ui-contract";
+import { expect, expectNoAxeViolations, test } from "./support/ui-contract";
 
 test.beforeEach(async ({ page }) => {
   await installAuthenticatedAdminApi(page);

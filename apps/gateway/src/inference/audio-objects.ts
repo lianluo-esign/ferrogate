@@ -48,18 +48,11 @@
  * `quarantined` is NOT transcribable. Reading around the scan gate would have
  * made #366 decorative — upload the file, get it flagged, transcribe it anyway.
  */
-import {
-  assertKeyBelongsToTenant,
-  CrossTenantKeyError,
-  storedAssetId,
-} from "../assets/keys.js";
-import {
-  isDownloadable,
-  type AssetMetadataStore,
-  type AssetObjectStore,
-} from "../assets/ports.js";
+
 import { assetMetadataStoreFromEnv } from "../assets/d1.js";
-import { reject, type InferenceRejection } from "./errors.js";
+import { CrossTenantKeyError, assertKeyBelongsToTenant, storedAssetId } from "../assets/keys.js";
+import { type AssetMetadataStore, type AssetObjectStore, isDownloadable } from "../assets/ports.js";
+import { type InferenceRejection, reject } from "./errors.js";
 import type { AudioUploadFile } from "./schemas.js";
 
 /**
@@ -281,7 +274,7 @@ export interface AudioObjectBindings {
  * binding answers {@link NO_AUDIO_OBJECTS} — 503, fail closed.
  */
 export function audioObjectsFromEnv(env: Record<string, unknown>): AudioObjectSource {
-  const objects = env["ASSETS"];
+  const objects = env.ASSETS;
   const metadata = assetMetadataStoreFromEnv(env);
   if (metadata === null || !isAssetObjectStore(objects)) {
     return NO_AUDIO_OBJECTS;

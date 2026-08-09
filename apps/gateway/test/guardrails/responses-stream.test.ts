@@ -138,8 +138,8 @@ function payload(sse: string, event: string): Record<string, unknown> | undefine
 /** `response.output[0].content[0].text` off a `response.completed` payload. */
 function completedText(sse: string): string | undefined {
   const body = payload(sse, "response.completed");
-  const response = body?.["response"] as Record<string, unknown> | undefined;
-  const output = response?.["output"] as Array<{ content?: Array<{ text?: unknown }> }> | undefined;
+  const response = body?.response as Record<string, unknown> | undefined;
+  const output = response?.output as Array<{ content?: Array<{ text?: unknown }> }> | undefined;
   const text = output?.[0]?.content?.[0]?.text;
   return typeof text === "string" ? text : undefined;
 }
@@ -167,9 +167,9 @@ describe("the terminal response.completed frame is screened (#778)", () => {
       "[DONE]",
     ]);
     expect(completedText(out)).toBe("here is the answer [REDACTED] done");
-    const response = payload(out, "response.completed")?.["response"] as Record<string, unknown>;
-    expect(response["id"]).toBe("resp_778");
-    expect(response["usage"]).toEqual({ input_tokens: 3, output_tokens: 9, total_tokens: 12 });
+    const response = payload(out, "response.completed")?.response as Record<string, unknown>;
+    expect(response.id).toBe("resp_778");
+    expect(response.usage).toEqual({ input_tokens: 3, output_tokens: 9, total_tokens: 12 });
     expect(outcome()?.kind).toBe("redacted");
   });
 
@@ -246,7 +246,7 @@ describe("the terminal response.completed frame is screened (#778)", () => {
     // The replacement lands ONCE, in the first position the finding touched,
     // and the straddled range is removed from the second — not duplicated into
     // both, and not left behind in either.
-    const response = payload(out, "response.completed")?.["response"] as {
+    const response = payload(out, "response.completed")?.response as {
       output: Array<{ content: Array<{ text: string }> }>;
     };
     expect(response.output[0]?.content.map((part) => part.text)).toEqual([
@@ -286,7 +286,7 @@ describe("the sibling frames on this protocol (#778)", () => {
     ]);
     const out = await text;
     expect(out).not.toContain(PROBE_SECRET);
-    expect(payload(out, "response.output_text.done")?.["text"]).toBe("all of it [REDACTED]");
+    expect(payload(out, "response.output_text.done")?.text).toBe("all of it [REDACTED]");
   });
 
   test("tool-call arguments are screened on this dialect, as they are on openai.chat", async () => {
@@ -302,7 +302,7 @@ describe("the sibling frames on this protocol (#778)", () => {
     ]);
     const out = await text;
     expect(out).not.toContain(PROBE_SECRET);
-    expect(payload(out, "response.function_call_arguments.delta")?.["delta"]).toBe(
+    expect(payload(out, "response.function_call_arguments.delta")?.delta).toBe(
       '{"key":"[REDACTED]"}',
     );
   });
@@ -319,10 +319,10 @@ describe("the sibling frames on this protocol (#778)", () => {
     const out = await text;
     expect(out).not.toContain(PROBE_SECRET);
     const body = payload(out, "response.function_call_arguments.done");
-    expect(body?.["arguments"]).toBe('{"key":"[REDACTED]"}');
+    expect(body?.arguments).toBe('{"key":"[REDACTED]"}');
     // The routing members a client needs to attribute the call survive.
-    expect(body?.["call_id"]).toBe("call_1");
-    expect(body?.["name"]).toBe("search");
+    expect(body?.call_id).toBe("call_1");
+    expect(body?.name).toBe("search");
   });
 
   test("response.output_item.done carries a whole item and is screened", async () => {

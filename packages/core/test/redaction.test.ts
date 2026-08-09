@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  SECRET_SHAPED_KEY_FRAGMENTS,
   hasSecretShapedKey,
   isSecretShapedKey,
   redactSecretShapedKeys,
-  SECRET_SHAPED_KEY_FRAGMENTS,
   secretShapedKeyPaths,
 } from "../src/index";
 

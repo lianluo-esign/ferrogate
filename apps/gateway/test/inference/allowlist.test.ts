@@ -100,12 +100,9 @@ describe("callerFromAuth carries the credential's model allowlist", () => {
     expect(callerCanUseModel(restricted, "fast-chat")).toBe(true);
     expect(callerCanUseModel(restricted, "smart-chat")).toBe(false);
     // Deny wins even over an allowlist that names the model.
-    expect(
-      callerCanUseModel(
-        { ...restricted, deniedModels: ["fast-chat"] },
-        "fast-chat",
-      ),
-    ).toBe(false);
+    expect(callerCanUseModel({ ...restricted, deniedModels: ["fast-chat"] }, "fast-chat")).toBe(
+      false,
+    );
   });
 });
 

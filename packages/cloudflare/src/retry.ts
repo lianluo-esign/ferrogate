@@ -69,7 +69,10 @@ export function backoffDelayMs(
   // `2 ** attempt` becomes Infinity past ~1024; Math.min collapses that to the
   // cap, and the cap is what every large attempt should yield anyway.
   const exponential = policy.baseBackoffMs * 2 ** attempt;
-  return Math.min(Number.isFinite(exponential) ? exponential : policy.maxBackoffMs, policy.maxBackoffMs);
+  return Math.min(
+    Number.isFinite(exponential) ? exponential : policy.maxBackoffMs,
+    policy.maxBackoffMs,
+  );
 }
 
 /** The sleep seam. Injecting a fake clock lets tests assert the schedule. */

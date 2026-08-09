@@ -1,9 +1,5 @@
+import { ShadowBudgetLedger, canarySelected, shadowSampled } from "@ferrogate/routing";
 import { describe, expect, test } from "vitest";
-import {
-  ShadowBudgetLedger,
-  canarySelected,
-  shadowSampled,
-} from "@ferrogate/routing";
 
 // Ports of ferrogate-routing::rollout::tests, plus TS-specific edges.
 

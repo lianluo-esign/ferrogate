@@ -28,11 +28,7 @@
 import { SELF, env } from "cloudflare:test";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 
-import {
-  type ProviderInterceptor,
-  interceptProviderFetch,
-  providerJson,
-} from "./provider-mock.js";
+import { type ProviderInterceptor, interceptProviderFetch, providerJson } from "./provider-mock.js";
 
 const BASE = "https://gw.test";
 
@@ -188,7 +184,7 @@ describe("#672 — the DEPLOYED adapter path applies Cloudflare AI Gateway routi
     const response = await chat("aig-chat", completion("gpt-4o-mini"));
     expect(response.status).toBe(200);
 
-    const sent = provider!.lastRequest();
+    const sent = (provider as NonNullable<typeof provider>).lastRequest();
     expect(sent.url).toBe(
       `https://gateway.ai.cloudflare.com/v1/${ACCOUNT_ID}/${GATEWAY_ID}/openai/chat/completions`,
     );
@@ -204,7 +200,7 @@ describe("#672 — the DEPLOYED adapter path applies Cloudflare AI Gateway routi
     const response = await chat("aig-claude", anthropicMessage());
     expect(response.status).toBe(200);
 
-    const sent = provider!.lastRequest();
+    const sent = (provider as NonNullable<typeof provider>).lastRequest();
     expect(sent.url).toBe(
       `https://gateway.ai.cloudflare.com/v1/${ACCOUNT_ID}/${GATEWAY_ID}/anthropic/v1/messages`,
     );
@@ -238,7 +234,7 @@ describe("#672 — the DEPLOYED adapter path applies Cloudflare AI Gateway routi
     const response = await chat("aig-unified", completion("gpt-4o-mini"));
     expect(response.status).toBe(200);
 
-    const sent = provider!.lastRequest();
+    const sent = (provider as NonNullable<typeof provider>).lastRequest();
     expect(sent.url).toBe(
       `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/ai/v1/chat/completions`,
     );
@@ -252,7 +248,7 @@ describe("#672 — the DEPLOYED adapter path applies Cloudflare AI Gateway routi
     const response = await chat("direct-chat", completion("gpt-4o-mini"));
     expect(response.status).toBe(200);
 
-    const sent = provider!.lastRequest();
+    const sent = (provider as NonNullable<typeof provider>).lastRequest();
     expect(sent.url).toBe(`${OPENAI_UPSTREAM}/chat/completions`);
     expect(sent.headers["cf-aig-authorization"]).toBeUndefined();
     expect(sent.headers["cf-aig-gateway-id"]).toBeUndefined();

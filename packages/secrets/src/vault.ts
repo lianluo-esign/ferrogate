@@ -122,9 +122,7 @@ export class VaultSecretResolver implements SecretResolver {
       data?: { data?: Record<string, unknown> };
     };
     if (Array.isArray(root.errors) && root.errors.length > 0) {
-      throw new Error(
-        `Vault returned errors for ${mount}/${path}: ${JSON.stringify(root.errors)}`,
-      );
+      throw new Error(`Vault returned errors for ${mount}/${path}: ${JSON.stringify(root.errors)}`);
     }
     const value = root.data?.data?.[field];
     return typeof value === "string" ? value : null;

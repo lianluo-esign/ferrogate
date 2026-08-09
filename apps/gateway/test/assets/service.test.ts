@@ -24,7 +24,7 @@ import {
   InMemoryAssetObjectStore,
   type StoredAsset,
 } from "../../src/assets/ports.js";
-import { ScannerBackedScreener, type AssetContentScanner } from "../../src/assets/scan.js";
+import { type AssetContentScanner, ScannerBackedScreener } from "../../src/assets/scan.js";
 import { SignatureVerifyingScreener } from "../../src/assets/signature-screener.js";
 import { PublisherKeyRegistry } from "../../src/assets/signature.js";
 import { buildTar, gzip } from "./archives.js";
@@ -596,7 +596,8 @@ describe("presigned upload lifecycle (#259/#368)", () => {
   });
 
   test("a streamed EICAR signature is detected across body chunks", async () => {
-    const eicar = "prefix X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H* suffix";
+    const eicar =
+      "prefix X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H* suffix";
     const objects = new StreamingCommitObjectStore(7);
     const h = harness({ objects, limits: { inlineMaxBytes: 4 } });
     const { result, sha256, size } = await intentFor(h, eicar, A, "3.0.1");

@@ -194,6 +194,7 @@ export class FerroGateMcpSession extends DurableObject {
       };
       // `last_error = None`: an exact delete, not `undefined`, so the record
       // does not carry a stale failure past a recovery.
+      // biome-ignore lint/performance/noDelete: removes the own-property key entirely; assigning undefined would leave an enumerable undefined-valued key and change JSON serialization, the 'in' operator, and Object.keys semantics
       delete next.lastError;
       await this.ctx.storage.put(STATE_KEY, next);
       return next;
@@ -225,6 +226,7 @@ export class FerroGateMcpSession extends DurableObject {
           policy.maxReconnectBackoffSecs,
         ),
       };
+      // biome-ignore lint/performance/noDelete: removes the own-property key entirely; assigning undefined would leave an enumerable undefined-valued key and change JSON serialization, the 'in' operator, and Object.keys semantics
       delete next.negotiation;
       await this.ctx.storage.put(STATE_KEY, next);
       return next;

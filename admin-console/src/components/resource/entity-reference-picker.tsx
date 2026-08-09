@@ -1,6 +1,3 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { keepPreviousData, useInfiniteQuery, useQueries } from "@tanstack/react-query";
-import { Check, ChevronsUpDown, Copy, LoaderCircle, Search, X } from "lucide-react";
 import { AsyncStatus } from "@/components/ui/async-status";
 import { Badge, badgeVariants } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -14,14 +11,17 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { useAuth } from "@/hooks/use-auth";
+import { useI18n } from "@/i18n";
 import {
+  type EntityReferenceOption,
   hydrateEntityReference,
   loadEntityReferencePage,
-  type EntityReferenceOption,
 } from "@/lib/entity-reference-registry";
 import type { EntityReferenceConfig } from "@/lib/resource-config";
-import { useI18n } from "@/i18n";
 import { cn } from "@/lib/utils";
+import { keepPreviousData, useInfiniteQuery, useQueries } from "@tanstack/react-query";
+import { Check, ChevronsUpDown, Copy, LoaderCircle, Search, X } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 interface EntityReferencePickerProps {
   id: string;
@@ -49,7 +49,14 @@ function useDebouncedValue(value: string, delayMs: number): string {
 function normalizedValues(value: unknown, multiple: boolean): string[] {
   if (multiple) {
     return Array.isArray(value)
-      ? [...new Set(value.map(String).map((item) => item.trim()).filter(Boolean))]
+      ? [
+          ...new Set(
+            value
+              .map(String)
+              .map((item) => item.trim())
+              .filter(Boolean),
+          ),
+        ]
       : [];
   }
   const single = typeof value === "string" ? value.trim() : "";
@@ -81,7 +88,7 @@ export function EntityReferencePicker({
   onChange,
 }: EntityReferencePickerProps) {
   const { session } = useAuth();
-  const apiKey = session!.gatewayApiKey;
+  const apiKey = (session as NonNullable<typeof session>).gatewayApiKey;
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
@@ -91,17 +98,14 @@ export function EntityReferencePicker({
   const selectedValues = useMemo(() => normalizedValues(value, multiple), [multiple, value]);
   const selectedValuesRef = useRef(selectedValues);
   selectedValuesRef.current = selectedValues;
-  const filters = useMemo(
-    () => {
-      const next: Record<string, string> = {};
-      for (const dependency of reference.dependencies ?? []) {
-        const dependencyValue = String(dependencyValues[dependency.field] ?? "").trim();
-        if (dependencyValue) next[dependency.queryKey] = dependencyValue;
-      }
-      return next;
-    },
-    [dependencyValues, reference.dependencies],
-  );
+  const filters = useMemo(() => {
+    const next: Record<string, string> = {};
+    for (const dependency of reference.dependencies ?? []) {
+      const dependencyValue = String(dependencyValues[dependency.field] ?? "").trim();
+      if (dependencyValue) next[dependency.queryKey] = dependencyValue;
+    }
+    return next;
+  }, [dependencyValues, reference.dependencies]);
   const missingDependency = (reference.dependencies ?? []).find(
     (dependency) => !String(dependencyValues[dependency.field] ?? "").trim(),
   );
@@ -120,13 +124,7 @@ export function EntityReferencePicker({
 
   const selectedQueries = useQueries({
     queries: selectedValues.map((selectedValue) => ({
-      queryKey: [
-        "entity-reference",
-        "hydrate",
-        referenceKey,
-        filtersKey,
-        selectedValue,
-      ],
+      queryKey: ["entity-reference", "hydrate", referenceKey, filtersKey, selectedValue],
       queryFn: ({ signal }) =>
         hydrateEntityReference(apiKey, reference, selectedValue, filters, signal),
       staleTime: 60_000,
@@ -134,13 +132,7 @@ export function EntityReferencePicker({
   });
 
   const listQuery = useInfiniteQuery({
-    queryKey: [
-      "entity-reference",
-      "list",
-      referenceKey,
-      filtersKey,
-      debouncedSearch,
-    ],
+    queryKey: ["entity-reference", "list", referenceKey, filtersKey, debouncedSearch],
     queryFn: ({ pageParam, signal }) =>
       loadEntityReferencePage(apiKey, reference, {
         search: debouncedSearch,
@@ -211,7 +203,7 @@ export function EntityReferencePicker({
   const listboxId = `${id}-options`;
   const dialogId = `${id}-picker`;
   const dependencyLabel = missingDependency
-    ? missingDependency.label ?? missingDependency.field.replaceAll("_", " ")
+    ? (missingDependency.label ?? missingDependency.field.replaceAll("_", " "))
     : undefined;
 
   return (
@@ -222,6 +214,7 @@ export function EntityReferencePicker({
             id={id}
             type="button"
             variant="outline"
+            // biome-ignore lint/a11y/useSemanticElements: this is the trigger of a custom async-search combobox rendered in a dialog; a native <select> cannot host the styled popover, so the ARIA combobox role on the button is intentional
             role="combobox"
             aria-controls={dialogId}
             aria-expanded={open}
@@ -229,11 +222,14 @@ export function EntityReferencePicker({
             disabled={Boolean(missingDependency)}
             className="h-auto min-h-10 w-full justify-between gap-2 px-3 py-2 font-normal"
           >
-            <span className={cn("truncate", selectedValues.length === 0 && "text-muted-foreground")}>
+            <span
+              className={cn("truncate", selectedValues.length === 0 && "text-muted-foreground")}
+            >
               {missingDependency
                 ? t("resource.picker.selectDependencyFirst", { name: dependencyLabel ?? "" })
                 : selectedValues.length === 0
-                  ? placeholder ?? t("resource.picker.selectPlaceholder", { label: label.toLowerCase() })
+                  ? (placeholder ??
+                    t("resource.picker.selectPlaceholder", { label: label.toLowerCase() }))
                   : multiple
                     ? t("common.selected", { count: selectedValues.length })
                     : selectedOptions[0]?.primaryLabel}
@@ -241,7 +237,10 @@ export function EntityReferencePicker({
             <ChevronsUpDown className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
           </Button>
         </DialogTrigger>
-        <DialogContent id={dialogId} className="max-h-[min(42rem,calc(100vh-2rem))] w-[calc(100%-2rem)] gap-3 overflow-hidden p-4 sm:max-w-xl sm:p-6">
+        <DialogContent
+          id={dialogId}
+          className="max-h-[min(42rem,calc(100vh-2rem))] w-[calc(100%-2rem)] gap-3 overflow-hidden p-4 sm:max-w-xl sm:p-6"
+        >
           <DialogHeader>
             <DialogTitle>{t("resource.picker.dialogTitle", { label })}</DialogTitle>
             <DialogDescription className="sr-only">
@@ -249,7 +248,10 @@ export function EntityReferencePicker({
             </DialogDescription>
           </DialogHeader>
           <div className="relative">
-            <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
+            <Search
+              className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground"
+              aria-hidden="true"
+            />
             <Input
               autoFocus
               type="search"
@@ -269,16 +271,22 @@ export function EntityReferencePicker({
               aria-controls={listboxId}
             />
           </div>
+          {/* biome-ignore lint/a11y/useFocusableInteractive: the listbox is a scroll container whose focusable children are the option buttons, so the container itself is deliberately not a tab stop */}
           <div
             ref={listboxRef}
             id={listboxId}
+            // biome-ignore lint/a11y/useSemanticElements: a custom async-search listbox — a native <select> cannot render these richly-styled async option rows
             role="listbox"
             aria-label={t("resource.picker.optionsLabel", { label })}
             aria-multiselectable={multiple || undefined}
             className="min-h-40 flex-1 overflow-y-auto rounded-md border p-1"
           >
             {listQuery.isPending ? (
-              <div className="flex min-h-40 items-center justify-center gap-2 text-sm text-muted-foreground" role="status">
+              <div
+                className="flex min-h-40 items-center justify-center gap-2 text-sm text-muted-foreground"
+                // biome-ignore lint/a11y/useSemanticElements: ARIA live region for async loading; the flex layout classes here assume a div, which <output>'s inline default would break
+                role="status"
+              >
                 <LoaderCircle className="size-4 animate-spin" aria-hidden="true" />
                 {t("resource.table.loading")}
               </div>
@@ -287,12 +295,21 @@ export function EntityReferencePicker({
                 <AsyncStatus tone="error">
                   {t("resource.picker.loadError", { message: listQuery.error.message })}
                 </AsyncStatus>
-                <Button type="button" variant="outline" size="sm" onClick={() => listQuery.refetch()}>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => listQuery.refetch()}
+                >
                   {t("resource.action.retry")}
                 </Button>
               </div>
             ) : options.length === 0 ? (
-              <p className="flex min-h-40 items-center justify-center text-sm text-muted-foreground" role="status">
+              <p
+                className="flex min-h-40 items-center justify-center text-sm text-muted-foreground"
+                // biome-ignore lint/a11y/useSemanticElements: ARIA live region for the empty-results message; the flex layout classes assume a block <p>, which <output>'s inline default would break
+                role="status"
+              >
                 {t("resource.picker.noMatches")}
               </p>
             ) : (
@@ -306,6 +323,7 @@ export function EntityReferencePicker({
                       else optionRefs.current.delete(option.value);
                     }}
                     type="button"
+                    // biome-ignore lint/a11y/useSemanticElements: an option row inside the custom listbox above; a native <option> cannot be a focusable, richly-styled button, so the ARIA option role is intentional
                     role="option"
                     aria-selected={selected}
                     // #340 box 5: a disabled/suspended target stays listed (so an
@@ -328,7 +346,10 @@ export function EntityReferencePicker({
                     }}
                     className="flex min-h-11 w-full items-center gap-3 rounded-sm px-3 py-2 text-left text-sm outline-none hover:bg-accent focus-visible:bg-accent focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-transparent"
                   >
-                    <Check className={cn("size-4 shrink-0", selected ? "opacity-100" : "opacity-0")} aria-hidden="true" />
+                    <Check
+                      className={cn("size-4 shrink-0", selected ? "opacity-100" : "opacity-0")}
+                      aria-hidden="true"
+                    />
                     <span className="min-w-0 flex-1">
                       <span className="flex items-center gap-2">
                         <span className="truncate font-medium">{option.primaryLabel}</span>
@@ -350,9 +371,14 @@ export function EntityReferencePicker({
               })
             )}
           </div>
-          {reference.allowRawValue && search.trim() && !options.some((option) => option.value === search.trim()) ? (
+          {reference.allowRawValue &&
+          search.trim() &&
+          !options.some((option) => option.value === search.trim()) ? (
             <Button type="button" variant="outline" onClick={() => selectOption(search.trim())}>
-              {t("resource.picker.useExactId")} <code className="ml-1 max-w-52 truncate" translate="no">{search.trim()}</code>
+              {t("resource.picker.useExactId")}{" "}
+              <code className="ml-1 max-w-52 truncate" translate="no">
+                {search.trim()}
+              </code>
             </Button>
           ) : null}
           {listQuery.hasNextPage ? (
@@ -362,7 +388,9 @@ export function EntityReferencePicker({
               disabled={listQuery.isFetchingNextPage}
               onClick={() => listQuery.fetchNextPage()}
             >
-              {listQuery.isFetchingNextPage ? t("resource.table.loading") : t("resource.action.loadMore")}
+              {listQuery.isFetchingNextPage
+                ? t("resource.table.loading")
+                : t("resource.action.loadMore")}
             </Button>
           ) : null}
         </DialogContent>
@@ -371,7 +399,10 @@ export function EntityReferencePicker({
       {selectedOptions.length > 0 ? (
         <ul className="grid gap-1" aria-label={t("resource.picker.selectedLabel", { label })}>
           {selectedOptions.map((option) => (
-            <li key={option.value} className="flex min-w-0 items-center gap-2 rounded-md border px-2 py-1.5 text-sm">
+            <li
+              key={option.value}
+              className="flex min-w-0 items-center gap-2 rounded-md border px-2 py-1.5 text-sm"
+            >
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2">
                   <span className="truncate font-medium">{option.primaryLabel}</span>

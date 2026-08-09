@@ -37,7 +37,6 @@
  * single-tenant deploys, so it is still worth its coverage.
  */
 import { SELF, env } from "cloudflare:test";
-import { controlNamespace } from "../support/control-namespace.js";
 import { DurableObjectTenantDatabaseRouter } from "@ferrogate/storage";
 import type { MiddlewareHandler } from "hono";
 import { afterEach, beforeAll, beforeEach, describe, expect, test } from "vitest";
@@ -68,6 +67,7 @@ import { createGatewayApp } from "../../src/routes/index.js";
 import { tenantDatabase } from "../../src/tenancy/index.js";
 import { ALL_ROUTES, errorBody, fixedRequestIds } from "../inference/fixtures.js";
 import { interceptProviderFetch, providerJson } from "../inference/provider-mock.js";
+import { controlNamespace } from "../support/control-namespace.js";
 
 const db = (env as unknown as { DB: D1Database }).DB;
 const vars = env as unknown as Record<string, string | undefined>;

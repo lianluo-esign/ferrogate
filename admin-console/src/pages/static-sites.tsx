@@ -1,3 +1,71 @@
+import {
+  SiteDomainChallenge,
+  SiteDomainLiveness,
+  bindAcmeNoteKey,
+} from "@/components/site-domain-liveness";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetFooter,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet";
+import { Switch } from "@/components/ui/switch";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { useAuth } from "@/hooks/use-auth";
+import { useOperatorError } from "@/hooks/use-operator-error";
+import { useI18n } from "@/i18n";
+import { APP_ROUTES } from "@/lib/app-routes";
+import { GATEWAY_BASE_URL } from "@/lib/config";
+import {
+  type AdminSchema,
+  type HeaderParamsFor,
+  type OpFor,
+  type PathParamsFor,
+  adminDelete,
+  adminGet,
+  adminPost,
+  gatewayGet,
+  gatewayGetBinary,
+  gatewayPut,
+  resolveAdminPath,
+} from "@/lib/gateway-client";
+import { validateSiteDomainHostname } from "@/lib/hostname";
+import { LocalizedError } from "@/lib/localized-error";
+import { readsAsZipArchive } from "@/lib/zip-archive";
+import { ApiError, type ApiErrorBody } from "@/types/auth";
+import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 // Static-site management surface (issue #345, parent #295). Static sites are
 // published as `static_site`-typed ZIP bundles (PUT /v1/assets/static_site/
 // {site}/{version}) that the gateway unpacks into per-file objects plus a
@@ -67,87 +135,8 @@
 // that structural check keeps legacy path-keyed file rows (pre-#397, whose
 // `version` IS a bare file path) out of the history list.
 import { useCallback, useMemo, useRef, useState } from "react";
-import {
-  useMutation,
-  useQueries,
-  useQuery,
-  useQueryClient,
-} from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import {
-  bindAcmeNoteKey,
-  SiteDomainChallenge,
-  SiteDomainLiveness,
-} from "@/components/site-domain-liveness";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import {
-  Sheet,
-  SheetContent,
-  SheetDescription,
-  SheetFooter,
-  SheetHeader,
-  SheetTitle,
-} from "@/components/ui/sheet";
-import { Switch } from "@/components/ui/switch";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
-import { useAuth } from "@/hooks/use-auth";
-import { useI18n } from "@/i18n";
-import { LocalizedError } from "@/lib/localized-error";
-import { useOperatorError } from "@/hooks/use-operator-error";
-import { APP_ROUTES } from "@/lib/app-routes";
-import { GATEWAY_BASE_URL } from "@/lib/config";
-import {
-  adminDelete,
-  adminGet,
-  adminPost,
-  type AdminSchema,
-  gatewayGet,
-  gatewayGetBinary,
-  gatewayPut,
-  type HeaderParamsFor,
-  type OpFor,
-  type PathParamsFor,
-  resolveAdminPath,
-} from "@/lib/gateway-client";
-import { validateSiteDomainHostname } from "@/lib/hostname";
-import { readsAsZipArchive } from "@/lib/zip-archive";
-import { ApiError, type ApiErrorBody } from "@/types/auth";
 
 type SiteDomain = AdminSchema<"AdminSiteDomain">;
 type AssetSummary = AdminSchema<"AssetSummary">;
@@ -184,10 +173,7 @@ const SITE_SERVE_CHANNEL = "serving";
  * (the mutable manifest marker and the per-file bundle objects), so history
  * lists only real bundle versions. */
 function isReservedSiteVersion(version: string): boolean {
-  return (
-    version === SITE_MANIFEST_VERSION ||
-    version.startsWith(`${SITE_FILE_VERSION_PREFIX}:`)
-  );
+  return version === SITE_MANIFEST_VERSION || version.startsWith(`${SITE_FILE_VERSION_PREFIX}:`);
 }
 
 /** The set of bundle versions that have retained per-file objects, extracted
@@ -380,15 +366,10 @@ function siteObjectPath(site: string, versionOrPath: string): string {
  * The gateway serves a manifest row as its stored JSON body, so a plain JSON GET
  * parses it regardless of the stored content type.
  */
-async function fetchActiveSiteBundle(
-  apiKey: string,
-  site: string,
-): Promise<ActiveSiteBundle> {
-  const registry = await adminGet(
-    apiKey,
-    "/v1/assets/{asset_type}/{name}/manifest",
-    { params: { asset_type: STATIC_SITE_TYPE, name: site } },
-  );
+async function fetchActiveSiteBundle(apiKey: string, site: string): Promise<ActiveSiteBundle> {
+  const registry = await adminGet(apiKey, "/v1/assets/{asset_type}/{name}/manifest", {
+    params: { asset_type: STATIC_SITE_TYPE, name: site },
+  });
   const servingVersion = registry.channels.find(
     (channel) => channel.channel === SITE_SERVE_CHANNEL,
   )?.version;
@@ -458,8 +439,7 @@ function rollbackErrorMessage(
   version: string,
 ): string {
   if (error instanceof ApiError) {
-    if (error.status === 404)
-      return t("page.staticSites.rollback.notFound", { version });
+    if (error.status === 404) return t("page.staticSites.rollback.notFound", { version });
     if (error.status === 409 || error.status === 400)
       return t("page.staticSites.rollback.unresolvable", { version });
   }
@@ -528,9 +508,7 @@ async function explainUncommittedPublish(
         limit: WITHHELD_LOOKUP_LIMIT,
       },
     });
-    withheld = listing.data.find(
-      (row) => row.name === site && row.version === version,
-    );
+    withheld = listing.data.find((row) => row.name === site && row.version === version);
     // `total` is the pre-pagination count; the gateway clamps `limit` to
     // `storage.admin_list_max_limit`, so asking for the max is not a promise of
     // getting it. Fewer rows than `total` means rows we never saw.
@@ -603,8 +581,7 @@ function putBundleWithProgress<T>(
         ),
       );
     };
-    xhr.onerror = () =>
-      reject(new ApiError(0, "network_error", "network request failed"));
+    xhr.onerror = () => reject(new ApiError(0, "network_error", "network request failed"));
     xhr.send(body);
   });
 }
@@ -642,10 +619,7 @@ function SiteDetailSheet({
   const queryClient = useQueryClient();
   const manifest = row?.manifest;
   const files = useMemo(
-    () =>
-      manifest
-        ? [...manifest.files].sort((a, b) => a.path.localeCompare(b.path))
-        : [],
+    () => (manifest ? [...manifest.files].sort((a, b) => a.path.localeCompare(b.path)) : []),
     [manifest],
   );
 
@@ -664,8 +638,7 @@ function SiteDetailSheet({
   // The history is unavailable only when the REGISTRY itself could not be read;
   // a failed served-bundle manifest leaves the retained versions perfectly
   // knowable (and is what lets an operator still purge such a site).
-  const registryError =
-    row !== null && row.registry === undefined ? row.manifestError : undefined;
+  const registryError = row !== null && row.registry === undefined ? row.manifestError : undefined;
   const servingVersion = row?.servingVersion;
 
   // Publish time per bundle version, from the tenant asset listing rows.
@@ -682,10 +655,7 @@ function SiteDetailSheet({
     if (!registry) return [];
     const retained = retainedBundleVersions(registry);
     return registry.versions
-      .filter(
-        (entry) =>
-          !isReservedSiteVersion(entry.version) && retained.has(entry.version),
-      )
+      .filter((entry) => !isReservedSiteVersion(entry.version) && retained.has(entry.version))
       .map((entry) => ({
         version: entry.version,
         yanked: entry.yanked,
@@ -710,21 +680,25 @@ function SiteDetailSheet({
     mutationFn: (version: string) =>
       gatewayPut<AssetChannelMutationResponse>(
         apiKey,
-        serveChannelPath(row!.name, version),
+        serveChannelPath((row as NonNullable<typeof row>).name, version),
       ),
     onSuccess: (_result, version) => {
       toast.success(
-        t("page.staticSites.rollback.success", { site: row!.name, version }),
+        t("page.staticSites.rollback.success", {
+          site: (row as NonNullable<typeof row>).name,
+          version,
+        }),
       );
       setRollbackVersion(null);
       // The served version changed: re-resolve the active bundle (channel
       // pointer AND the served bundle's manifest, which is now a DIFFERENT row)
       // plus the tenant asset listing, so the list and drawer both re-derive.
-      queryClient.invalidateQueries({ queryKey: siteBundleQueryKey(row!.name) });
+      queryClient.invalidateQueries({
+        queryKey: siteBundleQueryKey((row as NonNullable<typeof row>).name),
+      });
       queryClient.invalidateQueries({ queryKey: ASSETS_QUERY_KEY });
     },
-    onError: (error: unknown, version) =>
-      toast.error(rollbackErrorMessage(t, error, version)),
+    onError: (error: unknown, version) => toast.error(rollbackErrorMessage(t, error, version)),
   });
 
   // Custom-domain binding, integrated into THIS site's context (#345/#265).
@@ -788,8 +762,7 @@ function SiteDetailSheet({
         ? undefined
         : certificate === "active" || certificate === "issued_not_routing",
       serving: detail?.site_domain.serving ?? domain.serving,
-      verificationState:
-        detail?.site_domain.verification_state ?? domain.verification_state,
+      verificationState: detail?.site_domain.verification_state ?? domain.verification_state,
     };
   }
   // The TXT records still to be published. Only a pending binding has one to
@@ -810,7 +783,7 @@ function SiteDetailSheet({
       adminPost(apiKey, "/admin/v1/site-domains", {
         hostname,
         tenant_id: tenantId,
-        site: row!.name,
+        site: (row as NonNullable<typeof row>).name,
       }),
     onSuccess: (response) => {
       // Qualified by THIS hostname's enrolment, not by the gateway-wide ACME
@@ -843,9 +816,7 @@ function SiteDetailSheet({
         params: { hostname: target.hostname },
       }),
     onSuccess: (_result, target) => {
-      toast.success(
-        t("page.siteDomains.toast.unbound", { hostname: target.hostname }),
-      );
+      toast.success(t("page.siteDomains.toast.unbound", { hostname: target.hostname }));
       setPendingUnbind(null);
       queryClient.invalidateQueries({ queryKey: SITE_DOMAINS_QUERY_KEY });
     },
@@ -919,16 +890,9 @@ function SiteDetailSheet({
               window.opener; the sr-only hint announces the new-tab behavior. */}
             <div>
               <Button asChild variant="outline" size="sm">
-                <a
-                  href={serveHref(row.serveUrl)}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                >
+                <a href={serveHref(row.serveUrl)} target="_blank" rel="noopener noreferrer">
                   {t("page.staticSites.serveUrl.open")}
-                  <span className="sr-only">
-                    {" "}
-                    {t("page.staticSites.serveUrl.newTabHint")}
-                  </span>
+                  <span className="sr-only"> {t("page.staticSites.serveUrl.newTabHint")}</span>
                 </a>
               </Button>
             </div>
@@ -941,14 +905,10 @@ function SiteDetailSheet({
                 {t("page.staticSites.manifestError")}
               </p>
             ) : !manifest ? (
-              <p className="text-sm text-muted-foreground">
-                {t("resource.table.loading")}
-              </p>
+              <p className="text-sm text-muted-foreground">{t("resource.table.loading")}</p>
             ) : (
               <section className="flex flex-col gap-2">
-                <h3 className="text-sm font-semibold">
-                  {t("page.staticSites.detail.files")}
-                </h3>
+                <h3 className="text-sm font-semibold">{t("page.staticSites.detail.files")}</h3>
                 <div className="rounded-md border">
                   <Table>
                     <TableHeader>
@@ -957,9 +917,7 @@ function SiteDetailSheet({
                         <TableHead>{t("page.assets.col.contentType")}</TableHead>
                         <TableHead>{t("page.assets.col.contentHash")}</TableHead>
                         <TableHead>{t("page.assets.col.size")}</TableHead>
-                        <TableHead className="w-28">
-                          {t("resource.table.actionsColumn")}
-                        </TableHead>
+                        <TableHead className="w-28">{t("resource.table.actionsColumn")}</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -1011,9 +969,7 @@ function SiteDetailSheet({
               channel resolves what serve-mode returns, so rolling it back to a
               retained prior version actually changes the served bytes (#397). */}
             <section className="flex flex-col gap-2">
-              <h3 className="text-sm font-semibold">
-                {t("page.staticSites.history.title")}
-              </h3>
+              <h3 className="text-sm font-semibold">{t("page.staticSites.history.title")}</h3>
               <p className="text-xs text-muted-foreground">
                 {t("page.staticSites.history.description")}
               </p>
@@ -1025,9 +981,7 @@ function SiteDetailSheet({
                   {t("page.staticSites.history.unavailable")}
                 </p>
               ) : registryLoading || !registry ? (
-                <p className="text-sm text-muted-foreground">
-                  {t("resource.table.loading")}
-                </p>
+                <p className="text-sm text-muted-foreground">{t("resource.table.loading")}</p>
               ) : bundleRows.length === 0 ? (
                 <p className="text-sm text-muted-foreground">
                   {t("page.staticSites.history.empty")}
@@ -1040,9 +994,7 @@ function SiteDetailSheet({
                         <TableHead>{t("page.assets.col.version")}</TableHead>
                         <TableHead>{t("page.staticSites.col.published")}</TableHead>
                         <TableHead>{t("page.staticSites.col.access")}</TableHead>
-                        <TableHead className="w-32">
-                          {t("resource.table.actionsColumn")}
-                        </TableHead>
+                        <TableHead className="w-32">{t("resource.table.actionsColumn")}</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -1108,9 +1060,7 @@ function SiteDetailSheet({
               or target an unpublished site; the ACME + reload posture returned
               by the gateway stays visible after a successful bind. */}
             <section className="flex flex-col gap-2">
-              <h3 className="text-sm font-semibold">
-                {t("page.staticSites.domains.title")}
-              </h3>
+              <h3 className="text-sm font-semibold">{t("page.staticSites.domains.title")}</h3>
               <p className="text-xs text-muted-foreground">
                 {t("page.staticSites.domains.description", { site: row.name })}
               </p>
@@ -1129,63 +1079,59 @@ function SiteDetailSheet({
                         <TableHead>{t("page.siteDomains.col.bound")}</TableHead>
                         <TableHead>{t("page.siteDomains.col.status")}</TableHead>
                         <TableHead>{t("page.staticSites.domains.acme")}</TableHead>
-                        <TableHead className="w-24">
-                          {t("resource.table.actionsColumn")}
-                        </TableHead>
+                        <TableHead className="w-24">{t("resource.table.actionsColumn")}</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
                       {row.domains.map((domain) => {
                         const liveness = livenessOf(domain);
                         return (
-                        <TableRow
-                          key={domain.hostname}
-                          data-testid={`static-site-domain-${domain.hostname}`}
-                        >
-                          <TableCell className="font-medium">
-                            {domain.hostname}
-                          </TableCell>
-                          <TableCell className="font-mono text-xs break-all">
-                            {domain.serve_path}
-                          </TableCell>
-                          <TableCell className="text-xs">
-                            {format.date(domain.created_at_unix * 1000, {
-                              dateStyle: "medium",
-                              timeStyle: "short",
-                            })}
-                          </TableCell>
-                          {/* Does this hostname actually SERVE, and if not, why?
+                          <TableRow
+                            key={domain.hostname}
+                            data-testid={`static-site-domain-${domain.hostname}`}
+                          >
+                            <TableCell className="font-medium">{domain.hostname}</TableCell>
+                            <TableCell className="font-mono text-xs break-all">
+                              {domain.serve_path}
+                            </TableCell>
+                            <TableCell className="text-xs">
+                              {format.date(domain.created_at_unix * 1000, {
+                                dateStyle: "medium",
+                                timeStyle: "short",
+                              })}
+                            </TableCell>
+                            {/* Does this hostname actually SERVE, and if not, why?
                             A bound timestamp alone says nothing: post-#488 a
                             binding is refused until its DNS ownership proof
                             resolves, so omitting this rendered an unhealthy
                             state as implicitly healthy. */}
-                          <TableCell>
-                            <SiteDomainLiveness
-                              serving={liveness.serving}
-                              verificationState={liveness.verificationState}
-                            />
-                          </TableCell>
-                          {/* Live ACME posture for THIS binding, however long
+                            <TableCell>
+                              <SiteDomainLiveness
+                                serving={liveness.serving}
+                                verificationState={liveness.verificationState}
+                              />
+                            </TableCell>
+                            {/* Live ACME posture for THIS binding, however long
                             ago it was bound. Unknown until its detail read
                             lands (or if it failed) — never a guessed posture. */}
-                          <TableCell className="text-xs">
-                            {liveness.acme === undefined
-                              ? t("common.unknown")
-                              : liveness.acme
-                                ? t("page.staticSites.acme.enabled")
-                                : t("page.staticSites.acme.disabled")}
-                          </TableCell>
-                          <TableCell>
-                            <Button
-                              type="button"
-                              variant="destructive"
-                              size="sm"
-                              onClick={() => setPendingUnbind(domain)}
-                            >
-                              {t("page.siteDomains.unbind")}
-                            </Button>
-                          </TableCell>
-                        </TableRow>
+                            <TableCell className="text-xs">
+                              {liveness.acme === undefined
+                                ? t("common.unknown")
+                                : liveness.acme
+                                  ? t("page.staticSites.acme.enabled")
+                                  : t("page.staticSites.acme.disabled")}
+                            </TableCell>
+                            <TableCell>
+                              <Button
+                                type="button"
+                                variant="destructive"
+                                size="sm"
+                                onClick={() => setPendingUnbind(domain)}
+                              >
+                                {t("page.siteDomains.unbind")}
+                              </Button>
+                            </TableCell>
+                          </TableRow>
                         );
                       })}
                     </TableBody>
@@ -1198,16 +1144,14 @@ function SiteDetailSheet({
                 "not serving" while withholding the remedy would be half an
                 answer. */}
               {pendingChallenges.map((verification) => (
-                <SiteDomainChallenge
-                  key={verification.hostname}
-                  verification={verification}
-                />
+                <SiteDomainChallenge key={verification.hostname} verification={verification} />
               ))}
 
               {/* ACME posture from the last successful bind, kept visible in the
                 drawer (an aria-live status, not just a transient toast). */}
               {bindAcmeNote ? (
                 <p
+                  // biome-ignore lint/a11y/useSemanticElements: ARIA live region for the ACME bind note; keeping the block <p> preserves layout that <output>'s inline default would change
                   role="status"
                   className="rounded-md border border-primary/40 bg-primary/5 px-3 py-2 text-xs text-muted-foreground"
                 >
@@ -1222,9 +1166,7 @@ function SiteDetailSheet({
                   submitBind();
                 }}
               >
-                <Label htmlFor="site-domain-hostname">
-                  {t("page.siteDomains.field.hostname")}
-                </Label>
+                <Label htmlFor="site-domain-hostname">{t("page.siteDomains.field.hostname")}</Label>
                 <div className="flex flex-wrap items-start gap-2">
                   <Input
                     id="site-domain-hostname"
@@ -1242,9 +1184,7 @@ function SiteDetailSheet({
                   <Button
                     type="submit"
                     disabled={
-                      bindMutation.isPending ||
-                      hostnameInvalid ||
-                      bindHostname.trim() === ""
+                      bindMutation.isPending || hostnameInvalid || bindHostname.trim() === ""
                     }
                   >
                     {bindMutation.isPending
@@ -1269,10 +1209,7 @@ function SiteDetailSheet({
                     {bindError}
                   </p>
                 ) : (
-                  <p
-                    id="site-domain-hostname-hint"
-                    className="text-xs text-muted-foreground"
-                  >
+                  <p id="site-domain-hostname-hint" className="text-xs text-muted-foreground">
                     {t("page.siteDomains.field.hostname.hint")}
                   </p>
                 )}
@@ -1298,9 +1235,7 @@ function SiteDetailSheet({
                   </AlertDialogDescription>
                 </AlertDialogHeader>
                 <AlertDialogFooter>
-                  <AlertDialogCancel>
-                    {t("resource.action.cancel")}
-                  </AlertDialogCancel>
+                  <AlertDialogCancel>{t("resource.action.cancel")}</AlertDialogCancel>
                   <AlertDialogAction
                     onClick={(event) => {
                       event.preventDefault();
@@ -1386,12 +1321,12 @@ export default function StaticSitesPage() {
   const { session } = useAuth();
   const { t, format } = useI18n();
   const { toastError } = useOperatorError();
-  const apiKey = session!.gatewayApiKey;
-  const tenantId = session!.tenant.id;
+  const apiKey = (session as NonNullable<typeof session>).gatewayApiKey;
+  const tenantId = (session as NonNullable<typeof session>).tenant.id;
   // Label for the read-only publish-target tenant: the session tenant is the
   // ONLY tenant a publish from this console can land in (the publish path
   // carries no tenant; the gateway takes it from the API key).
-  const tenantName = session!.tenant.name || tenantId;
+  const tenantName = (session as NonNullable<typeof session>).tenant.name || tenantId;
   const queryClient = useQueryClient();
 
   // The site/version selection and the open site are mirrored to the URL
@@ -1418,9 +1353,7 @@ export default function StaticSitesPage() {
 
   // Publish form state (site/version seeded from + mirrored to the URL).
   const [site, setSiteState] = useState(() => searchParams.get("site") ?? "");
-  const [version, setVersionState] = useState(
-    () => searchParams.get("version") ?? "",
-  );
+  const [version, setVersionState] = useState(() => searchParams.get("version") ?? "");
   const [isPublic, setIsPublic] = useState(false);
   const [spaFallback, setSpaFallback] = useState(false);
   const [cacheControl, setCacheControl] = useState("");
@@ -1460,8 +1393,8 @@ export default function StaticSitesPage() {
   // Detail drawer + unpublish, both keyed by site slug so they survive row
   // rebuilds (the joined rows re-derive on every manifest status change). The
   // open site is mirrored to the URL too, so a drawer is a direct link.
-  const [detailSite, setDetailSiteState] = useState<string | null>(
-    () => searchParams.get("detail"),
+  const [detailSite, setDetailSiteState] = useState<string | null>(() =>
+    searchParams.get("detail"),
   );
   const setDetailSite = useCallback(
     (value: string | null) => {
@@ -1538,6 +1471,7 @@ export default function StaticSitesPage() {
     .map((q) => `${q.status}:${q.data?.servingVersion ?? ""}`)
     .join(",");
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: bundleQueries identity changes every render, so the memo intentionally keys on the derived bundleStatusSignature instead; depending on bundleQueries[index] directly would rebuild rows on every render
   const rows = useMemo<SiteRow[]>(
     () =>
       siteNames.map((name, index) => {
@@ -1561,26 +1495,17 @@ export default function StaticSitesPage() {
           manifestLoading: query.isLoading,
           // A registry failure fails the whole resolution; a manifest-row
           // failure is carried on the result so the row keeps its registry.
-          manifestError:
-            (query.error as Error | undefined) ?? query.data?.manifestError,
+          manifestError: (query.error as Error | undefined) ?? query.data?.manifestError,
           domains,
           serveUrl,
           assetVersions: assetVersionsBySite.get(name) ?? [],
         };
       }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [
-      siteNames,
-      domainsBySite,
-      assetVersionsBySite,
-      tenantId,
-      bundleStatusSignature,
-    ],
+    [siteNames, domainsBySite, assetVersionsBySite, tenantId, bundleStatusSignature],
   );
 
-  const detailRow = detailSite
-    ? (rows.find((row) => row.name === detailSite) ?? null)
-    : null;
+  const detailRow = detailSite ? (rows.find((row) => row.name === detailSite) ?? null) : null;
   const unpublishRow = unpublishSite
     ? (rows.find((row) => row.name === unpublishSite) ?? null)
     : null;
@@ -1817,9 +1742,7 @@ export default function StaticSitesPage() {
       if (markerFailures.length > 0) halt(markerFailures);
     },
     onSuccess: (_result, variables) => {
-      toast.success(
-        t("page.staticSites.unpublish.success", { site: variables.name }),
-      );
+      toast.success(t("page.staticSites.unpublish.success", { site: variables.name }));
       queryClient.invalidateQueries({ queryKey: ASSETS_QUERY_KEY });
       queryClient.invalidateQueries({ queryKey: SITE_DOMAINS_QUERY_KEY });
       queryClient.invalidateQueries({
@@ -1870,30 +1793,23 @@ export default function StaticSitesPage() {
   // The canonical serve path the bundle WILL be reachable at — always under the
   // session tenant, because that is where the gateway files the publish.
   const serveUrlPreview = `/sites/${tenantId}/${site.trim() || "{site}"}/`;
-  const publishDisabled =
-    publishMutation.isPending || archiveChecking || archiveError !== null;
+  const publishDisabled = publishMutation.isPending || archiveChecking || archiveError !== null;
 
   const progressFraction =
-    uploadProgress && uploadProgress.total > 0
-      ? uploadProgress.loaded / uploadProgress.total
-      : 0;
+    uploadProgress && uploadProgress.total > 0 ? uploadProgress.loaded / uploadProgress.total : 0;
   const progressPercent = Math.round(progressFraction * 100);
 
   // Exact site slug the operator must retype to arm the destructive unpublish.
-  const unpublishNameMatches =
-    unpublishSite !== null && unpublishConfirm === unpublishSite;
+  const unpublishNameMatches = unpublishSite !== null && unpublishConfirm === unpublishSite;
   // …and the registry row list the purge walks must have loaded, so the action
   // can never fire a partial delete set.
-  const unpublishArmed =
-    unpublishNameMatches && unpublishRow?.registry !== undefined;
+  const unpublishArmed = unpublishNameMatches && unpublishRow?.registry !== undefined;
 
   return (
     <div className="flex flex-col gap-4">
       <div>
         <h1 className="text-lg font-semibold">{t("page.staticSites.title")}</h1>
-        <p className="text-sm text-muted-foreground">
-          {t("page.staticSites.description")}
-        </p>
+        <p className="text-sm text-muted-foreground">{t("page.staticSites.description")}</p>
       </div>
 
       <Card>
@@ -2027,13 +1943,10 @@ export default function StaticSitesPage() {
             {publishMutation.isPending ? (
               <div className="sm:col-span-2 flex flex-col gap-1.5">
                 <div className="flex items-center justify-between text-sm text-muted-foreground">
-                  <span id="site-upload-label">
-                    {t("page.staticSites.publish.uploading")}
-                  </span>
-                  <span className="font-mono text-xs">
-                    {format.percent(progressFraction)}
-                  </span>
+                  <span id="site-upload-label">{t("page.staticSites.publish.uploading")}</span>
+                  <span className="font-mono text-xs">{format.percent(progressFraction)}</span>
                 </div>
+                {/* biome-ignore lint/a11y/useFocusableInteractive: a progressbar is a non-interactive status indicator, not a tab stop */}
                 <div
                   role="progressbar"
                   aria-labelledby="site-upload-label"
@@ -2081,9 +1994,7 @@ export default function StaticSitesPage() {
                 >=lg only — the detail drawer carries them everywhere. */}
             <TableRow>
               <TableHead>{t("page.staticSites.col.site")}</TableHead>
-              <TableHead className="hidden lg:table-cell">
-                {t("page.assets.col.version")}
-              </TableHead>
+              <TableHead className="hidden lg:table-cell">{t("page.assets.col.version")}</TableHead>
               <TableHead className="hidden lg:table-cell">
                 {t("page.staticSites.col.access")}
               </TableHead>
@@ -2093,9 +2004,7 @@ export default function StaticSitesPage() {
               <TableHead className="hidden lg:table-cell">
                 {t("page.staticSites.col.files")}
               </TableHead>
-              <TableHead className="hidden lg:table-cell">
-                {t("page.assets.col.size")}
-              </TableHead>
+              <TableHead className="hidden lg:table-cell">{t("page.assets.col.size")}</TableHead>
               <TableHead className="hidden lg:table-cell">
                 {t("page.staticSites.col.published")}
               </TableHead>
@@ -2155,8 +2064,7 @@ export default function StaticSitesPage() {
                     (#458/#464/#473). */}
                   <TableCell className="hidden font-mono text-xs lg:table-cell">
                     {row.manifest
-                      ? (row.manifest.cache_control ??
-                        t("page.staticSites.cache.default"))
+                      ? (row.manifest.cache_control ?? t("page.staticSites.cache.default"))
                       : "—"}
                   </TableCell>
                   <TableCell className="hidden lg:table-cell">
@@ -2181,10 +2089,7 @@ export default function StaticSitesPage() {
                       className="text-primary underline-offset-2 hover:underline"
                     >
                       {row.serveUrl}
-                      <span className="sr-only">
-                        {" "}
-                        {t("page.staticSites.serveUrl.newTabHint")}
-                      </span>
+                      <span className="sr-only"> {t("page.staticSites.serveUrl.newTabHint")}</span>
                     </a>
                   </TableCell>
                   <TableCell>

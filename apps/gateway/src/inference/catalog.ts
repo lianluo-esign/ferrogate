@@ -422,9 +422,7 @@ interface RouteRollout {
  * primary-before-fallback ordering must not depend on.
  */
 function definedRouting<T extends object>(leg: T): T {
-  return Object.fromEntries(
-    Object.entries(leg).filter(([, value]) => value !== undefined),
-  ) as T;
+  return Object.fromEntries(Object.entries(leg).filter(([, value]) => value !== undefined)) as T;
 }
 
 /** Either the flattened routes, or the reason the whole table was refused. */
@@ -1008,9 +1006,7 @@ export function modelCatalogFromEnv(env: InferenceBindings): ModelCatalogResult 
 }
 
 /** Parse the env tables without flattening them into physical routes. */
-export function modelCatalogInputsFromEnv(
-  env: InferenceBindings,
-): ModelCatalogInputsResult {
+export function modelCatalogInputsFromEnv(env: InferenceBindings): ModelCatalogInputsResult {
   const providers = parseTable(
     typeof env.GATEWAY_PROVIDERS === "string" ? env.GATEWAY_PROVIDERS : undefined,
     providerRecordSchema,

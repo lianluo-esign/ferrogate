@@ -10,11 +10,11 @@ import { MCP_METHOD_HEADER, MCP_NAME_HEADER } from "../src/protocol.js";
 import { parseSseEvents } from "../src/transport.js";
 import {
   EXEC_KEY,
+  type Fixture,
   NO_SCOPE_KEY,
   READ_KEY,
   rpcRequest,
   seedFixture,
-  type Fixture,
 } from "./fixtures.js";
 
 let fixture: Fixture;

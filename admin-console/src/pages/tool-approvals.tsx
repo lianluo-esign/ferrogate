@@ -1,16 +1,3 @@
-// Tool-approvals action queue (issue #318): the human-in-the-loop UI over
-// /admin/v1/tool-approvals (+ /approve /deny /expire).
-//
-// Fail-closed fingerprint contract (#62): every approve/deny POST carries the
-// EXACT immutable invocation `fingerprint` from the record being actioned —
-// never re-derived, never user-editable — so the gateway can reject a decision
-// that raced a changed invocation. The target-level `action_fingerprint`
-// (#306) and the run/workflow context (#305) are displayed for correlation
-// but are never part of the decision payload.
-import { useEffect, useMemo, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { MoreHorizontal } from "lucide-react";
-import { toast } from "sonner";
 import { ResourceTable } from "@/components/resource/resource-table";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -22,21 +9,34 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Label } from "@/components/ui/label";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Label } from "@/components/ui/label";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { useAuth } from "@/hooks/use-auth";
-import { useI18n } from "@/i18n";
 import { useFormatUnix } from "@/hooks/use-format-unix";
 import { useOperatorError } from "@/hooks/use-operator-error";
-import { adminGet, adminPost, type AdminSchema } from "@/lib/gateway-client";
+import { useI18n } from "@/i18n";
+import { type AdminSchema, adminGet, adminPost } from "@/lib/gateway-client";
 import type { ColumnConfig } from "@/lib/resource-config";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { MoreHorizontal } from "lucide-react";
+// Tool-approvals action queue (issue #318): the human-in-the-loop UI over
+// /admin/v1/tool-approvals (+ /approve /deny /expire).
+//
+// Fail-closed fingerprint contract (#62): every approve/deny POST carries the
+// EXACT immutable invocation `fingerprint` from the record being actioned —
+// never re-derived, never user-editable — so the gateway can reject a decision
+// that raced a changed invocation. The target-level `action_fingerprint`
+// (#306) and the run/workflow context (#305) are displayed for correlation
+// but are never part of the decision payload.
+import { useEffect, useMemo, useState } from "react";
+import { toast } from "sonner";
 
 type ToolApprovalRecord = AdminSchema<"ToolApprovalRecord">;
 type ApprovalAction = "approve" | "deny" | "expire";
@@ -86,26 +86,11 @@ function postDecision(
   const options = { params: { approval_id: approvalId } };
   switch (action) {
     case "approve":
-      return adminPost(
-        apiKey,
-        "/admin/v1/tool-approvals/{approval_id}/approve",
-        body,
-        options,
-      );
+      return adminPost(apiKey, "/admin/v1/tool-approvals/{approval_id}/approve", body, options);
     case "deny":
-      return adminPost(
-        apiKey,
-        "/admin/v1/tool-approvals/{approval_id}/deny",
-        body,
-        options,
-      );
+      return adminPost(apiKey, "/admin/v1/tool-approvals/{approval_id}/deny", body, options);
     case "expire":
-      return adminPost(
-        apiKey,
-        "/admin/v1/tool-approvals/{approval_id}/expire",
-        body,
-        options,
-      );
+      return adminPost(apiKey, "/admin/v1/tool-approvals/{approval_id}/expire", body, options);
   }
 }
 
@@ -235,9 +220,7 @@ function ApprovalDetailDialog({
         {record ? (
           <>
             <DialogHeader>
-              <DialogTitle>
-                {t("page.toolApprovals.detail.title", { id: record.id })}
-              </DialogTitle>
+              <DialogTitle>{t("page.toolApprovals.detail.title", { id: record.id })}</DialogTitle>
               <DialogDescription>
                 {t("page.toolApprovals.detail.description", { tool: toolLabel(record) })}
               </DialogDescription>
@@ -259,10 +242,7 @@ function ApprovalDetailDialog({
                   label={t("page.toolApprovals.detail.riskReason")}
                   value={record.risk_reason}
                 />
-                <DetailField
-                  label={t("page.toolApprovals.detail.tool")}
-                  value={record.tool_name}
-                />
+                <DetailField label={t("page.toolApprovals.detail.tool")} value={record.tool_name} />
                 <DetailField
                   label={t("page.toolApprovals.detail.server")}
                   value={record.server_name ?? "-"}
@@ -345,7 +325,7 @@ export default function ToolApprovalsPage() {
   const { t } = useI18n();
   const formatUnix = useFormatUnix();
   const { toastError } = useOperatorError();
-  const apiKey = session!.gatewayApiKey;
+  const apiKey = (session as NonNullable<typeof session>).gatewayApiKey;
   const queryClient = useQueryClient();
   const queryKey = ["tool-approvals"];
 
@@ -362,14 +342,15 @@ export default function ToolApprovalsPage() {
   // Ticking clock for age / TTL countdowns on the pending queue.
   const [nowUnix, setNowUnix] = useState(() => Math.floor(Date.now() / 1000));
   useEffect(() => {
-    const timer = setInterval(
-      () => setNowUnix(Math.floor(Date.now() / 1000)),
-      1_000,
-    );
+    const timer = setInterval(() => setNowUnix(Math.floor(Date.now() / 1000)), 1_000);
     return () => clearInterval(timer);
   }, []);
 
-  const { data, isLoading, error: listError } = useQuery({
+  const {
+    data,
+    isLoading,
+    error: listError,
+  } = useQuery({
     queryKey,
     queryFn: () => adminGet(apiKey, "/admin/v1/tool-approvals"),
     refetchInterval: QUEUE_REFETCH_INTERVAL_MS,
@@ -389,8 +370,7 @@ export default function ToolApprovalsPage() {
         .filter((record) => record.status !== "pending")
         .sort(
           (a, b) =>
-            (b.decided_at_unix ?? b.requested_at_unix) -
-            (a.decided_at_unix ?? a.requested_at_unix),
+            (b.decided_at_unix ?? b.requested_at_unix) - (a.decided_at_unix ?? a.requested_at_unix),
         ),
     [records],
   );
@@ -459,17 +439,40 @@ export default function ToolApprovalsPage() {
         </div>
       ),
     },
-    { key: "actor", header: t("page.toolApprovals.col.requestedBy"), priority: "secondary", minWidth: 220, mobileVisibility: "always", render: actorSummary },
+    {
+      key: "actor",
+      header: t("page.toolApprovals.col.requestedBy"),
+      priority: "secondary",
+      minWidth: 220,
+      mobileVisibility: "always",
+      render: actorSummary,
+    },
     {
       key: "arguments_summary",
       header: t("page.toolApprovals.col.arguments"),
       priority: "detail",
       minWidth: 220,
       mobileVisibility: "details",
-      render: (record) => <code className="line-clamp-2 break-all font-mono text-xs">{record.arguments_summary}</code>,
+      render: (record) => (
+        <code className="line-clamp-2 break-all font-mono text-xs">{record.arguments_summary}</code>
+      ),
     },
-    { key: "run_context", header: t("page.toolApprovals.col.runContext"), priority: "detail", minWidth: 220, mobileVisibility: "details", render: runContextSummary },
-    { key: "age", header: t("page.toolApprovals.col.age"), priority: "secondary", minWidth: 90, mobileVisibility: "always", render: (record) => formatDuration(nowUnix - record.requested_at_unix) },
+    {
+      key: "run_context",
+      header: t("page.toolApprovals.col.runContext"),
+      priority: "detail",
+      minWidth: 220,
+      mobileVisibility: "details",
+      render: runContextSummary,
+    },
+    {
+      key: "age",
+      header: t("page.toolApprovals.col.age"),
+      priority: "secondary",
+      minWidth: 90,
+      mobileVisibility: "always",
+      render: (record) => formatDuration(nowUnix - record.requested_at_unix),
+    },
     {
       key: "expires",
       header: t("page.toolApprovals.col.expiresIn"),
@@ -488,25 +491,68 @@ export default function ToolApprovalsPage() {
   ];
 
   const historyColumns: ColumnConfig<ToolApprovalRecord>[] = [
-    { key: "tool_name", header: t("page.toolApprovals.col.tool"), priority: "primary", minWidth: 190, mobileVisibility: "always", render: toolLabel },
-    { key: "status", header: t("common.status"), priority: "secondary", minWidth: 110, mobileVisibility: "always", render: (record) => <Badge variant={statusVariant(record.status)}>{record.status}</Badge> },
-    { key: "decision", header: t("page.toolApprovals.col.decision"), priority: "secondary", minWidth: 100, mobileVisibility: "always", render: (record) => record.decision ?? "-" },
-    { key: "decision_reason", header: t("page.toolApprovals.col.decisionReason"), priority: "detail", minWidth: 180, mobileVisibility: "details", render: (record) => record.decision_reason ?? "-" },
-    { key: "reviewer_api_key_id", header: t("page.toolApprovals.col.reviewer"), priority: "detail", minWidth: 180, mobileVisibility: "details", copyable: true },
-    { key: "decided_at_unix", header: t("page.toolApprovals.col.decidedAt"), priority: "secondary", minWidth: 170, mobileVisibility: "always", render: (record) => formatUnix(record.decided_at_unix) },
+    {
+      key: "tool_name",
+      header: t("page.toolApprovals.col.tool"),
+      priority: "primary",
+      minWidth: 190,
+      mobileVisibility: "always",
+      render: toolLabel,
+    },
+    {
+      key: "status",
+      header: t("common.status"),
+      priority: "secondary",
+      minWidth: 110,
+      mobileVisibility: "always",
+      render: (record) => <Badge variant={statusVariant(record.status)}>{record.status}</Badge>,
+    },
+    {
+      key: "decision",
+      header: t("page.toolApprovals.col.decision"),
+      priority: "secondary",
+      minWidth: 100,
+      mobileVisibility: "always",
+      render: (record) => record.decision ?? "-",
+    },
+    {
+      key: "decision_reason",
+      header: t("page.toolApprovals.col.decisionReason"),
+      priority: "detail",
+      minWidth: 180,
+      mobileVisibility: "details",
+      render: (record) => record.decision_reason ?? "-",
+    },
+    {
+      key: "reviewer_api_key_id",
+      header: t("page.toolApprovals.col.reviewer"),
+      priority: "detail",
+      minWidth: 180,
+      mobileVisibility: "details",
+      copyable: true,
+    },
+    {
+      key: "decided_at_unix",
+      header: t("page.toolApprovals.col.decidedAt"),
+      priority: "secondary",
+      minWidth: 170,
+      mobileVisibility: "always",
+      render: (record) => formatUnix(record.decided_at_unix),
+    },
   ];
 
   return (
     <div className="flex flex-col gap-4">
       <div>
         <h1 className="text-lg font-semibold">{t("page.toolApprovals.title")}</h1>
-        <p className="text-sm text-muted-foreground">
-          {t("page.toolApprovals.description")}
-        </p>
+        <p className="text-sm text-muted-foreground">{t("page.toolApprovals.description")}</p>
       </div>
 
       {listError ? (
-        <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <p
+          role="alert"
+          className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+        >
           {t("page.toolApprovals.loadError", { message: listError.message })}
         </p>
       ) : null}
@@ -531,7 +577,12 @@ export default function ToolApprovalsPage() {
             renderActions={(record) => (
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
-                  <Button variant="outline" size="icon" className="size-11 lg:size-8" aria-label={t("resource.action.rowActions", { label: toolLabel(record) })}>
+                  <Button
+                    variant="outline"
+                    size="icon"
+                    className="size-11 lg:size-8"
+                    aria-label={t("resource.action.rowActions", { label: toolLabel(record) })}
+                  >
                     <MoreHorizontal className="size-4" aria-hidden="true" />
                   </Button>
                 </DropdownMenuTrigger>
@@ -542,7 +593,10 @@ export default function ToolApprovalsPage() {
                   <DropdownMenuItem onSelect={() => openDecision(record, "approve")}>
                     {actionCopy.approve.confirmLabel}
                   </DropdownMenuItem>
-                  <DropdownMenuItem className="text-destructive" onSelect={() => openDecision(record, "deny")}>
+                  <DropdownMenuItem
+                    className="text-destructive"
+                    onSelect={() => openDecision(record, "deny")}
+                  >
                     {actionCopy.deny.confirmLabel}
                   </DropdownMenuItem>
                   <DropdownMenuItem onSelect={() => openDecision(record, "expire")}>
@@ -563,7 +617,12 @@ export default function ToolApprovalsPage() {
             emptyLabel={t("page.toolApprovals.history.empty")}
             rowLabel={(record) => toolLabel(record)}
             renderActions={(record) => (
-              <Button variant="outline" size="sm" className="min-h-11 lg:min-h-9" onClick={() => setDetailRecord(record)}>
+              <Button
+                variant="outline"
+                size="sm"
+                className="min-h-11 lg:min-h-9"
+                onClick={() => setDetailRecord(record)}
+              >
                 {t("page.toolApprovals.action.details")}
               </Button>
             )}
@@ -571,15 +630,9 @@ export default function ToolApprovalsPage() {
         </TabsContent>
       </Tabs>
 
-      <ApprovalDetailDialog
-        record={detailRecord}
-        onClose={() => setDetailRecord(null)}
-      />
+      <ApprovalDetailDialog record={detailRecord} onClose={() => setDetailRecord(null)} />
 
-      <Dialog
-        open={pendingDecision !== null}
-        onOpenChange={(open) => !open && closeDecision()}
-      >
+      <Dialog open={pendingDecision !== null} onOpenChange={(open) => !open && closeDecision()}>
         <DialogContent className="sm:max-w-lg">
           {pendingDecision && decisionCopy ? (
             <>
@@ -605,9 +658,7 @@ export default function ToolApprovalsPage() {
                   value={pendingDecision.record.fingerprint}
                 />
                 <div className="grid gap-2">
-                  <Label htmlFor="decision-reason">
-                    {t("page.toolApprovals.reviewerComment")}
-                  </Label>
+                  <Label htmlFor="decision-reason">{t("page.toolApprovals.reviewerComment")}</Label>
                   <Textarea
                     id="decision-reason"
                     value={reason}
@@ -617,7 +668,10 @@ export default function ToolApprovalsPage() {
                   />
                 </div>
                 {decisionError ? (
-                  <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                  <p
+                    role="alert"
+                    className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+                  >
                     {decisionError}
                   </p>
                 ) : null}
@@ -628,9 +682,7 @@ export default function ToolApprovalsPage() {
                 </Button>
                 <Button
                   type="button"
-                  variant={
-                    pendingDecision.action === "deny" ? "destructive" : "default"
-                  }
+                  variant={pendingDecision.action === "deny" ? "destructive" : "default"}
                   disabled={decisionMutation.isPending}
                   onClick={() =>
                     decisionMutation.mutate({

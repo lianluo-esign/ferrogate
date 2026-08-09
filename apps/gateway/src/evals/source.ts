@@ -44,12 +44,13 @@
  * alternative, blocking on D1, would be a latency regression on 100% of traffic
  * to measure 5% of it.
  */
+
+import { controlDatabaseFrom } from "../control-data.js";
 import {
   type OnlineEvalPolicy,
   type OnlineEvalPolicyRow,
   parseOnlineEvalPolicyRow,
 } from "./policy.js";
-import { controlDatabaseFrom } from "../control-data.js";
 
 /** The `quota_policies` columns this module reads, named once. */
 const ONLINE_EVAL_COLUMNS =
@@ -63,9 +64,7 @@ const ONLINE_EVAL_COLUMNS =
  * tenant fence, and (with the per-tenant memo key below) what stops tenant A's
  * opt-in from causing tenant B's prompts to be copied to a judge.
  */
-export const SELECT_TENANT_ONLINE_EVAL_POLICY =
-  `SELECT ${ONLINE_EVAL_COLUMNS} FROM quota_policies ` +
-  "WHERE scope_type = 'tenant' AND scope_id = ?";
+export const SELECT_TENANT_ONLINE_EVAL_POLICY = `SELECT ${ONLINE_EVAL_COLUMNS} FROM quota_policies WHERE scope_type = 'tenant' AND scope_id = ?`;
 
 /** The `D1Database` subset this module needs. A live binding fits. */
 export interface OnlineEvalDatabase {
@@ -202,15 +201,15 @@ export function d1OnlineEvalPolicySource(db: OnlineEvalDatabase): OnlineEvalPoli
       }
       if (row === null || row === undefined) return { ok: true, policy: null };
       const parsed = parseOnlineEvalPolicyRow({
-        enabled: row["online_eval_enabled"],
-        sampleRate: row["online_eval_sample_rate"],
-        samplingUnit: row["online_eval_sampling_unit"],
-        judgeModel: row["online_eval_judge_model"],
-        criteria: jsonColumn(row["online_eval_criteria_json"]),
-        regressionDrop: row["online_eval_regression_drop"],
-        regressionMinSamples: row["online_eval_regression_min_samples"],
-        coveragePercent: row["online_eval_coverage_percent"],
-        costQualityRouting: row["online_eval_cost_quality_routing"],
+        enabled: row.online_eval_enabled,
+        sampleRate: row.online_eval_sample_rate,
+        samplingUnit: row.online_eval_sampling_unit,
+        judgeModel: row.online_eval_judge_model,
+        criteria: jsonColumn(row.online_eval_criteria_json),
+        regressionDrop: row.online_eval_regression_drop,
+        regressionMinSamples: row.online_eval_regression_min_samples,
+        coveragePercent: row.online_eval_coverage_percent,
+        costQualityRouting: row.online_eval_cost_quality_routing,
       });
       return parsed.ok
         ? { ok: true, policy: parsed.policy }

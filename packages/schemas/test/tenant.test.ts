@@ -1,12 +1,12 @@
-import { describe, expect, test } from "vitest";
 import {
+  type TenantContext,
   applyWorkspaceScope,
   newWorkspaceScope,
   requestContextSchema,
-  type TenantContext,
   tenantContextSchema,
   workspaceScopeSchema,
 } from "@ferrogate/schemas";
+import { describe, expect, test } from "vitest";
 
 // These exercise the ferrogate-core wire schemas as surfaced by the schemas
 // façade. Core uses `.optional()` for every serde `Option<T>` field, so the
@@ -61,9 +61,7 @@ describe("workspaceScope", () => {
   });
 
   test("schema requires all three fields", () => {
-    expect(workspaceScopeSchema.safeParse({ tenant_id: "t", project_id: "p" }).success).toBe(
-      false,
-    );
+    expect(workspaceScopeSchema.safeParse({ tenant_id: "t", project_id: "p" }).success).toBe(false);
   });
 
   // Mirrors Rust `workspace_scope_applies_attribution_chain`.

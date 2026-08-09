@@ -15,10 +15,7 @@ import type { VerifiedDelegationChain } from "@ferrogate/identity";
 // TYPE-only, and it must stay that way: the module behind this subpath extends
 // `DurableObject` from `cloudflare:workers`, so a value import would pull a
 // workerd-only module into every consumer of this file's types.
-import type {
-  ControlDataNamespace,
-  TenantDataNamespace,
-} from "@ferrogate/storage/durable-objects";
+import type { ControlDataNamespace, TenantDataNamespace } from "@ferrogate/storage/durable-objects";
 import type { ApiOperation } from "./contract.js";
 
 // ---------------------------------------------------------------------------

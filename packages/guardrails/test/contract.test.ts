@@ -1,10 +1,10 @@
 import { describe, expect, test } from "vitest";
 import {
   DetectorError,
+  type DetectorResult,
   DetectorSecret,
   findingSchema,
   firstMatchedText,
-  type DetectorResult,
 } from "../src/index.js";
 
 describe("DetectorSecret redaction", () => {

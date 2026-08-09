@@ -31,8 +31,5 @@ export class LocalizedError extends Error {
 
 /** True when `value` carries operator copy that is already in the active locale. */
 export function isLocalizedError(value: unknown): value is LocalizedError {
-  return (
-    value instanceof Error &&
-    (value as Partial<LocalizedError>).isLocalizedCopy === true
-  );
+  return value instanceof Error && (value as Partial<LocalizedError>).isLocalizedCopy === true;
 }

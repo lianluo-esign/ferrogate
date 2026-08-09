@@ -30,7 +30,6 @@
  * real consumer from the bytes the real producer emitted.
  */
 import { env as poolEnv } from "cloudflare:test";
-import { controlNamespace } from "../support/control-namespace.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { GATEWAY_MIDDLEWARE, gatewayQueue } from "../../src/index.js";
 import type { PhysicalRoute } from "../../src/inference/index.js";
@@ -42,6 +41,7 @@ import {
   interceptProviderFetch,
   providerJson,
 } from "../inference/provider-mock.js";
+import { controlNamespace } from "../support/control-namespace.js";
 import { applyControlMigrations } from "./harness.js";
 
 const BASE = "https://gw.test";
@@ -137,7 +137,7 @@ function gatewayEnv(queue: QueueDouble): Record<string, unknown> {
     GATEWAY_NATIVE_API_KEYS: JSON.stringify(KEYS),
     GATEWAY_ONLINE_EVAL_POLICIES: JSON.stringify([OPT_IN]),
     ONLINE_EVAL: queue,
-    AI: (poolEnv as unknown as Record<string, unknown>)["AI"],
+    AI: (poolEnv as unknown as Record<string, unknown>).AI,
   };
 }
 
@@ -221,10 +221,10 @@ describe("a sampled canary response is scored AS the canary arm", () => {
 
     // The sample really is of the CANARY's response — the physical model proves
     // the rollout ran, so the arm below is not a constant.
-    expect(wire["provider"]).toBe("anthropic-canary");
-    expect(wire["provider_model"]).toBe("claude-canary-physical");
-    expect(wire["experiment_arm"]).toBe("canary");
-    expect(typeof wire["experiment_id"]).toBe("string");
+    expect(wire.provider).toBe("anthropic-canary");
+    expect(wire.provider_model).toBe("claude-canary-physical");
+    expect(wire.experiment_arm).toBe("canary");
+    expect(typeof wire.experiment_id).toBe("string");
 
     // Now the DEPLOYED consumer, on the bytes the DEPLOYED producer emitted.
     provider.restore();
@@ -269,12 +269,12 @@ describe("a sampled canary response is scored AS the canary arm", () => {
     // `compareExperimentQuality` has one undifferentiated population and can
     // only ever answer "incomparable" — i.e. the whole quality half of the
     // issue is inert.
-    expect(row["experiment_arm"]).toBe("canary");
-    expect(row["experiment_id"]).toBe(wire["experiment_id"]);
+    expect(row.experiment_arm).toBe("canary");
+    expect(row.experiment_id).toBe(wire.experiment_id);
 
     // And the two axes a comparison may NOT cross are on the same row, which is
     // what lets the grouped read pair arms only within one instrument.
-    expect(row["judge_model"]).toBe("judge-model");
-    expect(row["criterion_id"]).toBe("grounded");
+    expect(row.judge_model).toBe("judge-model");
+    expect(row.criterion_id).toBe("grounded");
   });
 });

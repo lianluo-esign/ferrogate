@@ -68,9 +68,10 @@ beforeAll(() => {
   // removed here — before the first request of the isolate, since
   // `envScopedDeps` memoizes the dispatcher on the FIRST request and never
   // re-reads `env.AI` (see the file docblock).
-  expect(mutable["AI"]).toBeDefined();
-  ORIGINAL["AI"] = mutable["AI"];
-  delete mutable["AI"];
+  expect(mutable.AI).toBeDefined();
+  ORIGINAL.AI = mutable.AI;
+  // biome-ignore lint/performance/noDelete: removes the own-property key entirely; assigning undefined would leave an enumerable undefined-valued key and change JSON serialization, the 'in' operator, and Object.keys semantics
+  delete mutable.AI;
 });
 
 afterAll(() => {

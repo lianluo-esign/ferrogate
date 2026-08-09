@@ -106,24 +106,24 @@ function enabledFrom(value: unknown): boolean {
 export function tuningFromRow(row: Record<string, unknown> | undefined): SpendAnomalyTuning {
   if (row === undefined) return SPEND_ANOMALY_DEFAULTS;
   const d = SPEND_ANOMALY_DEFAULTS;
-  const autoThrottleRpm = row["spend_anomaly_auto_throttle_rpm"];
+  const autoThrottleRpm = row.spend_anomaly_auto_throttle_rpm;
   return {
-    enabled: enabledFrom(row["spend_anomaly_enabled"]),
+    enabled: enabledFrom(row.spend_anomaly_enabled),
     baselineWindows: boundedInt(
-      row["spend_anomaly_baseline_windows"],
+      row.spend_anomaly_baseline_windows,
       d.baselineWindows,
       SPEND_ANOMALY_MAX_BASELINE_WINDOWS,
     ),
     minBaselineWindows: nonNegativeInt(
-      row["spend_anomaly_min_baseline_windows"],
+      row.spend_anomaly_min_baseline_windows,
       d.minBaselineWindows,
     ),
-    minActiveWindows: nonNegativeInt(row["spend_anomaly_min_active_windows"], d.minActiveWindows),
-    minWindowUsd: positive(row["spend_anomaly_min_window_usd"], d.minWindowUsd),
-    ratio: positive(row["spend_anomaly_ratio"], d.ratio),
-    criticalRatio: positive(row["spend_anomaly_critical_ratio"], d.criticalRatio),
-    cooldownSecs: positiveInt(row["spend_anomaly_cooldown_secs"], d.cooldownSecs),
-    forecastMinPct: positive(row["spend_anomaly_forecast_min_pct"], d.forecastMinPct),
+    minActiveWindows: nonNegativeInt(row.spend_anomaly_min_active_windows, d.minActiveWindows),
+    minWindowUsd: positive(row.spend_anomaly_min_window_usd, d.minWindowUsd),
+    ratio: positive(row.spend_anomaly_ratio, d.ratio),
+    criticalRatio: positive(row.spend_anomaly_critical_ratio, d.criticalRatio),
+    cooldownSecs: positiveInt(row.spend_anomaly_cooldown_secs, d.cooldownSecs),
+    forecastMinPct: positive(row.spend_anomaly_forecast_min_pct, d.forecastMinPct),
     // Off unless a positive integer is stored — the only leg that changes what
     // the gateway does to live traffic must never be switched on by a typo.
     autoThrottleRpm:
@@ -132,7 +132,7 @@ export function tuningFromRow(row: Record<string, unknown> | undefined): SpendAn
       autoThrottleRpm > 0
         ? autoThrottleRpm
         : undefined,
-    throttleTtlSecs: positiveInt(row["spend_anomaly_throttle_ttl_secs"], d.throttleTtlSecs),
+    throttleTtlSecs: positiveInt(row.spend_anomaly_throttle_ttl_secs, d.throttleTtlSecs),
   };
 }
 
@@ -145,6 +145,6 @@ export function tuningFromRow(row: Record<string, unknown> | undefined): SpendAn
  * admission path's own `monthly_budget_exceeded` already enforces).
  */
 export function budgetFromRow(row: Record<string, unknown> | undefined): number | undefined {
-  const raw = row?.["monthly_budget_usd"];
+  const raw = row?.monthly_budget_usd;
   return typeof raw === "number" && Number.isFinite(raw) && raw > 0 ? raw : undefined;
 }

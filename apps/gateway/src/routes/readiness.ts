@@ -109,8 +109,8 @@
  * that no-sync implies, because the decision table reads them.
  */
 import { configSnapshotId } from "@ferrogate/config";
-import { controlDatabaseFrom } from "../control-data.js";
 import type { Context } from "hono";
+import { controlDatabaseFrom } from "../control-data.js";
 import type { GatewayEnv } from "../ports.js";
 
 /** Worker var: `"true"` puts this deployment into operator drain. */
@@ -324,9 +324,7 @@ export function combineDrain(durable: DrainState, deployVar: boolean): DrainStat
  * `test/fleet-control-matrix.test.ts` §5.2 flips the document both ways inside
  * one isolate for that reason.
  */
-export async function resolveDrainState(
-  env: ReadinessBindings | undefined,
-): Promise<DrainState> {
+export async function resolveDrainState(env: ReadinessBindings | undefined): Promise<DrainState> {
   const durable = await readDurableDrain(controlDatabaseFrom(env));
   return combineDrain(durable, drainStatus(env).draining);
 }
@@ -372,13 +370,13 @@ export function clusterStatus(options: {
     ? DRAIN_UNAVAILABLE_CODE
     : draining
       ? "operator_drain"
-        : stale && hasRevision
-          ? "stale_state"
-          : stateReady
-            ? "state_loaded"
-            : lastSyncError !== null
-              ? "sync_error"
-              : "revision_missing";
+      : stale && hasRevision
+        ? "stale_state"
+        : stateReady
+          ? "state_loaded"
+          : lastSyncError !== null
+            ? "sync_error"
+            : "revision_missing";
 
   return {
     enabled: false,

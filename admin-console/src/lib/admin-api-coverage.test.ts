@@ -1,9 +1,9 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
 import { APP_ROUTES } from "@/lib/app-routes";
 import { RESOURCE_ROUTES } from "@/resources";
+import { describe, expect, it } from "vitest";
 
 // Console <-> Admin API control-plane coverage gate (#463, epic #313).
 //
@@ -238,92 +238,91 @@ const DELIBERATE_EXCLUSIONS: Readonly<Record<string, DeliberateExclusion>> = {
  * entry is asserted against the surface actually resolved, so a rename on
  * either side fails the test instead of silently rotting a comment.
  */
-const EXPECTED_NON_IDENTITY_SURFACES: Readonly<Record<string, { source: string; why: string }>> =
-  {
-    // The console's tenant IA is keyed on the durable registry, and the generic
-    // resource is named after the API group it calls, not the route it mounts.
-    "self-hosted-worker-records": {
-      source: "self-hosted-workers",
-      why: "durable worker records are the data behind the operator-facing 'self-hosted workers' resource; the record/registration split is an API detail",
-    },
-    // `/app/api-keys` is taken by the bespoke virtual-keys page (the operator's
-    // primary key surface), so the native api-keys CRUD mounts at a distinct
-    // route rather than renaming the API group.
-    "api-keys": {
-      source: "api-keys-native",
-      why: "native API keys mount at /app/api-keys-native because /app/api-keys is the bespoke virtual-keys page",
-    },
-    // Provider fleet health is one operator screen; the three reads that feed it
-    // (health, catalogued models, adapters, extensions) are separate API groups.
-    "provider-models": {
-      source: "ops-provider-health",
-      why: "provider catalogue read feeding the single provider-health ops screen",
-    },
-    "framework-adapters": {
-      source: "ops-provider-health",
-      why: "adapter inventory read feeding the single provider-health ops screen",
-    },
-    extensions: {
-      source: "ops-provider-health",
-      why: "extension inventory read feeding the single provider-health ops screen",
-    },
-    // The dashboard IS the overview endpoint's page; naming it 'overview' would
-    // duplicate the app root.
-    overview: {
-      source: "dashboard",
-      why: "the overview read backs the /app dashboard landing page",
-    },
-    // Billing IA groups the metering reads onto one page, and the outbox
-    // dead-letter queue is presented as 'billing dead letters'.
-    "metering-events": {
-      source: "billing-metering",
-      why: "metering reads are consolidated onto one billing metering page",
-    },
-    "metering-export-status": {
-      source: "billing-metering",
-      why: "metering reads are consolidated onto one billing metering page",
-    },
-    "usage-aggregates": {
-      source: "billing-metering",
-      why: "metering reads are consolidated onto one billing metering page",
-    },
-    "billing-outbox-dead-letters": {
-      source: "billing-dead-letters",
-      why: "the outbox implementation detail is dropped from the operator-facing page name",
-    },
-    // Ops screens are namespaced under an 'ops-' prefix in the page layer.
-    config: { source: "ops-config", why: "gateway config reload/validate lives under the ops IA" },
-    drain: { source: "ops-drain", why: "drain control lives under the ops IA" },
-    status: { source: "ops-status", why: "gateway status lives under the ops IA" },
-    observability: {
-      source: "ops-observability",
-      why: "observability snapshot lives under the ops IA",
-    },
-    "gateway-configs": {
-      source: "ops-gateway-configs",
-      why: "gateway config profiles live under the ops IA",
-    },
-    "provider-health": {
-      source: "ops-provider-health",
-      why: "provider health lives under the ops IA",
-    },
-    "request-log-exports": {
-      source: "ops-observability",
-      why: "log export jobs are driven from the observability ops screen",
-    },
-    // Remaining renames: catalogue/cockpit page names that read better than the
-    // API group name.
-    tools: { source: "tools-catalog", why: "the tools read renders the tool catalogue page" },
-    wallets: { source: "billing-wallets", why: "wallets are part of the billing cockpit IA" },
-    "payment-methods": {
-      source: "billing-payment-methods",
-      why: "payment methods are part of the billing cockpit IA",
-    },
-    "self-hosted-runs": {
-      source: "self-hosted-runs",
-      why: "identity page name, but mounted under the /app/workers/* IA rather than /app/self-hosted-runs",
-    },
-  };
+const EXPECTED_NON_IDENTITY_SURFACES: Readonly<Record<string, { source: string; why: string }>> = {
+  // The console's tenant IA is keyed on the durable registry, and the generic
+  // resource is named after the API group it calls, not the route it mounts.
+  "self-hosted-worker-records": {
+    source: "self-hosted-workers",
+    why: "durable worker records are the data behind the operator-facing 'self-hosted workers' resource; the record/registration split is an API detail",
+  },
+  // `/app/api-keys` is taken by the bespoke virtual-keys page (the operator's
+  // primary key surface), so the native api-keys CRUD mounts at a distinct
+  // route rather than renaming the API group.
+  "api-keys": {
+    source: "api-keys-native",
+    why: "native API keys mount at /app/api-keys-native because /app/api-keys is the bespoke virtual-keys page",
+  },
+  // Provider fleet health is one operator screen; the three reads that feed it
+  // (health, catalogued models, adapters, extensions) are separate API groups.
+  "provider-models": {
+    source: "ops-provider-health",
+    why: "provider catalogue read feeding the single provider-health ops screen",
+  },
+  "framework-adapters": {
+    source: "ops-provider-health",
+    why: "adapter inventory read feeding the single provider-health ops screen",
+  },
+  extensions: {
+    source: "ops-provider-health",
+    why: "extension inventory read feeding the single provider-health ops screen",
+  },
+  // The dashboard IS the overview endpoint's page; naming it 'overview' would
+  // duplicate the app root.
+  overview: {
+    source: "dashboard",
+    why: "the overview read backs the /app dashboard landing page",
+  },
+  // Billing IA groups the metering reads onto one page, and the outbox
+  // dead-letter queue is presented as 'billing dead letters'.
+  "metering-events": {
+    source: "billing-metering",
+    why: "metering reads are consolidated onto one billing metering page",
+  },
+  "metering-export-status": {
+    source: "billing-metering",
+    why: "metering reads are consolidated onto one billing metering page",
+  },
+  "usage-aggregates": {
+    source: "billing-metering",
+    why: "metering reads are consolidated onto one billing metering page",
+  },
+  "billing-outbox-dead-letters": {
+    source: "billing-dead-letters",
+    why: "the outbox implementation detail is dropped from the operator-facing page name",
+  },
+  // Ops screens are namespaced under an 'ops-' prefix in the page layer.
+  config: { source: "ops-config", why: "gateway config reload/validate lives under the ops IA" },
+  drain: { source: "ops-drain", why: "drain control lives under the ops IA" },
+  status: { source: "ops-status", why: "gateway status lives under the ops IA" },
+  observability: {
+    source: "ops-observability",
+    why: "observability snapshot lives under the ops IA",
+  },
+  "gateway-configs": {
+    source: "ops-gateway-configs",
+    why: "gateway config profiles live under the ops IA",
+  },
+  "provider-health": {
+    source: "ops-provider-health",
+    why: "provider health lives under the ops IA",
+  },
+  "request-log-exports": {
+    source: "ops-observability",
+    why: "log export jobs are driven from the observability ops screen",
+  },
+  // Remaining renames: catalogue/cockpit page names that read better than the
+  // API group name.
+  tools: { source: "tools-catalog", why: "the tools read renders the tool catalogue page" },
+  wallets: { source: "billing-wallets", why: "wallets are part of the billing cockpit IA" },
+  "payment-methods": {
+    source: "billing-payment-methods",
+    why: "payment methods are part of the billing cockpit IA",
+  },
+  "self-hosted-runs": {
+    source: "self-hosted-runs",
+    why: "identity page name, but mounted under the /app/workers/* IA rather than /app/self-hosted-runs",
+  },
+};
 
 // ---------------------------------------------------------------------------
 // Pure helpers — the gate's logic, testable against synthetic input so we can
@@ -334,7 +333,7 @@ const EXPECTED_NON_IDENTITY_SURFACES: Readonly<Record<string, { source: string; 
  * Every distinct control-plane group in the contract: the first path segment
  * after `/admin/v1/`. `/admin/v1/guardrail-policies/{id}/activate` -> `guardrail-policies`.
  */
-export function extractControlPlaneGroups(specJson: string): string[] {
+function extractControlPlaneGroups(specJson: string): string[] {
   const spec = JSON.parse(specJson) as { paths?: Record<string, unknown> };
   const groups = new Set<string>();
   for (const apiPath of Object.keys(spec.paths ?? {})) {
@@ -353,7 +352,7 @@ function controlPlaneGroupOf(apiPath: string): string | undefined {
 }
 
 /** Groups with neither a console surface nor a reviewed exclusion. */
-export function findUncoveredGroups(
+function findUncoveredGroups(
   groups: readonly string[],
   surfaces: ReadonlyMap<string, ConsoleSurface>,
   exclusions: Readonly<Record<string, DeliberateExclusion>>,
@@ -362,7 +361,7 @@ export function findUncoveredGroups(
 }
 
 /** Exclusions that no longer match any contract group (the map has rotted). */
-export function findStaleExclusions(
+function findStaleExclusions(
   groups: readonly string[],
   exclusions: Readonly<Record<string, DeliberateExclusion>>,
 ): string[] {
@@ -373,7 +372,7 @@ export function findStaleExclusions(
 }
 
 /** Exclusions that DID get a console surface and should now be deleted. */
-export function findObsoleteExclusions(
+function findObsoleteExclusions(
   surfaces: ReadonlyMap<string, ConsoleSurface>,
   exclusions: Readonly<Record<string, DeliberateExclusion>>,
 ): string[] {
@@ -551,11 +550,7 @@ describe("console coverage of the Admin API control plane (#313 acceptance box 1
     const uncovered = findUncoveredGroups(contractGroups, consoleSurfaces, DELIBERATE_EXCLUSIONS);
     expect(
       uncovered,
-      `Admin API control-plane group(s) with no console surface: ${uncovered.join(", ")}.\n` +
-        "Add a console page (a generic resource in src/resources/index.ts, or a bespoke page " +
-        "registered in src/App.tsx that calls the group's /admin/v1/<group> endpoints), or add a " +
-        "DELIBERATE_EXCLUSIONS entry in this file naming an owner and a SPECIFIC reason " +
-        "(see epic #313 acceptance box 1).",
+      `Admin API control-plane group(s) with no console surface: ${uncovered.join(", ")}.\nAdd a console page (a generic resource in src/resources/index.ts, or a bespoke page registered in src/App.tsx that calls the group's /admin/v1/<group> endpoints), or add a DELIBERATE_EXCLUSIONS entry in this file naming an owner and a SPECIFIC reason (see epic #313 acceptance box 1).`,
     ).toEqual([]);
   });
 
@@ -563,9 +558,9 @@ describe("console coverage of the Admin API control plane (#313 acceptance box 1
     // The negative case: a synthetic group proves the gate is not vacuous,
     // without mutating the committed contract.
     const synthetic = [...contractGroups, "brand-new-thing"];
-    expect(
-      findUncoveredGroups(synthetic, consoleSurfaces, DELIBERATE_EXCLUSIONS),
-    ).toEqual(["brand-new-thing"]);
+    expect(findUncoveredGroups(synthetic, consoleSurfaces, DELIBERATE_EXCLUSIONS)).toEqual([
+      "brand-new-thing",
+    ]);
     // ...and it passes again once the group is owned, either way.
     expect(
       findUncoveredGroups(synthetic, consoleSurfaces, {
@@ -601,15 +596,13 @@ describe("console coverage of tracked caller-facing groups (#474 acceptance box 
       const surface = callerFacingSurfaces.get(group);
       expect(
         surface,
-        `caller-facing group /v1/${group} has no console surface (${tracked.why}). ` +
-          "Add a bespoke page registered in src/App.tsx that calls its /v1/<group> endpoints, " +
-          "or delete the CALLER_FACING_TRACKED_GROUPS entry with a reviewed rationale.",
+        `caller-facing group /v1/${group} has no console surface (${tracked.why}). Add a bespoke page registered in src/App.tsx that calls its /v1/<group> endpoints, or delete the CALLER_FACING_TRACKED_GROUPS entry with a reviewed rationale.`,
       ).toBeDefined();
       expect(
-        existsSync(path.join(pagesDir, `${surface!.source}.tsx`)),
-        `group /v1/${group} maps to missing page src/pages/${surface!.source}.tsx`,
+        existsSync(path.join(pagesDir, `${(surface as NonNullable<typeof surface>).source}.tsx`)),
+        `group /v1/${group} maps to missing page src/pages/${(surface as NonNullable<typeof surface>).source}.tsx`,
       ).toBe(true);
-      expect(Object.values(APP_ROUTES)).toContain(surface!.route);
+      expect(Object.values(APP_ROUTES)).toContain((surface as NonNullable<typeof surface>).route);
     }
   });
 

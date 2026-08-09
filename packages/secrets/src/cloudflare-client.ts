@@ -148,9 +148,7 @@ export class EnvTokenResolver implements TokenResolver {
       const name = reference.slice("env://".length);
       const value = await readEnvSecret(name, this.env);
       if (value === undefined) {
-        throw new CloudflareError(
-          `token reference ${reference} resolved to an empty value`,
-        );
+        throw new CloudflareError(`token reference ${reference} resolved to an empty value`);
       }
       return value;
     }
@@ -199,11 +197,7 @@ export class CloudflareClient {
   private readonly tokens: TokenResolver;
   private readonly transport: HttpTransport;
 
-  constructor(
-    config: CloudflareConfig,
-    tokens: TokenResolver,
-    transport: HttpTransport,
-  ) {
+  constructor(config: CloudflareConfig, tokens: TokenResolver, transport: HttpTransport) {
     this.cfg = config;
     this.tokens = tokens;
     this.transport = transport;
@@ -222,11 +216,7 @@ export class CloudflareClient {
     return `${base}/${resolved}`;
   }
 
-  private async send(
-    method: HttpMethod,
-    path: string,
-    body?: Uint8Array,
-  ): Promise<unknown> {
+  private async send(method: HttpMethod, path: string, body?: Uint8Array): Promise<unknown> {
     const token = await this.tokens.resolve(this.cfg.apiTokenRef);
     const headers: Record<string, string> = {
       Authorization: `Bearer ${token}`,
@@ -249,9 +239,7 @@ export class CloudflareClient {
           `Cloudflare API returned HTTP ${response.status}: ${response.body}`,
         );
       }
-      throw new CloudflareError(
-        `invalid Cloudflare API envelope: ${String(cause)}`,
-      );
+      throw new CloudflareError(`invalid Cloudflare API envelope: ${String(cause)}`);
     }
     if (!parsed.success) {
       const detail = parsed.errors
@@ -265,10 +253,7 @@ export class CloudflareClient {
   }
 
   /** `GET` an envelope and validate `result` with `schema`. */
-  async getJson<S extends z.ZodTypeAny>(
-    path: string,
-    schema: S,
-  ): Promise<z.infer<S>> {
+  async getJson<S extends z.ZodTypeAny>(path: string, schema: S): Promise<z.infer<S>> {
     return schema.parse(await this.send("GET", path));
   }
 

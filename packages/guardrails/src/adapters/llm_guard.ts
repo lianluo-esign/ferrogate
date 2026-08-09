@@ -7,29 +7,30 @@
  * DETECT-ONLY (`supports_transform: false`): a hit denies/records, never redacts.
  * Hit iff `!is_valid || scanners["PromptInjection"] >= threshold`.
  */
-import { byteLen } from "../bytes.js";
+
 import { TIMED_OUT, withTimeout } from "../async.js";
+import { byteLen } from "../bytes.js";
+import {
+  type ContentSource,
+  type DetectorDescriptor,
+  DetectorError,
+  type DetectorHealth,
+  type DetectorInput,
+  type DetectorResult,
+  type DetectorSecret,
+  type GuardrailDetector,
+  MAX_DETECTOR_TIMEOUT_MS,
+} from "../contract.js";
+import { validateCustomHttpEndpoint } from "../custom_http.js";
 import {
   AdapterCounters,
+  type DetectorTransport,
   HttpJsonTransport,
   adapterStatusError,
   configDigest,
   hmacEvidenceFingerprint,
   nativeAdapterFailureModes,
-  type DetectorTransport,
 } from "./transport.js";
-import {
-  DetectorError,
-  DetectorSecret,
-  MAX_DETECTOR_TIMEOUT_MS,
-  type ContentSource,
-  type DetectorDescriptor,
-  type DetectorHealth,
-  type DetectorInput,
-  type DetectorResult,
-  type GuardrailDetector,
-} from "../contract.js";
-import { validateCustomHttpEndpoint } from "../custom_http.js";
 
 const LLM_GUARD_ADAPTER_VERSION = "llm-guard-prompt-injection-adapter/1";
 const PROMPT_INJECTION_SCANNER = "PromptInjection";
@@ -58,7 +59,10 @@ function validateConfig(config: LlmGuardPromptInjectionConfig): URL {
   try {
     endpoint = new URL(config.endpoint);
   } catch {
-    throw DetectorError.new("invalid_configuration", "llm-guard detector endpoint is not a valid URL");
+    throw DetectorError.new(
+      "invalid_configuration",
+      "llm-guard detector endpoint is not a valid URL",
+    );
   }
   validateCustomHttpEndpoint(endpoint, config.allowPrivateNetwork);
   if (
@@ -149,7 +153,10 @@ export class LlmGuardPromptInjectionDetector implements GuardrailDetector {
       .map((s) => s.text)
       .join("\n");
     if (byteLen(projected) > this.config.maxPayloadBytes) {
-      throw DetectorError.new("payload_too_large", "llm-guard detector request exceeds configured limit");
+      throw DetectorError.new(
+        "payload_too_large",
+        "llm-guard detector request exceeds configured limit",
+      );
     }
     if (projected.length === 0) {
       return this.passResult();
@@ -174,7 +181,10 @@ export class LlmGuardPromptInjectionDetector implements GuardrailDetector {
         throw new Error("missing is_valid");
       }
     } catch {
-      throw DetectorError.new("invalid_response", "llm-guard detector returned a malformed analyze response");
+      throw DetectorError.new(
+        "invalid_response",
+        "llm-guard detector returned a malformed analyze response",
+      );
     }
 
     const score = response.scanners?.[PROMPT_INJECTION_SCANNER];

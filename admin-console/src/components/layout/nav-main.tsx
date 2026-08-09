@@ -1,11 +1,5 @@
-import { useEffect, useState, type MouseEvent } from "react";
-import { ChevronRight } from "lucide-react";
-import { Link, useLocation } from "react-router-dom";
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "@/components/ui/collapsible";
+import { NAV_DASHBOARD, type NavGroup, isPathActive } from "@/components/layout/nav-config";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import {
   SidebarGroup,
   SidebarGroupLabel,
@@ -17,23 +11,15 @@ import {
   SidebarMenuSubItem,
   useSidebar,
 } from "@/components/ui/sidebar";
-import {
-  isPathActive,
-  NAV_DASHBOARD,
-  type NavGroup,
-} from "@/components/layout/nav-config";
 import { useI18n } from "@/i18n";
+import { ChevronRight } from "lucide-react";
+import { type MouseEvent, useEffect, useState } from "react";
+import { Link, useLocation } from "react-router-dom";
 
 const FOCUS_MAIN_HEADING_STATE = { focusMainHeading: true } as const;
 
 function shouldHandleNavigation(event: MouseEvent<HTMLAnchorElement>): boolean {
-  return (
-    event.button === 0 &&
-    !event.metaKey &&
-    !event.ctrlKey &&
-    !event.shiftKey &&
-    !event.altKey
-  );
+  return event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey;
 }
 
 function GroupNavigation({
@@ -55,12 +41,7 @@ function GroupNavigation({
   }, [isActive]);
 
   return (
-    <Collapsible
-      asChild
-      open={open}
-      onOpenChange={setOpen}
-      className="group/collapsible"
-    >
+    <Collapsible asChild open={open} onOpenChange={setOpen} className="group/collapsible">
       <SidebarMenuItem>
         <CollapsibleTrigger asChild>
           <SidebarMenuButton tooltip={groupTitle} isActive={isActive}>
@@ -73,15 +54,8 @@ function GroupNavigation({
           <SidebarMenuSub>
             {group.items.map((item) => (
               <SidebarMenuSubItem key={item.url}>
-                <SidebarMenuSubButton
-                  asChild
-                  isActive={isPathActive(pathname, item.url)}
-                >
-                  <Link
-                    to={item.url}
-                    state={FOCUS_MAIN_HEADING_STATE}
-                    onClick={onNavigate}
-                  >
+                <SidebarMenuSubButton asChild isActive={isPathActive(pathname, item.url)}>
+                  <Link to={item.url} state={FOCUS_MAIN_HEADING_STATE} onClick={onNavigate}>
                     <span>{t(item.titleKey)}</span>
                   </Link>
                 </SidebarMenuSubButton>

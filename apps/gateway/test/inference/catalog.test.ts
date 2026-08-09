@@ -17,7 +17,6 @@
  * contract router and the auth guard are all the real ones.
  */
 import { describe, expect, it } from "vitest";
-import { controlNamespace } from "../support/control-namespace.js";
 import app from "../../src/index.js";
 import {
   InMemoryUsageSink,
@@ -28,6 +27,7 @@ import {
   modelsFromEnv,
 } from "../../src/inference/index.js";
 import type { ModelRecord, ProviderRecord } from "../../src/inference/index.js";
+import { controlNamespace } from "../support/control-namespace.js";
 import {
   OPENAI_CHAT_STREAM_FRAMES,
   interceptProviderFetch,
@@ -151,12 +151,12 @@ describe("the deployed Worker resolves logical models to physical routes", () =>
       const body = upstream.body as Record<string, unknown>;
       // THE registry invariant: the physical id goes on the wire, and the
       // logical name the client asked for does not.
-      expect(body["model"]).toBe("claude-sonnet-4-5-20250929");
-      expect(body["model"]).not.toBe("ferrogate-reasoning");
+      expect(body.model).toBe("claude-sonnet-4-5-20250929");
+      expect(body.model).not.toBe("ferrogate-reasoning");
       // `prepare_chat_completions` on the Anthropic family: `max_tokens` is
       // required upstream, so the adapter defaults it.
-      expect(body["max_tokens"]).toBe(1024);
-      expect(body["stream"]).toBe(false);
+      expect(body.max_tokens).toBe(1024);
+      expect(body.stream).toBe(false);
     } finally {
       provider.restore();
     }
@@ -170,7 +170,7 @@ describe("the deployed Worker resolves logical models to physical routes", () =>
         messages: [{ role: "user", content: "hello" }],
       });
       const { headers } = provider.lastRequest();
-      expect(headers["authorization"]).toBe(`Bearer ${RELAY_TOKEN}`);
+      expect(headers.authorization).toBe(`Bearer ${RELAY_TOKEN}`);
       // `auth_scheme: "bearer"` REPLACES the family default; sending both would
       // let a relay that trusts either one accept a credential twice over.
       expect(headers["x-api-key"]).toBeUndefined();
@@ -190,8 +190,8 @@ describe("the deployed Worker resolves logical models to physical routes", () =>
       });
       const upstream = provider.lastRequest();
       expect(upstream.url).toBe("https://openai.test/v1/chat/completions");
-      expect(upstream.headers["authorization"]).toBe(`Bearer ${OPENAI_TOKEN}`);
-      expect((upstream.body as Record<string, unknown>)["model"]).toBe("gpt-4o-mini");
+      expect(upstream.headers.authorization).toBe(`Bearer ${OPENAI_TOKEN}`);
+      expect((upstream.body as Record<string, unknown>).model).toBe("gpt-4o-mini");
     } finally {
       provider.restore();
     }
@@ -301,7 +301,10 @@ const ANTHROPIC_STREAM_FRAMES: readonly string[] = [
 
 describe("streaming and metering over the env-driven registry", () => {
   /** The same env, driven through the standalone router so the sink is visible. */
-  function metered(): { sink: InMemoryUsageSink; send: (body: unknown, path?: string) => Promise<Response> } {
+  function metered(): {
+    sink: InMemoryUsageSink;
+    send: (body: unknown, path?: string) => Promise<Response>;
+  } {
     const sink = new InMemoryUsageSink();
     const router = createInferenceRouter({ models: modelsFromEnv, usage: sink });
     return {
@@ -309,7 +312,11 @@ describe("streaming and metering over the env-driven registry", () => {
       send: async (body: unknown, path = "/v1/chat/completions") =>
         await router.request(
           `${BASE}${path}`,
-          { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) },
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(body),
+          },
           ENV,
         ),
     };
@@ -327,7 +334,7 @@ describe("streaming and metering over the env-driven registry", () => {
 
       expect(res.status).toBe(200);
       expect(res.headers.get("content-type")).toBe("text/event-stream");
-      expect((provider.lastRequest().body as Record<string, unknown>)["stream"]).toBe(true);
+      expect((provider.lastRequest().body as Record<string, unknown>).stream).toBe(true);
       // Byte-for-byte: an Anthropic upstream on an Anthropic-dialect leg is a
       // pure proxy, so re-framing would be a defect, not a nicety.
       expect(await readBody(res)).toBe(sseBytes(ANTHROPIC_STREAM_FRAMES));
@@ -591,7 +598,9 @@ describe("cloudflare_ai_gateway on the provider table", () => {
   it("reads the account block out of GATEWAY_CLOUDFLARE, and refuses a malformed one", () => {
     const env = {
       GATEWAY_CLOUDFLARE: JSON.stringify(account),
-      GATEWAY_PROVIDERS: JSON.stringify([{ ...routed, cloudflare_ai_gateway: { gateway_id: "gw", mode: "unified" } }]),
+      GATEWAY_PROVIDERS: JSON.stringify([
+        { ...routed, cloudflare_ai_gateway: { gateway_id: "gw", mode: "unified" } },
+      ]),
       GATEWAY_MODELS: JSON.stringify([model]),
     };
     const wired = modelCatalogFromEnv(env);

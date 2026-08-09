@@ -10,6 +10,12 @@ import { describe, expect, it } from "vitest";
 
 import { JsonRpcErrorCode, type McpIngressRequest } from "../src/jsonrpc.js";
 import {
+  MCP_LEGACY_PROTOCOL_VERSION,
+  MCP_METHOD_HEADER,
+  MCP_NAME_HEADER,
+  MCP_PROTOCOL_VERSION,
+  MCP_PROTOCOL_VERSION_FALLBACK,
+  MCP_PROTOCOL_VERSION_HEADER,
   completeModernResult,
   declaredAgentRunId,
   decodeMcpName,
@@ -20,12 +26,6 @@ import {
   ingressMode,
   isSupportedModernMethod,
   isSupportedProtocolVersion,
-  MCP_LEGACY_PROTOCOL_VERSION,
-  MCP_METHOD_HEADER,
-  MCP_NAME_HEADER,
-  MCP_PROTOCOL_VERSION,
-  MCP_PROTOCOL_VERSION_FALLBACK,
-  MCP_PROTOCOL_VERSION_HEADER,
   modernRequestMeta,
   negotiateProtocolVersion,
   resolveLegacyProtocolVersion,
@@ -310,7 +310,7 @@ describe("modern result completion", () => {
   it("does not add a cache hint to tools/call", () => {
     const result: Record<string, unknown> = { content: [] };
     completeModernResult(result as never, "tools/call");
-    expect(result["resultType"]).toBe("complete");
+    expect(result.resultType).toBe("complete");
     expect(result).not.toHaveProperty("ttlMs");
   });
 });

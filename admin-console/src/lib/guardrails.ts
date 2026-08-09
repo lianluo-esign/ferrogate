@@ -16,7 +16,7 @@ export type InvestigationActionCorrelation = AdminSchema<"InvestigationActionCor
 /** Renders a unix-seconds timestamp as a compact UTC string ("—" when absent). */
 export function formatUnix(ts: number | null | undefined): string {
   if (ts === null || ts === undefined) return "—";
-  return new Date(ts * 1000).toISOString().slice(0, 19).replace("T", " ") + "Z";
+  return `${new Date(ts * 1000).toISOString().slice(0, 19).replace("T", " ")}Z`;
 }
 
 /** Truncates a "sha256:<hex>" fingerprint for table cells ("—" when absent). */

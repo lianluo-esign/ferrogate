@@ -10,5 +10,9 @@
   },
   "types": "./src/index.ts",
   "scripts": { "typecheck": "tsc --noEmit", "test": "vitest run" },
-  "dependencies": { "@ferrogate/core": "workspace:*", "@ferrogate/schemas": "workspace:*", "zod": "^3.25.76" }
+  "dependencies": {
+    "@ferrogate/core": "workspace:*",
+    "@ferrogate/schemas": "workspace:*",
+    "zod": "^3.25.76"
+  }
 }

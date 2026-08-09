@@ -11,7 +11,9 @@ const enc = (o: unknown) => new TextEncoder().encode(JSON.stringify(o));
 
 describe("validateCustomHttpEndpoint", () => {
   test("accepts a public https endpoint", () => {
-    expect(() => validateCustomHttpEndpoint(new URL("https://detector.example.com/scan"), false)).not.toThrow();
+    expect(() =>
+      validateCustomHttpEndpoint(new URL("https://detector.example.com/scan"), false),
+    ).not.toThrow();
   });
 
   test.each([
@@ -38,7 +40,9 @@ describe("parseDetectorResponse", () => {
   });
 
   test("legacy match+matched_text becomes a finding", () => {
-    const result = parseDetectorResponse(enc({ match: true, matched_text: "hit", category: "custom" }));
+    const result = parseDetectorResponse(
+      enc({ match: true, matched_text: "hit", category: "custom" }),
+    );
     expect(result.verdict).toBe("fail");
     expect(result.findings[0]?.category).toBe("custom");
     expect(result.findings[0]?.matched_text).toBe("hit");
@@ -53,7 +57,9 @@ describe("parseDetectorResponse", () => {
   });
 
   test("non-JSON body is invalid_response", () => {
-    expect(() => parseDetectorResponse(new TextEncoder().encode("not json"))).toThrow(DetectorError);
+    expect(() => parseDetectorResponse(new TextEncoder().encode("not json"))).toThrow(
+      DetectorError,
+    );
   });
 });
 

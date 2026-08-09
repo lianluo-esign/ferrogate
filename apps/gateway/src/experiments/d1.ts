@@ -8,9 +8,10 @@
  * databases. The scheduled repair sweep rebuilds that projection from the
  * object when a mirror write is interrupted.
  */
-import type { ShadowLegErrorCode, ShadowLegRecord } from "./record.js";
+
 import { controlDatabaseFrom } from "../control-data.js";
 import { evidenceProjectionKey, requestLogTenantDatabaseFrom } from "../requestlog/d1.js";
+import type { ShadowLegErrorCode, ShadowLegRecord } from "./record.js";
 
 export const EXPERIMENT_SHADOW_LEG_TABLE = "experiment_shadow_legs";
 

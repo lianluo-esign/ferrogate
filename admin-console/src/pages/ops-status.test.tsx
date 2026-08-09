@@ -1,10 +1,11 @@
-import { screen, within } from "@testing-library/react";
-import { HttpResponse, http } from "msw";
-import { beforeEach, describe, expect, it } from "vitest";
 import OpsStatusPage from "@/pages/ops-status";
 import { adminStatus } from "@/test/fixtures/ops";
 import { gatewayUrl, server } from "@/test/msw";
 import { renderWithProviders, seedSession } from "@/test/test-utils";
+import { screen, within } from "@testing-library/react";
+import { http, HttpResponse } from "msw";
+import { beforeEach, describe, expect, it } from "vitest";
+const nn = <T,>(v: T): NonNullable<T> => v as NonNullable<T>;
 
 beforeEach(() => {
   seedSession();
@@ -12,11 +13,7 @@ beforeEach(() => {
 
 describe("OpsStatusPage", () => {
   it("renders health counters, ACME posture and cluster readiness", async () => {
-    server.use(
-      http.get(gatewayUrl("/admin/v1/status"), () =>
-        HttpResponse.json(adminStatus()),
-      ),
-    );
+    server.use(http.get(gatewayUrl("/admin/v1/status"), () => HttpResponse.json(adminStatus())));
 
     renderWithProviders(<OpsStatusPage />);
 
@@ -46,12 +43,13 @@ describe("OpsStatusPage", () => {
     // not render empty/undefined tiles (falsifies an unconditional render).
     const base = adminStatus();
     const legacy = { ...base } as Record<string, unknown>;
+    // biome-ignore lint/performance/noDelete: removes the own-property key entirely; assigning undefined would leave an enumerable undefined-valued key and change JSON serialization, the 'in' operator, and Object.keys semantics
     delete legacy.platform_providers;
+    // biome-ignore lint/performance/noDelete: removes the own-property key entirely; assigning undefined would leave an enumerable undefined-valued key and change JSON serialization, the 'in' operator, and Object.keys semantics
     delete legacy.platform_models;
+    // biome-ignore lint/performance/noDelete: removes the own-property key entirely; assigning undefined would leave an enumerable undefined-valued key and change JSON serialization, the 'in' operator, and Object.keys semantics
     delete legacy.platform_offerings;
-    server.use(
-      http.get(gatewayUrl("/admin/v1/status"), () => HttpResponse.json(legacy)),
-    );
+    server.use(http.get(gatewayUrl("/admin/v1/status"), () => HttpResponse.json(legacy)));
 
     const { container } = renderWithProviders(<OpsStatusPage />);
 
@@ -75,7 +73,7 @@ describe("OpsStatusPage", () => {
         HttpResponse.json(
           adminStatus({
             acme: {
-              ...adminStatus().acme!,
+              ...nn(adminStatus().acme),
               reload_required: true,
               reload_mode: "listener",
             },
@@ -125,10 +123,7 @@ describe("OpsStatusPage", () => {
   it("surfaces a load error", async () => {
     server.use(
       http.get(gatewayUrl("/admin/v1/status"), () =>
-        HttpResponse.json(
-          { error: { code: "boom", message: "status exploded" } },
-          { status: 500 },
-        ),
+        HttpResponse.json({ error: { code: "boom", message: "status exploded" } }, { status: 500 }),
       ),
     );
 

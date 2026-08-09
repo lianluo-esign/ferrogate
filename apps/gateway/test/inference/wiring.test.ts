@@ -235,8 +235,7 @@ describe("the mounted module enforces the resolved TPM window", () => {
       // rather than a number being pinned, so this stays true if the default
       // completion reservation changes — and stays FALSE for any implementation
       // that reports a constant.
-      const charged = estimateChatCompletionUsage(JSON.parse(CHAT_BODY), "gpt-4o-mini")
-        .totalTokens;
+      const charged = estimateChatCompletionUsage(JSON.parse(CHAT_BODY), "gpt-4o-mini").totalTokens;
       expect(charged).toBeGreaterThan(0);
       expect(denied.headers.get("x-ratelimit-remaining-tokens")).toBe(String(600 - charged));
 

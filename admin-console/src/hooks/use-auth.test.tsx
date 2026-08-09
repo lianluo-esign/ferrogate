@@ -1,12 +1,12 @@
-import { act, renderHook, waitFor } from "@testing-library/react";
-import { HttpResponse, http } from "msw";
-import type { ReactNode } from "react";
-import { describe, expect, it } from "vitest";
 import { AuthProvider, useAuth } from "@/hooks/use-auth";
 import { loadStoredSession } from "@/lib/session-storage";
-import { ApiError } from "@/types/auth";
 import { authUrl, server } from "@/test/msw";
 import { seedSession } from "@/test/test-utils";
+import { ApiError } from "@/types/auth";
+import { act, renderHook, waitFor } from "@testing-library/react";
+import { http, HttpResponse } from "msw";
+import type { ReactNode } from "react";
+import { describe, expect, it } from "vitest";
 
 const sessionResponse = {
   access_token: "access-1",
@@ -23,15 +23,11 @@ function wrapper({ children }: { children: ReactNode }) {
 
 describe("useAuth", () => {
   it("login stores the session in state and localStorage", async () => {
-    server.use(
-      http.post(authUrl("/v1/admin/login"), () => HttpResponse.json(sessionResponse)),
-    );
+    server.use(http.post(authUrl("/v1/admin/login"), () => HttpResponse.json(sessionResponse)));
     const { result } = renderHook(() => useAuth(), { wrapper });
     expect(result.current.session).toBeNull();
 
-    await act(() =>
-      result.current.login({ email: "admin@example.com", password: "hunter2" }),
-    );
+    await act(() => result.current.login({ email: "admin@example.com", password: "hunter2" }));
 
     expect(result.current.session?.gatewayApiKey).toBe("fg-live-key");
     expect(result.current.session?.user.email).toBe("admin@example.com");

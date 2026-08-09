@@ -55,8 +55,16 @@ export interface TenantWorkerRepository {
 export interface TenantManagedWorkerRepository {
   readonly tenantId: string;
   upsertTemplate(id: string, document: Record<string, unknown>): Promise<void>;
-  upsertInstance(id: string, document: Record<string, unknown>, startedAtUnix: number): Promise<void>;
-  upsertSession(id: string, document: Record<string, unknown>, requestedAtUnix: number): Promise<void>;
+  upsertInstance(
+    id: string,
+    document: Record<string, unknown>,
+    startedAtUnix: number,
+  ): Promise<void>;
+  upsertSession(
+    id: string,
+    document: Record<string, unknown>,
+    requestedAtUnix: number,
+  ): Promise<void>;
   appendLifecycleEvent(
     id: string,
     document: Record<string, unknown>,
@@ -167,7 +175,12 @@ function repositoryFor(tenantId: string, db: D1Database): TenantWorkerRepository
              (id, worker_id, reported_at_unix, heartbeat_json)
            VALUES (?, ?, ?, ?)`,
         )
-        .bind(crypto.randomUUID(), requireWorkerId(workerId), requireTimestamp(occurredAtUnix, "reported_at_unix"), json(document))
+        .bind(
+          crypto.randomUUID(),
+          requireWorkerId(workerId),
+          requireTimestamp(occurredAtUnix, "reported_at_unix"),
+          json(document),
+        )
         .run();
     },
 
@@ -179,7 +192,12 @@ function repositoryFor(tenantId: string, db: D1Database): TenantWorkerRepository
              (id, worker_id, created_at_unix, artifact_json)
            VALUES (?, ?, ?, ?)`,
         )
-        .bind(crypto.randomUUID(), requireWorkerId(workerId), requireTimestamp(createdAtUnix, "created_at_unix"), json(document))
+        .bind(
+          crypto.randomUUID(),
+          requireWorkerId(workerId),
+          requireTimestamp(createdAtUnix, "created_at_unix"),
+          json(document),
+        )
         .run();
     },
 
@@ -191,7 +209,12 @@ function repositoryFor(tenantId: string, db: D1Database): TenantWorkerRepository
              (id, worker_id, created_at_unix, checkpoint_json)
            VALUES (?, ?, ?, ?)`,
         )
-        .bind(crypto.randomUUID(), requireWorkerId(workerId), requireTimestamp(createdAtUnix, "created_at_unix"), json(document))
+        .bind(
+          crypto.randomUUID(),
+          requireWorkerId(workerId),
+          requireTimestamp(createdAtUnix, "created_at_unix"),
+          json(document),
+        )
         .run();
     },
 
@@ -233,7 +256,11 @@ function repositoryFor(tenantId: string, db: D1Database): TenantWorkerRepository
              queued_at_unix = excluded.queued_at_unix,
              dispatch_json = excluded.dispatch_json`,
         )
-        .bind(normalizedDispatchId, requireTimestamp(queuedAtUnix, "queued_at_unix"), json(document))
+        .bind(
+          normalizedDispatchId,
+          requireTimestamp(queuedAtUnix, "queued_at_unix"),
+          json(document),
+        )
         .run();
     },
   };
@@ -263,7 +290,11 @@ function managedRepositoryFor(tenantId: string, db: D1Database): TenantManagedWo
              started_at_unix = excluded.started_at_unix,
              instance_json = excluded.instance_json`,
         )
-        .bind(requireWorkerId(id), requireTimestamp(startedAtUnix, "started_at_unix"), json(document))
+        .bind(
+          requireWorkerId(id),
+          requireTimestamp(startedAtUnix, "started_at_unix"),
+          json(document),
+        )
         .run();
     },
 
@@ -276,7 +307,11 @@ function managedRepositoryFor(tenantId: string, db: D1Database): TenantManagedWo
              requested_at_unix = excluded.requested_at_unix,
              session_json = excluded.session_json`,
         )
-        .bind(requireWorkerId(id), requireTimestamp(requestedAtUnix, "requested_at_unix"), json(document))
+        .bind(
+          requireWorkerId(id),
+          requireTimestamp(requestedAtUnix, "requested_at_unix"),
+          json(document),
+        )
         .run();
     },
 
@@ -290,7 +325,11 @@ function managedRepositoryFor(tenantId: string, db: D1Database): TenantManagedWo
              occurred_at_unix = excluded.occurred_at_unix,
              event_json = excluded.event_json`,
         )
-        .bind(requireWorkerId(id), requireTimestamp(occurredAtUnix, "occurred_at_unix"), json(document))
+        .bind(
+          requireWorkerId(id),
+          requireTimestamp(occurredAtUnix, "occurred_at_unix"),
+          json(document),
+        )
         .run();
     },
 
@@ -358,11 +397,7 @@ export async function openTenantManagedWorkerRepository(
   return target === null ? null : managedRepositoryFor(target.tenantId, target.db);
 }
 
-function decodeDocument(
-  id: string,
-  tenantId: string,
-  raw: string | null,
-): StoreRecord {
+function decodeDocument(id: string, tenantId: string, raw: string | null): StoreRecord {
   try {
     const parsed: unknown = raw === null ? null : JSON.parse(raw);
     if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {

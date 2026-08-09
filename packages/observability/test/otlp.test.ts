@@ -1,12 +1,12 @@
 import { describe, expect, test } from "vitest";
 import {
+  type GatewayMetricsSnapshot,
+  ObservabilityConfigError,
   buildOtlpLogsRequest,
   buildOtlpMetricsRequest,
   buildOtlpTracesRequest,
   defaultGatewayMetricsSnapshot,
-  ObservabilityConfigError,
   otlpAttribute,
-  type GatewayMetricsSnapshot,
 } from "../src/index.js";
 
 function decode(body: Uint8Array): unknown {
@@ -28,9 +28,9 @@ describe("OTLP/JSON request builders", () => {
     expect(metrics.url).toBe("http://collector:4318/v1/metrics");
     expect(metrics.contentType).toBe("application/json");
     const metricsBody = decode(metrics.body) as any;
-    expect(
-      metricsBody.resourceMetrics[0].resource.attributes[0].value.stringValue,
-    ).toBe("ferrogate");
+    expect(metricsBody.resourceMetrics[0].resource.attributes[0].value.stringValue).toBe(
+      "ferrogate",
+    );
     const metricNames = metricsBody.resourceMetrics[0].scopeMetrics[0].metrics.map(
       (m: any) => m.name,
     );
@@ -55,9 +55,7 @@ describe("OTLP/JSON request builders", () => {
     // Option<parent> absent → null, kind 2, times stringified.
     expect(tracesBody.resourceSpans[0].scopeSpans[0].spans[0].parentSpanId).toBeNull();
     expect(tracesBody.resourceSpans[0].scopeSpans[0].spans[0].kind).toBe(2);
-    expect(tracesBody.resourceSpans[0].scopeSpans[0].spans[0].startTimeUnixNano).toBe(
-      "1",
-    );
+    expect(tracesBody.resourceSpans[0].scopeSpans[0].spans[0].startTimeUnixNano).toBe("1");
 
     const logs = buildOtlpLogsRequest("http://collector:4318", "ferrogate", [
       {
@@ -71,9 +69,9 @@ describe("OTLP/JSON request builders", () => {
     ]);
     expect(logs.url).toBe("http://collector:4318/v1/logs");
     const logsBody = decode(logs.body) as any;
-    expect(
-      logsBody.resourceLogs[0].scopeLogs[0].logRecords[0].body.stringValue,
-    ).toBe("request completed");
+    expect(logsBody.resourceLogs[0].scopeLogs[0].logRecords[0].body.stringValue).toBe(
+      "request completed",
+    );
   });
 
   test("rejects a scheme-less endpoint", () => {
@@ -83,17 +81,15 @@ describe("OTLP/JSON request builders", () => {
       throw new Error("expected throw");
     } catch (error) {
       expect(error).toBeInstanceOf(ObservabilityConfigError);
-      expect((error as ObservabilityConfigError).errorKind).toBe(
-        "InvalidEndpoint",
-      );
+      expect((error as ObservabilityConfigError).errorKind).toBe("InvalidEndpoint");
       expect((error as ObservabilityConfigError).endpoint).toBe("collector:4318");
     }
   });
 
   test("rejects an empty endpoint", () => {
-    expect(() =>
-      buildOtlpMetricsRequest("   ", defaultGatewayMetricsSnapshot()),
-    ).toThrowError(ObservabilityConfigError);
+    expect(() => buildOtlpMetricsRequest("   ", defaultGatewayMetricsSnapshot())).toThrowError(
+      ObservabilityConfigError,
+    );
   });
 
   test("guardrail pass count saturates and is emitted as a verdict data point", () => {
@@ -104,9 +100,7 @@ describe("OTLP/JSON request builders", () => {
       guardrailEvaluationFailTotal: 2,
       guardrailEvaluationErrorTotal: 1,
     };
-    const body = decode(
-      buildOtlpMetricsRequest("http://c:4318", snapshot).body,
-    ) as any;
+    const body = decode(buildOtlpMetricsRequest("http://c:4318", snapshot).body) as any;
     const evals = body.resourceMetrics[0].scopeMetrics[0].metrics.filter(
       (m: any) => m.name === "ferrogate.guardrail.evaluations",
     );
@@ -123,15 +117,10 @@ describe("OTLP/JSON request builders", () => {
       guardrailEvaluationTotal: 0,
       guardrailEvaluationFailTotal: 3,
     };
-    const body = decode(
-      buildOtlpMetricsRequest("http://c:4318", snapshot).body,
-    ) as any;
+    const body = decode(buildOtlpMetricsRequest("http://c:4318", snapshot).body) as any;
     const pass = body.resourceMetrics[0].scopeMetrics[0].metrics
       .filter((m: any) => m.name === "ferrogate.guardrail.evaluations")
-      .find(
-        (m: any) =>
-          m.sum.dataPoints[0].attributes[0].value.stringValue === "pass",
-      );
+      .find((m: any) => m.sum.dataPoints[0].attributes[0].value.stringValue === "pass");
     expect(pass.sum.dataPoints[0].asDouble).toBe(0);
   });
 });

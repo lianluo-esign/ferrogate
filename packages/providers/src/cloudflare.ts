@@ -6,17 +6,23 @@
  * the outbound URL onto a tenant's Cloudflare AI Gateway and injects the
  * `cf-aig-*` headers, preserving the body and the per-request BYOK auth header.
  */
-import { AdapterError, SecretValue } from "./types.js";
-import type { ProviderAdapterFamily, ProviderHeader, ProviderHttpRequest } from "./types.js";
+
 import { asStr, getField } from "./json.js";
 import type { Json } from "./json.js";
+import { AdapterError, SecretValue } from "./types.js";
+import type { ProviderAdapterFamily, ProviderHeader, ProviderHttpRequest } from "./types.js";
+const nn = <T>(v: T): NonNullable<T> => v as NonNullable<T>;
 
 /** Which Cloudflare AI Gateway surface a provider routes through. */
 export type CloudflareAiGatewayMode = "Compat" | "Unified";
 export const DEFAULT_CLOUDFLARE_AI_GATEWAY_MODE: CloudflareAiGatewayMode = "Compat";
 
 /** The logical upstream surface being dispatched. */
-export type CloudflareAiGatewaySurface = "ChatCompletions" | "Responses" | "Messages" | "Embeddings";
+export type CloudflareAiGatewaySurface =
+  | "ChatCompletions"
+  | "Responses"
+  | "Messages"
+  | "Embeddings";
 
 /** Per-provider Cloudflare AI Gateway routing parameters. */
 export interface CloudflareAiGatewayRouting {
@@ -76,10 +82,7 @@ function unifiedSurfacePath(surface: CloudflareAiGatewaySurface): string {
 }
 
 /** Resolve the provider slug: explicit override, else family default (fail-closed). */
-function resolveSlug(
-  routing: CloudflareAiGatewayRouting,
-  family: ProviderAdapterFamily,
-): string {
+function resolveSlug(routing: CloudflareAiGatewayRouting, family: ProviderAdapterFamily): string {
   const explicit = routing.providerSlug?.trim();
   if (explicit) return explicit;
   const fallback = defaultSlugForFamily(family);
@@ -108,14 +111,14 @@ function rewriteModelToAuthorForm(body: Json, author: string): void {
   const model = asStr(getField(body, "model"));
   if (model === undefined) return;
   if (model.includes("/")) return;
-  (body as Record<string, Json>)["model"] = `${author}/${model}`;
+  (body as Record<string, Json>).model = `${author}/${model}`;
 }
 
 /** Insert a header, replacing any case-insensitive same-named header. */
 function upsertHeader(headers: ProviderHeader[], name: string, value: string): void {
   const lowered = name.toLowerCase();
   for (let i = headers.length - 1; i >= 0; i--) {
-    if (headers[i]!.name.toLowerCase() === lowered) headers.splice(i, 1);
+    if (nn(headers[i]).name.toLowerCase() === lowered) headers.splice(i, 1);
   }
   headers.push({ name, value: new SecretValue(value) });
 }

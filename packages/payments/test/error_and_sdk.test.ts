@@ -1,13 +1,13 @@
 import { describe, expect, test } from "vitest";
 
 import {
-  isPaymentError,
   PaymentError,
   SDK_EVIDENCE,
   SDK_NAME,
   SDK_VERDICT,
   SDK_VERSION,
   SdkVerdict,
+  isPaymentError,
   sdkUnavailable,
 } from "../src/index.js";
 

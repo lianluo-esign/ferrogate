@@ -1,9 +1,9 @@
-import { screen } from "@testing-library/react";
-import { beforeEach, describe, expect, it } from "vitest";
 import GuardrailPoliciesPage from "@/pages/guardrail-policies";
 import { policyRevision } from "@/test/fixtures/guardrails";
 import { mockAdminError, mockAdminList } from "@/test/msw";
 import { renderWithProviders, seedSession } from "@/test/test-utils";
+import { screen } from "@testing-library/react";
+import { beforeEach, describe, expect, it } from "vitest";
 
 beforeEach(() => {
   seedSession();
@@ -50,9 +50,7 @@ describe("GuardrailPoliciesPage", () => {
     renderWithProviders(<GuardrailPoliciesPage />);
 
     expect(
-      await screen.findByText(
-        /Failed to load guardrail policies: missing guardrails.policy.read/,
-      ),
+      await screen.findByText(/Failed to load guardrail policies: missing guardrails.policy.read/),
     ).toBeInTheDocument();
   });
 });

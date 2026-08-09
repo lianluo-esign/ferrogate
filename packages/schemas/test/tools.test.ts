@@ -1,9 +1,5 @@
+import { toolCallSchema, toolDefSchema, toolResultSchema } from "@ferrogate/schemas";
 import { describe, expect, test } from "vitest";
-import {
-  toolCallSchema,
-  toolDefSchema,
-  toolResultSchema,
-} from "@ferrogate/schemas";
 
 describe("toolDefSchema", () => {
   test("accepts a full definition with a JSON-Schema input_schema", () => {
@@ -60,9 +56,7 @@ describe("toolResultSchema", () => {
 
   // Edge: is_error is a required boolean (not defaulted).
   test("requires is_error", () => {
-    expect(
-      toolResultSchema.safeParse({ tool_call_id: "c1", content: "x" }).success,
-    ).toBe(false);
+    expect(toolResultSchema.safeParse({ tool_call_id: "c1", content: "x" }).success).toBe(false);
   });
 
   test("rejects a non-boolean is_error", () => {

@@ -21,6 +21,7 @@ import {
   splitBytes,
   streamOf,
 } from "./helpers.js";
+const nn = <T>(v: T): NonNullable<T> => v as NonNullable<T>;
 
 const decoder = new TextDecoder();
 
@@ -29,9 +30,7 @@ function normalize(
   fallbackModel = "claude-logical",
 ): Promise<string> {
   const chunks = typeof source === "string" ? [bytes(source)] : source;
-  return drainText(
-    streamOf(chunks).pipeThrough(openAiToAnthropicStream({ fallbackModel })),
-  );
+  return drainText(streamOf(chunks).pipeThrough(openAiToAnthropicStream({ fallbackModel })));
 }
 
 describe("messageToAnthropicSse (buffered serialization)", () => {
@@ -76,7 +75,7 @@ describe("messageToAnthropicSse (buffered serialization)", () => {
 
   test("message_start reports output_tokens 0; the tail reports the real count", () => {
     const frames = parseSse(messageToAnthropicSse(message));
-    const start = JSON.parse(frames[0]!.data!) as {
+    const start = JSON.parse(nn((frames[0] as NonNullable<(typeof frames)[0]>).data)) as {
       message: { usage: { input_tokens: number; output_tokens: number } };
     };
     expect(start.message.usage).toEqual({ input_tokens: 5, output_tokens: 0 });
@@ -179,10 +178,7 @@ describe("OpenAI -> Anthropic incremental normalizer", () => {
       content_block: { id: string; name: string };
     }[];
     expect(starts.map((start) => start.index)).toEqual([0, 1]);
-    expect(starts.map((start) => start.content_block.name)).toEqual([
-      "alpha",
-      "beta",
-    ]);
+    expect(starts.map((start) => start.content_block.name)).toEqual(["alpha", "beta"]);
     const stops = jsonEvents(sse, "content_block_stop") as { index: number }[];
     expect(stops.map((stop) => stop.index)).toEqual([0, 1]);
   });
@@ -203,9 +199,7 @@ describe("OpenAI -> Anthropic incremental normalizer", () => {
     expect(await normalize('data: {"error":{"type":"overloaded"}}\n\n')).toContain(
       '"type":"overloaded"',
     );
-    expect(await normalize('data: {"error":{}}\n\n')).toContain(
-      '"type":"provider_stream_error"',
-    );
+    expect(await normalize('data: {"error":{}}\n\n')).toContain('"type":"provider_stream_error"');
     expect(await normalize('data: {"error":{}}\n\n')).toContain(
       "provider returned a streaming error",
     );
@@ -213,11 +207,7 @@ describe("OpenAI -> Anthropic incremental normalizer", () => {
 
   test("an empty upstream still produces a well-formed Anthropic stream", async () => {
     const sse = await normalize("");
-    expect(eventNames(sse)).toEqual([
-      "message_start",
-      "message_delta",
-      "message_stop",
-    ]);
+    expect(eventNames(sse)).toEqual(["message_start", "message_delta", "message_stop"]);
     expect(sse).toContain('"model":"claude-logical"');
     expect(sse).toContain('"output_tokens":0');
   });
@@ -242,15 +232,13 @@ describe("OpenAI -> Anthropic incremental normalizer", () => {
   });
 
   test("a stream that ends without [DONE] still gets its terminal frames", async () => {
-    const sse = await normalize(
-      'data: {"choices":[{"delta":{"content":"x"}}]}\n\n',
-    );
+    const sse = await normalize('data: {"choices":[{"delta":{"content":"x"}}]}\n\n');
     expect(eventNames(sse).at(-1)).toBe("message_stop");
   });
 
   test("provider keep-alive comments are inert", async () => {
     const sse = await normalize(
-      ": ping\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\ndata: [DONE]\n\n",
+      ': ping\n\ndata: {"choices":[{"delta":{"content":"x"}}]}\n\ndata: [DONE]\n\n',
     );
     expect(eventNames(sse)[0]).toBe("message_start");
     expect(sse).not.toContain("ping");
@@ -270,14 +258,12 @@ describe("OpenAI -> Anthropic incremental normalizer", () => {
     const body = bytes(source);
     const emojiStart = body.indexOf(0xf0);
     const accentStart = body.indexOf(0xc3);
-    const sse = await normalize(
-      splitBytes(body, [accentStart + 1, emojiStart + 2]),
-    );
+    const sse = await normalize(splitBytes(body, [accentStart + 1, emojiStart + 2]));
     const deltas = jsonEvents(sse, "content_block_delta") as {
       delta: { text: string };
     }[];
     expect(deltas).toHaveLength(1);
-    expect(deltas[0]!.delta.text).toBe("héllo \u{1F680}");
+    expect((deltas[0] as NonNullable<(typeof deltas)[0]>).delta.text).toBe("héllo \u{1F680}");
     expect(sse).not.toContain("�");
   });
 
@@ -290,9 +276,7 @@ describe("OpenAI -> Anthropic incremental normalizer", () => {
     // Not awaited: `write` only settles once the readable side drains, which is
     // itself the proof that the normalizer emits before the stream is closed.
     const firstWrite = writer.write(
-      parseSse(
-        'data: {"id":"chatcmpl-1","choices":[{"delta":{"content":"first"}}]}\n\n',
-      )[0]!,
+      nn(parseSse('data: {"id":"chatcmpl-1","choices":[{"delta":{"content":"first"}}]}\n\n')[0]),
     );
 
     const early: string[] = [];
@@ -339,9 +323,7 @@ describe("OpenAI -> Anthropic incremental normalizer", () => {
     ]);
     expect(normalizer.completed).toBe(true);
     expect(normalizer.finish()).toEqual([]);
-    expect(normalizer.push(parseSse('data: {"choices":[{"delta":{}}]}\n\n')[0]!)).toEqual(
-      [],
-    );
+    expect(normalizer.push(nn(parseSse('data: {"choices":[{"delta":{}}]}\n\n')[0]))).toEqual([]);
   });
 });
 

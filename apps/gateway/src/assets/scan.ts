@@ -293,7 +293,11 @@ export class ScannerBackedScreener implements AssetScreener {
   }
 
   async streamedScreen(request: AssetStreamScreeningRequest): Promise<AssetScreeningVerdict> {
-    return streamedPendingScanVerdict(request, this.#scanner.backendName, "scanner_requires_buffering");
+    return streamedPendingScanVerdict(
+      request,
+      this.#scanner.backendName,
+      "scanner_requires_buffering",
+    );
   }
 }
 

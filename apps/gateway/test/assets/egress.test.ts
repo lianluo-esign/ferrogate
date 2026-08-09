@@ -35,10 +35,11 @@
  *    double-billed;
  *  - a 304 bills nothing at all — no bytes left the gateway.
  */
-import { QuotaScopeSelector } from "@ferrogate/policy";
-import { describe, expect, it } from "vitest";
+
 import { LedgerAssetEgressMeter } from "@ferrogate/billing/asset-egress";
 import { D1LedgerStore } from "@ferrogate/billing/metering";
+import { QuotaScopeSelector } from "@ferrogate/policy";
+import { describe, expect, it } from "vitest";
 import {
   ASSET_EGRESS_LOGICAL_MODEL_PREFIX,
   ASSET_EGRESS_PROVIDER,
@@ -50,9 +51,9 @@ import {
   assetEgressQuotaDenial,
   assetEgressRpmCounterKey,
 } from "../../src/assets/egress.js";
+import type { AssetEgressCounters } from "../../src/assets/egress.js";
 import { storedAssetId, storedAssetVariantId } from "../../src/assets/keys.js";
 import { billingDb, resetMeteringTables } from "../metering/d1-harness.js";
-import type { AssetEgressCounters } from "../../src/assets/egress.js";
 import { CTX, bytes, callerFor, harness } from "./helpers.js";
 
 const TENANT = "tenant-a";

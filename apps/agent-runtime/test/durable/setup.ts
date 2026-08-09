@@ -39,10 +39,9 @@ if (harnessBindings.CONTROL_DATA === undefined) {
 }
 const controlAlias = new Proxy({} as D1Database, {
   get(_target, prop) {
-    const db = controlDataObjectDatabase(harnessBindings.CONTROL_DATA as never) as unknown as Record<
-      string | symbol,
-      unknown
-    >;
+    const db = controlDataObjectDatabase(
+      harnessBindings.CONTROL_DATA as never,
+    ) as unknown as Record<string | symbol, unknown>;
     const value = db[prop];
     return typeof value === "function" ? value.bind(db) : value;
   },

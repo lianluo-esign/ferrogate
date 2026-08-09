@@ -177,9 +177,9 @@ async function visibleTemplate(
 }
 
 /** The KV namespace, or a 503 that names the missing binding. */
-function labelStore(c: Parameters<typeof scopeOf>[0]): NonNullable<
-  ReturnType<typeof depsOf>["promptLabels"]
-> {
+function labelStore(
+  c: Parameters<typeof scopeOf>[0],
+): NonNullable<ReturnType<typeof depsOf>["promptLabels"]> {
   const kv = depsOf(c).promptLabels;
   if (kv === null) {
     // Deliberately NOT "write the document and report success": a label the

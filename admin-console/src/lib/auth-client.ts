@@ -1,12 +1,12 @@
 import { AUTH_BASE_URL } from "@/lib/config";
 import {
-  ApiError,
-  type ApiErrorBody,
   type AdminLoginRequest,
   type AdminMeResponse,
   type AdminRefreshResponse,
   type AdminRegisterRequest,
   type AdminSessionResponse,
+  ApiError,
+  type ApiErrorBody,
 } from "@/types/auth";
 
 async function request<T>(path: string, init: RequestInit): Promise<T> {
@@ -36,27 +36,21 @@ async function request<T>(path: string, init: RequestInit): Promise<T> {
   return body as T;
 }
 
-export function registerAdminAccount(
-  payload: AdminRegisterRequest,
-): Promise<AdminSessionResponse> {
+export function registerAdminAccount(payload: AdminRegisterRequest): Promise<AdminSessionResponse> {
   return request("/v1/admin/register", {
     method: "POST",
     body: JSON.stringify(payload),
   });
 }
 
-export function loginAdminAccount(
-  payload: AdminLoginRequest,
-): Promise<AdminSessionResponse> {
+export function loginAdminAccount(payload: AdminLoginRequest): Promise<AdminSessionResponse> {
   return request("/v1/admin/login", {
     method: "POST",
     body: JSON.stringify(payload),
   });
 }
 
-export function refreshAdminSession(
-  refreshToken: string,
-): Promise<AdminRefreshResponse> {
+export function refreshAdminSession(refreshToken: string): Promise<AdminRefreshResponse> {
   return request("/v1/admin/refresh", {
     method: "POST",
     body: JSON.stringify({ refresh_token: refreshToken }),

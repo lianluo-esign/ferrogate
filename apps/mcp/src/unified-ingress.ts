@@ -285,16 +285,14 @@ export function stampSessionMeta(
 ): void {
   if (response === undefined || !isJsonObjectValue(response.result)) return;
   const result = response.result as Record<string, JsonValue>;
-  const meta = isJsonObjectValue(result["_meta"])
-    ? (result["_meta"] as Record<string, JsonValue>)
-    : {};
+  const meta = isJsonObjectValue(result._meta) ? (result._meta as Record<string, JsonValue>) : {};
   if (facts.openedWith !== undefined) {
     meta[UNIFIED_SESSION_META] = { id: facts.sessionId, upstreams: [...facts.openedWith] };
   }
   if (facts.added.length > 0) meta[UNIFIED_ADDED_META] = [...facts.added];
   if (facts.removed.length > 0) meta[UNIFIED_REMOVED_META] = [...facts.removed];
   if (facts.dropped.length > 0) meta[UNIFIED_DROPPED_META] = [...facts.dropped];
-  if (Object.keys(meta).length > 0) result["_meta"] = meta;
+  if (Object.keys(meta).length > 0) result._meta = meta;
 }
 
 /** The SSE `id:` cursor for one appended frame. */

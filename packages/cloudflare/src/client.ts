@@ -38,12 +38,7 @@ import {
   intoResultWithInfo,
 } from "./envelope.js";
 import { CloudflareError } from "./errors.js";
-import {
-  type Clock,
-  type RetryPolicy,
-  executeWithRetry,
-  systemClock,
-} from "./retry.js";
+import { type Clock, type RetryPolicy, executeWithRetry, systemClock } from "./retry.js";
 import { requiredGroupNames } from "./scopes.js";
 
 /** The default `client/v4` origin. */
@@ -175,8 +170,7 @@ export class EnvTokenResolver implements TokenResolver {
     }
     if (reference.startsWith("cf://")) {
       throw CloudflareError.tokenResolution(
-        `the cf:// secret backend is not resolvable from this package (${reference}); inside a ` +
-          "Worker a Secrets Store secret is a binding — read it from env and pass it inline",
+        `the cf:// secret backend is not resolvable from this package (${reference}); inside a Worker a Secrets Store secret is a binding — read it from env and pass it inline`,
       );
     }
     if (!reference.startsWith("env://")) return reference;
@@ -265,11 +259,7 @@ export class CloudflareClient {
   }
 
   /** Issue a request and decode its `result` into `T`. */
-  async requestJson<T>(
-    method: HttpMethod,
-    path: string,
-    options: RequestOptions = {},
-  ): Promise<T> {
+  async requestJson<T>(method: HttpMethod, path: string, options: RequestOptions = {}): Promise<T> {
     const { status, retryAfterMs, body } = await this.#send(method, path, options);
     return intoResult<T>(decodeEnvelope<T>(body, describe(method, path)), status, retryAfterMs);
   }
@@ -297,11 +287,7 @@ export class CloudflareClient {
   }
 
   /** Issue a request whose success carries no meaningful `result`. */
-  async requestAck(
-    method: HttpMethod,
-    path: string,
-    options: RequestOptions = {},
-  ): Promise<void> {
+  async requestAck(method: HttpMethod, path: string, options: RequestOptions = {}): Promise<void> {
     const { status, retryAfterMs, body } = await this.#send(method, path, options);
     intoAck(decodeEnvelope<unknown>(body, describe(method, path)), status, retryAfterMs);
   }
@@ -326,11 +312,7 @@ export class CloudflareClient {
     intoAck(decodeEnvelope<unknown>(body, "preflight"), status, retryAfterMs);
   }
 
-  async #send(
-    method: HttpMethod,
-    path: string,
-    options: RequestOptions,
-  ): Promise<HttpResponse> {
+  async #send(method: HttpMethod, path: string, options: RequestOptions): Promise<HttpResponse> {
     if (this.#config.accountId === "") {
       throw CloudflareError.config("account id is empty; refusing to build a Cloudflare URL");
     }
@@ -349,9 +331,7 @@ export class CloudflareClient {
       url: this.#buildUrl(path),
       bearerToken,
       ...(body === undefined ? {} : { body }),
-      ...(body === undefined
-        ? {}
-        : { contentType: options.contentType ?? "application/json" }),
+      ...(body === undefined ? {} : { contentType: options.contentType ?? "application/json" }),
     };
 
     const { outcome, attempts } = await executeWithRetry(
@@ -378,9 +358,7 @@ export class CloudflareClient {
         enabled: options.idempotent ?? method === "GET",
         isRetryableError: (error) => error instanceof CloudflareError && error.retryable,
         wrapExhaustedError: (count, error) =>
-          error instanceof CloudflareError
-            ? CloudflareError.exhaustedRetries(count, error)
-            : error,
+          error instanceof CloudflareError ? CloudflareError.exhaustedRetries(count, error) : error,
       },
     );
 

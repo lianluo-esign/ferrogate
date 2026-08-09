@@ -1,10 +1,10 @@
-import { fireEvent, screen, waitFor } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
-import { HttpResponse, http } from "msw";
-import { beforeEach, describe, expect, it } from "vitest";
 import OpsConfigPage from "@/pages/ops-config";
 import { gatewayUrl, server } from "@/test/msw";
 import { renderWithProviders, seedSession } from "@/test/test-utils";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { http, HttpResponse } from "msw";
+import { beforeEach, describe, expect, it } from "vitest";
 
 beforeEach(() => {
   seedSession();
@@ -33,9 +33,7 @@ describe("OpsConfigPage", () => {
 
     await user.click(screen.getByRole("button", { name: "Validate" }));
 
-    expect(
-      await screen.findByText("line 3: unknown provider 'nope'"),
-    ).toBeInTheDocument();
+    expect(await screen.findByText("line 3: unknown provider 'nope'")).toBeInTheDocument();
     // Still locked after a failed validation.
     expect(screen.getByRole("button", { name: "Reload" })).toBeDisabled();
   });
@@ -72,16 +70,12 @@ describe("OpsConfigPage", () => {
     await user.click(screen.getByRole("button", { name: "Validate" }));
 
     // Reload unlocks once validation returns valid.
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: "Reload" })).toBeEnabled(),
-    );
+    await waitFor(() => expect(screen.getByRole("button", { name: "Reload" })).toBeEnabled());
     expect(reloadCalled).toBe(false);
 
     // Opening the confirm dialog must not POST yet.
     await user.click(screen.getByRole("button", { name: "Reload" }));
-    expect(
-      await screen.findByText("Reload gateway config?"),
-    ).toBeInTheDocument();
+    expect(await screen.findByText("Reload gateway config?")).toBeInTheDocument();
     expect(reloadCalled).toBe(false);
 
     // Confirming POSTs the reload.
@@ -116,14 +110,10 @@ describe("OpsConfigPage", () => {
     fireEvent.change(textarea, { target: { value: "port = 8080" } });
     await user.click(screen.getByRole("button", { name: "Validate" }));
 
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: "Reload" })).toBeEnabled(),
-    );
+    await waitFor(() => expect(screen.getByRole("button", { name: "Reload" })).toBeEnabled());
 
     // Any further edit invalidates the prior validation and re-locks reload.
     fireEvent.change(textarea, { target: { value: "port = 9090" } });
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: "Reload" })).toBeDisabled(),
-    );
+    await waitFor(() => expect(screen.getByRole("button", { name: "Reload" })).toBeDisabled());
   });
 });

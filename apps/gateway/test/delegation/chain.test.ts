@@ -32,8 +32,8 @@
  * control.
  */
 import { env as poolEnv } from "cloudflare:test";
-import { controlNamespace } from "../support/control-namespace.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { controlNamespace } from "../support/control-namespace.js";
 
 import { GATEWAY_MIDDLEWARE } from "../../src/index.js";
 import { InMemoryModelResolver, inferenceRouteModule } from "../../src/inference/index.js";
@@ -51,8 +51,8 @@ import {
   resetRequestLogs,
   storedRequestLogs,
 } from "../requestlog/harness.js";
-import { ATTACKER_SECRET, SIGNING_SECRET, chain, forge } from "./fixtures.js";
 import { resetTenantObjectState, tenantObjectDb } from "../tenant-object.js";
+import { ATTACKER_SECRET, SIGNING_SECRET, chain, forge } from "./fixtures.js";
 
 const BASE = "https://gw.test";
 
@@ -132,12 +132,12 @@ function gateway(options: { readonly signingKey?: string | null } = {}): Harness
     GATEWAY_NATIVE_API_KEYS: JSON.stringify(KEYS),
     // The REAL control database: the request-log row and the revocation lookup
     // both go through the same D1 the deployed Worker uses.
-    CONTROL_DB: bindings["CONTROL_DB"],
+    CONTROL_DB: bindings.CONTROL_DB,
     CONTROL_DATA: controlNamespace(),
     // Tenant-attributed request evidence is authoritative in the tenant object;
     // keep this composition-root harness on the same binding path as the
     // deployed gateway so its projection assertions remain meaningful.
-    TENANT_DATA: bindings["TENANT_DATA"],
+    TENANT_DATA: bindings.TENANT_DATA,
     ...(options.signingKey === null
       ? {}
       : { DELEGATION_SIGNING_KEY: options.signingKey ?? SIGNING_SECRET }),
@@ -209,7 +209,7 @@ async function loggedRow(response: Response): Promise<Record<string, unknown>> {
   const requestId = response.headers.get("x-request-id");
   for (let attempt = 0; attempt < 100; attempt += 1) {
     const rows = (await storedRequestLogs()) as unknown as Record<string, unknown>[];
-    const row = rows.find((candidate) => candidate["request_id"] === requestId);
+    const row = rows.find((candidate) => candidate.request_id === requestId);
     if (row !== undefined) return row;
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
@@ -285,13 +285,13 @@ describe("#691 — the audit row names the chain, not the last credential", () =
     // The defect, stated as an assertion: before this change the row named
     // `key_writer` and nothing else, so an incident could not be attributed
     // past the credential.
-    expect(row["api_key_id"]).toBe("key_writer");
-    expect(row["delegation_chain"]).toBe(EXPECTED_PATH);
-    expect(row["delegation_root"]).toBe("user:u_alice");
+    expect(row.api_key_id).toBe("key_writer");
+    expect(row.delegation_chain).toBe(EXPECTED_PATH);
+    expect(row.delegation_root).toBe("user:u_alice");
     // The chain feeds the attribution shape #677/#678 already built rather than
     // a second one beside it: `agent_run_id` is the column the per-request cost
     // query already groups by.
-    expect(row["agent_run_id"]).toBe("run_42");
+    expect(row.agent_run_id).toBe("run_42");
   });
 
   it("leaves an undelegated request completely untouched", async () => {
@@ -300,8 +300,8 @@ describe("#691 — the audit row names the chain, not the last credential", () =
     expect(response.status).toBe(200);
 
     const row = await loggedRow(response);
-    expect(row["delegation_chain"]).toBeNull();
-    expect(row["delegation_root"]).toBeNull();
+    expect(row.delegation_chain).toBeNull();
+    expect(row.delegation_root).toBeNull();
   });
 });
 

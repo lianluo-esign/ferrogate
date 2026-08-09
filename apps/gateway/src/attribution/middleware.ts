@@ -231,7 +231,7 @@ async function requestTags(request: Request): Promise<TagMap | undefined> {
     if (bytes === undefined) return undefined;
     const parsed: unknown = JSON.parse(new TextDecoder().decode(bytes));
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return undefined;
-    const metadata = (parsed as Record<string, unknown>)["metadata"];
+    const metadata = (parsed as Record<string, unknown>).metadata;
     if (typeof metadata !== "object" || metadata === null || Array.isArray(metadata)) {
       return undefined;
     }

@@ -72,7 +72,9 @@ export function controlDataObjectDatabase(namespace: ControlDataNamespaceLike): 
     get(_target, prop) {
       const db = fresh() as unknown as Record<string | symbol, unknown>;
       const value = db[prop];
-      return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(db) : value;
+      return typeof value === "function"
+        ? (value as (...args: unknown[]) => unknown).bind(db)
+        : value;
     },
   });
 }

@@ -16,8 +16,8 @@
  *     to an ephemeral key.
  */
 import { env } from "cloudflare:test";
-import { controlNamespace } from "./support/control-namespace.js";
 import { beforeEach, describe, expect, it } from "vitest";
+import { controlNamespace } from "./support/control-namespace.js";
 
 import { D1McpAuth } from "../src/auth.js";
 import {
@@ -173,7 +173,7 @@ describe("TenantDataObject grants — durability and revocation", () => {
     const rows = await tenantDatabase(TENANT_DATA, ACTOR.tenantId)
       .prepare("SELECT COUNT(*) AS n FROM mcp_oauth_credentials")
       .first<{
-      n: number;
+        n: number;
       }>();
     expect(rows?.n).toBe(1);
     expect((await grants.get(ACTOR, SERVER))?.subject).toBe("sub-2");
@@ -315,7 +315,9 @@ describe("DurableCredentialStore (the bound composition)", () => {
     expect(await completer.commitOauthCallback(consumed as StoredMcpOauthFlow, credential())).toBe(
       true,
     );
-    expect(await new DurableCredentialStore(KV, TENANT_DATA).getCredential(ACTOR, SERVER)).toBeDefined();
+    expect(
+      await new DurableCredentialStore(KV, TENANT_DATA).getCredential(ACTOR, SERVER),
+    ).toBeDefined();
   });
 
   it("survives a revoke across store objects", async () => {
@@ -335,32 +337,38 @@ describe("server catalog", () => {
       (tenant_id, name, transport, url, auth_type, tools_to_execute,
        tools_to_auto_execute, headers, oauth, signed_jwt_audience, timeout_ms)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
-    await t1.prepare(sql).bind(
-      "t1",
-      "srv",
-      "streamable_http",
-      "https://up.test/mcp",
-      "per_user_oauth",
-      '["echo"]',
-      '["echo"]',
-      null,
-      '{"issuer":"https://idp.test","clientId":"c1","scopes":["openid"]}',
-      null,
-      5000,
-    ).run();
-    await t2.prepare(sql).bind(
-      "t2",
-      "other",
-      "sse",
-      "https://other.test/sse",
-      "none",
-      "[]",
-      "[]",
-      null,
-      null,
-      null,
-      1000,
-    ).run();
+    await t1
+      .prepare(sql)
+      .bind(
+        "t1",
+        "srv",
+        "streamable_http",
+        "https://up.test/mcp",
+        "per_user_oauth",
+        '["echo"]',
+        '["echo"]',
+        null,
+        '{"issuer":"https://idp.test","clientId":"c1","scopes":["openid"]}',
+        null,
+        5000,
+      )
+      .run();
+    await t2
+      .prepare(sql)
+      .bind(
+        "t2",
+        "other",
+        "sse",
+        "https://other.test/sse",
+        "none",
+        "[]",
+        "[]",
+        null,
+        null,
+        null,
+        1000,
+      )
+      .run();
 
     const catalog = await loadServerCatalog(TENANT_DATA, "t1");
     expect(catalog.map((server) => server.name)).toEqual(["srv"]);

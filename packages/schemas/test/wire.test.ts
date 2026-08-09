@@ -1,7 +1,5 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { describe, expect, test } from "vitest";
-import { z } from "zod";
 import {
   OPENAPI_OPERATION_COUNT,
   assertScopeParity,
@@ -14,6 +12,8 @@ import {
   scopeSchema,
   wireSchemas,
 } from "@ferrogate/schemas";
+import { describe, expect, test } from "vitest";
+import { z } from "zod";
 
 describe("scopeSchema", () => {
   test("requires a non-empty tenant and allows optional project/workspace", () => {
@@ -75,9 +75,9 @@ describe("errorEnvelopeSchema — the shape the gateway actually writes", () => 
 
   test("the OLD flat shape is refused — it is not a FerroGate response", () => {
     expect(errorEnvelopeSchema.safeParse({ code: "x", message: "y" }).success).toBe(false);
-    expect(
-      errorEnvelopeSchema.safeParse({ code: "x", message: "y", requestId: "r" }).success,
-    ).toBe(false);
+    expect(errorEnvelopeSchema.safeParse({ code: "x", message: "y", requestId: "r" }).success).toBe(
+      false,
+    );
   });
 
   test("`type` is the discriminating literal, and `message`/`code` are required", () => {
@@ -180,7 +180,6 @@ describe("wireSchemas registry", () => {
     expect(wireSchemas.tenantContext?.safeParse({ organization_id: "org" }).success).toBe(true);
     expect(wireSchemas.gatewayError?.safeParse({ code: "c", message: "m" }).success).toBe(true);
   });
-
 });
 
 /**

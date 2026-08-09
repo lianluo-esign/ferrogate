@@ -93,7 +93,11 @@ async function proveOwnership(who: { tenant: string; key: string }): Promise<Res
   expect(issued.status).toBe(409);
 
   // The verification document lives in the proving tenant's object (#861).
-  const record = await rawTenantDocument(who.tenant, "site-domain-verifications", `${who.tenant}:${HOST}`);
+  const record = await rawTenantDocument(
+    who.tenant,
+    "site-domain-verifications",
+    `${who.tenant}:${HOST}`,
+  );
   const token = String(record?.challenge_token ?? "");
   expect(token).not.toBe("");
 

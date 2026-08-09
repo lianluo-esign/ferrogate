@@ -55,8 +55,7 @@ function db(name: "DB" | "CONTROL_DB"): D1Database {
     // binding means the declaration was removed and this suite is about to
     // prove something other than what it claims.
     throw new Error(
-      `lifecycle tests expect the \`${name}\` D1 binding (apps/gateway/wrangler.toml). ` +
-        "See src/adapters.ts for why the chain reads BOTH databases.",
+      `lifecycle tests expect the \`${name}\` D1 binding (apps/gateway/wrangler.toml). See src/adapters.ts for why the chain reads BOTH databases.`,
     );
   }
   return binding;
@@ -456,9 +455,7 @@ describe("D1TenancyLifecycleGate", () => {
   it("is `null` from an env with neither database bound", () => {
     expect(D1TenancyLifecycleGate.fromEnv({})).toBeNull();
     expect(D1TenancyLifecycleGate.fromEnv({ DB: {} })).toBeNull();
-    expect(
-      D1TenancyLifecycleGate.fromEnv({ CONTROL_DATA: bindings.CONTROL_DATA }),
-    ).not.toBeNull();
+    expect(D1TenancyLifecycleGate.fromEnv({ CONTROL_DATA: bindings.CONTROL_DATA })).not.toBeNull();
   });
 });
 

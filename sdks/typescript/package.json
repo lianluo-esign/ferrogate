@@ -4,11 +4,7 @@
   "type": "module",
   "description": "Thin typed TypeScript client for the FerroGate Control Plane API, generated from docs/openapi/admin-api.openapi.json.",
   "license": "Apache-2.0",
-  "files": [
-    "dist",
-    "README.md",
-    "LICENSE"
-  ],
+  "files": ["dist", "README.md", "LICENSE"],
   "main": "./dist/index.js",
   "module": "./dist/index.js",
   "exports": {

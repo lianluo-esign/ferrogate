@@ -1,17 +1,18 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
-import { HttpResponse, http } from "msw";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { QueryClientProvider } from "@tanstack/react-query";
-import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthProvider } from "@/hooks/use-auth";
 import { I18nProvider, type Locale } from "@/i18n";
 import { en } from "@/i18n/locales/en";
 import { zhCN } from "@/i18n/locales/zh-CN";
-import SelfHostedWorkersOpsPage from "@/pages/self-hosted-workers-ops";
 import type { AdminSchema } from "@/lib/gateway-client";
+import SelfHostedWorkersOpsPage from "@/pages/self-hosted-workers-ops";
 import { gatewayUrl, mockAdminError, server } from "@/test/msw";
 import { createTestQueryClient, seedSession } from "@/test/test-utils";
+import { QueryClientProvider } from "@tanstack/react-query";
+import { render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { http, HttpResponse } from "msw";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+const nn = <T,>(v: T): NonNullable<T> => v as NonNullable<T>;
 
 type WorkerRecord = AdminSchema<"AdminSelfHostedWorkerRecord">;
 
@@ -63,10 +64,7 @@ function renderPage(locale?: Locale) {
         <AuthProvider>
           <QueryClientProvider client={createTestQueryClient()}>
             <Routes>
-              <Route
-                path="/app/workers/self-hosted"
-                element={<SelfHostedWorkersOpsPage />}
-              />
+              <Route path="/app/workers/self-hosted" element={<SelfHostedWorkersOpsPage />} />
             </Routes>
           </QueryClientProvider>
         </AuthProvider>
@@ -85,7 +83,7 @@ describe("SelfHostedWorkersOpsPage", () => {
     renderPage();
 
     expect(await screen.findByText("edge-runner-01")).toBeInTheDocument();
-    const record = screen.getByText("edge-runner-01").closest("article")!;
+    const record = nn(screen.getByText("edge-runner-01").closest("article"));
     expect(within(record).getByText("active")).toBeInTheDocument();
     expect(within(record).getByText("4 events · 3 checkpoints · 2 artifacts")).toBeInTheDocument();
   });
@@ -94,9 +92,7 @@ describe("SelfHostedWorkersOpsPage", () => {
     mockRecords([]);
     renderPage();
 
-    expect(
-      await screen.findByText("No self-hosted workers registered yet."),
-    ).toBeInTheDocument();
+    expect(await screen.findByText("No self-hosted workers registered yet.")).toBeInTheDocument();
   });
 
   it("surfaces a list load error", async () => {
@@ -109,9 +105,7 @@ describe("SelfHostedWorkersOpsPage", () => {
     );
     renderPage();
 
-    expect(
-      await screen.findByText(/Failed to load self-hosted workers/),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(/Failed to load self-hosted workers/)).toBeInTheDocument();
   });
 
   it("registers a worker and reveals the identity fingerprint exactly once", async () => {
@@ -155,10 +149,7 @@ describe("SelfHostedWorkersOpsPage", () => {
     // canonical id (ws-1) is what gets submitted.
     await user.click(screen.getByRole("combobox", { name: "Workspace id" }));
     await user.click(await screen.findByRole("option", { name: /Edge WS/ }));
-    await user.type(
-      screen.getByLabelText("Identity fingerprint"),
-      "sha256:supplied-fp",
-    );
+    await user.type(screen.getByLabelText("Identity fingerprint"), "sha256:supplied-fp");
     await user.click(screen.getByRole("button", { name: "Register" }));
 
     // secret-shown-once dialog
@@ -178,9 +169,7 @@ describe("SelfHostedWorkersOpsPage", () => {
 
     // copy button copies the revealed value
     await user.click(screen.getByRole("button", { name: "Copy" }));
-    await waitFor(() =>
-      expect(writeText).toHaveBeenCalledWith("sha256:rotated-secret-value"),
-    );
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("sha256:rotated-secret-value"));
   });
 
   it("blocks registration when required fields are missing", async () => {
@@ -193,9 +182,7 @@ describe("SelfHostedWorkersOpsPage", () => {
     await user.click(screen.getByRole("button", { name: "Register" }));
 
     expect(
-      await screen.findByText(
-        "Worker name, workspace id, and identity fingerprint are required.",
-      ),
+      await screen.findByText("Worker name, workspace id, and identity fingerprint are required."),
     ).toBeInTheDocument();
   });
 });
@@ -213,15 +200,11 @@ describe("SelfHostedWorkersOpsPage copy is localized", () => {
         name: en["page.selfHostedWorkersOps.title"],
       }),
     ).toBeInTheDocument();
-    expect(
-      screen.getByText(en["workerOps.trustBadge.reported"]),
-    ).toBeInTheDocument();
+    expect(screen.getByText(en["workerOps.trustBadge.reported"])).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: en["page.selfHostedWorkersOps.register"] }),
     ).toBeInTheDocument();
-    expect(
-      await screen.findByText(en["page.selfHostedWorkersOps.empty"]),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(en["page.selfHostedWorkersOps.empty"])).toBeInTheDocument();
   });
 
   it("renders Simplified Chinese title, reported-trust badge, register action, and empty state", async () => {
@@ -233,16 +216,12 @@ describe("SelfHostedWorkersOpsPage copy is localized", () => {
         name: zhCN["page.selfHostedWorkersOps.title"],
       }),
     ).toBeInTheDocument();
-    expect(
-      screen.getByText(zhCN["workerOps.trustBadge.reported"]),
-    ).toBeInTheDocument();
+    expect(screen.getByText(zhCN["workerOps.trustBadge.reported"])).toBeInTheDocument();
     expect(
       screen.getByRole("button", {
         name: zhCN["page.selfHostedWorkersOps.register"],
       }),
     ).toBeInTheDocument();
-    expect(
-      await screen.findByText(zhCN["page.selfHostedWorkersOps.empty"]),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(zhCN["page.selfHostedWorkersOps.empty"])).toBeInTheDocument();
   });
 });

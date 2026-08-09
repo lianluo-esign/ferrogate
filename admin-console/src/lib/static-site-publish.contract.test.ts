@@ -41,14 +41,9 @@
 //    branch keeps real publishes from being reported as successes meanwhile.
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { describe, expect, it } from "vitest";
-import {
-  contractOperation,
-  contractSchema,
-  fieldShapes,
-  sortedRequired,
-} from "@/lib/contract-pin";
+import { contractOperation, contractSchema, fieldShapes, sortedRequired } from "@/lib/contract-pin";
 import { ZIP_MAGIC } from "@/lib/zip-archive";
+import { describe, expect, it } from "vitest";
 
 // Vitest runs with `admin-console/` as its root, so the TS gateway sources sit
 // one directory up. Reading the source (rather than a checked-in copy) is the

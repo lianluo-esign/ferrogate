@@ -13,8 +13,8 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  encodeSseEvent,
   MAX_MCP_RESPONSE_BYTES,
+  encodeSseEvent,
   parseSseEvents,
   prefersEventStream,
   readSseJsonResponse,

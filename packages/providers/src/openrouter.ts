@@ -5,6 +5,9 @@
  * `http-referer`/`x-title` attribution headers and strips the `stream_options`
  * opt-in (OpenRouter includes usage automatically and has deprecated it).
  */
+
+import { isObject } from "./json.js";
+import { OpenAiCompatibleAdapter } from "./openai.js";
 import { AdapterError, BaseProviderAdapter, SecretValue } from "./types.js";
 import type {
   ChatCompletionPlan,
@@ -17,8 +20,6 @@ import type {
   ProviderUsage,
   ResponsesPlan,
 } from "./types.js";
-import { OpenAiCompatibleAdapter } from "./openai.js";
-import { isObject } from "./json.js";
 
 export class OpenRouterAdapter extends BaseProviderAdapter {
   readonly #openaiCompatible = new OpenAiCompatibleAdapter();
@@ -39,16 +40,14 @@ export class OpenRouterAdapter extends BaseProviderAdapter {
       request,
     );
     if (stream && isObject(prepared.body)) {
-      delete prepared.body["stream_options"];
+      // biome-ignore lint/performance/noDelete: removes the own-property key entirely; assigning undefined would leave an enumerable undefined-valued key and change JSON serialization, the 'in' operator, and Object.keys semantics
+      delete prepared.body.stream_options;
     }
     prepared.headers.push(...headers);
     return prepared;
   }
 
-  override prepareResponses(
-    provider: ProviderConfig,
-    request: ResponsesPlan,
-  ): ProviderHttpRequest {
+  override prepareResponses(provider: ProviderConfig, request: ResponsesPlan): ProviderHttpRequest {
     validateKind(provider.kind);
     const headers = openrouterHeaders(provider);
     const prepared = this.#openaiCompatible.prepareResponses(

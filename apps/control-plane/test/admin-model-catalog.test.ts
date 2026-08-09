@@ -15,13 +15,13 @@ import { tenantModelCatalogFromD1 } from "../../gateway/src/inference/tenant-cat
 import { resolveTenantStorage } from "../src/adapters.js";
 import type { ControlPlaneBindings } from "../src/ports.js";
 import { runScheduledTick } from "../src/schedule/scheduled.js";
-import { applySchema, db, resetD1 } from "./d1.js";
-import { BASE, arm, bearer, jsonRequest, operatorKey, tenantKey } from "./harness.js";
-import { applyTenantSchema, tenantDbA } from "./tenant-db.js";
 import {
   TenantCatalogConflictError,
   TenantModelCatalogStore,
 } from "../src/store/tenant-model-catalog.js";
+import { applySchema, db, resetD1 } from "./d1.js";
+import { BASE, arm, bearer, jsonRequest, operatorKey, tenantKey } from "./harness.js";
+import { applyTenantSchema, tenantDbA } from "./tenant-db.js";
 
 const OPERATOR = operatorKey.secret;
 

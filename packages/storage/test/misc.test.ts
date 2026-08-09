@@ -120,7 +120,13 @@ describe("MemoryMetadataRollupStore — fan-out + org isolation (#171/#226)", ()
     );
     expect(store.listUsageMetadataRollups("customer", "org1")).toHaveLength(1);
     // another org's rollup is invisible to org1's scoped read
-    store.incrementUsageMetadataRollups("org2", new Map([["customer", "acme"]]), "2026-07", delta, 0);
+    store.incrementUsageMetadataRollups(
+      "org2",
+      new Map([["customer", "acme"]]),
+      "2026-07",
+      delta,
+      0,
+    );
     expect(store.listUsageMetadataRollups("customer", "org1")).toHaveLength(1);
     expect(store.listUsageMetadataRollups("customer", undefined)).toHaveLength(2);
   });

@@ -7,27 +7,28 @@
  * storage, or network I/O; the same inputs always yield the same output.
  * Evaluation fails closed: every ambiguity is a Deny with a stable reason code.
  */
-import { Sha256Builder } from "./sha256.js";
+
 import {
-  canonicalUrl,
-  policyNetworkCaip2,
-  policyNetworkEquals,
-  resourceRuleMatches,
-  snapshot as makeSnapshot,
   type AtomicAmount,
   type ConversionSnapshot,
   type Credits,
   type PolicyNetwork,
   type ResourceRule,
+  U64_MAX,
   type ValidatedX402SpendPolicy,
   type X402SpendPolicy,
-  U64_MAX,
+  canonicalUrl,
+  snapshot as makeSnapshot,
+  policyNetworkCaip2,
+  policyNetworkEquals,
+  resourceRuleMatches,
 } from "./config.js";
+import { Sha256Builder } from "./sha256.js";
 import {
-  challengeHashHex,
-  networkCaip2,
   type PaymentIntent,
   type SelectedPayment,
+  challengeHashHex,
+  networkCaip2,
 } from "./wire.js";
 
 /** The three-valued payment decision. */
@@ -293,7 +294,10 @@ export function authorizeX402Payment(
   // `Option<&'static str>`).
   const mismatch = intent.bindingMismatch(selected);
   if (mismatch !== null) {
-    return deny(REASON_INTENT_MISMATCH, `payment intent does not match the challenge (${mismatch} differs)`);
+    return deny(
+      REASON_INTENT_MISMATCH,
+      `payment intent does not match the challenge (${mismatch} differs)`,
+    );
   }
 
   // 1. Master switch.
@@ -304,7 +308,10 @@ export function authorizeX402Payment(
   // 2. Network allowlist.
   const network: PolicyNetwork = { network: selected.network };
   if (!p.allowedNetworks.some((n) => policyNetworkEquals(n, network))) {
-    return deny(REASON_NETWORK_NOT_ALLOWED, `network ${policyNetworkCaip2(network)} is not allowlisted`);
+    return deny(
+      REASON_NETWORK_NOT_ALLOWED,
+      `network ${policyNetworkCaip2(network)} is not allowlisted`,
+    );
   }
 
   // 3. (network, mint) allowlist.
@@ -312,7 +319,10 @@ export function authorizeX402Payment(
     (a) => policyNetworkEquals(a.network, network) && a.mint === selected.mint,
   );
   if (!mintAllowed) {
-    return deny(REASON_MINT_NOT_ALLOWED, `mint ${selected.mint} on ${policyNetworkCaip2(network)} is not allowlisted`);
+    return deny(
+      REASON_MINT_NOT_ALLOWED,
+      `mint ${selected.mint} on ${policyNetworkCaip2(network)} is not allowlisted`,
+    );
   }
 
   // 4. Recipient allowlist.
@@ -324,7 +334,11 @@ export function authorizeX402Payment(
   //    egress URL (no redirect), and that URL must be covered by a resource rule.
   const challenge = canonicalUrl(selected.resourceUrl);
   const authorized = canonicalUrl(intent.authorizedResourceUrl());
-  if (challenge === undefined || authorized === undefined || !canonicalUrlEquals(challenge, authorized)) {
+  if (
+    challenge === undefined ||
+    authorized === undefined ||
+    !canonicalUrlEquals(challenge, authorized)
+  ) {
     return deny(
       REASON_RESOURCE_MISMATCH,
       `challenge resource ${JSON.stringify(selected.resourceUrl)} does not match authorized egress ${JSON.stringify(
@@ -374,10 +388,16 @@ function evaluateAmount(
 
   // 6. Atomic bounds (direct, independent of the credit conversion).
   if (caps.minAtomicPerPayment !== undefined && atomic < caps.minAtomicPerPayment) {
-    return deny(REASON_AMOUNT_BELOW_MIN, `atomic amount ${atomic} is below the minimum ${caps.minAtomicPerPayment}`);
+    return deny(
+      REASON_AMOUNT_BELOW_MIN,
+      `atomic amount ${atomic} is below the minimum ${caps.minAtomicPerPayment}`,
+    );
   }
   if (caps.maxAtomicPerPayment !== undefined && atomic > caps.maxAtomicPerPayment) {
-    return deny(REASON_ATOMIC_CAP_EXCEEDED, `atomic amount ${atomic} exceeds the hard cap ${caps.maxAtomicPerPayment}`);
+    return deny(
+      REASON_ATOMIC_CAP_EXCEEDED,
+      `atomic amount ${atomic} exceeds the hard cap ${caps.maxAtomicPerPayment}`,
+    );
   }
 
   // 7. Conversion freshness: a rate past its window — or one whose freshness the

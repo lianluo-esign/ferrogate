@@ -28,11 +28,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { Caller, InferenceDeps, PhysicalRoute } from "../../src/inference/index.js";
 import type { ResidencyPolicy } from "../../src/residency/index.js";
 import { errorBody, harness } from "./fixtures.js";
-import {
-  type ProviderInterceptor,
-  interceptProviderFetch,
-  providerJson,
-} from "./provider-mock.js";
+import { type ProviderInterceptor, interceptProviderFetch, providerJson } from "./provider-mock.js";
 
 const MODEL = "resident-model";
 
@@ -131,13 +127,10 @@ describe("#681 — failover cannot leave the tenant's region", () => {
         : providerJson(CHAT_OK),
     );
 
-    const app = harness(
-      { caller: euCaller() },
-      [
-        route({ provider: "eu", region: "eu-west-1", priority: 0 }),
-        route({ provider: "us", region: "us-east-1", priority: 1 }),
-      ],
-    );
+    const app = harness({ caller: euCaller() }, [
+      route({ provider: "eu", region: "eu-west-1", priority: 0 }),
+      route({ provider: "us", region: "us-east-1", priority: 1 }),
+    ]);
 
     const res = await app.post("/v1/chat/completions", CHAT_BODY);
 
@@ -158,13 +151,10 @@ describe("#681 — failover cannot leave the tenant's region", () => {
         : providerJson(CHAT_OK),
     );
 
-    const app = harness(
-      { caller: euCaller() },
-      [
-        route({ provider: "eu-a", region: "eu-west-1", priority: 0 }),
-        route({ provider: "eu-b", region: "eu-west-1", priority: 1 }),
-      ],
-    );
+    const app = harness({ caller: euCaller() }, [
+      route({ provider: "eu-a", region: "eu-west-1", priority: 0 }),
+      route({ provider: "eu-b", region: "eu-west-1", priority: 1 }),
+    ]);
 
     const res = await app.post("/v1/chat/completions", CHAT_BODY);
 
@@ -181,19 +171,16 @@ describe("#681 — the shadow mirror cannot leave the tenant's region", () => {
   it("does not mirror an EU tenant's prompt to an out-of-region shadow route", async () => {
     provider = interceptProviderFetch(() => providerJson(CHAT_OK));
 
-    const app = harness(
-      { caller: euCaller() },
-      [
-        route({ provider: "eu", region: "eu-west-1", priority: 0 }),
-        route({
-          provider: "us-mirror",
-          region: "us-east-1",
-          priority: 5,
-          shadowPercent: 100,
-          shadowMaxRequests: 0,
-        }),
-      ],
-    );
+    const app = harness({ caller: euCaller() }, [
+      route({ provider: "eu", region: "eu-west-1", priority: 0 }),
+      route({
+        provider: "us-mirror",
+        region: "us-east-1",
+        priority: 5,
+        shadowPercent: 100,
+        shadowMaxRequests: 0,
+      }),
+    ]);
 
     const res = await app.post("/v1/chat/completions", CHAT_BODY);
     expect(res.status).toBe(200);
@@ -210,19 +197,16 @@ describe("#681 — the shadow mirror cannot leave the tenant's region", () => {
     // mirroring was simply broken.
     provider = interceptProviderFetch(() => providerJson(CHAT_OK));
 
-    const app = harness(
-      { caller: euCaller() },
-      [
-        route({ provider: "eu", region: "eu-west-1", priority: 0 }),
-        route({
-          provider: "eu-mirror",
-          region: "eu-west-1",
-          priority: 5,
-          shadowPercent: 100,
-          shadowMaxRequests: 0,
-        }),
-      ],
-    );
+    const app = harness({ caller: euCaller() }, [
+      route({ provider: "eu", region: "eu-west-1", priority: 0 }),
+      route({
+        provider: "eu-mirror",
+        region: "eu-west-1",
+        priority: 5,
+        shadowPercent: 100,
+        shadowMaxRequests: 0,
+      }),
+    ]);
 
     const res = await app.post("/v1/chat/completions", CHAT_BODY);
     expect(res.status).toBe(200);
@@ -240,9 +224,7 @@ describe("#681 — the shadow mirror cannot leave the tenant's region", () => {
   it("names the region constraint when nothing in the catalog can serve it", async () => {
     provider = interceptProviderFetch(() => providerJson(CHAT_OK));
 
-    const app = harness({ caller: euCaller() }, [
-      route({ provider: "us", region: "us-east-1" }),
-    ]);
+    const app = harness({ caller: euCaller() }, [route({ provider: "us", region: "us-east-1" })]);
 
     const res = await app.post("/v1/chat/completions", CHAT_BODY);
 
@@ -268,9 +250,7 @@ describe("#681 — zero data retention is asserted by the route and verified her
     // satisfying a ZDR policy the day the policy is switched on.
     provider = interceptProviderFetch(() => providerJson(CHAT_OK));
 
-    const app = harness({ caller: zdrCaller() }, [
-      route({ provider: "eu", region: "eu-west-1" }),
-    ]);
+    const app = harness({ caller: zdrCaller() }, [route({ provider: "eu", region: "eu-west-1" })]);
 
     const res = await app.post("/v1/chat/completions", CHAT_BODY);
 

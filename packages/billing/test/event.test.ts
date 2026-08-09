@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  type BillingEvent,
   InMemoryBillingEventSink,
   MAX_METADATA_ENTRIES,
   MAX_METADATA_KEY_LEN,
@@ -8,8 +9,8 @@ import {
   providerAttemptForRequest,
   providerAttemptIsLegacy,
   validateRequestMetadata,
-  type BillingEvent,
 } from "../src/index.js";
+const nn = <T>(v: T): NonNullable<T> => v as NonNullable<T>;
 
 function wireEvent(request_id: string): Record<string, unknown> {
   return {
@@ -48,9 +49,9 @@ describe("validateRequestMetadata (issue #171)", () => {
     );
   });
   it("rejects an over-long value", () => {
-    expect(validateRequestMetadata({ customer_id: "v".repeat(MAX_METADATA_VALUE_LEN + 1) })).toContain(
-      "value",
-    );
+    expect(
+      validateRequestMetadata({ customer_id: "v".repeat(MAX_METADATA_VALUE_LEN + 1) }),
+    ).toContain("value");
   });
 });
 
@@ -65,14 +66,20 @@ describe("parseBillingEvent wire flatten", () => {
 
   it("treats a payload missing provider-attempt fields as legacy", () => {
     const wire = wireEvent("req-legacy");
+    // biome-ignore lint/performance/noDelete: removes the own-property key entirely; assigning undefined would leave an enumerable undefined-valued key and change JSON serialization, the 'in' operator, and Object.keys semantics
     delete wire.provider_attempt_id;
+    // biome-ignore lint/performance/noDelete: removes the own-property key entirely; assigning undefined would leave an enumerable undefined-valued key and change JSON serialization, the 'in' operator, and Object.keys semantics
     delete wire.provider_attempt_index;
     const event = parseBillingEvent(wire);
     expect(providerAttemptIsLegacy(event.provider_attempt)).toBe(true);
   });
 
   it("coerces the i64 wallet fields to bigint", () => {
-    const wire = { ...wireEvent("req-wallet"), wallet_delta_credits: -35_000, wallet_balance_after_credits: 465_000 };
+    const wire = {
+      ...wireEvent("req-wallet"),
+      wallet_delta_credits: -35_000,
+      wallet_balance_after_credits: 465_000,
+    };
     const event = parseBillingEvent(wire);
     expect(event.wallet_delta_credits).toBe(-35_000n);
     expect(event.wallet_balance_after_credits).toBe(465_000n);
@@ -89,7 +96,7 @@ describe("InMemoryBillingEventSink", () => {
     sink.record(event("fg-test"));
     const events = sink.list();
     expect(events).toHaveLength(1);
-    expect(events[0]!.tenant.organization_id).toBe("org");
+    expect((events[0] as NonNullable<(typeof events)[0]>).tenant.organization_id).toBe("org");
   });
 
   it("enforces a FIFO retention limit while tracking the running total", () => {
@@ -98,9 +105,9 @@ describe("InMemoryBillingEventSink", () => {
     const events = sink.list();
     expect(sink.length).toBe(2);
     expect(sink.recordedTotal()).toBe(3);
-    expect(events[0]!.request_id).toBe("fg-2");
-    expect(events[1]!.request_id).toBe("fg-3");
-    expect(sink.listPaginated(1, 1)[0]!.request_id).toBe("fg-3");
+    expect((events[0] as NonNullable<(typeof events)[0]>).request_id).toBe("fg-2");
+    expect((events[1] as NonNullable<(typeof events)[1]>).request_id).toBe("fg-3");
+    expect(nn(sink.listPaginated(1, 1)[0]).request_id).toBe("fg-3");
   });
 
   it("uses providerAttemptForRequest to build a request-scoped attempt id", () => {

@@ -1,13 +1,13 @@
-import { screen, waitFor, within } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
-import { HttpResponse, http } from "msw";
-import { beforeEach, describe, expect, it } from "vitest";
 import AgentSchedulesPage, {
   type AdminAgentSchedule,
   type AdminAgentScheduleFire,
 } from "@/pages/agent-schedules";
 import { gatewayUrl, mockAdminList, server } from "@/test/msw";
 import { renderWithProviders, seedSession } from "@/test/test-utils";
+import { screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { http, HttpResponse } from "msw";
+import { beforeEach, describe, expect, it } from "vitest";
 
 function schedule(overrides: Partial<AdminAgentSchedule> = {}): AdminAgentSchedule {
   return {
@@ -87,9 +87,7 @@ describe("AgentSchedulesPage", () => {
     mockAdminList("/admin/v1/agent-schedules", []);
     // #342: tenant/workspace are shared entity pickers; the schedule submits the
     // canonical ids while operators pick by human display name.
-    mockAdminList("/admin/v1/tenant-accounts", [
-      { id: "tenant-1", name: "Acme", slug: "acme" },
-    ]);
+    mockAdminList("/admin/v1/tenant-accounts", [{ id: "tenant-1", name: "Acme", slug: "acme" }]);
     mockAdminList("/admin/v1/workspaces", [
       { id: "ws-1", name: "Prod workspace", slug: "prod", project_id: "proj-1" },
     ]);
@@ -151,9 +149,7 @@ describe("AgentSchedulesPage", () => {
   it("scopes the workspace target to the selected tenant and excludes others until one is chosen", async () => {
     const user = userEvent.setup();
     mockAdminList("/admin/v1/agent-schedules", []);
-    mockAdminList("/admin/v1/tenant-accounts", [
-      { id: "tenant-1", name: "Acme", slug: "acme" },
-    ]);
+    mockAdminList("/admin/v1/tenant-accounts", [{ id: "tenant-1", name: "Acme", slug: "acme" }]);
     // The workspace list is captured so we can assert the dependent tenant_id
     // filter is applied — only the selected tenant's workspaces are offered.
     const captured: { workspaceQuery: URLSearchParams | null } = { workspaceQuery: null };
@@ -204,10 +200,7 @@ describe("AgentSchedulesPage", () => {
     server.use(
       http.post(gatewayUrl("/admin/v1/agent-schedules/sched-1/run-now"), () => {
         runNowCalls += 1;
-        return HttpResponse.json(
-          { object: "agent_schedule_fire", fire: fire() },
-          { status: 202 },
-        );
+        return HttpResponse.json({ object: "agent_schedule_fire", fire: fire() }, { status: 202 });
       }),
     );
 
@@ -219,7 +212,9 @@ describe("AgentSchedulesPage", () => {
     expect(await screen.findByText("Run schedule now?")).toBeInTheDocument();
     expect(runNowCalls).toBe(0);
 
-    await user.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Run now" }));
+    await user.click(
+      within(screen.getByRole("alertdialog")).getByRole("button", { name: "Run now" }),
+    );
 
     await waitFor(() => expect(runNowCalls).toBe(1));
     // 202 response fire surfaced: outcome + dispatch id
@@ -236,10 +231,7 @@ describe("AgentSchedulesPage", () => {
     server.use(
       http.post(gatewayUrl("/admin/v1/agent-schedules/sched-1/run-now"), () => {
         runNowCalls += 1;
-        return HttpResponse.json(
-          { object: "agent_schedule_fire", fire: fire() },
-          { status: 202 },
-        );
+        return HttpResponse.json({ object: "agent_schedule_fire", fire: fire() }, { status: 202 });
       }),
     );
 
@@ -249,9 +241,7 @@ describe("AgentSchedulesPage", () => {
     await user.click(screen.getByRole("button", { name: "Run now" }));
     await user.click(await screen.findByRole("button", { name: "Cancel" }));
 
-    await waitFor(() =>
-      expect(screen.queryByText("Run schedule now?")).not.toBeInTheDocument(),
-    );
+    await waitFor(() => expect(screen.queryByText("Run schedule now?")).not.toBeInTheDocument());
     expect(runNowCalls).toBe(0);
   });
 

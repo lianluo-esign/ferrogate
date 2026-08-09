@@ -1,5 +1,3 @@
-import { useState, type FormEvent } from "react";
-import { useQuery } from "@tanstack/react-query";
 import { EntityReferencePicker } from "@/components/resource/entity-reference-picker";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -24,6 +22,8 @@ import { useAuth } from "@/hooks/use-auth";
 import { useI18n } from "@/i18n";
 import { adminGet } from "@/lib/gateway-client";
 import { formatUnix, shortFingerprint, verdictVariant } from "@/lib/guardrails";
+import { useQuery } from "@tanstack/react-query";
+import { type FormEvent, useState } from "react";
 
 type Verdict = "pass" | "fail" | "error";
 type Action = "allow" | "block" | "redact" | "record";
@@ -55,7 +55,7 @@ function orUndefined(value: string): string | undefined {
 export default function GuardrailEvaluationsPage() {
   const { session } = useAuth();
   const { t, format } = useI18n();
-  const apiKey = session!.gatewayApiKey;
+  const apiKey = (session as NonNullable<typeof session>).gatewayApiKey;
 
   const [form, setForm] = useState<EvaluationFilters>(EMPTY_FILTERS);
   const [applied, setApplied] = useState<EvaluationFilters>(EMPTY_FILTERS);
@@ -76,10 +76,7 @@ export default function GuardrailEvaluationsPage() {
       }),
   });
 
-  function setField<K extends keyof EvaluationFilters>(
-    key: K,
-    value: EvaluationFilters[K],
-  ) {
+  function setField<K extends keyof EvaluationFilters>(key: K, value: EvaluationFilters[K]) {
     setForm((current) => ({ ...current, [key]: value }));
   }
 
@@ -101,7 +98,9 @@ export default function GuardrailEvaluationsPage() {
 
       <form className="grid gap-4 rounded-md border p-4 sm:grid-cols-3" onSubmit={handleSubmit}>
         <div className="grid gap-2">
-          <Label htmlFor="filter-request-id">{t("page.guardrailEvaluations.filter.requestId")}</Label>
+          <Label htmlFor="filter-request-id">
+            {t("page.guardrailEvaluations.filter.requestId")}
+          </Label>
           <Input
             id="filter-request-id"
             value={form.request_id}
@@ -119,7 +118,9 @@ export default function GuardrailEvaluationsPage() {
           />
         </div>
         <div className="grid gap-2">
-          <Label htmlFor="filter-agent-run-id">{t("page.guardrailEvaluations.filter.agentRunId")}</Label>
+          <Label htmlFor="filter-agent-run-id">
+            {t("page.guardrailEvaluations.filter.agentRunId")}
+          </Label>
           <Input
             id="filter-agent-run-id"
             value={form.agent_run_id}
@@ -217,7 +218,10 @@ export default function GuardrailEvaluationsPage() {
       </form>
 
       {error && (
-        <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <p
+          role="alert"
+          className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+        >
           {t("page.guardrailEvaluations.loadError", { message: error.message })}
         </p>
       )}
@@ -284,10 +288,11 @@ export default function GuardrailEvaluationsPage() {
                       "—"
                     )}
                   </TableCell>
-                  <TableCell className="font-mono text-xs">
-                    {row.decision_reason ?? "—"}
-                  </TableCell>
-                  <TableCell className="font-mono text-xs" title={row.action_fingerprint ?? undefined}>
+                  <TableCell className="font-mono text-xs">{row.decision_reason ?? "—"}</TableCell>
+                  <TableCell
+                    className="font-mono text-xs"
+                    title={row.action_fingerprint ?? undefined}
+                  >
                     {shortFingerprint(row.action_fingerprint)}
                   </TableCell>
                   <TableCell>{row.finding_count}</TableCell>

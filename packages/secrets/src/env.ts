@@ -135,19 +135,11 @@ export async function readEnvSecret(
  * failure is invisible at the point it is caused. Use {@link readEnvSecret}
  * from any call site that can await.
  */
-export function nonEmptyEnv(
-  name: string,
-  env: EnvLike = defaultEnv(),
-): string | undefined {
+export function nonEmptyEnv(name: string, env: EnvLike = defaultEnv()): string | undefined {
   const value = env[name];
   if (isSecretsStoreBinding(value)) {
     throw new Error(
-      `environment variable ${name} is bound as a Cloudflare Secrets Store secret ` +
-        `([[secrets_store_secrets]]), whose value can only be read asynchronously with ` +
-        `await ${name}.get(). This reader is synchronous. Fix by either (1) reading it through ` +
-        `readEnvSecret(${JSON.stringify(name)}, env) from a call site that can await, or ` +
-        `(2) binding it as a plain [vars] entry / "wrangler secret put" value if a synchronous ` +
-        `read is required.`,
+      `environment variable ${name} is bound as a Cloudflare Secrets Store secret ([[secrets_store_secrets]]), whose value can only be read asynchronously with await ${name}.get(). This reader is synchronous. Fix by either (1) reading it through readEnvSecret(${JSON.stringify(name)}, env) from a call site that can await, or (2) binding it as a plain [vars] entry / "wrangler secret put" value if a synchronous read is required.`,
     );
   }
   return value !== undefined && value.trim() !== "" ? value : undefined;

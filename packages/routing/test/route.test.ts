@@ -1,5 +1,5 @@
-import { describe, expect, test } from "vitest";
 import type { RouteMatch, RouteMatcher } from "@ferrogate/routing";
+import { describe, expect, test } from "vitest";
 
 // The crate ships only the abstraction (RouteMatch struct + RouteMatcher trait);
 // the concrete matcher lives over the runtime route table. Smoke-test that the

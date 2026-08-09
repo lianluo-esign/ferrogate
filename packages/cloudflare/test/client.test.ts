@@ -10,7 +10,7 @@
  * opt-in per call and defaults to GET-only.
  */
 import { describe, expect, test } from "vitest";
-import { CloudflareClient, EnvTokenResolver, DEFAULT_API_BASE_URL } from "../src/client.js";
+import { CloudflareClient, DEFAULT_API_BASE_URL, EnvTokenResolver } from "../src/client.js";
 import { CloudflareError } from "../src/errors.js";
 import { REQUIRED_TOKEN_PERMISSION_GROUPS } from "../src/scopes.js";
 import { RecordingClock, ScriptedTransport, errorResponse, okResponse } from "./support.js";
@@ -45,9 +45,7 @@ describe("URL construction and auth", () => {
   test("templates EVERY occurrence of the placeholder", async () => {
     const transport = new ScriptedTransport([okResponse({})]);
     await client(transport).getJson("accounts/{account_id}/x/{account_id}");
-    expect(transport.requests[0]?.url).toBe(
-      `${DEFAULT_API_BASE_URL}/accounts/acct_123/x/acct_123`,
-    );
+    expect(transport.requests[0]?.url).toBe(`${DEFAULT_API_BASE_URL}/accounts/acct_123/x/acct_123`);
   });
 
   test("normalises a trailing base slash and a leading path slash", async () => {
@@ -176,22 +174,17 @@ describe("error mapping", () => {
 
   test("a transport throw surfaces as a typed transport error", async () => {
     const transport = new ScriptedTransport([{ throws: new TypeError("network failure") }]);
-    await expect(
-      client(transport).getJson("accounts/{account_id}"),
-    ).rejects.toBeInstanceOf(CloudflareError);
+    await expect(client(transport).getJson("accounts/{account_id}")).rejects.toBeInstanceOf(
+      CloudflareError,
+    );
   });
 });
 
 describe("retry loop", () => {
   test("a GET is retried on a 503 and succeeds", async () => {
     const clock = new RecordingClock();
-    const transport = new ScriptedTransport([
-      errorResponse(503, []),
-      okResponse({ id: "ok" }),
-    ]);
-    const result = await client(transport, clock).getJson<{ id: string }>(
-      "accounts/{account_id}",
-    );
+    const transport = new ScriptedTransport([errorResponse(503, []), okResponse({ id: "ok" })]);
+    const result = await client(transport, clock).getJson<{ id: string }>("accounts/{account_id}");
     expect(result).toEqual({ id: "ok" });
     expect(transport.callCount).toBe(2);
     expect(clock.slept).toEqual([1_000]);
@@ -202,9 +195,11 @@ describe("retry loop", () => {
     const transport = new ScriptedTransport(
       Array.from({ length: 5 }, () => errorResponse(429, [], 2_000)),
     );
-    await expect(client(transport, clock).getJson("accounts/{account_id}")).rejects.toMatchObject(
-      { kind: "rate_limited", attempts: 5, retryAfterMs: 2_000 },
-    );
+    await expect(client(transport, clock).getJson("accounts/{account_id}")).rejects.toMatchObject({
+      kind: "rate_limited",
+      attempts: 5,
+      retryAfterMs: 2_000,
+    });
     expect(transport.callCount).toBe(5);
     expect(clock.slept).toEqual([2_000, 2_000, 2_000, 2_000]);
   });

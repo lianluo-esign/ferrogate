@@ -76,7 +76,10 @@ describe("validate_asset_bucket", () => {
     ["endpoint", "field asset_bucket.endpoint: required when asset_bucket.enabled = true"],
     ["bucket", "field asset_bucket.bucket: required when asset_bucket.enabled = true"],
     ["region", "field asset_bucket.region: required when asset_bucket.enabled = true"],
-    ["access_key_id", "field asset_bucket.access_key_id: required when asset_bucket.enabled = true"],
+    [
+      "access_key_id",
+      "field asset_bucket.access_key_id: required when asset_bucket.enabled = true",
+    ],
     [
       "secret_access_key_env",
       "field asset_bucket.secret_access_key_env: required when asset_bucket.enabled = true",
@@ -185,9 +188,18 @@ describe("validate_asset_bucket_backend", () => {
   });
 
   const cases: [string, string][] = [
-    ["cf_account_id", 'field asset_bucket.cf_account_id: required when asset_bucket.backend = "workers-static-assets"'],
-    ["cf_api_token", 'field asset_bucket.cf_api_token: required when asset_bucket.backend = "workers-static-assets"'],
-    ["cf_script_name", 'field asset_bucket.cf_script_name: required when asset_bucket.backend = "workers-static-assets"'],
+    [
+      "cf_account_id",
+      'field asset_bucket.cf_account_id: required when asset_bucket.backend = "workers-static-assets"',
+    ],
+    [
+      "cf_api_token",
+      'field asset_bucket.cf_api_token: required when asset_bucket.backend = "workers-static-assets"',
+    ],
+    [
+      "cf_script_name",
+      'field asset_bucket.cf_script_name: required when asset_bucket.backend = "workers-static-assets"',
+    ],
   ];
   test.each(cases)("requires %s", (field, expected) => {
     expect(firstError(cfNative({ [field]: null }))).toBe(expected);

@@ -7,7 +7,14 @@
  * (`intoChatBodyWith*`) are the Rust `#[cfg(test)]` helpers, retained for unit
  * coverage of the canonicalization.
  */
-import { AdapterError } from "./types.js";
+
+import {
+  applyPromptCacheToAnthropic,
+  applyPromptCacheToAutomaticFamily,
+  promptCacheFromBody,
+  stripPromptCacheDirective,
+} from "./caching.js";
+import type { CanonicalPromptCache } from "./caching.js";
 import type { Json, JsonObject } from "./json.js";
 import {
   asArray,
@@ -25,13 +32,7 @@ import {
   structuredOutputFromResponsesBody,
 } from "./structured.js";
 import type { CanonicalStructuredOutput } from "./structured.js";
-import {
-  applyPromptCacheToAnthropic,
-  applyPromptCacheToAutomaticFamily,
-  promptCacheFromBody,
-  stripPromptCacheDirective,
-} from "./caching.js";
-import type { CanonicalPromptCache } from "./caching.js";
+import { AdapterError } from "./types.js";
 
 type CanonicalToolChoice =
   | { type: "Auto" }
@@ -99,11 +100,11 @@ export class CanonicalAiRequest {
   /** Rust `#[cfg(test)]` helper: chat body carrying `system` as a field. */
   intoChatBodyWithSystemField(): Json {
     const body: JsonObject = { ...this.sourceBody };
-    body["messages"] = canonicalMessagesToJson(this.messages);
-    if (this.tools.length > 0) body["tools"] = canonicalToolsToJson(this.tools);
-    if (this.toolChoice) body["tool_choice"] = canonicalToolChoiceToJson(this.toolChoice);
-    if (this.instructions !== undefined) body["system"] = this.instructions;
-    if (this.maxOutputTokens !== undefined) body["max_tokens"] = this.maxOutputTokens;
+    body.messages = canonicalMessagesToJson(this.messages);
+    if (this.tools.length > 0) body.tools = canonicalToolsToJson(this.tools);
+    if (this.toolChoice) body.tool_choice = canonicalToolChoiceToJson(this.toolChoice);
+    if (this.instructions !== undefined) body.system = this.instructions;
+    if (this.maxOutputTokens !== undefined) body.max_tokens = this.maxOutputTokens;
     return body;
   }
 
@@ -111,13 +112,13 @@ export class CanonicalAiRequest {
   intoChatBodyWithSystemMessage(): Json {
     const body: JsonObject = { ...this.sourceBody };
     const messages = canonicalMessagesToJson(this.messages);
-    if (this.tools.length > 0) body["tools"] = canonicalToolsToJson(this.tools);
-    if (this.toolChoice) body["tool_choice"] = canonicalToolChoiceToJson(this.toolChoice);
+    if (this.tools.length > 0) body.tools = canonicalToolsToJson(this.tools);
+    if (this.toolChoice) body.tool_choice = canonicalToolChoiceToJson(this.toolChoice);
     if (this.instructions !== undefined) {
       (messages as Json[]).unshift({ role: "system", content: this.instructions });
     }
-    body["messages"] = messages;
-    if (this.maxOutputTokens !== undefined) body["max_tokens"] = this.maxOutputTokens;
+    body.messages = messages;
+    if (this.maxOutputTokens !== undefined) body.max_tokens = this.maxOutputTokens;
     return body;
   }
 
@@ -128,11 +129,11 @@ export class CanonicalAiRequest {
     // other candidate on the ladder. `ownBody` is the boundary that stops it,
     // and the type the `apply*` helpers demand (issue #690).
     const body = ownBody({ ...this.sourceBody });
-    body["messages"] = canonicalMessagesToAnthropicJson(this.messages);
-    if (this.tools.length > 0) body["tools"] = canonicalToolsToAnthropicJson(this.tools);
-    if (this.toolChoice) body["tool_choice"] = canonicalToolChoiceToAnthropicJson(this.toolChoice);
-    if (this.instructions !== undefined) body["system"] = this.instructions;
-    if (this.maxOutputTokens !== undefined) body["max_tokens"] = this.maxOutputTokens;
+    body.messages = canonicalMessagesToAnthropicJson(this.messages);
+    if (this.tools.length > 0) body.tools = canonicalToolsToAnthropicJson(this.tools);
+    if (this.toolChoice) body.tool_choice = canonicalToolChoiceToAnthropicJson(this.toolChoice);
+    if (this.instructions !== undefined) body.system = this.instructions;
+    if (this.maxOutputTokens !== undefined) body.max_tokens = this.maxOutputTokens;
     // Coerced into a forced tool call (or refused) AFTER the caller's own tools
     // and tool_choice are in place, so a collision between the two is visible
     // rather than silently overwritten (issue #674).
@@ -150,20 +151,20 @@ export class CanonicalAiRequest {
 
   intoGeminiBody(): Json {
     const body = ownBody({ ...this.sourceBody });
-    body["contents"] = canonicalMessagesToGeminiJson(this.messages);
+    body.contents = canonicalMessagesToGeminiJson(this.messages);
     if (this.instructions !== undefined) {
-      body["systemInstruction"] = canonicalInstructionToGeminiJson(this.instructions);
+      body.systemInstruction = canonicalInstructionToGeminiJson(this.instructions);
     }
-    if (this.tools.length > 0) body["tools"] = canonicalToolsToGeminiJson(this.tools);
-    if (this.toolChoice) body["toolConfig"] = canonicalToolChoiceToGeminiJson(this.toolChoice);
+    if (this.tools.length > 0) body.tools = canonicalToolsToGeminiJson(this.tools);
+    if (this.toolChoice) body.toolConfig = canonicalToolChoiceToGeminiJson(this.toolChoice);
     const generationConfig: JsonObject = {};
     if (this.maxOutputTokens !== undefined) {
-      generationConfig["maxOutputTokens"] = this.maxOutputTokens;
+      generationConfig.maxOutputTokens = this.maxOutputTokens;
     }
     if (this.structuredOutput !== undefined) {
       applyStructuredOutputToGemini(generationConfig, this.structuredOutput, "gemini");
     }
-    if (Object.keys(generationConfig).length > 0) body["generationConfig"] = generationConfig;
+    if (Object.keys(generationConfig).length > 0) body.generationConfig = generationConfig;
     // Gemini caches implicitly and has no per-request breakpoint, so the
     // directive is adjudicated (auto accepted, explicit/off refused) and never
     // reaches the wire (#690).
@@ -246,9 +247,9 @@ function responsesContentItemToCanonical(value: Json): ResponsesContentItem {
   if (typeof value === "string") return { type: "Block", block: { kind: "Text", text: value } };
   const object = asObject(value);
   if (object) {
-    const blockType = asStr(object["type"]);
+    const blockType = asStr(object.type);
     if (blockType === "input_text" || blockType === "output_text" || blockType === "text") {
-      return { type: "Block", block: { kind: "Text", text: asStr(object["text"]) ?? "" } };
+      return { type: "Block", block: { kind: "Text", text: asStr(object.text) ?? "" } };
     }
     if (blockType === "input_image" || blockType === "image_url" || blockType === "image") {
       const image = extractImageReference(object);
@@ -300,18 +301,15 @@ const toolCallsIsEmpty = (value: Json): boolean =>
   value === null || (isArray(value) && value.length === 0);
 
 function extractImageReference(object: JsonObject): string | undefined {
-  const source = object["source"];
+  const source = object.source;
   const candidate =
-    object["image_url"] ??
-    object["url"] ??
-    getField(source, "url") ??
-    getField(source, "data");
+    object.image_url ?? object.url ?? getField(source, "url") ?? getField(source, "data");
   if (typeof candidate === "string") return candidate;
   if (isObject(candidate)) {
-    const nested = asStr(candidate["url"] ?? candidate["data"]);
+    const nested = asStr(candidate.url ?? candidate.data);
     if (nested !== undefined) return nested;
   }
-  const direct = asStr(object["image_url"]);
+  const direct = asStr(object.image_url);
   return direct;
 }
 
@@ -372,7 +370,7 @@ function canonicalToolCallsToJson(toolCalls: CanonicalToolCall[]): Json {
 function canonicalToolsToJson(tools: CanonicalToolDefinition[]): Json {
   return tools.map((tool) => {
     const fn: JsonObject = { name: tool.name, parameters: tool.inputSchema };
-    if (tool.description !== undefined) fn["description"] = tool.description;
+    if (tool.description !== undefined) fn.description = tool.description;
     return { type: "function", function: fn };
   });
 }
@@ -433,7 +431,7 @@ function canonicalContentBlockToAnthropicJson(block: CanonicalContentBlock): Jso
 function canonicalToolsToAnthropicJson(tools: CanonicalToolDefinition[]): Json {
   return tools.map((tool) => {
     const value: JsonObject = { name: tool.name, input_schema: tool.inputSchema };
-    if (tool.description !== undefined) value["description"] = tool.description;
+    if (tool.description !== undefined) value.description = tool.description;
     return value;
   });
 }
@@ -497,8 +495,8 @@ function canonicalInstructionParts(instructions: Json): Json {
     const parts: Json[] = [];
     for (const block of instructions) {
       if (typeof block === "string") parts.push({ text: block });
-      else if (isObject(block) && asStr(block["type"]) === "text") {
-        parts.push({ text: asStr(block["text"]) ?? "" });
+      else if (isObject(block) && asStr(block.type) === "text") {
+        parts.push({ text: asStr(block.text) ?? "" });
       }
     }
     return parts;
@@ -511,7 +509,7 @@ function canonicalToolsToGeminiJson(tools: CanonicalToolDefinition[]): Json {
     {
       functionDeclarations: tools.map((tool) => {
         const value: JsonObject = { name: tool.name, parameters: tool.inputSchema };
-        if (tool.description !== undefined) value["description"] = tool.description;
+        if (tool.description !== undefined) value.description = tool.description;
         return value;
       }),
     },
@@ -565,13 +563,12 @@ function responsesToolsToCanonical(value: Json | undefined): CanonicalToolDefini
 function responsesToolDefinitionToCanonical(value: Json): CanonicalToolDefinition {
   const object = asObject(value);
   if (!object) throw contentNotSupportedError();
-  const fn = asObject(object["function"]);
-  const nameRaw = asStr(object["name"] ?? getField(fn, "name"));
+  const fn = asObject(object.function);
+  const nameRaw = asStr(object.name ?? getField(fn, "name"));
   const name = nameRaw !== undefined && nameRaw.trim().length > 0 ? nameRaw : undefined;
   if (name === undefined) throw contentNotSupportedError();
-  const description = asStr(object["description"] ?? getField(fn, "description"));
-  const inputSchema =
-    object["input_schema"] ?? object["parameters"] ?? getField(fn, "parameters");
+  const description = asStr(object.description ?? getField(fn, "description"));
+  const inputSchema = object.input_schema ?? object.parameters ?? getField(fn, "parameters");
   if (inputSchema === undefined) throw contentNotSupportedError();
   return { name, description, inputSchema };
 }
@@ -593,7 +590,7 @@ function responsesToolChoiceToCanonical(value: Json | undefined): CanonicalToolC
   }
   const object = asObject(value);
   if (object) {
-    const kind = asStr(object["type"]);
+    const kind = asStr(object.type);
     switch (kind) {
       case "auto":
         return { type: "Auto" };
@@ -604,7 +601,7 @@ function responsesToolChoiceToCanonical(value: Json | undefined): CanonicalToolC
         return { type: "Required" };
       case "function":
       case "tool": {
-        const nameRaw = asStr(object["name"] ?? getField(asObject(object["function"]), "name"));
+        const nameRaw = asStr(object.name ?? getField(asObject(object.function), "name"));
         const name = nameRaw !== undefined && nameRaw.trim().length > 0 ? nameRaw : undefined;
         if (name === undefined) throw contentNotSupportedError();
         return { type: "Tool", name };

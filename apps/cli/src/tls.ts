@@ -54,9 +54,7 @@ export function assertPemBundle(path: string, pem: string): void {
   if (blocks.length === 0) {
     if (pem.includes("-----BEGIN CERTIFICATE-----")) {
       throw CliError.usage(
-        `CA bundle '${path}' is not a valid PEM certificate bundle: a ` +
-          "'-----BEGIN CERTIFICATE-----' block is never closed by a matching " +
-          "'-----END CERTIFICATE-----'",
+        `CA bundle '${path}' is not a valid PEM certificate bundle: a '-----BEGIN CERTIFICATE-----' block is never closed by a matching '-----END CERTIFICATE-----'`,
       );
     }
     throw CliError.usage(`CA bundle '${path}' contains no certificates`);
@@ -65,8 +63,7 @@ export function assertPemBundle(path: string, pem: string): void {
     const base64 = (body ?? "").replace(/\s+/g, "");
     if (base64 === "" || !/^[A-Za-z0-9+/]+={0,2}$/.test(base64)) {
       throw CliError.usage(
-        `CA bundle '${path}' is not a valid PEM certificate bundle: a certificate block does ` +
-          "not contain base64-encoded DER",
+        `CA bundle '${path}' is not a valid PEM certificate bundle: a certificate block does not contain base64-encoded DER`,
       );
     }
   }
@@ -101,10 +98,7 @@ export function createTlsPolicy(deps: {
           context.tlsInsecureSkipVerify
             ? "tls_insecure_skip_verify"
             : `ca_bundle_path '${context.caBundlePath ?? ""}'`
-        } cannot be honoured: this runtime's fetch() ignores per-request TLS options, so the ` +
-          "connection would silently use a TLS policy you did not ask for. The shipped " +
-          "`ferrogate` binary is a Bun binary, whose fetch does honour them — run it under Bun " +
-          "(`bun run ferrogate ...`) rather than a plain Node host.",
+        } cannot be honoured: this runtime's fetch() ignores per-request TLS options, so the connection would silently use a TLS policy you did not ask for. The shipped \`ferrogate\` binary is a Bun binary, whose fetch does honour them — run it under Bun (\`bun run ferrogate ...\`) rather than a plain Node host.`,
       );
     }
 

@@ -180,9 +180,9 @@ function parseBasicString(cursor: Cursor, line: number): string {
       out += char;
       continue;
     }
-    const escape = text[cursor.index];
+    const escapeChar = text[cursor.index];
     cursor.index += 1;
-    switch (escape) {
+    switch (escapeChar) {
       case '"':
         out += '"';
         break;
@@ -206,17 +206,17 @@ function parseBasicString(cursor: Cursor, line: number): string {
         break;
       case "u":
       case "U": {
-        const width = escape === "u" ? 4 : 8;
+        const width = escapeChar === "u" ? 4 : 8;
         const hex = text.slice(cursor.index, cursor.index + width);
         if (!new RegExp(`^[0-9a-fA-F]{${width}}$`).test(hex)) {
-          throw new TomlError(`invalid \\${escape} escape`, line);
+          throw new TomlError(`invalid \\${escapeChar} escape`, line);
         }
         cursor.index += width;
         out += String.fromCodePoint(Number.parseInt(hex, 16));
         break;
       }
       default:
-        throw new TomlError(`unknown string escape '\\${escape ?? ""}'`, line);
+        throw new TomlError(`unknown string escape '\\${escapeChar ?? ""}'`, line);
     }
   }
 }

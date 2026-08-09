@@ -234,7 +234,7 @@ describe("the emitted payload is the OTLP apps/telemetry ingests", () => {
     };
     const byName = new Map(
       metrics.resourceMetrics[0].scopeMetrics[0].metrics.map((metric) => [
-        metric["name"] as string,
+        metric.name as string,
         metric,
       ]),
     );
@@ -369,7 +369,7 @@ describe("TELEMETRY_ATTRIBUTE_PROFILE selects the attribute vocabulary", () => {
 
   it("emits BOTH vocabularies when the var is absent", async () => {
     const wire = await emitted(undefined);
-    expect(wire.attributes["route"]).toBe("createChatCompletion");
+    expect(wire.attributes.route).toBe("createChatCompletion");
     expect(wire.attributes["gen_ai.request.model"]).toBe("claude-sonnet");
     // The legacy span NAME survives the default, because that is what a saved
     // dashboard query filters on.
@@ -380,8 +380,8 @@ describe("TELEMETRY_ATTRIBUTE_PROFILE selects the attribute vocabulary", () => {
 
   it("drops the ferrogate.* half and takes the semconv span name under `genai`", async () => {
     const wire = await emitted("genai");
-    expect(wire.attributes["route"]).toBeUndefined();
-    expect(wire.attributes["request_id"]).toBeUndefined();
+    expect(wire.attributes.route).toBeUndefined();
+    expect(wire.attributes.request_id).toBeUndefined();
     expect(wire.attributes["gen_ai.operation.name"]).toBe("chat");
     expect(wire.attributes["gen_ai.system"]).toBe("anthropic");
     expect(wire.spanName).toBe("chat claude-sonnet");
@@ -395,7 +395,7 @@ describe("TELEMETRY_ATTRIBUTE_PROFILE selects the attribute vocabulary", () => {
   it("reproduces the exact pre-#669 wire under `ferrogate`", async () => {
     const wire = await emitted("ferrogate");
     expect(wire.spanName).toBe("ferrogate.gateway.request");
-    expect(wire.attributes["route"]).toBe("createChatCompletion");
+    expect(wire.attributes.route).toBe("createChatCompletion");
     expect(Object.keys(wire.attributes).some((key) => key.startsWith("gen_ai."))).toBe(false);
     expect(wire.metricNames.some((name) => name.startsWith("gen_ai."))).toBe(false);
   });

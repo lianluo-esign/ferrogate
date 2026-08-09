@@ -1,15 +1,13 @@
-import type { ReactNode } from "react";
 import type { InterpolationValues, TranslationKey } from "@/i18n";
+import type { ReactNode } from "react";
+const nn = <T>(v: T): NonNullable<T> => v as NonNullable<T>;
 
 /**
  * Translator shape (the subset of `useI18n().t` the framework needs) used to
  * resolve the optional `*Key` catalog indirections below. Kept as a local type
  * so this pure-data module never imports the React i18n runtime (#348).
  */
-export type ResourceTranslator = (
-  key: TranslationKey,
-  values?: InterpolationValues,
-) => string;
+export type ResourceTranslator = (key: TranslationKey, values?: InterpolationValues) => string;
 
 /**
  * Resolve operator-facing config copy, preferring a typed catalog `key` (a
@@ -408,10 +406,7 @@ export interface ResourceConfig<T extends Record<string, unknown>> {
    * back to the untyped `gatewayGet(basePath)` until a resource's slice
    * migrates. Exemplars: tenant-accounts, plans, virtual-keys.
    */
-  fetchList?: (
-    apiKey: string,
-    request: ResourceListRequest,
-  ) => Promise<ResourceListResult<T>>;
+  fetchList?: (apiKey: string, request: ResourceListRequest) => Promise<ResourceListResult<T>>;
 }
 
 export function defaultFieldValues(fields: FieldConfig[]): Record<string, unknown> {
@@ -475,7 +470,7 @@ export function clearDependentReferenceValues(
   const cleared = new Set<string>();
 
   while (pending.length > 0) {
-    const parent = pending.shift()!;
+    const parent = nn(pending.shift());
     for (const field of fields) {
       if (cleared.has(field.name) || !referenceDependsOn(field, parent)) {
         continue;

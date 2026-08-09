@@ -53,7 +53,9 @@ describe("filterResolvedDetectorAddresses", () => {
       { ip: "8.8.8.8", port: 443 },
       { ip: "10.0.0.1", port: 443 },
     ];
-    expect(filterResolvedDetectorAddresses(addresses, false)).toEqual([{ ip: "8.8.8.8", port: 443 }]);
+    expect(filterResolvedDetectorAddresses(addresses, false)).toEqual([
+      { ip: "8.8.8.8", port: 443 },
+    ]);
     expect(filterResolvedDetectorAddresses(addresses, true)).toHaveLength(2);
   });
 });

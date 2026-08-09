@@ -1,3 +1,4 @@
+const nn = <T>(v: T): NonNullable<T> => v as NonNullable<T>;
 /**
  * Port of `ferrogate-config`'s `config/network_access.rs` (inventory §5.4,
  * "Network access", issue #166): pre-authentication IP/CIDR allowlisting,
@@ -63,9 +64,7 @@ export class IpCidr {
       prefixLen = Number.parseInt(prefixPart, 10);
     }
     if (prefixLen > maxPrefix) {
-      throw new Error(
-        `prefix length /${prefixLen} exceeds maximum /${maxPrefix} for ${ipPart}`,
-      );
+      throw new Error(`prefix length /${prefixLen} exceeds maximum /${maxPrefix} for ${ipPart}`);
     }
     return new IpCidr(parsed.value, prefixLen, parsed.isV6);
   }
@@ -134,14 +133,20 @@ function parseIpv6(s: string): bigint | null {
     head = s.split(":");
     tail = [];
   } else {
-    head = s.slice(0, doubleColon).split(":").filter((g) => g !== "");
-    tail = s.slice(doubleColon + 2).split(":").filter((g) => g !== "");
+    head = s
+      .slice(0, doubleColon)
+      .split(":")
+      .filter((g) => g !== "");
+    tail = s
+      .slice(doubleColon + 2)
+      .split(":")
+      .filter((g) => g !== "");
   }
 
   // Expand a trailing embedded IPv4 (`::ffff:1.2.3.4`) into two hex groups.
   const expandV4 = (groups: string[]): string[] | null => {
     if (groups.length === 0) return groups;
-    const last = groups[groups.length - 1]!;
+    const last = nn(groups[groups.length - 1]);
     if (last.includes(".")) {
       const v4 = parseIpv4(last);
       if (v4 === null) return null;
@@ -214,7 +219,7 @@ export function resolveClientIp(
         .filter((e) => e.length > 0);
       const idx = entries.length - hops;
       if (idx >= 0 && idx < entries.length) {
-        const entry = entries[idx]!;
+        const entry = nn(entries[idx]);
         if (parseIp(entry) !== null) return entry;
       }
     }

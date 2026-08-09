@@ -106,8 +106,8 @@ const SECONDS_PER_DAY = 86_400;
 function policyFrom(rule: unknown): RetentionPolicy | undefined {
   if (typeof rule !== "object" || rule === null) return undefined;
   const record = rule as Record<string, unknown>;
-  if (record["keep_last_n"] !== undefined) return undefined;
-  const days = record["days"];
+  if (record.keep_last_n !== undefined) return undefined;
+  const days = record.days;
   if (typeof days !== "number" || !Number.isFinite(days) || days <= 0) return undefined;
   return {
     maxAgeSecs: Math.floor(days * SECONDS_PER_DAY),
@@ -199,10 +199,7 @@ function deleteCandidateStatements(
 }
 
 /** Resolve an authoritative object without letting a Cron binding fault escape. */
-function tenantDatabaseForSweep(
-  env: unknown,
-  tenantId: string,
-): RequestLogDatabase | undefined {
+function tenantDatabaseForSweep(env: unknown, tenantId: string): RequestLogDatabase | undefined {
   try {
     return requestLogTenantDatabaseFromEnv(env, tenantId);
   } catch {
@@ -299,13 +296,10 @@ async function sweepUnscopedProjection(
   policy: RetentionPolicy,
   nowUnix: number,
 ): Promise<RequestLogSweepResult> {
-  return sweepCandidates(
-    projectionDb,
-    policy,
-    nowUnix,
-    REQUEST_LOG_SWEEP_MAX_ROWS,
-    { sql: " WHERE tenant IS NULL OR tenant = ''", params: [] },
-  );
+  return sweepCandidates(projectionDb, policy, nowUnix, REQUEST_LOG_SWEEP_MAX_ROWS, {
+    sql: " WHERE tenant IS NULL OR tenant = ''",
+    params: [],
+  });
 }
 
 /**
@@ -330,7 +324,8 @@ async function tenantIdsFromProjection(
   const maxAgeSecs = policy.maxAgeSecs;
   if (maxAgeSecs === undefined || !Number.isFinite(maxAgeSecs)) return [];
   const eligibleBeforeUnix = nowUnix - maxAgeSecs;
-  const exclusion = excluded.length === 0 ? "" : ` AND tenant NOT IN (${placeholders(excluded.length)})`;
+  const exclusion =
+    excluded.length === 0 ? "" : ` AND tenant NOT IN (${placeholders(excluded.length)})`;
   try {
     const result = (await projectionDb
       .prepare(

@@ -1,4 +1,3 @@
-import { describe, expect, test } from "vitest";
 import {
   REDACTED_PLACEHOLDER,
   SECRET_SHAPED_KEY_FRAGMENTS,
@@ -7,6 +6,7 @@ import {
   redactSecretShapedKeys,
   secretShapedKeyPaths,
 } from "@ferrogate/schemas";
+import { describe, expect, test } from "vitest";
 
 describe("SECRET_SHAPED_KEY_FRAGMENTS", () => {
   // Guard against the #351 drift: the two fragments a weaker copy had lost.

@@ -188,12 +188,12 @@ function parseToolCalls(value: unknown): readonly AgentRunToolCall[] {
       throw new HttpError(400, "invalid_agent_tool_call", "each tool call must be a JSON object");
     }
     const entry = raw as Record<string, unknown>;
-    const name = entry["name"];
+    const name = entry.name;
     if (typeof name !== "string" || name.trim() === "") {
       throw new HttpError(400, "invalid_agent_tool_call", "agent tool call name must not be empty");
     }
-    const route = entry["route"];
-    const sessionId = entry["session_id"];
+    const route = entry.route;
+    const sessionId = entry.session_id;
     if (route !== undefined && route !== null && typeof route !== "string") {
       throw new HttpError(400, "invalid_agent_tool_call", "tool call route must be a string");
     }
@@ -202,7 +202,7 @@ function parseToolCalls(value: unknown): readonly AgentRunToolCall[] {
     }
     calls.push({
       name: name.trim(),
-      ...(entry["arguments"] === undefined ? {} : { arguments: entry["arguments"] }),
+      ...(entry.arguments === undefined ? {} : { arguments: entry.arguments }),
       ...(typeof route === "string" ? { route } : {}),
       ...(typeof sessionId === "string" ? { session_id: sessionId } : {}),
     });

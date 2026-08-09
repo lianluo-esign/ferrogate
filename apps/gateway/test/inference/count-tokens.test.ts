@@ -31,12 +31,12 @@
  */
 import { SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import { operationById } from "../../src/contract.js";
 import {
   DEFAULT_COMPLETION_TOKEN_RESERVATION,
   setInferenceRequestScope,
 } from "../../src/inference/index.js";
 import type { TokenAdmissionHandle, TokenGovernor } from "../../src/inference/index.js";
-import { operationById } from "../../src/contract.js";
 import { INFERENCE_OPERATION_IDS } from "../../src/routes/index.js";
 import { ALL_ROUTES, errorBody, harness, tenantCaller } from "./fixtures.js";
 import { interceptProviderFetch, providerJson } from "./provider-mock.js";

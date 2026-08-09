@@ -1,10 +1,10 @@
-import { describe, expect, test } from "vitest";
 import {
   GatewayError,
   type GatewayResult,
   gatewayErrorSchema,
   newGatewayError,
 } from "@ferrogate/schemas";
+import { describe, expect, test } from "vitest";
 
 describe("gatewayError", () => {
   test("newGatewayError builds a throwable GatewayError with code+message", () => {

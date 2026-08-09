@@ -6,11 +6,17 @@
  * production uses {@link HttpJsonTransport} (`fetch`, bounded response, optional
  * bearer, endpoint SSRF validation); tests use `FixtureTransport`.
  */
-import { byteLen } from "../bytes.js";
-import { hmacSha256, sha256, toHex } from "../hash.js";
+
 import { TIMED_OUT, withTimeout } from "../async.js";
+import { byteLen } from "../bytes.js";
+import {
+  DetectorError,
+  type DetectorErrorKind,
+  type DetectorHealth,
+  type DetectorSecret,
+} from "../contract.js";
 import { classifyFetchError, statusError, validateCustomHttpEndpoint } from "../custom_http.js";
-import { DetectorError, DetectorSecret, type DetectorErrorKind, type DetectorHealth } from "../contract.js";
+import { hmacSha256, sha256, toHex } from "../hash.js";
 
 /** A raw HTTP reply: status code plus bounded body bytes. */
 export interface TransportReply {
@@ -50,7 +56,7 @@ export class HttpJsonTransport implements DetectorTransport {
       accept: "application/json",
     };
     if (this.bearerToken) {
-      headers["authorization"] = `Bearer ${this.bearerToken.expose()}`;
+      headers.authorization = `Bearer ${this.bearerToken.expose()}`;
     }
     let response: Response;
     try {
@@ -74,7 +80,10 @@ export class HttpJsonTransport implements DetectorTransport {
     }
     const contentLength = response.headers.get("content-length");
     if (contentLength !== null && Number.parseInt(contentLength, 10) > this.maxResponseBytes) {
-      throw DetectorError.new("payload_too_large", "guardrail adapter response exceeds configured limit");
+      throw DetectorError.new(
+        "payload_too_large",
+        "guardrail adapter response exceeds configured limit",
+      );
     }
     const bytes = await this.readBounded(response);
     return { status: response.status, body: bytes };
@@ -85,7 +94,10 @@ export class HttpJsonTransport implements DetectorTransport {
     if (!reader) {
       const buf = new Uint8Array(await response.arrayBuffer());
       if (buf.length > this.maxResponseBytes) {
-        throw DetectorError.new("payload_too_large", "guardrail adapter response exceeds configured limit");
+        throw DetectorError.new(
+          "payload_too_large",
+          "guardrail adapter response exceeds configured limit",
+        );
       }
       return buf;
     }
@@ -102,7 +114,10 @@ export class HttpJsonTransport implements DetectorTransport {
         break;
       }
       if (chunk.value.length > this.maxResponseBytes - total) {
-        throw DetectorError.new("payload_too_large", "guardrail adapter response exceeds configured limit");
+        throw DetectorError.new(
+          "payload_too_large",
+          "guardrail adapter response exceeds configured limit",
+        );
       }
       chunks.push(chunk.value);
       total += chunk.value.length;
@@ -124,14 +139,23 @@ export class HttpJsonTransport implements DetectorTransport {
     maxResponseBytes: number,
   ): HttpJsonTransport {
     validateCustomHttpEndpoint(endpoint, allowPrivateNetwork);
-    return new HttpJsonTransport(endpoint, timeoutMs, allowPrivateNetwork, bearerToken, maxResponseBytes);
+    return new HttpJsonTransport(
+      endpoint,
+      timeoutMs,
+      allowPrivateNetwork,
+      bearerToken,
+      maxResponseBytes,
+    );
   }
 }
 
 /** Map a non-success HTTP status onto the shared detector error taxonomy. */
 export function adapterStatusError(status: number): DetectorError {
   if (status < 100 || status > 599) {
-    return DetectorError.new("invalid_response", "guardrail adapter returned an invalid HTTP status");
+    return DetectorError.new(
+      "invalid_response",
+      "guardrail adapter returned an invalid HTTP status",
+    );
   }
   return statusError(status);
 }

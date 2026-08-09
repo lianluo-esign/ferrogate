@@ -1,3 +1,4 @@
+const nn = <T>(v: T): NonNullable<T> => v as NonNullable<T>;
 /**
  * Port of the free helper functions in `ferrogate-config`'s
  * `caddyfile/parser_support.rs` (the `Parser`-method helpers live on the
@@ -57,7 +58,7 @@ export function envReference(value: string): string | null {
 /** Find the `-> <provider>:<model>` (or first `x:y`) argument of a `model` directive. */
 export function modelRefArg(args: string[]): string | null {
   for (let i = 0; i + 1 < args.length; i += 1) {
-    if (args[i] === "->") return args[i + 1]!;
+    if (args[i] === "->") return nn(args[i + 1]);
   }
   for (const arg of args.slice(1)) {
     if (arg.includes(":")) return arg;

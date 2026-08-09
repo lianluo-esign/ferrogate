@@ -40,14 +40,15 @@
  * exists for (same shape as the API-key tables — durable first, config second,
  * and the config leg never widens a durable decision).
  */
-import type { AssetEntitlements, AssetEntitlementsPort } from "./handlers.js";
-import { controlDatabaseFrom } from "../control-data.js";
+
 import {
   DurableObjectTenantDatabaseRouter,
-  backfillTenantConfigurationPolicy,
   type TenantDatabaseRouter,
+  backfillTenantConfigurationPolicy,
 } from "@ferrogate/storage";
 import type { TenantDataNamespace } from "@ferrogate/storage/durable-objects";
+import { controlDatabaseFrom } from "../control-data.js";
+import type { AssetEntitlements, AssetEntitlementsPort } from "./handlers.js";
 
 /** Rust permission key for the role half of `tenant_can_host` (issue #182). */
 export const ASSET_HOST_PERMISSION = "assets.host";
@@ -235,9 +236,7 @@ export class D1AssetEntitlements implements AssetEntitlementsPort {
         .prepare("SELECT permission_keys_json FROM roles WHERE id = ?1")
         .bind(row.role_id)
         .all();
-      const role = (shared.results ?? [])[0] as
-        | { permission_keys_json?: unknown }
-        | undefined;
+      const role = (shared.results ?? [])[0] as { permission_keys_json?: unknown } | undefined;
       if (role !== undefined) {
         valid.push({
           role_id: row.role_id,

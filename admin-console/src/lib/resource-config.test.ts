@@ -1,9 +1,9 @@
-import { describe, expect, it } from "vitest";
 import {
+  type FieldConfig,
   clearDependentReferenceValues,
   defaultFieldValues,
-  type FieldConfig,
 } from "@/lib/resource-config";
+import { describe, expect, it } from "vitest";
 
 const cascadingFields: FieldConfig[] = [
   {

@@ -242,7 +242,13 @@ export function validatePluginRequiredPermissions(
       );
     }
   }
-  validateRequiredBoolPermission(section, index, "filesystem", required.filesystem, granted.filesystem);
+  validateRequiredBoolPermission(
+    section,
+    index,
+    "filesystem",
+    required.filesystem,
+    granted.filesystem,
+  );
   validateRequiredBoolPermission(section, index, "shell", required.shell, granted.shell);
   validateRequiredBoolPermission(
     section,
@@ -288,7 +294,12 @@ export function validatePluginManifest(
       "min_gateway_version must be <= max_gateway_version",
     );
   }
-  validatePluginManifestNames(section, index, "manifest.capabilities", plugin.manifest.capabilities);
+  validatePluginManifestNames(
+    section,
+    index,
+    "manifest.capabilities",
+    plugin.manifest.capabilities,
+  );
   validateExtensionPermissionNames(
     section,
     index,
@@ -341,7 +352,7 @@ export function validateBuiltinPluginShape(
     }
     case "mcp.http": {
       if (plugin.kind !== "tool_provider") fail(at("kind"), "mcp.http must be tool_provider");
-      const endpoint = plugin.config["endpoint"];
+      const endpoint = plugin.config.endpoint;
       if (typeof endpoint !== "string") fail(at("config.endpoint"), "required for mcp.http");
       let url: URL;
       try {
@@ -438,9 +449,7 @@ export function materializeSkillPackageResourcesWithPrevious(
 
   config.plugins = config.plugins.filter((plugin) => !ownedPluginIds.has(plugin.id));
   config.extensions = config.extensions.filter((plugin) => !ownedPluginIds.has(plugin.id));
-  config.mcp_servers = config.mcp_servers.filter(
-    (server) => !ownedMcpServerNames.has(server.name),
-  );
+  config.mcp_servers = config.mcp_servers.filter((server) => !ownedMcpServerNames.has(server.name));
   config.prompt_templates = config.prompt_templates.filter(
     (template) => !ownedPromptTemplateIds.has(template.id),
   );
@@ -453,7 +462,11 @@ export function materializeSkillPackageResourcesWithPrevious(
   for (const pkg of config.skill_packages) {
     if (!pkg.enabled) continue;
     for (const plugin of pkg.resources.plugins) {
-      upsertOrReplace<ExtensionConfig>(config.plugins, plugin, (existing) => existing.id === plugin.id);
+      upsertOrReplace<ExtensionConfig>(
+        config.plugins,
+        plugin,
+        (existing) => existing.id === plugin.id,
+      );
     }
     for (const server of pkg.resources.mcp_servers) {
       upsertOrReplace<McpServerConfig>(

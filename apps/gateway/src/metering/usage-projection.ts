@@ -5,12 +5,14 @@
  * committed object snapshot and replace the matching control row, so a retry
  * after a partial control batch cannot double-count spend, tokens, or presence.
  */
+
 import {
-  evidenceProjectionKey,
-  type RequestLogDatabase,
-} from "../requestlog/d1.js";
-import { periodMonthFromUnix, usageMetadataRollupId, usageMonthlyRollupId } from "@ferrogate/storage";
+  periodMonthFromUnix,
+  usageMetadataRollupId,
+  usageMonthlyRollupId,
+} from "@ferrogate/storage";
 import type { UsageAggregateWrite } from "@ferrogate/storage";
+import { type RequestLogDatabase, evidenceProjectionKey } from "../requestlog/d1.js";
 
 /** The stable dimensions needed to rebuild a replace-style usage projection. */
 export interface UsageProjectionRequest {
@@ -304,9 +306,7 @@ export async function projectUsageRollups(
       ),
   ];
 
-  const metadata = [...(write.metadata?.entries() ?? [])].sort(([a], [b]) =>
-    a.localeCompare(b),
-  );
+  const metadata = [...(write.metadata?.entries() ?? [])].sort(([a], [b]) => a.localeCompare(b));
   for (const [metadataKey, metadataValue] of metadata) {
     const metadataId = usageMetadataRollupId(periodMonth, tenantId, metadataKey, metadataValue);
     const row = await tenantDatabase
@@ -351,7 +351,9 @@ export async function projectUsageRollups(
       .bind(tenantId, write.presenceApiKeyId)
       .first<PresenceRow>();
     if (presence === null) {
-      throw new Error(`tenant observed presence ${tenantId}/${write.presenceApiKeyId} is unavailable`);
+      throw new Error(
+        `tenant observed presence ${tenantId}/${write.presenceApiKeyId} is unavailable`,
+      );
     }
     statements.push(
       projectionDatabase
@@ -414,11 +416,7 @@ export async function projectUsageProjectionRetry(
       `usage projection retry ${row.sourceId} tenant mismatch: row=${row.tenantId}, payload=${payloadTenantId}`,
     );
   }
-  await projectUsageRollups(
-    tenantDatabase,
-    projectionDatabase,
-    request,
-  );
+  await projectUsageRollups(tenantDatabase, projectionDatabase, request);
 }
 
 /** Remove an intent only after every replace-style projection has committed. */

@@ -1,15 +1,15 @@
 import { describe, expect, test } from "vitest";
 import {
   CloudflareBackend,
-  defaultGatewayMetricsSnapshot,
-  endpointProtectsCredentials,
-  ObservabilitySignal,
-  otlpAttribute,
-  TENANT_HEADER,
   type GatewayMetricsSnapshot,
+  ObservabilitySignal,
   type OtlpHttpRequest,
   type OtlpLogRecord,
   type OtlpSpanRecord,
+  TENANT_HEADER,
+  defaultGatewayMetricsSnapshot,
+  endpointProtectsCredentials,
+  otlpAttribute,
 } from "../src/index.js";
 
 const TOKEN = "s3cr3t-collector-token";
@@ -39,9 +39,7 @@ function log(): OtlpLogRecord {
 }
 
 function header(request: OtlpHttpRequest, name: string): string | undefined {
-  return request.headers.find(
-    ([key]) => key.toLowerCase() === name.toLowerCase(),
-  )?.[1];
+  return request.headers.find(([key]) => key.toLowerCase() === name.toLowerCase())?.[1];
 }
 
 describe("CloudflareBackend", () => {
@@ -54,18 +52,14 @@ describe("CloudflareBackend", () => {
     ];
     for (const request of requests) {
       expect(request).not.toBeNull();
-      expect(header(request as OtlpHttpRequest, "authorization")).toBe(
-        `Bearer ${TOKEN}`,
-      );
+      expect(header(request as OtlpHttpRequest, "authorization")).toBe(`Bearer ${TOKEN}`);
     }
   });
 
   test("signals target the standard OTLP paths", () => {
     const b = backend();
     expect(b.metricsRequest(snapshot())?.url).toBe(`${ENDPOINT}/v1/metrics`);
-    expect(b.tracesRequest("ferrogate", [span()])?.url).toBe(
-      `${ENDPOINT}/v1/traces`,
-    );
+    expect(b.tracesRequest("ferrogate", [span()])?.url).toBe(`${ENDPOINT}/v1/traces`);
     expect(b.logsRequest("ferrogate", [log()])?.url).toBe(`${ENDPOINT}/v1/logs`);
   });
 
@@ -111,10 +105,9 @@ describe("CloudflareBackend", () => {
   });
 
   test("validate refuses plaintext to a remote collector", () => {
-    expect(
-      new CloudflareBackend("http://collector.example.com", TOKEN).validate()
-        ?.errorKind,
-    ).toBe("InsecureEndpoint");
+    expect(new CloudflareBackend("http://collector.example.com", TOKEN).validate()?.errorKind).toBe(
+      "InsecureEndpoint",
+    );
   });
 
   test("validate allows plaintext loopback for wrangler dev", () => {
@@ -135,29 +128,22 @@ describe("CloudflareBackend", () => {
       "http://user@evil.com",
       "http://evil.com/localhost",
     ]) {
-      expect(
-        new CloudflareBackend(endpoint, TOKEN).validate()?.errorKind,
-      ).toBe("InsecureEndpoint");
+      expect(new CloudflareBackend(endpoint, TOKEN).validate()?.errorKind).toBe("InsecureEndpoint");
     }
   });
 
   test("validate requires a credential", () => {
-    expect(
-      new CloudflareBackend(ENDPOINT, "   ").validate()?.errorKind,
-    ).toBe("MissingCredential");
+    expect(new CloudflareBackend(ENDPOINT, "   ").validate()?.errorKind).toBe("MissingCredential");
   });
 
   test("validate refuses a credential that could split the request", () => {
-    expect(
-      new CloudflareBackend(ENDPOINT, "token\r\nX-Injected: 1").validate()
-        ?.errorKind,
-    ).toBe("InvalidCredential");
+    expect(new CloudflareBackend(ENDPOINT, "token\r\nX-Injected: 1").validate()?.errorKind).toBe(
+      "InvalidCredential",
+    );
   });
 
   test("validate still checks the endpoint shape", () => {
-    expect(new CloudflareBackend("", TOKEN).validate()?.errorKind).toBe(
-      "MissingEndpoint",
-    );
+    expect(new CloudflareBackend("", TOKEN).validate()?.errorKind).toBe("MissingEndpoint");
   });
 });
 

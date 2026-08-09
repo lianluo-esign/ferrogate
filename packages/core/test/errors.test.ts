@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   GatewayError,
-  gatewayErrorSchema,
   type GatewayResult,
+  gatewayErrorSchema,
   newGatewayError,
 } from "../src/index";
 
@@ -20,7 +20,10 @@ describe("GatewayError", () => {
     const err = GatewayError.new("bad_request", "nope");
     expect(err.toJSON()).toEqual({ code: "bad_request", message: "nope" });
     expect(JSON.parse(JSON.stringify(err))).toEqual({ code: "bad_request", message: "nope" });
-    expect(gatewayErrorSchema.parse(err.toJSON())).toEqual({ code: "bad_request", message: "nope" });
+    expect(gatewayErrorSchema.parse(err.toJSON())).toEqual({
+      code: "bad_request",
+      message: "nope",
+    });
   });
 
   it("newGatewayError and fromData round-trip the wire shape", () => {

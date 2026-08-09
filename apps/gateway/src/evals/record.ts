@@ -141,15 +141,15 @@ function criteriaFromWire(value: unknown): OnlineEvalCriterion[] | undefined {
 export function onlineEvalSampleFromWire(body: unknown): OnlineEvalSample | undefined {
   if (typeof body !== "object" || body === null) return undefined;
   const wire = body as OnlineEvalSampleWire;
-  if (wire["object"] !== ONLINE_EVAL_SAMPLE_OBJECT) return undefined;
+  if (wire.object !== ONLINE_EVAL_SAMPLE_OBJECT) return undefined;
 
   const requestId = str(wire, "request_id");
   const tenantId = str(wire, "tenant_id");
   const samplingKey = str(wire, "sampling_key");
   const judgeModel = str(wire, "judge_model");
-  const criteria = criteriaFromWire(wire["criteria"]);
-  const prompt = wire["prompt"];
-  const completion = wire["completion"];
+  const criteria = criteriaFromWire(wire.criteria);
+  const prompt = wire.prompt;
+  const completion = wire.completion;
   if (
     requestId === undefined ||
     tenantId === undefined ||
@@ -162,9 +162,9 @@ export function onlineEvalSampleFromWire(body: unknown): OnlineEvalSample | unde
     return undefined;
   }
 
-  const unit = wire["sampling_unit"];
-  const rate = wire["sample_rate"];
-  const sampledAt = wire["sampled_at_unix"];
+  const unit = wire.sampling_unit;
+  const rate = wire.sample_rate;
+  const sampledAt = wire.sampled_at_unix;
   return {
     requestId,
     tenantId,
@@ -185,8 +185,8 @@ export function onlineEvalSampleFromWire(body: unknown): OnlineEvalSample | unde
     criteria,
     prompt,
     completion,
-    promptTruncated: wire["prompt_truncated"] === true,
-    completionTruncated: wire["completion_truncated"] === true,
+    promptTruncated: wire.prompt_truncated === true,
+    completionTruncated: wire.completion_truncated === true,
     sampledAtUnix:
       typeof sampledAt === "number" && Number.isFinite(sampledAt)
         ? Math.floor(sampledAt)

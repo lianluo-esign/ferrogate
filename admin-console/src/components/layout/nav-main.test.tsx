@@ -1,17 +1,19 @@
+import { NAV_DASHBOARD, NAV_GROUPS } from "@/components/layout/nav-config";
+import { NavMain } from "@/components/layout/nav-main";
+import { SidebarProvider } from "@/components/ui/sidebar";
+import { I18nProvider, type Locale, translate } from "@/i18n";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, useNavigate } from "react-router-dom";
 import { describe, expect, it } from "vitest";
-import { NavMain } from "@/components/layout/nav-main";
-import { NAV_DASHBOARD, NAV_GROUPS } from "@/components/layout/nav-config";
-import { SidebarProvider } from "@/components/ui/sidebar";
-import { I18nProvider, translate, type Locale } from "@/i18n";
 
 function NavigationHarness() {
   const navigate = useNavigate();
   return (
     <SidebarProvider>
-      <button type="button" onClick={() => navigate("/app/ops/status")}>Go to status</button>
+      <button type="button" onClick={() => navigate("/app/ops/status")}>
+        Go to status
+      </button>
       <NavMain groups={NAV_GROUPS} />
     </SidebarProvider>
   );
@@ -75,15 +77,11 @@ describe("NavMain", () => {
   it("renders the control-plane label and destinations in Simplified Chinese", () => {
     renderNavigation("/app", "zh-CN");
 
-    expect(
-      screen.getByText(translate("zh-CN", "nav.controlPlane")),
-    ).toBeInTheDocument();
+    expect(screen.getByText(translate("zh-CN", "nav.controlPlane"))).toBeInTheDocument();
     expect(
       screen.getByRole("link", { name: translate("zh-CN", NAV_DASHBOARD.titleKey) }),
     ).toHaveAttribute("data-active", "true");
     // A collapsed group label still resolves from the zh-CN catalog.
-    expect(
-      screen.getByText(translate("zh-CN", "nav.group.operations")),
-    ).toBeInTheDocument();
+    expect(screen.getByText(translate("zh-CN", "nav.group.operations"))).toBeInTheDocument();
   });
 });

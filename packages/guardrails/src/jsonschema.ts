@@ -96,7 +96,7 @@ export function isValidSchema(schema: unknown): boolean {
   }
   const s = schema as Record<string, unknown>;
 
-  const type = s["type"];
+  const type = s.type;
   if (type !== undefined) {
     const types = Array.isArray(type) ? type : [type];
     if (!types.every((t) => typeof t === "string" && KNOWN_TYPES.includes(t))) {
@@ -104,10 +104,10 @@ export function isValidSchema(schema: unknown): boolean {
     }
   }
 
-  if (typeof s["pattern"] === "string" && !compiles(s["pattern"])) {
+  if (typeof s.pattern === "string" && !compiles(s.pattern)) {
     return false;
   }
-  const patternProperties = s["patternProperties"];
+  const patternProperties = s.patternProperties;
   if (isPlainObject(patternProperties)) {
     if (!Object.keys(patternProperties).every(compiles)) {
       return false;
@@ -121,8 +121,8 @@ export function isValidSchema(schema: unknown): boolean {
       return false;
     }
   }
-  if (s["additionalProperties"] !== undefined && s["additionalProperties"] !== false) {
-    if (!isValidSchema(s["additionalProperties"])) {
+  if (s.additionalProperties !== undefined && s.additionalProperties !== false) {
+    if (!isValidSchema(s.additionalProperties)) {
       return false;
     }
   }
@@ -202,7 +202,7 @@ export function evaluateSchema(schema: unknown, value: unknown, root: unknown = 
   // --- $ref -----------------------------------------------------------------
   // Draft 2020-12 allows `$ref` to sit alongside other keywords, so this is an
   // additional constraint rather than a replacement.
-  const ref = s["$ref"];
+  const ref = s.$ref;
   if (typeof ref === "string") {
     if (!ref.startsWith("#")) {
       // Remote reference: unresolvable without network I/O. FAIL CLOSED.
@@ -218,7 +218,7 @@ export function evaluateSchema(schema: unknown, value: unknown, root: unknown = 
   }
 
   // --- type -----------------------------------------------------------------
-  const type = s["type"];
+  const type = s.type;
   if (type !== undefined) {
     const types = Array.isArray(type) ? type : [type];
     if (!types.some((t) => typeof t === "string" && matchesType(t, value))) {
@@ -227,34 +227,34 @@ export function evaluateSchema(schema: unknown, value: unknown, root: unknown = 
   }
 
   // --- enum / const ---------------------------------------------------------
-  if (Array.isArray(s["enum"]) && !s["enum"].some((candidate) => deepEqual(candidate, value))) {
+  if (Array.isArray(s.enum) && !s.enum.some((candidate) => deepEqual(candidate, value))) {
     return false;
   }
-  if ("const" in s && !deepEqual(s["const"], value)) {
+  if ("const" in s && !deepEqual(s.const, value)) {
     return false;
   }
 
   // --- boolean applicators --------------------------------------------------
-  const allOf = s["allOf"];
+  const allOf = s.allOf;
   if (Array.isArray(allOf) && !allOf.every((sub) => evaluateSchema(sub, value, root))) {
     return false;
   }
-  const anyOf = s["anyOf"];
+  const anyOf = s.anyOf;
   if (Array.isArray(anyOf) && !anyOf.some((sub) => evaluateSchema(sub, value, root))) {
     return false;
   }
-  const oneOf = s["oneOf"];
+  const oneOf = s.oneOf;
   if (Array.isArray(oneOf)) {
     const matches = oneOf.filter((sub) => evaluateSchema(sub, value, root)).length;
     if (matches !== 1) {
       return false;
     }
   }
-  if ("not" in s && evaluateSchema(s["not"], value, root)) {
+  if ("not" in s && evaluateSchema(s.not, value, root)) {
     return false;
   }
   if ("if" in s) {
-    const branch = evaluateSchema(s["if"], value, root) ? "then" : "else";
+    const branch = evaluateSchema(s.if, value, root) ? "then" : "else";
     if (branch in s && !evaluateSchema(s[branch], value, root)) {
       return false;
     }
@@ -262,11 +262,11 @@ export function evaluateSchema(schema: unknown, value: unknown, root: unknown = 
 
   // --- numbers --------------------------------------------------------------
   if (typeof value === "number") {
-    if (typeof s["minimum"] === "number" && value < s["minimum"]) return false;
-    if (typeof s["maximum"] === "number" && value > s["maximum"]) return false;
-    if (typeof s["exclusiveMinimum"] === "number" && value <= s["exclusiveMinimum"]) return false;
-    if (typeof s["exclusiveMaximum"] === "number" && value >= s["exclusiveMaximum"]) return false;
-    const multipleOf = s["multipleOf"];
+    if (typeof s.minimum === "number" && value < s.minimum) return false;
+    if (typeof s.maximum === "number" && value > s.maximum) return false;
+    if (typeof s.exclusiveMinimum === "number" && value <= s.exclusiveMinimum) return false;
+    if (typeof s.exclusiveMaximum === "number" && value >= s.exclusiveMaximum) return false;
+    const multipleOf = s.multipleOf;
     if (typeof multipleOf === "number" && multipleOf > 0) {
       const quotient = value / multipleOf;
       // Tolerance, not `%`: `0.3 % 0.1` is 0.09999999999999998 in IEEE-754, so
@@ -278,9 +278,9 @@ export function evaluateSchema(schema: unknown, value: unknown, root: unknown = 
   // --- strings --------------------------------------------------------------
   if (typeof value === "string") {
     const length = codePointLength(value);
-    if (typeof s["minLength"] === "number" && length < s["minLength"]) return false;
-    if (typeof s["maxLength"] === "number" && length > s["maxLength"]) return false;
-    const pattern = s["pattern"];
+    if (typeof s.minLength === "number" && length < s.minLength) return false;
+    if (typeof s.maxLength === "number" && length > s.maxLength) return false;
+    const pattern = s.pattern;
     if (typeof pattern === "string") {
       const compiled = regex(pattern);
       // An uncompilable pattern reached evaluation only if the schema bypassed
@@ -294,15 +294,15 @@ export function evaluateSchema(schema: unknown, value: unknown, root: unknown = 
     const obj = value;
     const keys = Object.keys(obj);
 
-    if (typeof s["minProperties"] === "number" && keys.length < s["minProperties"]) return false;
-    if (typeof s["maxProperties"] === "number" && keys.length > s["maxProperties"]) return false;
+    if (typeof s.minProperties === "number" && keys.length < s.minProperties) return false;
+    if (typeof s.maxProperties === "number" && keys.length > s.maxProperties) return false;
 
-    const required = s["required"];
+    const required = s.required;
     if (Array.isArray(required) && !required.every((k) => typeof k === "string" && k in obj)) {
       return false;
     }
 
-    const dependentRequired = s["dependentRequired"];
+    const dependentRequired = s.dependentRequired;
     if (isPlainObject(dependentRequired)) {
       for (const [trigger, needed] of Object.entries(dependentRequired)) {
         if (trigger in obj && Array.isArray(needed)) {
@@ -311,28 +311,26 @@ export function evaluateSchema(schema: unknown, value: unknown, root: unknown = 
       }
     }
 
-    const dependentSchemas = s["dependentSchemas"];
+    const dependentSchemas = s.dependentSchemas;
     if (isPlainObject(dependentSchemas)) {
       for (const [trigger, sub] of Object.entries(dependentSchemas)) {
         if (trigger in obj && !evaluateSchema(sub, obj, root)) return false;
       }
     }
 
-    const propertyNames = s["propertyNames"];
+    const propertyNames = s.propertyNames;
     if (propertyNames !== undefined) {
       if (!keys.every((k) => evaluateSchema(propertyNames, k, root))) return false;
     }
 
-    const properties = isPlainObject(s["properties"]) ? s["properties"] : undefined;
+    const properties = isPlainObject(s.properties) ? s.properties : undefined;
     if (properties !== undefined) {
       for (const [key, sub] of Object.entries(properties)) {
         if (key in obj && !evaluateSchema(sub, obj[key], root)) return false;
       }
     }
 
-    const patternProperties = isPlainObject(s["patternProperties"])
-      ? s["patternProperties"]
-      : undefined;
+    const patternProperties = isPlainObject(s.patternProperties) ? s.patternProperties : undefined;
     const patternMatched = new Set<string>();
     if (patternProperties !== undefined) {
       for (const [rawPattern, sub] of Object.entries(patternProperties)) {
@@ -350,7 +348,7 @@ export function evaluateSchema(schema: unknown, value: unknown, root: unknown = 
     // `additionalProperties` applies to keys matched by NEITHER `properties`
     // NOR `patternProperties` — a key covered by a pattern is not "additional".
     if ("additionalProperties" in s) {
-      const additional = s["additionalProperties"];
+      const additional = s.additionalProperties;
       const declared = new Set(properties === undefined ? [] : Object.keys(properties));
       for (const key of keys) {
         if (declared.has(key) || patternMatched.has(key)) continue;
@@ -362,10 +360,10 @@ export function evaluateSchema(schema: unknown, value: unknown, root: unknown = 
 
   // --- arrays ---------------------------------------------------------------
   if (Array.isArray(value)) {
-    if (typeof s["minItems"] === "number" && value.length < s["minItems"]) return false;
-    if (typeof s["maxItems"] === "number" && value.length > s["maxItems"]) return false;
+    if (typeof s.minItems === "number" && value.length < s.minItems) return false;
+    if (typeof s.maxItems === "number" && value.length > s.maxItems) return false;
 
-    if (s["uniqueItems"] === true) {
+    if (s.uniqueItems === true) {
       for (let i = 0; i < value.length; i += 1) {
         for (let j = i + 1; j < value.length; j += 1) {
           if (deepEqual(value[i], value[j])) return false;
@@ -373,7 +371,7 @@ export function evaluateSchema(schema: unknown, value: unknown, root: unknown = 
       }
     }
 
-    const prefixItems = s["prefixItems"];
+    const prefixItems = s.prefixItems;
     let prefixLength = 0;
     if (Array.isArray(prefixItems)) {
       prefixLength = Math.min(prefixItems.length, value.length);
@@ -383,7 +381,7 @@ export function evaluateSchema(schema: unknown, value: unknown, root: unknown = 
     }
 
     if ("items" in s) {
-      const items = s["items"];
+      const items = s.items;
       // Draft 2020-12: `items` applies to the elements AFTER `prefixItems`. A
       // Draft-7-style tuple `items: [...]` is honoured as a prefix so an older
       // operator schema is not silently unconstrained.
@@ -399,10 +397,10 @@ export function evaluateSchema(schema: unknown, value: unknown, root: unknown = 
     }
 
     if ("contains" in s) {
-      const count = value.filter((item) => evaluateSchema(s["contains"], item, root)).length;
-      const minContains = typeof s["minContains"] === "number" ? s["minContains"] : 1;
+      const count = value.filter((item) => evaluateSchema(s.contains, item, root)).length;
+      const minContains = typeof s.minContains === "number" ? s.minContains : 1;
       if (count < minContains) return false;
-      if (typeof s["maxContains"] === "number" && count > s["maxContains"]) return false;
+      if (typeof s.maxContains === "number" && count > s.maxContains) return false;
     }
   }
 

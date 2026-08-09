@@ -8,6 +8,17 @@
  */
 import type { ToolCall, ToolDef, ToolResult } from "@ferrogate/core";
 
+import { assertPromptCacheForAutomaticFamily, stripPromptCacheDirective } from "./caching.js";
+import {
+  asStr,
+  asU64,
+  getField,
+  isObject,
+  ownBody,
+  parseJson,
+  parseJsonStringOrClone,
+} from "./json.js";
+import type { Json, JsonObject } from "./json.js";
 import {
   AdapterError,
   BaseProviderAdapter,
@@ -26,17 +37,6 @@ import type {
   ProviderUsage,
   ResponsesPlan,
 } from "./types.js";
-import { assertPromptCacheForAutomaticFamily, stripPromptCacheDirective } from "./caching.js";
-import {
-  asStr,
-  asU64,
-  getField,
-  isObject,
-  ownBody,
-  parseJson,
-  parseJsonStringOrClone,
-} from "./json.js";
-import type { Json, JsonObject } from "./json.js";
 
 export class OpenAiCompatibleAdapter extends BaseProviderAdapter {
   override kind(): string {
@@ -59,8 +59,8 @@ export class OpenAiCompatibleAdapter extends BaseProviderAdapter {
     assertPromptCacheForAutomaticFamily(request.body, provider.kind);
     const body = ownBody(ensureChatObjectBody(request.body));
     stripPromptCacheDirective(body);
-    body["model"] = request.providerModel;
-    body["stream"] = request.stream;
+    body.model = request.providerModel;
+    body.stream = request.stream;
     if (request.stream) requestOpenaiStreamUsage(body);
 
     return {
@@ -72,16 +72,13 @@ export class OpenAiCompatibleAdapter extends BaseProviderAdapter {
     };
   }
 
-  override prepareResponses(
-    provider: ProviderConfig,
-    request: ResponsesPlan,
-  ): ProviderHttpRequest {
+  override prepareResponses(provider: ProviderConfig, request: ResponsesPlan): ProviderHttpRequest {
     validateKind(provider.kind);
     assertPromptCacheForAutomaticFamily(request.body, provider.kind);
     const body = ownBody(ensureLabeledObjectBody(request.body, "responses request body"));
     stripPromptCacheDirective(body);
-    body["model"] = request.providerModel;
-    body["stream"] = request.stream;
+    body.model = request.providerModel;
+    body.stream = request.stream;
 
     return {
       provider: provider.name,
@@ -100,7 +97,7 @@ export class OpenAiCompatibleAdapter extends BaseProviderAdapter {
     // Owned before `model` is pinned: the adapter's own field must not become
     // the caller's, on a body other candidates are still to be prepared from.
     const body = ownBody(ensureLabeledObjectBody(request.body, "embeddings request body"));
-    body["model"] = request.providerModel;
+    body.model = request.providerModel;
 
     return {
       provider: provider.name,
@@ -114,7 +111,7 @@ export class OpenAiCompatibleAdapter extends BaseProviderAdapter {
   override prepareImages(provider: ProviderConfig, request: ImagesPlan): ProviderHttpRequest {
     validateKind(provider.kind);
     const body = ownBody(ensureLabeledObjectBody(request.body, "image generation request body"));
-    body["model"] = request.providerModel;
+    body.model = request.providerModel;
 
     return {
       provider: provider.name,
@@ -190,9 +187,9 @@ export class OpenAiCompatibleAdapter extends BaseProviderAdapter {
   override injectTools(body: Json, tools: readonly ToolDef[]): Json {
     const object = ensureLabeledObjectBody(body, "tool-enabled request body");
     if (tools.length === 0) return object;
-    object["tools"] = tools.map((tool) => {
+    object.tools = tools.map((tool) => {
       const fn: JsonObject = { name: tool.name, parameters: tool.input_schema as Json };
-      if (tool.description !== undefined) fn["description"] = tool.description;
+      if (tool.description !== undefined) fn.description = tool.description;
       return { type: "function", function: fn };
     });
     return object;
@@ -217,8 +214,8 @@ export class OpenAiCompatibleAdapter extends BaseProviderAdapter {
   override appendToolResults(body: Json, results: readonly ToolResult[]): Json {
     const object = ensureLabeledObjectBody(body, "tool-result request body");
     if (results.length === 0) return object;
-    if (!Array.isArray(object["messages"])) object["messages"] = [];
-    const messages = object["messages"] as Json[];
+    if (!Array.isArray(object.messages)) object.messages = [];
+    const messages = object.messages as Json[];
     for (const result of results) {
       messages.push({
         role: "tool",
@@ -232,12 +229,12 @@ export class OpenAiCompatibleAdapter extends BaseProviderAdapter {
 
 /** Ensure `stream_options.include_usage = true` so streaming responses report usage. */
 export function requestOpenaiStreamUsage(body: JsonObject): void {
-  let streamOptions = body["stream_options"];
+  let streamOptions = body.stream_options;
   if (!isObject(streamOptions)) {
     streamOptions = {};
-    body["stream_options"] = streamOptions;
+    body.stream_options = streamOptions;
   }
-  (streamOptions as JsonObject)["include_usage"] = true;
+  (streamOptions as JsonObject).include_usage = true;
 }
 
 function validateKind(kind: string): void {
@@ -265,10 +262,12 @@ export function providerHeaders(apiKey: string | undefined): ProviderHeader[] {
 }
 
 const trimEndSlashes = (value: string): string => value.replace(/\/+$/, "");
-const chatCompletionsEndpoint = (baseUrl: string): string => `${trimEndSlashes(baseUrl)}/chat/completions`;
+const chatCompletionsEndpoint = (baseUrl: string): string =>
+  `${trimEndSlashes(baseUrl)}/chat/completions`;
 const responsesEndpoint = (baseUrl: string): string => `${trimEndSlashes(baseUrl)}/responses`;
 const embeddingsEndpoint = (baseUrl: string): string => `${trimEndSlashes(baseUrl)}/embeddings`;
-const imagesGenerationsEndpoint = (baseUrl: string): string => `${trimEndSlashes(baseUrl)}/images/generations`;
+const imagesGenerationsEndpoint = (baseUrl: string): string =>
+  `${trimEndSlashes(baseUrl)}/images/generations`;
 const modelsEndpoint = (baseUrl: string): string => `${trimEndSlashes(baseUrl)}/models`;
 
 function parseOpenAiModelCatalog(body: Uint8Array): ProviderCatalogModel[] {
@@ -318,7 +317,10 @@ function catalogCapabilities(model: Json): string[] {
 const dedupeSorted = (values: string[]): string[] =>
   values.filter((value, index) => index === 0 || value !== values[index - 1]);
 
-export function fallbackErrorMessage(parsed: Json | undefined, body: Uint8Array): string | undefined {
+export function fallbackErrorMessage(
+  parsed: Json | undefined,
+  body: Uint8Array,
+): string | undefined {
   if (typeof parsed === "string") return parsed;
   const text = new TextDecoder().decode(body).trim();
   if (text.length === 0) return undefined;

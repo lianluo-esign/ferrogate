@@ -43,8 +43,7 @@ type AssetSummary = components["schemas"]["AssetSummary"];
 type AssetManifest = components["schemas"]["AssetManifest"];
 type AssetManifestVariant = components["schemas"]["AssetManifestVariant"];
 type AdminSiteDomain = components["schemas"]["AdminSiteDomain"];
-type AdminSiteDomainVerification =
-  components["schemas"]["AdminSiteDomainVerification"];
+type AdminSiteDomainVerification = components["schemas"]["AdminSiteDomainVerification"];
 
 /**
  * The AdminSiteDomain shape the gateway ACTUALLY serializes. `admin_site_domain`
@@ -135,11 +134,7 @@ function variant(sizeBytes = 2048): AssetManifestVariant {
   };
 }
 
-function staticSiteSummary(
-  name: string,
-  version: string,
-  createdAtUnix: number,
-): AssetSummary {
+function staticSiteSummary(name: string, version: string, createdAtUnix: number): AssetSummary {
   return {
     id: `asset_${name}_${version}`.replace(/[^a-z0-9_]/gi, "_"),
     asset_type: STATIC_SITE_TYPE,
@@ -301,9 +296,8 @@ function buildState(): StaticSitesState {
 function verificationFor(binding: WireSiteDomain): AdminSiteDomainVerification {
   return {
     object: "site_domain_verification",
-    state: binding.verification_state === "pending_verification"
-      ? "pending_verification"
-      : "verified",
+    state:
+      binding.verification_state === "pending_verification" ? "pending_verification" : "verified",
     serves: binding.serving,
     tenant_id: binding.tenant_id,
     hostname: binding.hostname,
@@ -353,7 +347,8 @@ async function handlePublish(
   const spaFallback = headers["x-site-spa-fallback"] === "true";
   const cacheHeader = headers["x-site-cache-control"];
   const cacheControl = cacheHeader && cacheHeader !== "" ? cacheHeader : null;
-  const now = (state.clock += 1_000);
+  state.clock += 1_000;
+  const now = state.clock;
 
   state.summaries = [
     staticSiteSummary(name, version, now),
@@ -463,7 +458,8 @@ async function handleGatewayRequest(
     }
     if (method === "PUT") {
       const version = url.searchParams.get("version") ?? "";
-      const now = (state.clock += 1_000);
+      state.clock += 1_000;
+      const now = state.clock;
       const existing = manifest.channels.find((entry) => entry.channel === channel);
       if (existing) existing.version = version;
       else manifest.channels.push({ channel, version, updated_at_unix: now });
@@ -478,9 +474,7 @@ async function handleGatewayRequest(
     // DELETE — the unpublish purge drops the `serving` channel pointer too, so a
     // later publish of the same slug does not inherit a stale one.
     if (method === "DELETE") {
-      manifest.channels = manifest.channels.filter(
-        (entry) => entry.channel !== channel,
-      );
+      manifest.channels = manifest.channels.filter((entry) => entry.channel !== channel);
       await fulfillJson(route, 200, {
         object: "asset_channel",
         asset_type: assetType,
@@ -545,9 +539,7 @@ async function handleGatewayRequest(
     // cannot tell a correct purge from one that strands the site.
     if (method === "DELETE") {
       const registryManifestForDelete = state.registry.get(regKey(assetType, name));
-      if (
-        registryManifestForDelete?.channels.some((entry) => entry.version === tail)
-      ) {
+      if (registryManifestForDelete?.channels.some((entry) => entry.version === tail)) {
         await fulfillJson(route, 409, {
           error: {
             code: "asset_version_referenced",
@@ -585,15 +577,15 @@ async function handleGatewayRequest(
   await notMocked(route, method, pathname);
 }
 
-async function handleSiteDomainsRequest(
-  route: Route,
-  state: StaticSitesState,
-): Promise<void> {
+async function handleSiteDomainsRequest(route: Route, state: StaticSitesState): Promise<void> {
   const request = route.request();
   const method = request.method();
   const url = new URL(request.url());
   const pathname = url.pathname;
-  const now = () => (state.clock += 1_000);
+  const now = () => {
+    state.clock += 1_000;
+    return state.clock;
+  };
 
   // GET /admin/v1/site-domains — the bound-hostname list (overrides the shared
   // admin mock's empty stub so the fixture domain is present + mutations reflect).
@@ -606,9 +598,7 @@ async function handleSiteDomainsRequest(
   // the ONLY endpoint carrying ACME posture, so the site drawer calls it for
   // every bound hostname (a pre-existing binding has no bind response to read).
   if (method === "GET" && pathname.startsWith("/admin/v1/site-domains/")) {
-    const hostname = decodeURIComponent(
-      pathname.slice("/admin/v1/site-domains/".length),
-    );
+    const hostname = decodeURIComponent(pathname.slice("/admin/v1/site-domains/".length));
     const binding = state.domains.find((domain) => domain.hostname === hostname);
     if (!binding) {
       await fulfillJson(route, 404, {
@@ -655,10 +645,7 @@ async function handleSiteDomainsRequest(
       updated_at_unix: created,
     };
     // Replace any existing binding for this hostname (bind is idempotent-ish).
-    state.domains = [
-      ...state.domains.filter((domain) => domain.hostname !== hostname),
-      siteDomain,
-    ];
+    state.domains = [...state.domains.filter((domain) => domain.hostname !== hostname), siteDomain];
     await fulfillJson(route, 202, {
       object: "site_domain",
       site_domain: siteDomain,
@@ -670,9 +657,7 @@ async function handleSiteDomainsRequest(
 
   // DELETE /admin/v1/site-domains/{hostname} — unbind a custom hostname.
   if (method === "DELETE" && pathname.startsWith("/admin/v1/site-domains/")) {
-    const hostname = decodeURIComponent(
-      pathname.slice("/admin/v1/site-domains/".length),
-    );
+    const hostname = decodeURIComponent(pathname.slice("/admin/v1/site-domains/".length));
     state.domains = state.domains.filter((domain) => domain.hostname !== hostname);
     await fulfillJson(route, 200, {
       object: "site_domain",

@@ -14,25 +14,22 @@
  * simply `async`.
  */
 import { z } from "zod";
-import { type EnvLike, INSPECT, defaultEnv, nonEmptyEnv } from "./env.js";
-import {
-  cfBindingEnvVar,
-  cfBindingNameIsUnambiguous,
-} from "./cloudflare-bindings.js";
+import { cfBindingEnvVar, cfBindingNameIsUnambiguous } from "./cloudflare-bindings.js";
 import { CfSecretsCapacityPolicy } from "./cloudflare-caps.js";
+import {
+  CloudflareClient,
+  CloudflareConfig,
+  CloudflareError,
+  EnvTokenResolver,
+  type HttpTransport,
+} from "./cloudflare-client.js";
 import {
   CF_ACCOUNT_ID_ENV,
   CF_API_BASE_URL_ENV,
   CF_API_TOKEN_ENV,
   CF_SECRETS_STORE_BETA_MAX_STORES_PER_ACCOUNT,
 } from "./cloudflare-consts.js";
-import {
-  type HttpTransport,
-  CloudflareClient,
-  CloudflareConfig,
-  CloudflareError,
-  EnvTokenResolver,
-} from "./cloudflare-client.js";
+import { type EnvLike, INSPECT, defaultEnv, nonEmptyEnv } from "./env.js";
 import type { SecretResolver } from "./resolver.js";
 import type { SecretRef } from "./secret-ref.js";
 import { describeSecretRef } from "./secret-ref.js";
@@ -137,15 +134,8 @@ export class CloudflareSecretResolver implements SecretResolver {
       config.apiBaseUrl ?? undefined,
     );
     const transport = fetchTransport(fetchImpl);
-    const client = new CloudflareClient(
-      cfConfig,
-      new EnvTokenResolver(env),
-      transport,
-    );
-    return new CloudflareSecretResolver(
-      client,
-      CfSecretsCapacityPolicy.fromEnv(env),
-    );
+    const client = new CloudflareClient(cfConfig, new EnvTokenResolver(env), transport);
+    return new CloudflareSecretResolver(client, CfSecretsCapacityPolicy.fromEnv(env));
   }
 
   /**
@@ -154,10 +144,7 @@ export class CloudflareSecretResolver implements SecretResolver {
    * capacity policy; override with {@link withCapacityPolicy}.
    */
   static fromClient(client: CloudflareClient): CloudflareSecretResolver {
-    return new CloudflareSecretResolver(
-      client,
-      CfSecretsCapacityPolicy.default(),
-    );
+    return new CloudflareSecretResolver(client, CfSecretsCapacityPolicy.default());
   }
 
   /** Replace the capacity guardrail policy enforced by {@link createSecret}. */
@@ -186,9 +173,7 @@ export class CloudflareSecretResolver implements SecretResolver {
   ): Promise<string> {
     this.capacity.checkValueSize(store, name, value);
     if (name.length === 0) {
-      throw new Error(
-        "Cloudflare Secrets Store secret name must not be empty",
-      );
+      throw new Error("Cloudflare Secrets Store secret name must not be empty");
     }
     // #417 review item 2: refusing the write is what makes the read guard's
     // premise (one canonical secret per env var) true. A non-canonical name
@@ -196,10 +181,7 @@ export class CloudflareSecretResolver implements SecretResolver {
     // resolver would then refuse to read it back.
     if (!cfBindingNameIsUnambiguous(name)) {
       throw new Error(
-        `Cloudflare Secrets Store secret name ${JSON.stringify(name)} is not canonical: it must ` +
-          `match [a-z0-9-]+ so that exactly one secret maps to ${cfBindingEnvVar(name)}. Writing ` +
-          `a non-canonical name would let it collide with a canonical sibling under the same ` +
-          `environment variable, and the resolver would refuse to read it back`,
+        `Cloudflare Secrets Store secret name ${JSON.stringify(name)} is not canonical: it must match [a-z0-9-]+ so that exactly one secret maps to ${cfBindingEnvVar(name)}. Writing a non-canonical name would let it collide with a canonical sibling under the same environment variable, and the resolver would refuse to read it back`,
       );
     }
 
@@ -243,10 +225,7 @@ export class CloudflareSecretResolver implements SecretResolver {
         body,
       );
     } catch (error) {
-      throw mapCfError(
-        error,
-        `failed to create Cloudflare secret cf://${store}/${name}`,
-      );
+      throw mapCfError(error, `failed to create Cloudflare secret cf://${store}/${name}`);
     }
     const first = created[0];
     if (first === undefined) {
@@ -271,15 +250,7 @@ export class CloudflareSecretResolver implements SecretResolver {
 
     const bindingEnv = cfBindingEnvVar(name);
     throw new Error(
-      `Cloudflare Secrets Store secret cf://${store}/${name} exists (id ${secretId}) but its ` +
-        `value cannot be read back: Secrets Store secret values are write-only over the REST API ` +
-        `and are only readable by a Worker the secret is bound to. Supported paths: (1) ` +
-        `Worker-binding resolution — bind the secret to the consuming Worker and expose it to ` +
-        `FerroGate via the ${bindingEnv} environment variable or an injected binding map (see ` +
-        `docs/cloudflare-secrets-resolution.md); (2) for a self-hosted gateway, keep a readable ` +
-        `copy in HashiCorp Vault or the environment and reference it as vault:// or env:// ` +
-        `instead. FerroGate manages cf:// secrets over REST (create/write) but will not ` +
-        `fabricate a value.`,
+      `Cloudflare Secrets Store secret cf://${store}/${name} exists (id ${secretId}) but its value cannot be read back: Secrets Store secret values are write-only over the REST API and are only readable by a Worker the secret is bound to. Supported paths: (1) Worker-binding resolution — bind the secret to the consuming Worker and expose it to FerroGate via the ${bindingEnv} environment variable or an injected binding map (see docs/cloudflare-secrets-resolution.md); (2) for a self-hosted gateway, keep a readable copy in HashiCorp Vault or the environment and reference it as vault:// or env:// instead. FerroGate manages cf:// secrets over REST (create/write) but will not fabricate a value.`,
     );
   }
 
@@ -304,17 +275,11 @@ export class CloudflareSecretResolver implements SecretResolver {
         namedResourceListSchema,
       );
     } catch (error) {
-      throw mapCfError(
-        error,
-        `failed to list secrets in Cloudflare Secrets Store ${storeId}`,
-      );
+      throw mapCfError(error, `failed to list secrets in Cloudflare Secrets Store ${storeId}`);
     }
   }
 
-  private async resolveSecretId(
-    storeId: string,
-    name: string,
-  ): Promise<string | null> {
+  private async resolveSecretId(storeId: string, name: string): Promise<string | null> {
     const secrets = await this.listSecrets(storeId);
     return secrets.find((c) => c.name === name)?.id ?? null;
   }
@@ -332,8 +297,7 @@ export class CloudflareSecretResolver implements SecretResolver {
 
 /** Attach context to a {@link CloudflareError} while flattening to `Error`. */
 function mapCfError(error: unknown, context: string): Error {
-  const detail =
-    error instanceof Error ? error.message : String(error);
+  const detail = error instanceof Error ? error.message : String(error);
   return new Error(`${context}: ${detail}`);
 }
 
@@ -348,15 +312,11 @@ export function fetchTransport(fetchImpl: typeof fetch = fetch): HttpTransport {
       });
       const retryAfterHeader = response.headers.get("retry-after");
       const retryAfterMs =
-        retryAfterHeader !== null
-          ? Number.parseInt(retryAfterHeader, 10) * 1000
-          : undefined;
+        retryAfterHeader !== null ? Number.parseInt(retryAfterHeader, 10) * 1000 : undefined;
       return {
         status: response.status,
         body: await response.text(),
-        ...(retryAfterMs !== undefined && Number.isFinite(retryAfterMs)
-          ? { retryAfterMs }
-          : {}),
+        ...(retryAfterMs !== undefined && Number.isFinite(retryAfterMs) ? { retryAfterMs } : {}),
       };
     },
   };

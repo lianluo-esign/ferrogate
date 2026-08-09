@@ -25,9 +25,10 @@
  * `export { ShadowBudgetDurableObject }` from `src/worker.ts`, which stops the
  * Worker booting at all) and both cases below go red.
  */
+
+import { SELF, env } from "cloudflare:test";
 import { DurableObjectShadowBudgetLedger } from "@ferrogate/routing/durable-objects";
 import type { ShadowBudgetNamespace } from "@ferrogate/routing/durable-objects";
-import { SELF, env } from "cloudflare:test";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 const BASE = "https://gw.test";
@@ -88,7 +89,7 @@ afterAll(() => {
 
 /** The namespace `wrangler.toml` is supposed to declare. */
 function namespace(): ShadowBudgetNamespace {
-  const slot = (env as unknown as Record<string, unknown>)["SHADOW_BUDGET"];
+  const slot = (env as unknown as Record<string, unknown>).SHADOW_BUDGET;
   if (
     typeof slot !== "object" ||
     slot === null ||
@@ -96,7 +97,7 @@ function namespace(): ShadowBudgetNamespace {
   ) {
     throw new Error(
       "`SHADOW_BUDGET` is not bound. `apps/gateway/wrangler.toml` must declare " +
-        "[[durable_objects.bindings]] name = \"SHADOW_BUDGET\", class_name = " +
+        '[[durable_objects.bindings]] name = "SHADOW_BUDGET", class_name = ' +
         '"ShadowBudgetDurableObject" (migration tag v3), and `src/worker.ts` must ' +
         "re-export the class. Without it the shadow spend cap is PER ISOLATE.",
     );

@@ -13,7 +13,9 @@ import {
 
 describe("ModelRegistry", () => {
   test("resolves an enabled model to its primary route", () => {
-    const registry = ModelRegistry.create([newModelRegistryEntry("fast-chat", "openai", "gpt-4o-mini")]);
+    const registry = ModelRegistry.create([
+      newModelRegistryEntry("fast-chat", "openai", "gpt-4o-mini"),
+    ]);
     const resolved = registry.resolve("fast-chat");
     expect(resolved.logicalModel).toBe("fast-chat");
     expect(resolved.primary.provider).toBe("openai");
@@ -166,10 +168,18 @@ describe("Anthropic Messages ⇄ OpenAI translation (issue #272)", () => {
           role: "assistant",
           content: [
             { type: "text", text: "checking" },
-            { type: "tool_use", id: "toolu_1", name: "lookup_weather", input: { city: "Shanghai" } },
+            {
+              type: "tool_use",
+              id: "toolu_1",
+              name: "lookup_weather",
+              input: { city: "Shanghai" },
+            },
           ],
         },
-        { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "21C" }] },
+        {
+          role: "user",
+          content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "21C" }],
+        },
       ],
     }) as any;
     expect(chat.tools[0].function.name).toBe("lookup_weather");
@@ -207,7 +217,13 @@ describe("Anthropic Messages ⇄ OpenAI translation (issue #272)", () => {
             message: {
               role: "assistant",
               content: "hello there",
-              tool_calls: [{ id: "call_1", type: "function", function: { name: "lookup", arguments: '{"q":"x"}' } }],
+              tool_calls: [
+                {
+                  id: "call_1",
+                  type: "function",
+                  function: { name: "lookup", arguments: '{"q":"x"}' },
+                },
+              ],
             },
             finish_reason: "tool_calls",
           },

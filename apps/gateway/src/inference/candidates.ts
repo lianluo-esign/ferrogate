@@ -73,13 +73,13 @@ export interface RouteRequirements {
 
 /** True for a request body field that carries tools. */
 function hasTools(body: Record<string, unknown>): boolean {
-  const tools = body["tools"];
+  const tools = body.tools;
   return Array.isArray(tools) && tools.length > 0;
 }
 
 /** `structured_output_requested` — `response_format` / `text.format` json_schema. */
 function wantsStructuredOutput(body: Record<string, unknown>): boolean {
-  const format = body["response_format"];
+  const format = body.response_format;
   if (typeof format === "object" && format !== null) {
     const type = (format as { type?: unknown }).type;
     return type === "json_schema" || type === "json_object";
@@ -89,7 +89,7 @@ function wantsStructuredOutput(body: Record<string, unknown>): boolean {
 
 /** `request_contains_image_input` — any multimodal content part. */
 function hasImageInput(body: Record<string, unknown>): boolean {
-  const messages = body["messages"];
+  const messages = body.messages;
   if (!Array.isArray(messages)) {
     return false;
   }
@@ -594,8 +594,6 @@ export function applyCanary(
  * this and a shadow provider silently becomes a failover target — i.e. the
  * client is served by the provider that was only ever meant to be measured.
  */
-export function servableCandidates(
-  candidates: readonly PhysicalRoute[],
-): readonly PhysicalRoute[] {
+export function servableCandidates(candidates: readonly PhysicalRoute[]): readonly PhysicalRoute[] {
   return candidates.filter((route) => route.shadowPercent === undefined);
 }

@@ -4,21 +4,21 @@
  * bucket-prefix listing, audit, and gateway metrics.
  */
 import {
-  D1AssetMetadataStore as StorageD1AssetMetadataStore,
+  type BucketObject,
   D1RetentionPolicyStore,
+  R2AssetBlobStore,
   RETENTION_RESOURCE_ASSET,
   RETENTION_SCOPE_DEFAULT,
-  R2AssetBlobStore,
+  D1AssetMetadataStore as StorageD1AssetMetadataStore,
+  type TenantDatabaseHandle,
+  type TenantDatabaseRouter,
   retentionPolicyOf,
   sweepAssetRetention,
   sweepOrphanBlobs,
-  type BucketObject,
-  type TenantDatabaseHandle,
-  type TenantDatabaseRouter,
 } from "@ferrogate/storage";
+import { recordAssetLifecycleMetrics } from "../routes/metrics.js";
 import { assetAuditSinkFromEnv } from "./d1.js";
 import { tenantKeyPrefix } from "./keys.js";
-import { recordAssetLifecycleMetrics } from "../routes/metrics.js";
 
 export const DEFAULT_ASSET_RETENTION_ORPHAN_GRACE_SECS = 86400;
 const ASSET_RETENTION_ORPHAN_GRACE_ENV = "ASSET_RETENTION_ORPHAN_GRACE_SECS";
@@ -37,11 +37,7 @@ function r2BucketFrom(env: unknown): R2Bucket | undefined {
   return bucket as R2Bucket;
 }
 
-function nonNegativeIntegerFromEnv(
-  env: unknown,
-  name: string,
-  fallback: number,
-): number {
+function nonNegativeIntegerFromEnv(env: unknown, name: string, fallback: number): number {
   if (typeof env !== "object" || env === null) return fallback;
   const raw = (env as Record<string, unknown>)[name];
   if (typeof raw !== "string" && typeof raw !== "number") return fallback;
@@ -49,17 +45,12 @@ function nonNegativeIntegerFromEnv(
   return Number.isFinite(value) && value >= 0 ? Math.floor(value) : fallback;
 }
 
-async function listTenantBucketObjects(
-  bucket: R2Bucket,
-  prefix: string,
-): Promise<BucketObject[]> {
+async function listTenantBucketObjects(bucket: R2Bucket, prefix: string): Promise<BucketObject[]> {
   const objects: BucketObject[] = [];
   let cursor: string | undefined;
   for (;;) {
     const page =
-      cursor === undefined
-        ? await bucket.list({ prefix })
-        : await bucket.list({ prefix, cursor });
+      cursor === undefined ? await bucket.list({ prefix }) : await bucket.list({ prefix, cursor });
     for (const object of page.objects) {
       objects.push({
         key: object.key,

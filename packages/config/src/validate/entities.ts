@@ -7,10 +7,11 @@
  * exactly as the Rust functions do, so a reference to an entity that failed its
  * own check can never be silently accepted downstream.
  */
+
+import { parseUpstreamEndpoint } from "../routing.js";
 import { endpointUrls } from "../schema/entities.js";
 import type { McpServerConfig } from "../schema/entities.js";
 import type { Config } from "../schema/index.js";
-import { parseUpstreamEndpoint } from "../routing.js";
 import {
   fail,
   isBlank,
@@ -20,12 +21,13 @@ import {
   validateHeaders,
   validateSecretRef,
 } from "./helpers.js";
+const nn = <T>(v: T): NonNullable<T> => v as NonNullable<T>;
 
 /** `validate_providers` → the set of declared provider names. */
 export function validateProviders(config: Config): Set<string> {
   const names = new Set<string>();
   for (let index = 0; index < config.providers.length; index += 1) {
-    const provider = config.providers[index]!;
+    const provider = nn(config.providers[index]);
     const at = (field: string) => `providers[${index}].${field}`;
     if (isBlank(provider.name)) fail(at("name"), "cannot be empty");
     if (names.has(provider.name)) fail(at("name"), `duplicate provider name ${provider.name}`);
@@ -36,7 +38,8 @@ export function validateProviders(config: Config): Set<string> {
     if (isSetAndEmpty(provider.openrouter_http_referer)) {
       fail(at("openrouter_http_referer"), "cannot be empty");
     }
-    if (isSetAndEmpty(provider.openrouter_x_title)) fail(at("openrouter_x_title"), "cannot be empty");
+    if (isSetAndEmpty(provider.openrouter_x_title))
+      fail(at("openrouter_x_title"), "cannot be empty");
     if (isSetAndEmpty(provider.region)) fail(at("region"), "cannot be empty");
     if (isSetAndEmpty(provider.aws_access_key_id)) fail(at("aws_access_key_id"), "cannot be empty");
     if (isSetAndEmpty(provider.aws_secret_access_key_env)) {
@@ -65,12 +68,16 @@ export function validateProviders(config: Config): Set<string> {
     }
     // Vertex has no bearer-API-key auth mode -- same fail-closed shape as Bedrock.
     if (provider.kind === "vertex" || provider.kind === "vertex-ai") {
-      if (provider.gcp_project_id === null) fail(at("gcp_project_id"), "required when kind = vertex");
+      if (provider.gcp_project_id === null)
+        fail(at("gcp_project_id"), "required when kind = vertex");
       if (provider.gcp_access_token_env === null) {
         fail(at("gcp_access_token_env"), "required when kind = vertex");
       }
       if (provider.region === null) {
-        fail(at("region"), "required when kind = vertex (this is the GCP location, e.g. us-central1)");
+        fail(
+          at("region"),
+          "required when kind = vertex (this is the GCP location, e.g. us-central1)",
+        );
       }
     }
   }
@@ -81,7 +88,7 @@ export function validateProviders(config: Config): Set<string> {
 export function validateModels(config: Config, providerNames: Set<string>): Set<string> {
   const names = new Set<string>();
   for (let index = 0; index < config.models.length; index += 1) {
-    const model = config.models[index]!;
+    const model = nn(config.models[index]);
     const at = (field: string) => `models[${index}].${field}`;
     if (isBlank(model.name)) fail(at("name"), "cannot be empty");
     if (names.has(model.name)) fail(at("name"), `duplicate model name ${model.name}`);
@@ -108,13 +115,11 @@ export function validateModels(config: Config, providerNames: Set<string>): Set<
       (model.input_price_per_1m === null || model.output_price_per_1m === null)
     ) {
       throw new Error(
-        `field models[${index}]: billing_service.enabled requires input_price_per_1m and ` +
-          `output_price_per_1m on every model, so monthly budget enforcement never diverges from ` +
-          `the billing service's ledger (model ${model.name})`,
+        `field models[${index}]: billing_service.enabled requires input_price_per_1m and output_price_per_1m on every model, so monthly budget enforcement never diverges from the billing service's ledger (model ${model.name})`,
       );
     }
     for (let fallbackIndex = 0; fallbackIndex < model.fallbacks.length; fallbackIndex += 1) {
-      const fallback = model.fallbacks[fallbackIndex]!;
+      const fallback = nn(model.fallbacks[fallbackIndex]);
       if (!fallback.enabled) continue;
       const atFallback = (field: string) => `${at("fallbacks")}[${fallbackIndex}].${field}`;
       if (!providerNames.has(fallback.provider)) {
@@ -129,8 +134,7 @@ export function validateModels(config: Config, providerNames: Set<string>): Set<
         (fallback.input_price_per_1m === null || fallback.output_price_per_1m === null)
       ) {
         throw new Error(
-          `field models[${index}].fallbacks[${fallbackIndex}]: lowest_cost requires ` +
-            `input_price_per_1m and output_price_per_1m`,
+          `field models[${index}].fallbacks[${fallbackIndex}]: lowest_cost requires input_price_per_1m and output_price_per_1m`,
         );
       }
       // Issue #146: a fallback route can be selected at request time, so it needs
@@ -140,8 +144,7 @@ export function validateModels(config: Config, providerNames: Set<string>): Set<
         (fallback.input_price_per_1m === null || fallback.output_price_per_1m === null)
       ) {
         throw new Error(
-          `field models[${index}].fallbacks[${fallbackIndex}]: billing_service.enabled requires ` +
-            `input_price_per_1m and output_price_per_1m on every fallback route`,
+          `field models[${index}].fallbacks[${fallbackIndex}]: billing_service.enabled requires input_price_per_1m and output_price_per_1m on every fallback route`,
         );
       }
       if (fallback.weight === 0) fail(atFallback("weight"), "must be greater than zero");
@@ -149,7 +152,7 @@ export function validateModels(config: Config, providerNames: Set<string>): Set<
     // Canary rollout target (issue #276): validated like the primary route so a
     // misconfigured canary fails closed at load time.
     const canary = model.canary;
-    if (canary !== null && canary.enabled) {
+    if (canary?.enabled) {
       if (!providerNames.has(canary.provider)) {
         fail(
           at("canary.provider"),
@@ -164,7 +167,7 @@ export function validateModels(config: Config, providerNames: Set<string>): Set<
     // Shadow/mirror target (issue #276): metered but never billed, so it does not
     // carry the billing-service price requirement.
     const shadow = model.shadow;
-    if (shadow !== null && shadow.enabled) {
+    if (shadow?.enabled) {
       if (!providerNames.has(shadow.provider)) {
         fail(
           at("shadow.provider"),
@@ -173,7 +176,10 @@ export function validateModels(config: Config, providerNames: Set<string>): Set<
       }
       if (isBlank(shadow.provider_model)) fail(at("shadow.provider_model"), "cannot be empty");
       if (shadow.sample_percent > 100) {
-        fail(at("shadow.sample_percent"), `must be between 0 and 100 (got ${shadow.sample_percent})`);
+        fail(
+          at("shadow.sample_percent"),
+          `must be between 0 and 100 (got ${shadow.sample_percent})`,
+        );
       }
     }
   }
@@ -198,7 +204,11 @@ const MCP_PROTOCOL_OWNED_HEADERS = [
  * only their outermost context under `Display`, so those two strings are the
  * observable messages.
  */
-function validateMcpStaticHeader(header: { name: string; value: string | null; value_env: string | null }): void {
+function validateMcpStaticHeader(header: {
+  name: string;
+  value: string | null;
+  value_env: string | null;
+}): void {
   if (!isValidHeaderName(header.name)) throw new Error("MCP static header name is invalid");
   if (MCP_PROTOCOL_OWNED_HEADERS.some((reserved) => header.name.toLowerCase() === reserved)) {
     throw new Error(`MCP static header ${header.name} is protocol-owned`);
@@ -222,6 +232,7 @@ function validateMcpStaticHeader(header: { name: string; value: string | null; v
  * `Uri` itself would reject (empty / whitespace / control characters).
  */
 function validateMcpHttpEndpoint(raw: string): void {
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: the control-character ranges are deliberate — the endpoint is rejected precisely when it contains whitespace or control characters
   if (raw.length === 0 || /[\s\u0000-\u001f\u007f]/.test(raw)) {
     throw new Error(`invalid MCP endpoint ${raw}`);
   }
@@ -262,7 +273,9 @@ function validateMcpOauthConfig(
     throw new Error("MCP oauth.issuer must be an http or https URL");
   }
   if (issuer.protocol === "http:" && !oauth.allow_insecure_http) {
-    throw new Error("MCP oauth.issuer must use https unless allow_insecure_http is explicitly enabled");
+    throw new Error(
+      "MCP oauth.issuer must use https unless allow_insecure_http is explicitly enabled",
+    );
   }
   if (isBlank(oauth.client_id)) throw new Error("MCP oauth.client_id cannot be empty");
   if (oauth.scopes.length === 0 || oauth.scopes.some((scope) => isBlank(scope))) {
@@ -295,7 +308,10 @@ function validateMcpOauthConfig(
  * naming the limitation. Pinned by
  * `validate-entities.test.ts` > "mcp tls is rejected, not silently ignored".
  */
-function validateMcpTlsConfig(tls: { insecure_skip_verify: boolean; ca_cert_path: string | null }): void {
+function validateMcpTlsConfig(tls: {
+  insecure_skip_verify: boolean;
+  ca_cert_path: string | null;
+}): void {
   if (tls.ca_cert_path !== null) {
     throw new Error(
       "MCP tls.ca_cert_path is unsupported on Cloudflare Workers: there is no filesystem to read " +
@@ -323,7 +339,9 @@ function validateMcpTlsConfig(tls: { insecure_skip_verify: boolean; ca_cert_path
 export function validateMcpServerConfig(server: McpServerConfig): void {
   if (isBlank(server.name)) throw new Error("MCP server name cannot be empty");
   if (server.name.includes("-")) {
-    throw new Error("MCP server name cannot contain '-' because tool names use serverName-toolName");
+    throw new Error(
+      "MCP server name cannot contain '-' because tool names use serverName-toolName",
+    );
   }
   if (server.tools_to_execute.length === 0) {
     throw new Error(
@@ -405,7 +423,7 @@ export function validateMcpServerConfig(server: McpServerConfig): void {
 export function validateMcpServers(config: Config): void {
   const names = new Set<string>();
   for (let index = 0; index < config.mcp_servers.length; index += 1) {
-    const server = config.mcp_servers[index]!;
+    const server = nn(config.mcp_servers[index]);
     if (names.has(server.name)) {
       fail(`mcp_servers[${index}].name`, `duplicate MCP server name ${server.name}`);
     }
@@ -445,7 +463,7 @@ export function validateApiKeys(
 ): Set<string> {
   const ids = new Set<string>();
   for (let index = 0; index < config.api_keys.length; index += 1) {
-    const key = config.api_keys[index]!;
+    const key = nn(config.api_keys[index]);
     const at = (field: string) => `api_keys[${index}].${field}`;
     if (isBlank(key.id)) fail(at("id"), "cannot be empty");
     if (ids.has(key.id)) fail(at("id"), `duplicate api key id ${key.id}`);
@@ -473,9 +491,7 @@ export function validateApiKeys(
     if (key.platform_operator === true && key.organization_id !== null) {
       fail(
         at("platform_operator"),
-        `api key ${key.id} sets platform_operator = true and organization_id = ` +
-          `${key.organization_id}; a platform-operator key is unscoped by definition, so it must ` +
-          `not also claim a tenant`,
+        `api key ${key.id} sets platform_operator = true and organization_id = ${key.organization_id}; a platform-operator key is unscoped by definition, so it must not also claim a tenant`,
       );
     }
     for (const allowedModel of key.allowed_models) {
@@ -490,7 +506,10 @@ export function validateApiKeys(
     }
     for (const allowedProvider of key.allowed_providers) {
       if (!providerNames.has(allowedProvider)) {
-        fail(at("allowed_providers"), `api key ${key.id} allows unknown provider ${allowedProvider}`);
+        fail(
+          at("allowed_providers"),
+          `api key ${key.id} allows unknown provider ${allowedProvider}`,
+        );
       }
     }
     for (const deniedProvider of key.denied_providers) {
@@ -523,7 +542,7 @@ export function validatePolicies(
 ): void {
   const names = new Set<string>();
   for (let index = 0; index < config.policies.length; index += 1) {
-    const policy = config.policies[index]!;
+    const policy = nn(config.policies[index]);
     const at = (field: string) => `policies[${index}].${field}`;
     if (isBlank(policy.name)) fail(at("name"), "cannot be empty");
     if (names.has(policy.name)) fail(at("name"), `duplicate policy name ${policy.name}`);
@@ -553,7 +572,7 @@ export function validatePolicies(
 export function validateGatewayConfigs(config: Config, apiKeyIds: Set<string>): void {
   const ids = new Set<string>();
   for (let index = 0; index < config.gateway_configs.length; index += 1) {
-    const profile = config.gateway_configs[index]!;
+    const profile = nn(config.gateway_configs[index]);
     const at = (field: string) => `gateway_configs[${index}].${field}`;
     if (isBlank(profile.id)) fail(at("id"), "cannot be empty");
     if (ids.has(profile.id)) fail(at("id"), `duplicate gateway config id ${profile.id}`);
@@ -580,7 +599,7 @@ export function validateGatewayConfigs(config: Config, apiKeyIds: Set<string>): 
 export function validateAgentUpstreams(config: Config): void {
   const ids = new Set<string>();
   for (let index = 0; index < config.agent_upstreams.length; index += 1) {
-    const upstream = config.agent_upstreams[index]!;
+    const upstream = nn(config.agent_upstreams[index]);
     const at = (field: string) => `agent_upstreams[${index}].${field}`;
     if (isBlank(upstream.id)) fail(at("id"), "cannot be empty");
     if (ids.has(upstream.id)) fail(at("id"), `duplicate agent upstream id ${upstream.id}`);
@@ -606,7 +625,7 @@ export function validateAgentUpstreams(config: Config): void {
 export function validateUpstreams(config: Config): Set<string> {
   const names = new Set<string>();
   for (let index = 0; index < config.upstreams.length; index += 1) {
-    const upstream = config.upstreams[index]!;
+    const upstream = nn(config.upstreams[index]);
     if (isBlank(upstream.name)) fail(`upstreams[${index}].name`, "cannot be empty");
     if (names.has(upstream.name)) {
       fail(`upstreams[${index}].name`, `duplicate upstream name ${upstream.name}`);
@@ -617,7 +636,7 @@ export function validateUpstreams(config: Config): Set<string> {
       fail(`upstreams[${index}].url`, "upstream must define url or urls");
     }
     for (let endpointIndex = 0; endpointIndex < endpoints.length; endpointIndex += 1) {
-      const endpoint = endpoints[endpointIndex]!;
+      const endpoint = nn(endpoints[endpointIndex]);
       try {
         parseUpstreamEndpoint(endpoint);
       } catch (error) {
@@ -637,7 +656,7 @@ export function validateUpstreams(config: Config): Set<string> {
 export function validateRoutes(config: Config, upstreamNames: Set<string>): void {
   const names = new Set<string>();
   for (let index = 0; index < config.routes.length; index += 1) {
-    const route = config.routes[index]!;
+    const route = nn(config.routes[index]);
     const at = (field: string) => `routes[${index}].${field}`;
     if (isBlank(route.name)) fail(at("name"), "cannot be empty");
     if (names.has(route.name)) fail(at("name"), `duplicate route name ${route.name}`);

@@ -1,3 +1,21 @@
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { useAuth } from "@/hooks/use-auth";
+import { useFormatUnix } from "@/hooks/use-format-unix";
+import { useOperatorError } from "@/hooks/use-operator-error";
+import { useI18n } from "@/i18n";
+import { type AdminSchema, adminDelete, adminGet, adminPost } from "@/lib/gateway-client";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 // MCP OAuth identities console (#202/#215, #323): per-server view of the
 // subject-bound MCP identity over the runtime endpoints
 //   GET    /v1/mcp/identity/{server}            → status (no token material)
@@ -17,25 +35,7 @@
 // reflects the now-connected identity. We surface the URL + state and explain
 // the hand-off rather than pretending the SPA completes it.
 import { useMemo, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import { useAuth } from "@/hooks/use-auth";
-import { useI18n } from "@/i18n";
-import { useFormatUnix } from "@/hooks/use-format-unix";
-import { useOperatorError } from "@/hooks/use-operator-error";
-import { adminDelete, adminGet, adminPost, type AdminSchema } from "@/lib/gateway-client";
 
 type AuthorizeResponse = AdminSchema<"McpOauthAuthorizeResponse">;
 
@@ -57,7 +57,7 @@ export default function McpIdentitiesPage() {
   const { t } = useI18n();
   const formatUnix = useFormatUnix();
   const { toastError } = useOperatorError();
-  const apiKey = session!.gatewayApiKey;
+  const apiKey = (session as NonNullable<typeof session>).gatewayApiKey;
   const queryClient = useQueryClient();
 
   const [serverInput, setServerInput] = useState("");
@@ -69,10 +69,7 @@ export default function McpIdentitiesPage() {
     queryKey: ["mcp-servers"],
     queryFn: () => adminGet(apiKey, "/admin/v1/mcp-servers"),
   });
-  const serverNames = useMemo(
-    () => (serversData?.data ?? []).map((s) => s.name),
-    [serversData],
-  );
+  const serverNames = useMemo(() => (serversData?.data ?? []).map((s) => s.name), [serversData]);
 
   const identityQueryKey = ["mcp-identity", server];
   const {
@@ -82,8 +79,7 @@ export default function McpIdentitiesPage() {
     error: statusError,
   } = useQuery({
     queryKey: identityQueryKey,
-    queryFn: () =>
-      adminGet(apiKey, "/v1/mcp/identity/{server}", { params: { server } }),
+    queryFn: () => adminGet(apiKey, "/v1/mcp/identity/{server}", { params: { server } }),
     enabled: server !== "",
   });
 
@@ -100,8 +96,7 @@ export default function McpIdentitiesPage() {
   });
 
   const revokeMutation = useMutation({
-    mutationFn: () =>
-      adminDelete(apiKey, "/v1/mcp/identity/{server}", { params: { server } }),
+    mutationFn: () => adminDelete(apiKey, "/v1/mcp/identity/{server}", { params: { server } }),
     onSuccess: () => {
       toast.success(t("page.mcpIdentities.toast.disconnected", { server }));
       setAuthorization(null);
@@ -123,9 +118,7 @@ export default function McpIdentitiesPage() {
     <div className="flex flex-col gap-4">
       <div>
         <h1 className="text-lg font-semibold">{t("page.mcpIdentities.title")}</h1>
-        <p className="text-sm text-muted-foreground">
-          {t("page.mcpIdentities.description")}
-        </p>
+        <p className="text-sm text-muted-foreground">{t("page.mcpIdentities.description")}</p>
       </div>
 
       <Card>
@@ -173,15 +166,16 @@ export default function McpIdentitiesPage() {
       </Card>
 
       {statusError ? (
-        <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <p
+          role="alert"
+          className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+        >
           {t("page.mcpIdentities.loadError", { server, message: statusError.message })}
         </p>
       ) : null}
 
       {server === "" ? (
-        <p className="text-sm text-muted-foreground">
-          {t("page.mcpIdentities.prompt")}
-        </p>
+        <p className="text-sm text-muted-foreground">{t("page.mcpIdentities.prompt")}</p>
       ) : isLoading ? (
         <p className="text-sm text-muted-foreground">{t("page.mcpIdentities.loading")}</p>
       ) : status ? (
@@ -269,9 +263,7 @@ export default function McpIdentitiesPage() {
                 className="grid gap-2 rounded-md border border-primary/40 bg-primary/5 px-3 py-3"
                 data-testid="authorization-panel"
               >
-                <p className="text-sm font-medium">
-                  {t("page.mcpIdentities.authPanel.title")}
-                </p>
+                <p className="text-sm font-medium">{t("page.mcpIdentities.authPanel.title")}</p>
                 <p className="text-xs text-muted-foreground">
                   {t("page.mcpIdentities.authPanel.description", {
                     expires: formatUnix(authorization.expires_at_unix),

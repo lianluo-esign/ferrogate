@@ -63,8 +63,7 @@ export class MemoryBudgetAlertStore {
   ): StoredBudgetAlertNotification[] {
     const out = [...this.rows.values()]
       .filter(
-        (n) =>
-          n.scopeType === scopeType && n.scopeId === scopeId && n.periodMonth === periodMonth,
+        (n) => n.scopeType === scopeType && n.scopeId === scopeId && n.periodMonth === periodMonth,
       )
       .map((n) => ({ ...n }));
     out.sort((a, b) => a.thresholdPct - b.thresholdPct);

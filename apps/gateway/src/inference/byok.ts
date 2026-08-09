@@ -59,13 +59,13 @@ import {
   type TenantCredentialStore,
   byokKeyringFromEnvAsync,
 } from "@ferrogate/secrets";
-import { controlDatabaseFrom } from "../control-data.js";
 import {
   DurableObjectTenantDatabaseRouter,
   backfillTenantConfigurationPolicy,
   tenantProviderCredentialStoreFor,
 } from "@ferrogate/storage";
 import type { TenantDataNamespace } from "@ferrogate/storage/durable-objects";
+import { controlDatabaseFrom } from "../control-data.js";
 import type { InferenceRejection } from "./errors.js";
 import { reject } from "./errors.js";
 import type { Caller, InferenceBindings, ModelResolver, PhysicalRoute } from "./ports.js";
@@ -136,7 +136,7 @@ export function byokPortsFromEnv(env: InferenceBindings): ByokPorts | null {
   // in `wrangler.toml` with its `wrangler secret put` instruction. The literal
   // is checked against the package constant on the line below, so the two
   // cannot drift apart silently.
-  if (env["FERROGATE_BYOK_MASTER_KEY"] === undefined) return null;
+  if (env.FERROGATE_BYOK_MASTER_KEY === undefined) return null;
 
   const router = new DurableObjectTenantDatabaseRouter(namespace, db);
   const store: TenantCredentialStore = {

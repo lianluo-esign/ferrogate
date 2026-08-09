@@ -784,8 +784,9 @@ describe("the unattended schedule seam (src/schedule/alarm-queue.ts)", () => {
       headers: bearer(TENANT_A_KEY),
     });
     expect(storedResponse.status).toBe(200);
-    const slot = ((await storedResponse.json()) as { agent_schedule: { next_fire_at_unix: number } })
-      .agent_schedule.next_fire_at_unix;
+    const slot = (
+      (await storedResponse.json()) as { agent_schedule: { next_fire_at_unix: number } }
+    ).agent_schedule.next_fire_at_unix;
     expect(typeof slot).toBe("number");
     await scheduled(
       { scheduledTime: slot * 1000, cron: "* * * * *", noRetry: () => {} },
