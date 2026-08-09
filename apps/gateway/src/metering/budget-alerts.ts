@@ -137,12 +137,12 @@ import {
 import type { TenantDataNamespace } from "@ferrogate/storage/durable-objects";
 import { controlDatabaseFrom } from "../control-data.js";
 import {
+  NO_SPEND_SOURCE,
   type QuotaPolicySource,
   type SpendSource,
   currentPeriodMonth,
   d1SpendSource,
   quotaPolicySourceFromEnv,
-  spendSourceFromEnv,
 } from "../ratelimit/quota.js";
 import type { MeteringDiagnostics } from "./ports.js";
 import type { MeteringAttribution } from "./usage-ledger.js";
@@ -275,7 +275,11 @@ export function budgetAlertPortsFrom(env: unknown): BudgetAlertPorts | undefined
   return {
     config,
     policies: quotaPolicySourceFromEnv(env as Parameters<typeof quotaPolicySourceFromEnv>[0]),
-    spend: spendSourceFromEnv(env as Parameters<typeof spendSourceFromEnv>[0]),
+    // The base `spend` is always overridden by the tenant-routed `spendForTenant`
+    // below (see `runBudgetAlertPass`), and since #821 PR2-delete there is no
+    // shared `env.DB` to read a fleet-wide rollup from. `NO_SPEND_SOURCE` is the
+    // inert base; the routed source is the authority.
+    spend: NO_SPEND_SOURCE,
     spendForTenant: async (tenantId) => d1SpendSource((await tenantDbFor(tenantId)).db),
     claims: {
       async claimBudgetAlertNotification(claim) {

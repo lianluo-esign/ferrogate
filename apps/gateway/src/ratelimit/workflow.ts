@@ -303,26 +303,6 @@ function workflowBudgetSourceOverHandle(
   };
 }
 
-/** `env.DB`, when it is really a D1 binding. */
-function workflowDatabase(env: WorkflowBudgetBindings): D1Database | undefined {
-  const candidate = env.DB;
-  return candidate !== undefined && typeof candidate.prepare === "function" ? candidate : undefined;
-}
-
-/**
- * The `"off"`-mode source: D1 whenever the shared `DB` is bound,
- * {@link NO_WORKFLOW_BUDGETS} otherwise.
- *
- * Since #819 this is the second choice, not the first: when the tenancy
- * resolver is routing, `rateLimit()` builds {@link routedWorkflowBudgetSource}
- * instead. Reaching for `env.DB` while a tenant handle exists is exactly the
- * cross-tenant fallback `src/tenancy/` forbids.
- */
-export function workflowBudgetSourceFromEnv(env: WorkflowBudgetBindings): WorkflowBudgetSource {
-  const db = workflowDatabase(env);
-  return db === undefined ? NO_WORKFLOW_BUDGETS : d1WorkflowBudgetSource(db);
-}
-
 /**
  * The pure pre-flight, re-exported through this module so every caller in the
  * gateway reaches `@ferrogate/policy`'s implementation and none is tempted to

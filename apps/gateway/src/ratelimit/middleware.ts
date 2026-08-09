@@ -127,21 +127,18 @@ import {
   quotaPolicySourceFromEnv,
   resolveQuotaWindows,
   routedWalletSpendSource,
-  spendSourceFromEnv,
 } from "./quota.js";
 import {
   NO_TOKEN_BUDGET,
   type TokenBudgetBindings,
   type TokenBudgetSource,
   d1TokenBudgetSource,
-  tokenBudgetSourceFromEnv,
 } from "./token-budget.js";
 import {
   NO_WALLET_ADMISSION,
   type WalletAdmission,
   type WalletAdmissionBindings,
   routedWalletAdmission,
-  walletAdmissionFromEnv,
   walletHoldCreditsFromEnv,
   walletHoldId,
 } from "./wallet.js";
@@ -152,7 +149,6 @@ import {
   type WorkflowStepDeclaration,
   preflightStep,
   routedWorkflowBudgetSource,
-  workflowBudgetSourceFromEnv,
   workflowDeclarationFrom,
 } from "./workflow.js";
 
@@ -421,11 +417,10 @@ function defaultWorkflowBudgets(
   env: RateLimitBindings,
 ): WorkflowBudgetSource {
   const mode = parseTenantDatabaseRoutingMode(env.GATEWAY_TENANT_DB_ROUTING);
-  if (mode === "off") return workflowBudgetSourceFromEnv(env);
   // Routing is on with no tenant storage bound at all: nothing has ever opened
-  // a budget envelope, so nothing is capped. `unbudgeted`, exactly as
-  // `workflowBudgetSourceFromEnv` answers for an unbound `DB` — and, as there,
-  // NOT by reaching for the shared database.
+  // a budget envelope, so nothing is capped. `unbudgeted`, and NOT by reaching
+  // for a shared database — since #821 PR2-delete there is no shared `DB` to
+  // reach for.
   if (mode === "durable_object" && env.TENANT_DATA === undefined) return NO_WORKFLOW_BUDGETS;
   return {
     async forStep(step, tenantId) {
@@ -436,24 +431,19 @@ function defaultWorkflowBudgets(
 
 function defaultWalletAdmission(c: Context<GatewayEnv>, env: RateLimitBindings): WalletAdmission {
   const mode = parseTenantDatabaseRoutingMode(env.GATEWAY_TENANT_DB_ROUTING);
-  // Only an EXPLICIT `"off"` opts out. An unparseable value is NOT treated as
-  // "off": the tenancy middleware has already answered it with a 503, and
-  // guessing "not routing" here would be the guess that reaches for `DB`.
-  if (mode === "off") return walletAdmissionFromEnv(env);
   if (mode === "durable_object" && env.TENANT_DATA === undefined) {
     // Routing is on, but this Worker has NO tenant storage bound at all — so
     // there are no `wallets` rows anywhere, for any tenant.
     //
     // `not_applicable`, not a refusal, and the distinction is the one
     // `WalletAdmissionOutcome` already draws: the prepaid wallet is OPT-IN per
-    // tenant, so "no wallet exists" must never deny. This is the same
-    // conclusion `walletAdmissionFromEnv` reaches when `DB` is unbound, reached
-    // the same way. A 503 belongs to storage that IS bound and then FAILED —
-    // that is an outage, and an outage has not proven the caller is overdrawn.
+    // tenant, so "no wallet exists" must never deny. A 503 belongs to storage
+    // that IS bound and then FAILED — that is an outage, and an outage has not
+    // proven the caller is overdrawn.
     //
-    // What this arm deliberately does NOT do is reach for `env.DB`. An unbound
-    // namespace means no wallet; it does not mean "use the shared database",
-    // which is the cross-tenant fallback the tenancy directory forbids.
+    // What this arm deliberately does NOT do is reach for a shared `env.DB`.
+    // Since #821 PR2-delete there is no shared database at all; an unbound
+    // namespace means no wallet, full stop.
     return NO_WALLET_ADMISSION;
   }
   const holdCredits = walletHoldCreditsFromEnv(env);
@@ -490,17 +480,13 @@ function defaultWalletAdmission(c: Context<GatewayEnv>, env: RateLimitBindings):
  * move with it.
  */
 function defaultSpendSource(c: Context<GatewayEnv>, env: RateLimitBindings): SpendSource {
-  const legacyRollups = spendSourceFromEnv(env);
   const mode = parseTenantDatabaseRoutingMode(env.GATEWAY_TENANT_DB_ROUTING);
-  // Only an EXPLICIT `"off"` keeps the wallet on the shared `DB`; an
-  // unparseable value is not a licence to guess, exactly as in
-  // `defaultWalletAdmission`.
-  if (mode === "off") return legacyRollups;
   if (mode === "durable_object" && env.TENANT_DATA === undefined) {
     // No tenant storage bound at all ⇒ no `wallets` row exists for any tenant.
     // `availableCredits: null` is the OPT-IN answer ("this tenant has no
-    // wallet"), never `0`, and never a read of `env.DB` — the same conclusion
-    // `NO_WALLET_ADMISSION` reaches at step 3b, reached the same way.
+    // wallet"), never `0`, and never a read of a shared `env.DB` — since #821
+    // PR2-delete there is no shared database, the same conclusion
+    // `NO_WALLET_ADMISSION` reaches at step 3b.
     return NO_SPEND_SOURCE;
   }
   const rollups: SpendSource = {
@@ -550,7 +536,6 @@ function defaultSpendSource(c: Context<GatewayEnv>, env: RateLimitBindings): Spe
 
 function defaultTokenBudget(c: Context<GatewayEnv>, env: RateLimitBindings): TokenBudgetSource {
   const mode = parseTenantDatabaseRoutingMode(env.GATEWAY_TENANT_DB_ROUTING);
-  if (mode === "off") return tokenBudgetSourceFromEnv(env);
   if (mode === "durable_object" && env.TENANT_DATA === undefined) return NO_TOKEN_BUDGET;
   const accessor = tenantDatabaseOf(c);
   if (accessor.tenantId === null) return NO_TOKEN_BUDGET;

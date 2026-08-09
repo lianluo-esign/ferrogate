@@ -70,11 +70,11 @@ function tenantCatalogGateway() {
   const database = {} as D1Database;
   const accessor: TenantDatabaseAccessor = {
     tenantId: "tenant_a",
-    mode: "shared_development",
+    mode: "durable_object",
     handle: async () => ({
       tenantId: "tenant_a",
       db: database,
-      source: "shared_development",
+      source: "durable_object",
       supportsAtomicBatch: true,
     }),
     db: async () => database,

@@ -27,18 +27,25 @@ const WRANGLER_TOML = readFileSync(new URL("./wrangler.toml", import.meta.url), 
  */
 
 /**
- * The REAL tenant-database migration, read from the same directory
- * `wrangler.toml`'s `migrations_dir` points `wrangler d1 migrations apply` at.
- * `test/setup-d1.ts` applies it to `env.DB` before every test file.
+ * The REAL tenant-database migration, read from the deployed tenant schema.
+ * `test/setup-d1.ts` applies it to the test-only `env.DB` before every file.
  *
- * This is not optional plumbing. `wrangler.toml` now declares
- * `[[d1_databases]] binding = "DB"`, which makes `depsFromEnv` build the D1
- * key resolver as the PRIMARY credential source — and a bound `DB` whose
- * `api_keys` table does not exist raises `ApiKeyStoreUnavailable`, i.e. every
- * bearer request in this suite would answer 503 instead of falling through to
- * the config keys below. Running the deployed migration rather than a fixture
- * copy is also what keeps the tests honest: a column rename in the migration
- * breaks them, instead of them passing against a private schema.
+ * ## Since #821 PR2-delete: `DB` is a TEST-ONLY D1, not a deploy binding
+ *
+ * `wrangler.toml` no longer declares `[[d1_databases]] binding = "DB"` — the
+ * shared `ferrogate-tenant` database is retired and production reads every
+ * tenant-schema table through the per-tenant `TENANT_DATA` Durable Object. But
+ * the `@ferrogate/storage` D1 ADAPTER CLASSES (`d1SpendSource`,
+ * `d1WalletAdmission`, `D1TokenBudgetSource`, `D1WorkflowBudgetSource`,
+ * `D1ConversationStore`, the asset stores) are still the production code —
+ * production just hands them a Durable-Object-backed handle instead of a shared
+ * one. Those adapter classes are unit-tested here over a plain D1 handle, so the
+ * pool binds a LOCAL, test-only D1 named `DB` via `miniflare.d1Databases`
+ * (below), decoupled from `wrangler.toml`. It is a fixture, not a deploy
+ * binding, and `test/env-var-drift.test.ts`'s "no dead binding stanza" gate —
+ * which parses the committed toml, where `DB` no longer appears — proves it is
+ * not shipped. Running the deployed migration rather than a fixture copy keeps
+ * the adapters honest: a column rename in the migration breaks them.
  */
 const migrations = await readD1Migrations("../../sql/d1-ts/tenant");
 
@@ -158,6 +165,11 @@ export default defineConfig({
       // for real instead of installing a double.
       remoteBindings: false,
       miniflare: {
+        // #821 PR2-delete: `DB` is no longer a `wrangler.toml` stanza, so bind a
+        // test-only local D1 here purely to exercise the `@ferrogate/storage` D1
+        // adapter classes over a plain handle (see the `migrations` note above).
+        // Production reads every tenant table through `TENANT_DATA` instead.
+        d1Databases: { DB: "gateway-test-tenant-d1" },
         bindings: {
           // Zero-D1 S5 (#881): no pin. The committed `durable_object` posture is
           // the only one now, and the suite seeds/reads control fixtures through

@@ -19,14 +19,19 @@
  * D1 aliases of `ferrogate-control` — the alias is a test-harness convenience,
  * not a second database, and there is no `[[d1_databases]]` stanza behind it.
  *
- * ## Why the whole suite needs the tenant `DB`, not just `test/keys/`
+ * ## Why the suite still binds a tenant `DB` — now a TEST-ONLY fixture
  *
- * `wrangler.toml` declares `[[d1_databases]] binding = "DB"` (the TENANT
- * database), so `depsFromEnv` (src/adapters.ts) builds the D1 key resolver and
- * makes it the PRIMARY credential source for EVERY request in this suite. With
- * the tables present and empty, the durable legs simply find no rows and the
- * config fallbacks answer; `test/keys/*.test.ts` and the RBAC/guardrail-store
- * suites seed real rows and exercise the durable legs for real.
+ * Since #821 PR2-delete `wrangler.toml` no longer declares
+ * `[[d1_databases]] binding = "DB"`: the shared `ferrogate-tenant` database is
+ * retired and production reads every tenant-schema table through the per-tenant
+ * `TENANT_DATA` Durable Object. `vitest.config.ts` instead binds a LOCAL,
+ * test-only D1 named `DB` (via `miniflare.d1Databases`) so the `@ferrogate/
+ * storage` D1 ADAPTER classes (wallet/spend/token/workflow/conversation/asset
+ * stores) — still production code, just handed a DO-backed handle in the
+ * deployed Worker — can be unit-tested over a plain D1 handle. Applying the
+ * deployed tenant migration to it keeps those adapters honest against schema
+ * drift. It is a fixture, not a deploy binding; `test/env-var-drift.test.ts`
+ * proves `DB` no longer appears in the committed toml.
  */
 import { applyD1Migrations, env } from "cloudflare:test";
 import { controlDataObjectDatabase } from "@ferrogate/storage";

@@ -1097,50 +1097,28 @@ binding = "PROMPT_LABELS"
 id = "PLACEHOLDER_SET_AT_DEPLOY_TIME"
 
 # ---------------------------------------------------------------------------
-# D1 — the tenant database holding the durable `api_keys` table
-#
-# Read as `env.DB` by `d1ApiKeyResolverFromEnv` (src/keys/resolver.ts), which
-# `depsFromEnv` (src/adapters.ts) makes the PRIMARY credential source when the
-# binding is present. The `[vars]` key tables above become its fallback, which
-# is the Rust order: `authenticate_durable` first, `config.api_keys` second.
-#
-# The schema is `sql/d1-ts/tenant/0001_init_tenant.sql` — `migrations_dir`
-# points there so `wrangler d1 migrations apply ferrogate-tenant [--local]`
-# provisions exactly the DDL the test suite applies (`vitest.config.ts` reads it
-# with `readD1Migrations`), and tests and deploys cannot run different schemas.
-# THIS MUST BE RUN BEFORE FIRST TRAFFIC: with the binding present but the table
-# absent, `D1ApiKeyStore` raises `ApiKeyStoreUnavailable` and every bearer
-# request answers `503 external_auth_unavailable` — deliberately, because an
-# outage must never be indistinguishable from a revocation.
-#
-# Only `api_keys` is read here, and only ever READ — the gateway data plane
-# never writes a key row.
-#
-# `database_name` / `database_id` are DOCUMENTED PLACEHOLDERS. The deploy step
-# substitutes the account's real database; `wrangler dev --local` and
-# `vitest-pool-workers` ignore the id entirely and provision a local SQLite file.
-# Never commit a real database uuid here.
 # ---------------------------------------------------------------------------
-[[d1_databases]]
-binding = "DB"
-database_name = "ferrogate-tenant"
-database_id = "replace-at-deploy-tenant"
-migrations_dir = "../../sql/d1-ts/tenant"
-
-# ---------------------------------------------------------------------------
-# Zero-D1 S5 (#881): the CONTROL D1 stanzas are DELETED
+# Zero-D1 #821 PR2-delete: the tenant `[[d1_databases]] DB` stanza is DELETED
 #
-# Two `[[d1_databases]]` stanzas used to sit here — `binding = "BILLING_DB"`
-# and `binding = "CONTROL_DB"`, both aliasing the one `ferrogate-control`
-# database. Both are gone. Every reader that used them —
-# `meteringBindingsFromEnv` (unscoped billing settlement/projection),
-# `D1RbacAuthorizer` (permissions/roles/tenant_role_bindings),
-# `D1GuardrailPolicyStore` (guardrail_policy_revisions/bindings), and
-# `D1SiteDomainDirectory` (site_domains, #738) — now resolves the singleton
-# `CONTROL_DATA` Durable Object facade exclusively. There is no `d1_compat`
-# fallback: `GATEWAY_CONTROL_STORAGE = "durable_object"` is the only
-# resolvable posture. The `ferrogate-tenant` `DB` stanza above (epic
-# #821/#824) is the only D1 binding this Worker keeps.
+# The `ferrogate-tenant` shared D1 (`binding = "DB"`) used to sit here. It is
+# gone. Every tenant-schema table (`sql/d1-ts/tenant/`) — `api_keys`, wallets +
+# reservations, usage/monthly rollups, workflow budgets, `stored_assets` +
+# `asset_channels`, `responses_conversations`, billing events/ledger — now lives
+# ONLY in that tenant's own SQLite-backed Durable Object
+# (`env.TENANT_DATA.idFromName(tenantId)`, `packages/storage` `TenantDataObject`).
+# The resolver's pure `DurableObjectTenantDatabaseRouter` is unconditional
+# (src/tenancy/resolver.ts); the `off` / `shared_development` routing modes and
+# the `legacyShared`/`BackendDispatching` fallback arm — the only readers of the
+# shared `DB` — are deleted, so nothing in `src/` reads `env.DB` any more.
+#
+# DEPLOY GATE (IRREVERSIBLE): before deploying, the control roster must show zero
+# tenants with `migration_state ∈ {shared, copying, verifying}` and every tenant
+# `storage_backend = 'durable_object'`; otherwise a not-yet-cut-over tenant's
+# data is dropped when the shared D1 goes away.
+#
+# The earlier Zero-D1 S5 (#881) already deleted the CONTROL_DB / BILLING_DB D1
+# stanzas; their readers resolve the singleton `CONTROL_DATA` Durable Object
+# facade. This Worker now declares NO `[[d1_databases]]` stanza at all.
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------

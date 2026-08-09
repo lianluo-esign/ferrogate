@@ -10,10 +10,8 @@
  * three strategies, the control/tenant split, and the fail-closed invariant.
  */
 import {
-  BackendDispatchingTenantDatabaseRouter,
   DurableObjectTenantDatabaseRouter,
   EnvBindingTenantDatabaseRouter,
-  SharedDatabaseTenantRouter,
   type TenantDatabaseHandle,
   type TenantDatabaseRouter,
   type TenantObjectAddress,
@@ -21,7 +19,6 @@ import {
 import { controlDatabaseFrom } from "../control-data.js";
 import { HttpError } from "../middleware/errors.js";
 import {
-  TENANT_DATABASE_ROUTING_DISABLED,
   TENANT_DATABASE_ROUTING_MISCONFIGURED,
   TENANT_DATABASE_ROUTING_MODES,
   TENANT_DATABASE_UNAVAILABLE,
@@ -43,12 +40,13 @@ import { tenantDataNamespace } from "./tenant-data.js";
  * turn on — no deploy, no provisioning call, no binding budget — so there is no
  * longer a reason for the safe posture to be the opt-in one.
  *
- * `"off"` survives as an EXPLICIT value for a deployment that binds no
- * `TENANT_DATA` namespace. A value that is present but NOT a legal mode returns
- * `undefined`, which the resolver turns into `503
- * tenant_database_routing_misconfigured`. It deliberately does NOT fall back to
- * `"off"` OR to the default: an operator who typed `bindng` asked for a
- * specific posture and must be told they did not get it, exactly as a malformed
+ * Since #821 PR2-delete there is no shared `env.DB` tenant database left to
+ * fall back to: the `"off"` and `"shared_development"` modes, both of which
+ * read it, are gone. A value that is present but NOT a legal mode (including
+ * either of those retired names) returns `undefined`, which the resolver turns
+ * into `503 tenant_database_routing_misconfigured`. It deliberately does NOT
+ * fall back to the default: an operator who typed `bindng` asked for a specific
+ * posture and must be told they did not get it, exactly as a malformed
  * `[network_access]` answers `503 network_access_misconfigured` rather than
  * degrading to "no allowlist".
  */
@@ -63,55 +61,6 @@ export function parseTenantDatabaseRoutingMode(
 /** Thrown as the uniform gateway envelope; see `middleware/errors.ts`. */
 function misconfigured(detail: string): HttpError {
   return new HttpError(503, TENANT_DATABASE_ROUTING_MISCONFIGURED, detail);
-}
-
-/**
- * The `"off"` resolver — now reachable only by NAMING `"off"` in the var.
- *
- * It is a real object rather than `undefined` so that the failure mode is a
- * NAMED refusal at the point of use instead of an `undefined` that some call
- * site helpfully replaces with `env.DB`. `router` throws for the same reason.
- *
- * Since #819 an absent var means `"durable_object"`, so reaching this class is
- * a deployment DECISION rather than an omission. The messages below say
- * "switched off" instead of "not configured" for exactly that reason: telling
- * an operator to set a var they have already set is how a 503 becomes
- * unactionable.
- */
-class DisabledTenantDatabaseResolver implements TenantDatabaseResolver {
-  readonly mode = "off" as const;
-  readonly eager = false;
-
-  get router(): TenantDatabaseRouter {
-    throw new HttpError(
-      503,
-      TENANT_DATABASE_ROUTING_DISABLED,
-      'per-tenant storage routing is switched off on this Worker (GATEWAY_TENANT_DB_ROUTING = "off")',
-    );
-  }
-
-  control(): D1Database {
-    throw new HttpError(
-      503,
-      TENANT_DATABASE_ROUTING_DISABLED,
-      'per-tenant storage routing is switched off on this Worker (GATEWAY_TENANT_DB_ROUTING = "off")',
-    );
-  }
-
-  forTenant(tenantId: string, _address?: TenantObjectAddress): Promise<TenantDatabaseHandle> {
-    return Promise.reject(
-      new HttpError(
-        503,
-        TENANT_DATABASE_ROUTING_DISABLED,
-        [
-          `per-tenant storage routing is switched off on this Worker, so tenant ${tenantId} has`,
-          'no database; unset GATEWAY_TENANT_DB_ROUTING (the default is "durable_object", which',
-          "needs no provisioning). This request is refused rather than served from the shared",
-          "database.",
-        ].join(" "),
-      ),
-    );
-  }
 }
 
 /** Wraps a `@ferrogate/storage` router in the gateway's error envelope. */
@@ -168,23 +117,6 @@ export function createTenantDatabaseResolver(env: TenancyBindings): TenantDataba
         `${TENANT_DATABASE_ROUTING_MODES.join(", ")}; refusing to guess a tenant-routing posture`,
     );
   }
-  if (mode === "off") return new DisabledTenantDatabaseResolver();
-
-  if (mode === "shared_development") {
-    // Named explicitly in the var, or unreachable. `SharedDatabaseTenantRouter`
-    // gives NO physical isolation — every tenant shares `env.DB` and only the
-    // `tenant_id` column separates them, which is the Postgres-era posture this
-    // topology replaces. Legitimate for `wrangler dev --local` and for a
-    // genuinely single-tenant self-hosted deployment; nothing else.
-    const shared = env.DB;
-    if (shared === undefined) {
-      throw misconfigured(
-        'GATEWAY_TENANT_DB_ROUTING = "shared_development" needs the DB binding, which is not bound',
-      );
-    }
-    return new RoutedTenantDatabaseResolver(mode, false, new SharedDatabaseTenantRouter(shared));
-  }
-
   // Every remaining mode needs the CONTROL database. Native-binding modes use
   // `tenant_databases.binding_name` for compatibility routing. For
   // `durable_object` it is NOT a routing table: routing needs nothing, and the
@@ -209,10 +141,10 @@ export function createTenantDatabaseResolver(env: TenancyBindings): TenantDataba
     //
     // `tenantDataNamespace` is the ONE place the binding is read, and it raises
     // `503 tenant_database_routing_misconfigured` when the stanza is absent —
-    // deliberately NOT a fallback to `env.DB`. Reusing it here rather than
-    // reading `env.TENANT_DATA` a second time keeps the refusal, its message
-    // and the `env.X` token `test/env-var-drift.test.ts` scans for in a single
-    // module.
+    // deliberately NOT a fallback to a shared database. Reusing it here rather
+    // than reading `env.TENANT_DATA` a second time keeps the refusal, its
+    // message and the `env.X` token `test/env-var-drift.test.ts` scans for in a
+    // single module.
     //
     // Handles resolve LAZILY (`eager: false`) and that is not the weaker
     // posture it is under `binding`: eager resolution existed to prove a
@@ -221,26 +153,17 @@ export function createTenantDatabaseResolver(env: TenancyBindings): TenantDataba
     // own admission refusal, which is observable at the first statement and
     // nowhere earlier, so an "eager" DO mode would have to issue a real RPC per
     // request to learn anything a lazy one does not.
+    //
+    // Since #821 PR2-delete the pure DO router is UNCONDITIONAL: the shared
+    // `env.DB` tenant database has been retired, so there is no
+    // `BackendDispatchingTenantDatabaseRouter` legacy-shared fallback and no
+    // pre-cutover source. Every tenant is one Durable Object; there is nowhere
+    // else its rows could be.
     const durableObject = new DurableObjectTenantDatabaseRouter(
       tenantDataNamespace(env),
       controlDb,
     );
-    // The test harness intentionally has no shared `DB`, so it retains the
-    // zero-registry-read default DO router. Production binds the old shared
-    // tenant database during #824; in that posture the registry state is the
-    // routing fact and pre-cutover tenants must remain on that source.
-    if (env.DB === undefined) {
-      return new RoutedTenantDatabaseResolver(mode, false, durableObject);
-    }
-    return new RoutedTenantDatabaseResolver(
-      mode,
-      false,
-      new BackendDispatchingTenantDatabaseRouter(controlDb, {
-        fallback: new EnvBindingTenantDatabaseRouter(env as Record<string, unknown>, controlDb),
-        durableObject,
-        legacyShared: new SharedDatabaseTenantRouter(env.DB),
-      }),
-    );
+    return new RoutedTenantDatabaseResolver(mode, false, durableObject);
   }
 
   // `binding` / `binding_strict` — the strategy to deploy. `env` is passed

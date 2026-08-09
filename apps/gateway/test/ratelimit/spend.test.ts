@@ -58,7 +58,6 @@ import {
   currentPeriodMonth,
   d1SpendSource,
   monthlyBudgetScope,
-  spendSourceFromEnv,
 } from "../../src/ratelimit/index.js";
 
 const db = (env as unknown as { DB: D1Database }).DB;
@@ -353,18 +352,12 @@ describe("d1SpendSource — wallet balance", () => {
   });
 });
 
-describe("spendSourceFromEnv", () => {
-  test("a bound D1 tenant database gives the durable source", async () => {
-    await seedWallet("tenant_a", 42);
-    const source = spendSourceFromEnv({ DB: db });
-    expect(await source.walletBalanceCredits("tenant_a")).toEqual({
-      ok: true,
-      availableCredits: 42,
-    });
-  });
-
-  test("no binding ⇒ the empty-store readings, which deny nothing", async () => {
-    expect(spendSourceFromEnv({})).toBe(NO_SPEND_SOURCE);
+describe("NO_SPEND_SOURCE — the empty-store readings that deny nothing", () => {
+  test("committed spend is zero and wallet balance is opt-in null", async () => {
+    // Since #821 PR2-delete the shared-`env.DB` `spendSourceFromEnv` resolver is
+    // gone; the composition root's inert base is `NO_SPEND_SOURCE`, and the live
+    // spend authority is the tenant-object-routed source (`d1SpendSource` over a
+    // resolved handle, exercised above).
     expect(await NO_SPEND_SOURCE.committedSpendUsd("tenant", "t", MONTH)).toEqual({
       ok: true,
       committedSpendUsd: 0,
@@ -373,14 +366,6 @@ describe("spendSourceFromEnv", () => {
       ok: true,
       availableCredits: null,
     });
-  });
-
-  test("a `DB` that is a plain VAR string is not treated as a database", async () => {
-    // `db.prepare` on a string would throw on the request path instead of
-    // degrading to the empty-store source.
-    expect(spendSourceFromEnv({ DB: "not-a-database" as unknown as D1Database })).toBe(
-      NO_SPEND_SOURCE,
-    );
   });
 });
 

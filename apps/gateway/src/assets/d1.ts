@@ -190,9 +190,6 @@ export function assetDatabaseFromTenantResolver(
   return new TenantAssetDatabase(resolve);
 }
 
-/** Binding name of the TENANT D1 (see `wrangler.toml`). */
-export const TENANT_DATABASE_BINDING = "DB";
-
 export function isAssetDatabase(value: unknown): value is AssetDatabase {
   return (
     typeof value === "object" &&
@@ -638,12 +635,17 @@ export class D1AssetMetadataStore implements AssetMetadataStore {
 }
 
 /**
- * Bindings → the durable registry. `undefined` when `DB` is unbound, so
- * `buildAssetService` falls back to the in-isolate store for local dev.
+ * The shared-`env.DB` asset registry — RETIRED by #821 PR2-delete.
+ *
+ * `stored_assets`/`asset_channels` are tenant-schema tables and now live only
+ * in each tenant's own Durable Object. The request path builds a routed
+ * `D1AssetMetadataStore` over the authenticated tenant accessor
+ * (`assetRouteModule`'s `serviceFor`, and `audioObjectsForRequest`), so there is
+ * no shared database for this base factory to read. It answers `null` — no base
+ * store — and `buildAssetService` keeps the in-isolate store for local dev.
  */
-export function assetMetadataStoreFromEnv(env: Record<string, unknown>): AssetMetadataStore | null {
-  const db = env[TENANT_DATABASE_BINDING];
-  return isAssetDatabase(db) ? new D1AssetMetadataStore(db) : null;
+export function assetMetadataStoreFromEnv(_env: Record<string, unknown>): AssetMetadataStore | null {
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -744,12 +746,16 @@ export class D1AssetBundleIndexStore implements AssetBundleIndexStore {
   }
 }
 
-/** `null` when `DB` is absent — same fallback rule as the metadata store. */
+/**
+ * The shared-`env.DB` bundle-file index — RETIRED by #821 PR2-delete, same rule
+ * as {@link assetMetadataStoreFromEnv}. `asset_bundle_files` lives in the tenant
+ * object; the routed path supplies the store, so this base factory answers
+ * `null`.
+ */
 export function assetBundleIndexStoreFromEnv(
-  env: Record<string, unknown>,
+  _env: Record<string, unknown>,
 ): AssetBundleIndexStore | null {
-  const db = env[TENANT_DATABASE_BINDING];
-  return isAssetDatabase(db) ? new D1AssetBundleIndexStore(db) : null;
+  return null;
 }
 
 // ---------------------------------------------------------------------------

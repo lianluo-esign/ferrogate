@@ -207,12 +207,6 @@ export function walletHoldCreditsFromEnv(env: WalletAdmissionBindings): number {
   return parsed;
 }
 
-/** `env.DB`, but only when it is really a D1 binding (a `[vars]` `DB` is a string). */
-function walletDatabase(env: WalletAdmissionBindings): D1Database | undefined {
-  const candidate = env.DB;
-  return candidate !== undefined && typeof candidate.prepare === "function" ? candidate : undefined;
-}
-
 /**
  * The durable guard: `@ferrogate/storage`'s `D1WalletStore`, per request, on the
  * tenant database.
@@ -363,27 +357,6 @@ function walletAdmissionOverHandle(
       };
     },
   };
-}
-
-/**
- * The `"off"`-mode guard: the durable D1 one whenever the shared `DB` is bound,
- * {@link NO_WALLET_ADMISSION} otherwise.
- *
- * Binding `DB` can therefore only ever TIGHTEN admission, never loosen it —
- * the same property `spendSourceFromEnv` has.
- *
- * Since #819 this is the FALLBACK-FREE second choice, not the first: when the
- * tenancy resolver is routing (the `durable_object` default, or any of the
- * `binding*` modes), `rateLimit()` builds {@link routedWalletAdmission} instead
- * and this function is not consulted. That ordering is deliberate — reaching
- * for `env.DB` while a tenant handle exists is exactly the cross-tenant
- * fallback `src/tenancy/` forbids, so the routed guard must win rather than be
- * a co-equal alternative.
- */
-export function walletAdmissionFromEnv(env: WalletAdmissionBindings): WalletAdmission {
-  const db = walletDatabase(env);
-  if (db === undefined) return NO_WALLET_ADMISSION;
-  return d1WalletAdmission(db, { holdCredits: walletHoldCreditsFromEnv(env) });
 }
 
 /** The hold id for a request. Stable, so a retried admission is idempotent. */

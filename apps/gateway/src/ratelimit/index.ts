@@ -178,7 +178,6 @@ export {
   quotaPolicySourceFromEnv,
   quotaPolicySourceFromVars,
   resolveQuotaWindows,
-  spendSourceFromEnv,
 } from "./quota.js";
 
 export {
@@ -204,7 +203,6 @@ export {
   type TokenBudgetSource,
   NO_TOKEN_BUDGET,
   d1TokenBudgetSource,
-  tokenBudgetSourceFromEnv,
 } from "./token-budget.js";
 
 export {
@@ -219,7 +217,6 @@ export {
   d1WalletAdmission,
   routedWalletAdmission,
   gatewayTenantHandle,
-  walletAdmissionFromEnv,
   walletHoldCreditsFromEnv,
   walletHoldId,
 } from "./wallet.js";
@@ -237,7 +234,6 @@ export {
   d1WorkflowBudgetSource,
   preflightStep,
   routedWorkflowBudgetSource,
-  workflowBudgetSourceFromEnv,
   workflowDeclarationFrom,
 } from "./workflow.js";
 

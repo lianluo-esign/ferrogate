@@ -160,11 +160,13 @@ export function tenantDatabase(options: TenantDatabaseOptions = {}): MiddlewareH
     // The MODE is read from the var directly, without building a router. That
     // is what lets the accessor report `mode` and honour `eager` while the
     // resolver itself stays unbuilt until something asks for a handle — see
-    // `RequestTenantDatabaseAccessor`. An unparseable var has no mode; it is
-    // reported as `"off"` HERE and as a 503 the moment a handle is requested,
-    // which is the fail-closed pairing: nothing is routed, and nothing is
-    // quietly served from the shared database either.
-    const mode = parseTenantDatabaseRoutingMode(env.GATEWAY_TENANT_DB_ROUTING) ?? "off";
+    // `RequestTenantDatabaseAccessor`. An unparseable var has no mode; the
+    // accessor reports the default `"durable_object"` HERE (purely cosmetic) and
+    // the moment a handle is requested `resolverFor` rebuilds and throws `503
+    // tenant_database_routing_misconfigured`. That is the fail-closed pairing:
+    // nothing is routed, and — since #821 PR2-delete there is no shared database
+    // at all — nothing could be quietly served from one either.
+    const mode = parseTenantDatabaseRoutingMode(env.GATEWAY_TENANT_DB_ROUTING) ?? "durable_object";
     const tenantId = routableTenantId(auth);
     const accessor = new RequestTenantDatabaseAccessor(
       () => resolverFor(env),

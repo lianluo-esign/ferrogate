@@ -98,21 +98,15 @@ export type TenantDatabaseRoutingMode =
    * function of the tenant id. `CONTROL_DB` is still required, because
    * `control()` and `provisionedTenants()` are genuinely account-global and a
    * DO namespace cannot be enumerated in production.
+   *
+   * Since #821 PR2-delete this is the ONLY shared-storage-free posture, and the
+   * shared `env.DB` tenant database it once fell back to has been retired: the
+   * per-tenant Durable Object is the sole tenant-data path. The former `"off"`
+   * and `"shared_development"` modes, both of which read that shared `DB`, are
+   * gone; naming either now parses to `undefined` → `503
+   * tenant_database_routing_misconfigured`.
    */
   | "durable_object"
-  /**
-   * No per-tenant routing is configured. The resolver hands out NO handle at
-   * all: a caller that asks for one gets `503
-   * tenant_database_routing_disabled`. This is still fail-closed — the absence
-   * of a route is an error, not a silent redirection to the shared database.
-   *
-   * It was the default until #819 turned routing on, and it is KEPT rather
-   * than deleted: a self-hosted deployment that binds no `TENANT_DATA`
-   * namespace needs a posture that is honestly "no tenant storage" instead of
-   * a 503 on every request whose handler asks. It must now be named
-   * EXPLICITLY, so a deployment that is not routing says so in its config.
-   */
-  | "off"
   /**
    * `EnvBindingTenantDatabaseRouter` over `env.CONTROL_DB`. Handles are
    * resolved LAZILY, on first use, so an operation that never touches tenant
@@ -125,15 +119,7 @@ export type TenantDatabaseRoutingMode =
    * posture — a tenant whose binding has not been deployed cannot reach the
    * data plane at all, rather than failing at the first store call.
    */
-  | "binding_strict"
-  /**
-   * `SharedDatabaseTenantRouter` over `env.DB` — ONE database for every tenant,
-   * i.e. NO physical isolation. `wrangler dev --local` and genuinely
-   * single-tenant self-hosted deployments only. It must be named explicitly in
-   * the var, so a code search for this string finds every deployment that
-   * accepted the tradeoff, and no typo can reach it.
-   */
-  | "shared_development";
+  | "binding_strict";
 
 /**
  * Every legal `GATEWAY_TENANT_DB_ROUTING` value, for diagnostics and tests.
@@ -144,10 +130,8 @@ export type TenantDatabaseRoutingMode =
  */
 export const TENANT_DATABASE_ROUTING_MODES: readonly TenantDatabaseRoutingMode[] = [
   "durable_object",
-  "off",
   "binding",
   "binding_strict",
-  "shared_development",
 ] as const;
 
 // ---------------------------------------------------------------------------
@@ -163,8 +147,6 @@ export const TENANT_DATABASE_ROUTING_MODES: readonly TenantDatabaseRoutingMode[]
  * legitimately retry after the operator acts.
  */
 export const TENANT_DATABASE_UNAVAILABLE = "tenant_database_unavailable";
-/** Mode is `"off"` and something asked for a tenant handle anyway. */
-export const TENANT_DATABASE_ROUTING_DISABLED = "tenant_database_routing_disabled";
 /** The var names an unknown mode, or the mode's required binding is absent. */
 export const TENANT_DATABASE_ROUTING_MISCONFIGURED = "tenant_database_routing_misconfigured";
 /**
@@ -238,17 +220,15 @@ export interface TenancyBindings {
   readonly GATEWAY_CONTROL_STORAGE?: string;
   /**
    * The per-tenant Durable Object namespace — `"durable_object"` mode, i.e. the
-   * default. Optional in the TYPE because a self-hosted `"binding"` or
-   * `"shared_development"` deployment legitimately declares no stanza; absent
-   * under `"durable_object"` is a NAMED 503, never a fallback to `DB`.
+   * default. Optional in the TYPE because a self-hosted `"binding"` deployment
+   * legitimately declares no stanza; absent under `"durable_object"` is a NAMED
+   * 503, never a fallback to a shared database.
    */
   readonly TENANT_DATA?: TenantDataNamespace;
   /** The singleton CONTROL Durable Object namespace. */
   readonly CONTROL_DATA?: ControlDataNamespace;
   /** The CONTROL database holding `tenant_databases`. */
   readonly CONTROL_DB?: D1Database;
-  /** The shared database — `"shared_development"` mode only. */
-  readonly DB?: D1Database;
   /** Any number of per-tenant `[[d1_databases]]` bindings, by name. */
   readonly [binding: string]: unknown;
 }

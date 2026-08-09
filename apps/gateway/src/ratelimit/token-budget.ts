@@ -134,14 +134,3 @@ export function d1TokenBudgetSource(db: D1Database): TokenBudgetSource {
   };
 }
 
-/** `env.DB`, when it is really a D1 binding. */
-function tokenBudgetDatabase(env: TokenBudgetBindings): D1Database | undefined {
-  const candidate = env.DB;
-  return candidate !== undefined && typeof candidate.prepare === "function" ? candidate : undefined;
-}
-
-/** D1 whenever the tenant database is bound, {@link NO_TOKEN_BUDGET} otherwise. */
-export function tokenBudgetSourceFromEnv(env: TokenBudgetBindings): TokenBudgetSource {
-  const db = tokenBudgetDatabase(env);
-  return db === undefined ? NO_TOKEN_BUDGET : d1TokenBudgetSource(db);
-}

@@ -127,23 +127,25 @@ export interface UsageAggregateSink {
   accumulate(write: UsageAggregateWrite): Promise<void>;
 }
 
-/** `env.DB`, when it is really a D1 binding (a `[vars]` `DB` is a string). */
+/**
+ * The tenant's usage database — its own Durable Object, addressed by `tenantId`.
+ *
+ * Since #821 PR2-delete there is no shared `env.DB` fallback for the no-`tenantId`
+ * case: the shared tenant database is retired, so a call without a tenant has
+ * nowhere to accumulate and answers `undefined`. Every live caller supplies the
+ * request's tenant (`meteringDatabaseFrom(env, tenantId)`).
+ */
 export function usageDatabaseFrom(env: unknown, tenantId?: string): D1Database | undefined {
-  if (tenantId !== undefined) {
-    if (tenantId.trim() === "") return undefined;
-    if (typeof env !== "object" || env === null) return undefined;
-    const namespace = (env as UsageLedgerBindings).TENANT_DATA;
-    if (namespace === undefined) return undefined;
-    const stub = tenantDataObjectFor(
-      { TENANT_DATA: namespace },
-      tenantId,
-      tenantObjectAddressForEnv(env, tenantId),
-    );
-    return new DurableObjectD1Database(tenantId, stub).asD1Database();
-  }
+  if (tenantId === undefined || tenantId.trim() === "") return undefined;
   if (typeof env !== "object" || env === null) return undefined;
-  const candidate = (env as UsageLedgerBindings).DB;
-  return candidate !== undefined && typeof candidate.prepare === "function" ? candidate : undefined;
+  const namespace = (env as UsageLedgerBindings).TENANT_DATA;
+  if (namespace === undefined) return undefined;
+  const stub = tenantDataObjectFor(
+    { TENANT_DATA: namespace },
+    tenantId,
+    tenantObjectAddressForEnv(env, tenantId),
+  );
+  return new DurableObjectD1Database(tenantId, stub).asD1Database();
 }
 
 /** `D1UsageLedger` on one tenant's database. */

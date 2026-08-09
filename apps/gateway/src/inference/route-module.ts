@@ -373,7 +373,7 @@ async function tenantModelsForRequest(
     platformRevision = platform.revision;
   }
 
-  if (source === undefined || accessor.tenantId === null || parsedMode === "off") {
+  if (source === undefined || accessor.tenantId === null) {
     return { ok: true, models: platformResolver };
   }
 

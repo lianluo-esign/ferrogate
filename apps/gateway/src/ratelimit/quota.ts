@@ -784,18 +784,6 @@ export interface SpendBindings {
   readonly DB?: D1Database | undefined;
 }
 
-/**
- * `env.DB`, but only when it is really a D1 binding.
- *
- * Same guard as `meteringBindingsFromEnv`: a `[vars]` entry named `DB` is a
- * STRING, and handing a string to `db.prepare()` would throw on the request
- * path rather than degrading to {@link NO_SPEND_SOURCE}.
- */
-function spendDatabase(env: SpendBindings): D1Database | undefined {
-  const candidate = env.DB;
-  return candidate !== undefined && typeof candidate.prepare === "function" ? candidate : undefined;
-}
-
 /** `usage_monthly_rollups` is UNIQUE on `(period_month, scope_type, scope_id)`. */
 const MONTHLY_SPEND_SQL =
   "SELECT cost_usd FROM usage_monthly_rollups " +
@@ -875,15 +863,6 @@ export function d1SpendSource(
       }
     },
   };
-}
-
-/**
- * The {@link SpendSource} the composition root gets: D1 whenever the tenant
- * database is bound, {@link NO_SPEND_SOURCE} otherwise.
- */
-export function spendSourceFromEnv(env: SpendBindings): SpendSource {
-  const db = spendDatabase(env);
-  return db === undefined ? NO_SPEND_SOURCE : d1SpendSource(db);
 }
 
 /**
