@@ -270,11 +270,15 @@ export class D1TwoHopApiKeyDirectory implements TwoHopApiKeyDirectory {
       }
       if (directory === null) return { kind: "no_directory_row" };
 
-      // POSITIVE ONLY: populate KV only for a row the control object actually
-      // holds — never for the unknown-key (null) case above, so a miss can never
-      // be seeded as a hit and a key-spray cannot fill the namespace. Best-effort:
-      // a failed populate just leaves the next request to take the RPC path again.
-      if (this.#projection !== undefined) {
+      // POSITIVE ONLY, and LIVE only: populate KV for a row the control object
+      // actually holds AND that is live — never the unknown-key (null) case above
+      // (so a miss can never be seeded as a hit and a key-spray cannot fill the
+      // namespace), and never a RETIRED row (a revoke that only landed its
+      // directory leg, or a disabled/expired row). The lifecycle check below
+      // would reject such a row anyway, and delete-on-revoke removes its KV
+      // entry, so caching it would only widen the stale-positive window.
+      // Best-effort: a failed populate just leaves the next request on the RPC.
+      if (this.#projection !== undefined && apiKeyLifecycleReason(directory, this.#now()) === null) {
         try {
           await this.#projection.write(keyHash, directory);
         } catch {
