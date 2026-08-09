@@ -159,11 +159,7 @@ interface ErrorEnvelope {
   error: { message: string; type: string; code: string; request_id: string | null };
 }
 
-async function render(
-  id: string,
-  secret: string,
-  body?: unknown,
-): Promise<Response> {
+async function render(id: string, secret: string, body?: unknown): Promise<Response> {
   return await SELF.fetch(`${BASE}/v1/prompts/${id}/render`, {
     method: "POST",
     headers: { authorization: `Bearer ${secret}`, "content-type": "application/json" },
@@ -189,7 +185,12 @@ describe("parsePromptTemplates — fail-closed, entry by entry", () => {
   it("drops only the entry the schema refuses", () => {
     const parsed = parsePromptTemplates(
       JSON.stringify([
-        { id: "ok", name: "Ok", model: "m", versions: [{ messages: [{ role: "user", content: "c" }] }] },
+        {
+          id: "ok",
+          name: "Ok",
+          model: "m",
+          versions: [{ messages: [{ role: "user", content: "c" }] }],
+        },
         { id: "missing-versions", name: "Bad", model: "m" },
       ]),
     );
@@ -265,9 +266,7 @@ describe("renderPromptText", () => {
   });
 
   it("refuses an unterminated placeholder rather than emitting it literally", () => {
-    expect(() => renderPromptText(greeting, "Hello {{who", {})).toThrow(
-      "unclosed prompt variable",
-    );
+    expect(() => renderPromptText(greeting, "Hello {{who", {})).toThrow("unclosed prompt variable");
   });
 
   it("does NOT re-expand a substituted value — single pass, forward only", () => {
@@ -292,7 +291,11 @@ describe("renderPromptTemplate", () => {
 
   it("emits `input` for a responses target, and omits absent sampling fields", () => {
     const responses = templates.find((t) => t.id === "tpl_responses")!;
-    const rendered = renderPromptTemplate(responses, responses.versions[0]!, {});
+    const rendered = renderPromptTemplate(
+      responses,
+      responses.versions[0] as NonNullable<(typeof responses.versions)[0]>,
+      {},
+    );
     expect(rendered).toEqual({ model: "prompt-model", input: [{ role: "user", content: "hi" }] });
     expect(Object.keys(rendered)).not.toContain("temperature");
     expect(Object.keys(rendered)).not.toContain("top_p");
@@ -353,7 +356,7 @@ describe("MOUNT: the deployed Worker renders prompt templates", () => {
       body: "not json at all",
     });
     expect(res.status).toBe(400);
-    expect((await res.json() as ErrorEnvelope).error.code).toBe("invalid_request_body");
+    expect(((await res.json()) as ErrorEnvelope).error.code).toBe("invalid_request_body");
   });
 
   it("400s prompt_template_render_failed when a required variable is missing", async () => {
@@ -367,19 +370,19 @@ describe("MOUNT: the deployed Worker renders prompt templates", () => {
   it("404s an unknown template id", async () => {
     const res = await render("tpl_nope", ROOT, {});
     expect(res.status).toBe(404);
-    expect((await res.json() as ErrorEnvelope).error.code).toBe("prompt_template_not_found");
+    expect(((await res.json()) as ErrorEnvelope).error.code).toBe("prompt_template_not_found");
   });
 
   it("409s an ARCHIVED template", async () => {
     const res = await render("tpl_archived", ROOT, {});
     expect(res.status).toBe(409);
-    expect((await res.json() as ErrorEnvelope).error.code).toBe("prompt_template_inactive");
+    expect(((await res.json()) as ErrorEnvelope).error.code).toBe("prompt_template_inactive");
   });
 
   it("404s an unknown revision and 409s a DRAFT one — two different refusals", async () => {
     const missing = await render("tpl_greeting", ROOT, { revision: 99 });
     expect(missing.status).toBe(404);
-    expect((await missing.json() as ErrorEnvelope).error.code).toBe(
+    expect(((await missing.json()) as ErrorEnvelope).error.code).toBe(
       "prompt_template_version_not_found",
     );
 
@@ -394,7 +397,7 @@ describe("MOUNT: the deployed Worker renders prompt templates", () => {
   it("refuses an anonymous caller BEFORE the handler runs", async () => {
     const res = await SELF.fetch(`${BASE}/v1/prompts/tpl_greeting/render`, { method: "POST" });
     expect(res.status).toBe(401);
-    expect((await res.json() as ErrorEnvelope).error.code).toBe("missing_api_key");
+    expect(((await res.json()) as ErrorEnvelope).error.code).toBe("missing_api_key");
   });
 });
 
@@ -402,13 +405,13 @@ describe("MOUNT: the model ladder gates the render", () => {
   it("400 model_not_found for a template naming a model no provider serves", async () => {
     const res = await render("tpl_unknown_model", ROOT, {});
     expect(res.status).toBe(400);
-    expect((await res.json() as ErrorEnvelope).error.code).toBe("model_not_found");
+    expect(((await res.json()) as ErrorEnvelope).error.code).toBe("model_not_found");
   });
 
   it("400 model_disabled — distinct from model_not_found", async () => {
     const res = await render("tpl_disabled_model", ROOT, {});
     expect(res.status).toBe(400);
-    expect((await res.json() as ErrorEnvelope).error.code).toBe("model_disabled");
+    expect(((await res.json()) as ErrorEnvelope).error.code).toBe("model_disabled");
   });
 });
 
@@ -444,7 +447,7 @@ describe("MOUNT: per-credential allowlists gate the render", () => {
     });
     const res = await render("tpl_greeting", secret, { variables: { who: "Ada" } });
     expect(res.status).toBe(200);
-    expect((await res.json() as { messages: unknown[] }).messages).toHaveLength(2);
+    expect(((await res.json()) as { messages: unknown[] }).messages).toHaveLength(2);
   });
 
   it("403 model_not_visible for a model owned by ANOTHER tenant", async () => {
@@ -456,7 +459,7 @@ describe("MOUNT: per-credential allowlists gate the render", () => {
     });
     const res = await render("tpl_other_tenant_model", secret, {});
     expect(res.status).toBe(403);
-    expect((await res.json() as ErrorEnvelope).error.code).toBe("model_not_visible");
+    expect(((await res.json()) as ErrorEnvelope).error.code).toBe("model_not_visible");
   });
 
   it("403 provider_not_allowed when allowed_providers excludes every candidate", async () => {
@@ -470,7 +473,7 @@ describe("MOUNT: per-credential allowlists gate the render", () => {
     // `second-provider-model` only routes through `secondary`.
     const refused = await render("tpl_second_provider", secret, {});
     expect(refused.status).toBe(403);
-    expect((await refused.json() as ErrorEnvelope).error.code).toBe("provider_not_allowed");
+    expect(((await refused.json()) as ErrorEnvelope).error.code).toBe("provider_not_allowed");
 
     // Positive control on the SAME key: a model on the allowed provider renders.
     const allowed = await render("tpl_responses", secret, {});

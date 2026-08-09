@@ -162,9 +162,7 @@ function unboundBindingResponse(provider: string): Response {
       errors: [
         {
           code: 7000,
-          message:
-            `workers-ai provider '${provider}' requires the ${WORKERS_AI_BINDING} binding; ` +
-            "declare [ai] in wrangler.toml",
+          message: `workers-ai provider '${provider}' requires the ${WORKERS_AI_BINDING} binding; declare [ai] in wrangler.toml`,
         },
       ],
     }),
@@ -203,7 +201,7 @@ async function runOnBinding(
   // Embeddings: hand the NATIVE body back and let the adapter's
   // `translateEmbeddingsResponse` shape it, which is the seam that already
   // exists for exactly this and is where the Gemini/Vertex translations live.
-  if (record !== undefined && Array.isArray(record["data"])) {
+  if (record !== undefined && Array.isArray(record.data)) {
     return jsonResponse(record);
   }
   // Rerank (issue #676): same deal, through `translateRerankResponse`.
@@ -221,7 +219,7 @@ async function runOnBinding(
   // and are rendered as a chat completion whose `content` is `""` — a 200 with
   // an empty answer, which is the worst possible failure for a governance
   // surface: silent, and metered.
-  if (record !== undefined && Array.isArray(record["response"])) {
+  if (record !== undefined && Array.isArray(record.response)) {
     return jsonResponse(record);
   }
   // Audio (issue #703): the same treatment, one surface each, and for exactly
@@ -237,10 +235,10 @@ async function runOnBinding(
   // adapter's `translateSpeechResponse` / `translateTranscriptionResponse` do
   // the shaping — the same seam the embeddings and rerank arms above use rather
   // than a second translation living in the dispatcher.
-  if (record !== undefined && typeof record["audio"] === "string") {
+  if (record !== undefined && typeof record.audio === "string") {
     return jsonResponse(record);
   }
-  if (record !== undefined && typeof record["text"] === "string") {
+  if (record !== undefined && typeof record.text === "string") {
     return jsonResponse(record);
   }
   return jsonResponse(openAiCompletion(record, model));
@@ -251,13 +249,13 @@ function openAiCompletion(
   result: Record<string, unknown> | undefined,
   model: string,
 ): Record<string, unknown> {
-  const content = typeof result?.["response"] === "string" ? (result["response"] as string) : "";
-  const toolCalls = Array.isArray(result?.["tool_calls"])
-    ? (result?.["tool_calls"] as unknown[])
+  const content = typeof result?.response === "string" ? (result.response as string) : "";
+  const toolCalls = Array.isArray(result?.tool_calls)
+    ? (result?.tool_calls as unknown[])
     : undefined;
   const message: Record<string, unknown> = { role: "assistant", content };
   if (toolCalls !== undefined && toolCalls.length > 0) {
-    message["tool_calls"] = toolCalls.map((call, index) => openAiToolCall(call, index));
+    message.tool_calls = toolCalls.map((call, index) => openAiToolCall(call, index));
   }
   return {
     id: `chatcmpl-${model}`,
@@ -276,7 +274,7 @@ function openAiCompletion(
     // (`"openai"`) extractor meters this family with no new arm. Absent usage
     // stays absent rather than becoming zeros — a fabricated zero would be
     // metered as a real reading of "this cost nothing".
-    ...(isRecord(result?.["usage"]) ? { usage: result?.["usage"] } : {}),
+    ...(isRecord(result?.usage) ? { usage: result?.usage } : {}),
   };
 }
 
@@ -288,12 +286,12 @@ function openAiCompletion(
  */
 function openAiToolCall(call: unknown, index: number): Record<string, unknown> {
   const record = asRecord(call) ?? {};
-  const args = record["arguments"];
+  const args = record.arguments;
   return {
-    id: typeof record["id"] === "string" ? record["id"] : `workers_ai_tool_${index}`,
+    id: typeof record.id === "string" ? record.id : `workers_ai_tool_${index}`,
     type: "function",
     function: {
-      name: typeof record["name"] === "string" ? record["name"] : "",
+      name: typeof record.name === "string" ? record.name : "",
       arguments: typeof args === "string" ? args : JSON.stringify(args ?? {}),
     },
   };
@@ -378,10 +376,10 @@ export function workersAiSseToOpenAi(
     }
     const record = asRecord(value);
     if (record === undefined) return;
-    if (isRecord(record["usage"])) {
-      usage = record["usage"] as Record<string, unknown>;
+    if (isRecord(record.usage)) {
+      usage = record.usage as Record<string, unknown>;
     }
-    const text = record["response"];
+    const text = record.response;
     if (typeof text !== "string" || text.length === 0) return;
     // The role rides on the FIRST delta only, which is the OpenAI framing.
     const delta = first ? { role: "assistant", content: text } : { content: text };

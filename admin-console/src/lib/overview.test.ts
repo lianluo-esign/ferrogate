@@ -1,3 +1,21 @@
+import {
+  type AdminOverviewSection,
+  classifyWorkerStatus,
+  healthyWorkerCount,
+  parseAlerts,
+  parseControlPlane,
+  parseRuntime,
+  parseUsage,
+  sectionView,
+} from "@/lib/overview";
+import {
+  overviewAlertsData,
+  overviewControlPlaneData,
+  overviewRuntimeData,
+  overviewSectionOk,
+  overviewSectionUnavailable,
+  overviewUsageData,
+} from "@/test/fixtures/ops";
 // Unit coverage for the overview consumer layer (issue #343).
 //
 // These tests pin the two rules the cockpit's honesty depends on:
@@ -8,24 +26,6 @@
 //     writes, and is UNKNOWN — never zero — when the histogram cannot be
 //     classified.
 import { describe, expect, it } from "vitest";
-import {
-  classifyWorkerStatus,
-  healthyWorkerCount,
-  parseAlerts,
-  parseControlPlane,
-  parseRuntime,
-  parseUsage,
-  sectionView,
-  type AdminOverviewSection,
-} from "@/lib/overview";
-import {
-  overviewAlertsData,
-  overviewControlPlaneData,
-  overviewRuntimeData,
-  overviewSectionOk,
-  overviewSectionUnavailable,
-  overviewUsageData,
-} from "@/test/fixtures/ops";
 
 describe("parseControlPlane", () => {
   it("reads the contract shape the gateway sends today", () => {
@@ -118,10 +118,7 @@ describe("sectionView", () => {
   });
 
   it("treats an ok section with no payload object as unavailable", () => {
-    const view = sectionView(
-      { status: "ok", source: "control_plane_store" },
-      parseControlPlane,
-    );
+    const view = sectionView({ status: "ok", source: "control_plane_store" }, parseControlPlane);
     expect(view.status).toBe("unavailable");
   });
 });

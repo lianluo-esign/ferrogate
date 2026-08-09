@@ -170,7 +170,9 @@ describe("no registered family may silently ignore the caching directive", () =>
     for (const [family, spec] of families) {
       for (const directive of [{ mode: "off" }, { mode: "explicit", ttl: "5m" }]) {
         const adapter = defaultAdapterRegistry.adapterFor(family);
-        const result = adapter!.buildUpstreamRequest(plan(spec.route, directive));
+        const result = (adapter as NonNullable<typeof adapter>).buildUpstreamRequest(
+          plan(spec.route, directive),
+        );
         const label = `${family} / ${directive.mode}`;
         const disposition = directive.mode === "off" ? spec.off : spec.explicit;
 
@@ -200,7 +202,9 @@ describe("no registered family may silently ignore the caching directive", () =>
   it("accepts `auto` everywhere and never leaks FerroGate's own member", () => {
     for (const [family, spec] of families) {
       const adapter = defaultAdapterRegistry.adapterFor(family);
-      const result = adapter!.buildUpstreamRequest(plan(spec.route, { mode: "auto" }));
+      const result = (adapter as NonNullable<typeof adapter>).buildUpstreamRequest(
+        plan(spec.route, { mode: "auto" }),
+      );
       // `auto` is the mode documented as never refused; a family that refuses
       // it takes itself off every ladder for no reason the caller can act on.
       expect(result.ok, family).toBe(true);

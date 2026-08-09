@@ -3,20 +3,11 @@
  * of the Rust `MockTransport`) and route builders mirroring the Rust
  * `read_routes` / `ok_envelope` helpers. No live network.
  */
-import type {
-  HttpRequest,
-  HttpResponse,
-  HttpTransport,
-} from "../src/cloudflare-client.js";
-import {
-  CloudflareClient,
-  CloudflareConfig,
-  EnvTokenResolver,
-} from "../src/cloudflare-client.js";
+import type { HttpRequest, HttpResponse, HttpTransport } from "../src/cloudflare-client.js";
+import { CloudflareClient, CloudflareConfig, EnvTokenResolver } from "../src/cloudflare-client.js";
 import { CloudflareSecretResolver } from "../src/cloudflare.js";
 
-export const BASE =
-  "https://api.test/client/v4/accounts/acct-123/secrets_store";
+export const BASE = "https://api.test/client/v4/accounts/acct-123/secrets_store";
 
 /** Wrap a JSON `result` in a Cloudflare success envelope. */
 export function okEnvelope(resultJson: string): string {
@@ -40,29 +31,16 @@ export class MockTransport implements HttpTransport {
 }
 
 /** Build a resolver whose client speaks to the scripted transport. */
-export function resolverWith(
-  routes: Map<string, [number, string]>,
-): CloudflareSecretResolver {
-  const config = new CloudflareConfig(
-    "acct-123",
-    "inline-token",
-    "https://api.test/client/v4",
-  );
-  const client = new CloudflareClient(
-    config,
-    new EnvTokenResolver({}),
-    new MockTransport(routes),
-  );
+export function resolverWith(routes: Map<string, [number, string]>): CloudflareSecretResolver {
+  const config = new CloudflareConfig("acct-123", "inline-token", "https://api.test/client/v4");
+  const client = new CloudflareClient(config, new EnvTokenResolver({}), new MockTransport(routes));
   return CloudflareSecretResolver.fromClient(client);
 }
 
 /** One store `provider-keys` (id `store-1`) holding secret `openai-api-key`. */
 export function readRoutes(): Map<string, [number, string]> {
   return new Map<string, [number, string]>([
-    [
-      `GET ${BASE}/stores`,
-      [200, okEnvelope(`[{"id":"store-1","name":"provider-keys"}]`)],
-    ],
+    [`GET ${BASE}/stores`, [200, okEnvelope(`[{"id":"store-1","name":"provider-keys"}]`)]],
     [
       `GET ${BASE}/stores/store-1/secrets`,
       [200, okEnvelope(`[{"id":"sec-1","name":"openai-api-key"}]`)],

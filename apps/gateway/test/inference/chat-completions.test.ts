@@ -14,9 +14,7 @@ const COMPLETION = {
   id: "chatcmpl-abc",
   object: "chat.completion",
   model: "gpt-4o-mini-2024-07-18",
-  choices: [
-    { index: 0, message: { role: "assistant", content: "Hello" }, finish_reason: "stop" },
-  ],
+  choices: [{ index: 0, message: { role: "assistant", content: "Hello" }, finish_reason: "stop" }],
   usage: { prompt_tokens: 11, completion_tokens: 4, total_tokens: 15 },
 };
 
@@ -50,7 +48,7 @@ describe("POST /v1/chat/completions", () => {
       const upstream = provider.lastRequest();
       expect(upstream.url).toBe("https://api.openai.example/v1/chat/completions");
       expect(upstream.method).toBe("POST");
-      expect(upstream.headers["authorization"]).toBe("Bearer sk-test-openai");
+      expect(upstream.headers.authorization).toBe("Bearer sk-test-openai");
       // The adapter OWNS `model`: the caller's LOGICAL name must not reach the
       // provider, or a tenant could pin a physical model the route forbids.
       expect((upstream.body as { model: string }).model).toBe("gpt-4o-mini-2024-07-18");
@@ -211,18 +209,19 @@ describe("POST /v1/responses", () => {
   });
 
   it("does not inject stream_options.include_usage (Responses reports usage itself)", async () => {
-    const provider = interceptProviderFetch(() =>
-      new Response('data: {"type":"response.completed"}\n\n', {
-        headers: { "content-type": "text/event-stream" },
-      }),
+    const provider = interceptProviderFetch(
+      () =>
+        new Response('data: {"type":"response.completed"}\n\n', {
+          headers: { "content-type": "text/event-stream" },
+        }),
     );
     try {
       const h = harness();
       await h.post("/v1/responses", { model: "gpt-4o-mini", input: "hi", stream: true });
 
       const body = provider.lastRequest().body as Record<string, unknown>;
-      expect(body["stream"]).toBe(true);
-      expect(body["stream_options"]).toBeUndefined();
+      expect(body.stream).toBe(true);
+      expect(body.stream_options).toBeUndefined();
     } finally {
       provider.restore();
     }

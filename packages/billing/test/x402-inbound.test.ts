@@ -2,12 +2,12 @@ import { describe, expect, it } from "vitest";
 import {
   BillingError,
   InMemoryRevenueSink,
+  type InboundX402Endpoint,
+  type InboundX402RevenueRecord,
   PAYMENT_REQUIRED_STATUS,
   RevenueSource,
   settleInboundPayment,
   validateInboundX402Endpoint,
-  type InboundX402Endpoint,
-  type InboundX402RevenueRecord,
 } from "../src/index.js";
 
 /** Assert `fn` throws a {@link BillingError} carrying `code`. */

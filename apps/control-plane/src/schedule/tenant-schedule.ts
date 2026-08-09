@@ -12,15 +12,18 @@
  */
 import {
   D1AgentScheduleStore,
-  scheduleFireOutcomeFromString,
+  type ScheduleFireOutcome,
   type StoredAgentSchedule,
   type StoredAgentScheduleFire,
-  type ScheduleFireOutcome,
   type TenantDatabaseHandle,
   type TenantDatabaseRouter,
+  scheduleFireOutcomeFromString,
 } from "@ferrogate/storage";
 import type { CallerScope, StoreRecord } from "../ports.js";
-import { backfillTenantResourceKinds, RESOURCE_BACKFILL_BATCH_SIZE } from "../store/resource-backfill.js";
+import {
+  RESOURCE_BACKFILL_BATCH_SIZE,
+  backfillTenantResourceKinds,
+} from "../store/resource-backfill.js";
 import { scheduleSpecFromRecord } from "./model.js";
 
 export const DEFAULT_SCHEDULE_WORKSPACE = "default";
@@ -87,7 +90,8 @@ function legacyFireFromRecord(
   }
   const rawOutcome = requiredString(record.outcome, `${row.resource_id}.outcome`);
   const outcome: ScheduleFireOutcome | undefined = scheduleFireOutcomeFromString(rawOutcome);
-  if (outcome === undefined) throw new Error(`legacy ${row.resource_id} has unknown fire outcome ${rawOutcome}`);
+  if (outcome === undefined)
+    throw new Error(`legacy ${row.resource_id} has unknown fire outcome ${rawOutcome}`);
   return {
     fireId: row.resource_id,
     scheduleId,
@@ -134,7 +138,7 @@ async function migrateLegacySchedules(
   for (const row of rows.results) {
     const record = legacyRecord(row, tenantId);
     if (row.resource_kind === "agent-schedules") {
-      if (await store.getSchedule(row.resource_id) === undefined) {
+      if ((await store.getSchedule(row.resource_id)) === undefined) {
         await store.upsertSchedule(storedScheduleFromRecord(record, tenantId, row.updated_at_unix));
       }
     } else {
@@ -148,7 +152,12 @@ async function migrateLegacySchedules(
        VALUES (?, ?, ?, ?)
        ON CONFLICT (tenant_id, mark) DO NOTHING`,
     )
-    .bind(tenantId, TYPED_SCHEDULE_MIGRATION_MARK, JSON.stringify({ version: 1, rows: rows.results.length }), Math.floor(Date.now() / 1000))
+    .bind(
+      tenantId,
+      TYPED_SCHEDULE_MIGRATION_MARK,
+      JSON.stringify({ version: 1, rows: rows.results.length }),
+      Math.floor(Date.now() / 1000),
+    )
     .run();
 }
 
@@ -164,7 +173,11 @@ function optionalUnix(value: unknown): number | undefined {
 }
 
 function targetObject(record: Readonly<Record<string, unknown>>): Record<string, unknown> {
-  if (typeof record.target === "object" && record.target !== null && !Array.isArray(record.target)) {
+  if (
+    typeof record.target === "object" &&
+    record.target !== null &&
+    !Array.isArray(record.target)
+  ) {
     return record.target as Record<string, unknown>;
   }
   if (typeof record.target_json === "string" && record.target_json.trim() !== "") {
@@ -294,7 +307,10 @@ export async function getTenantSchedule(
   tenantId: string,
   scheduleId: string,
   controlDatabase?: D1Database | null,
-): Promise<{ repository: TenantScheduleRepository; schedule: StoredAgentSchedule | undefined } | null> {
+): Promise<{
+  repository: TenantScheduleRepository;
+  schedule: StoredAgentSchedule | undefined;
+} | null> {
   const repository = await openTenantScheduleRepository(router, tenantId, controlDatabase);
   if (repository === null) return null;
   return { repository, schedule: await repository.store.getSchedule(scheduleId) };

@@ -65,14 +65,14 @@ import {
   onlineEvalDatabaseFrom,
   onlineEvalTenantDatabaseFrom,
   writeOnlineEvalScoreProjections,
-  writeTenantOnlineEvalScores,
   writeOnlineEvalScores,
+  writeTenantOnlineEvalScores,
 } from "./d1.js";
 import { buildJudgeRequestBody, parseJudgeVerdict } from "./judge.js";
 import { refreshOnlineEvalLegQuality } from "./leg-quality.js";
+import { onlineEvalScorePoints, publishOnlineEvalScorePoints } from "./metrics.js";
 import { type OnlineEvalSample, onlineEvalSampleFromWire } from "./record.js";
 import type { OnlineEvalScoreRecord } from "./record.js";
-import { onlineEvalScorePoints, publishOnlineEvalScorePoints } from "./metrics.js";
 
 /** The `MessageBatch` slice this consumer uses, structurally. */
 export interface OnlineEvalMessageBatch {

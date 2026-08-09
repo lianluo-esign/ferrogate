@@ -13,9 +13,7 @@ describe("gateway span templates", () => {
     expect(templates[0]?.name).toBe("ferrogate.gateway.request");
     expect(
       templates.some(
-        (t) =>
-          t.kind === GatewaySpanKind.ProviderDispatch &&
-          t.fields.includes("retryable"),
+        (t) => t.kind === GatewaySpanKind.ProviderDispatch && t.fields.includes("retryable"),
       ),
     ).toBe(true);
     expect(

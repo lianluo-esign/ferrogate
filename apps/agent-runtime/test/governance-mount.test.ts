@@ -55,7 +55,10 @@ const REQUEST = {
 describe("resolveDeps mounts the governed-egress allowlist", () => {
   it("REFUSES a host the operator never governed (the sealed default)", async () => {
     const deps = resolveDeps(envWith(""));
-    expect(deps, "resolveDeps returned undefined; the dev port bundle is not available").toBeDefined();
+    expect(
+      deps,
+      "resolveDeps returned undefined; the dev port bundle is not available",
+    ).toBeDefined();
 
     const decision = await deps?.governance.authorize(
       REQUEST as unknown as Parameters<NonNullable<typeof deps>["governance"]["authorize"]>[0],

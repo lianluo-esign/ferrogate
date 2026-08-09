@@ -83,7 +83,8 @@ beforeAll(async () => {
 const mutableEnv = env as unknown as Record<string, unknown>;
 
 afterEach(() => {
-  delete mutableEnv["GATEWAY_DRAIN"];
+  // biome-ignore lint/performance/noDelete: removes the own-property key entirely; assigning undefined would leave an enumerable undefined-valued key and change JSON serialization, the 'in' operator, and Object.keys semantics
+  delete mutableEnv.GATEWAY_DRAIN;
 });
 
 /** Run `body` and return the error it threw (failing if it did not throw). */
@@ -279,7 +280,7 @@ describe("openai SDK — error taxonomy", () => {
   });
 
   it("503 — an operator drain becomes InternalServerError with a 503 status", async () => {
-    mutableEnv["GATEWAY_DRAIN"] = "true";
+    mutableEnv.GATEWAY_DRAIN = "true";
     const error = await captured(() => openaiClient().chat.completions.create(REQUEST));
 
     expect(error.status).toBe(503);

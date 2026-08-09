@@ -122,20 +122,20 @@ export function promptTranscriptFrom(body: unknown): string | undefined {
   const lines: string[] = [];
 
   // Anthropic's top-level `system`, which is NOT a message in that dialect.
-  const system = record["system"];
+  const system = record.system;
   const systemText = typeof system === "string" ? system : flattenContent(system);
   if (systemText !== "") lines.push(`system: ${systemText}`);
 
   // OpenAI `/v1/responses` puts its system prompt on `instructions`.
-  const instructions = record["instructions"];
+  const instructions = record.instructions;
   if (typeof instructions === "string" && instructions !== "") {
     lines.push(`system: ${instructions}`);
   }
 
-  lines.push(...messageLines(record["messages"]));
+  lines.push(...messageLines(record.messages));
 
   // `/v1/responses` `input`: a bare string, or the message-shaped array.
-  const input = record["input"];
+  const input = record.input;
   if (typeof input === "string" && input !== "") lines.push(`user: ${input}`);
   else if (Array.isArray(input)) lines.push(...messageLines(input));
 
@@ -156,7 +156,7 @@ export function completionTextFrom(body: unknown): string | undefined {
   const record = body as Record<string, unknown>;
 
   // OpenAI chat completions.
-  const choices = record["choices"];
+  const choices = record.choices;
   if (Array.isArray(choices) && choices.length > 0) {
     const first = choices[0] as { message?: { content?: unknown }; text?: unknown };
     const text = flattenContent(first?.message?.content);
@@ -165,9 +165,9 @@ export function completionTextFrom(body: unknown): string | undefined {
   }
 
   // OpenAI responses — the convenience field first, then the output array.
-  const outputText = record["output_text"];
+  const outputText = record.output_text;
   if (typeof outputText === "string" && outputText !== "") return outputText;
-  const output = record["output"];
+  const output = record.output;
   if (Array.isArray(output)) {
     const parts: string[] = [];
     for (const item of output) {
@@ -179,7 +179,7 @@ export function completionTextFrom(body: unknown): string | undefined {
   }
 
   // Anthropic messages.
-  const content = record["content"];
+  const content = record.content;
   const anthropic = flattenContent(content);
   if (anthropic !== "") return anthropic;
 

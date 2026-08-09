@@ -49,13 +49,14 @@
  * writer" look identical from the admin API and that confusion is the whole
  * defect #665 exists to close.
  */
+
+import { controlDatabaseFrom } from "../control-data.js";
 import {
   type GuardrailEvidenceDatabase,
   guardrailTenantDatabaseFromEnv,
   writeGuardrailEvidence,
   writeTenantGuardrailEvidence,
 } from "./evidence-d1.js";
-import { controlDatabaseFrom } from "../control-data.js";
 import type { GuardrailEvidenceEnvelope } from "./evidence-wire.js";
 import { guardrailEvidenceToWire } from "./evidence-wire.js";
 import type { GuardrailCheckEvidence, GuardrailEvidence, GuardrailEvidenceSink } from "./ports.js";

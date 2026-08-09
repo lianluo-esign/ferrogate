@@ -17,9 +17,7 @@
           "name": "fast-chat",
           "provider": "primary",
           "provider_model": "gpt-4o-mini",
-          "visible_organization_ids": [
-            "tenant-other"
-          ]
+          "visible_organization_ids": ["tenant-other"]
         }
       ],
       "api_keys": [
@@ -27,10 +25,7 @@
           "id": "key-1",
           "name": "conformance key",
           "key": "secret-1",
-          "scopes": [
-            "chat.completions",
-            "responses.create"
-          ],
+          "scopes": ["chat.completions", "responses.create"],
           "organization_id": "tenant-1",
           "project_id": "project-1"
         }
@@ -58,9 +53,7 @@
     "outcome": "deny",
     "status": 403,
     "code": "model_not_visible",
-    "durable_writes": [
-      "request_log"
-    ],
+    "durable_writes": ["request_log"],
     "audit_events": []
   },
   "worker_shell": {

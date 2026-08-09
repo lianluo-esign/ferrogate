@@ -1,11 +1,11 @@
 import { render, renderHook, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
-import { I18nProvider, useI18n } from "./i18n-provider";
-import { LanguageSwitcher } from "./language-switcher";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { getLoadedCatalog, loadCatalog } from "./catalog";
 import { LOCALE_STORAGE_KEY } from "./detect";
+import { I18nProvider, useI18n } from "./i18n-provider";
+import { LanguageSwitcher } from "./language-switcher";
 
 afterEach(() => {
   window.localStorage.clear();

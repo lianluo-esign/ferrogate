@@ -140,10 +140,7 @@ const AUDIT_EVENT_COLUMNS =
   "chain_key, seq, prev_hash, row_hash";
 
 /** Read the complete tenant chain before pagination; projection rows are merged below. */
-async function auditRowsForTenant(
-  db: D1Database,
-  tenantId: string,
-): Promise<AuditEventRow[]> {
+async function auditRowsForTenant(db: D1Database, tenantId: string): Promise<AuditEventRow[]> {
   const result = await db
     .prepare(
       `SELECT ${AUDIT_EVENT_COLUMNS}
@@ -333,7 +330,7 @@ export const REQUEST_LOG_COLUMNS =
  * re-serve one row and skip another. An evidence export that silently drops a
  * decision is worse than one that errors.
  */
-const REQUEST_LOG_ORDER = `ORDER BY started_at_unix DESC, request_id ASC`;
+const REQUEST_LOG_ORDER = "ORDER BY started_at_unix DESC, request_id ASC";
 
 export interface RequestLogRow {
   readonly request_id: string;
@@ -508,12 +505,7 @@ function listRequestLogsHandler(): Handler {
 
     const page =
       scope.kind === "tenant"
-        ? await requestLogTenantPage(
-            tenantRouter,
-            scope.tenantId,
-            query.limit,
-            query.offset,
-          )
+        ? await requestLogTenantPage(tenantRouter, scope.tenantId, query.limit, query.offset)
         : await requestLogPage(db as D1Database, scope, query.limit, query.offset);
     const body =
       scope.kind === "platform_operator"
@@ -574,23 +566,16 @@ function exportRequestLogsHandler(): Handler {
     const tenantRouter = deps.tenantStorage ?? deps.tenantDatabases;
 
     const metadata =
-      db !== null && scope.kind === "platform_operator"
-        ? derivedControlProjectionMetadata()
-        : null;
+      db !== null && scope.kind === "platform_operator" ? derivedControlProjectionMetadata() : null;
 
     const records =
       db === null && scope.kind === "platform_operator"
         ? (await deps.store.list("request-log-exports", scope, query)).items
-        : (await (scope.kind === "tenant"
-            ? requestLogTenantPage(
-                tenantRouter,
-                scope.tenantId,
-                query.limit,
-                query.offset,
-              )
-            : requestLogPage(db as D1Database, scope, query.limit, query.offset))).rows.map(
-            requestLogDocument,
-          );
+        : (
+            await (scope.kind === "tenant"
+              ? requestLogTenantPage(tenantRouter, scope.tenantId, query.limit, query.offset)
+              : requestLogPage(db as D1Database, scope, query.limit, query.offset))
+          ).rows.map(requestLogDocument);
 
     const body = records.map((record) => JSON.stringify(record)).join("\n");
     return raw(
@@ -1213,7 +1198,7 @@ function getGuardrailInvestigationHandler(): Handler {
           );
 
     const totalCostUsd = billing.records.reduce((sum, record) => {
-      const cost = record["cost_usd"];
+      const cost = record.cost_usd;
       return typeof cost === "number" && Number.isFinite(cost) ? sum + cost : sum;
     }, 0);
 
@@ -1317,7 +1302,9 @@ function requestLogRowOrder(a: RequestLogRow, b: RequestLogRow): number {
   return b.started_at_unix - a.started_at_unix || a.request_id.localeCompare(b.request_id);
 }
 
-function timelineRowOrder(timeColumn: string): (a: Record<string, unknown>, b: Record<string, unknown>) => number {
+function timelineRowOrder(
+  timeColumn: string,
+): (a: Record<string, unknown>, b: Record<string, unknown>) => number {
   return (a, b) => {
     const aTime = typeof a[timeColumn] === "number" ? (a[timeColumn] as number) : 0;
     const bTime = typeof b[timeColumn] === "number" ? (b[timeColumn] as number) : 0;

@@ -44,8 +44,8 @@
  * serve path. The provisioning half is tracked separately; see the PR for #738.
  */
 import type { Context, MiddlewareHandler } from "hono";
-import { controlDatabaseFrom } from "../control-data.js";
 import { assetDepsFromEnv } from "../assets/handlers.js";
+import { controlDatabaseFrom } from "../control-data.js";
 import { HttpError } from "../middleware/errors.js";
 import type { GatewayEnv } from "../ports.js";
 import {

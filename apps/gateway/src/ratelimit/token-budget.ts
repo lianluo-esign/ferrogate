@@ -102,10 +102,7 @@ const MONTHLY_TOKEN_BUDGET_SQL = "SELECT monthly_token_budget FROM api_keys WHER
  */
 export function d1TokenBudgetSource(db: D1Database): TokenBudgetSource {
   return {
-    async forApiKey(
-      apiKeyId: string,
-      tenantId: string | undefined,
-    ): Promise<TokenBudgetReading> {
+    async forApiKey(apiKeyId: string, tenantId: string | undefined): Promise<TokenBudgetReading> {
       let budget: number | undefined;
       try {
         const row = await db

@@ -28,17 +28,17 @@
  *    isolate-local schema cache.
  */
 import { DurableObjectD1Database } from "@ferrogate/storage";
+import type { TenantDatabaseRouter } from "@ferrogate/storage";
 import type { TenantDataNamespace } from "@ferrogate/storage/durable-objects";
 import { loadAdminServerCatalog } from "./catalog.js";
-import type { TenantDatabaseRouter } from "@ferrogate/storage";
 import {
   type IdentityCipherPort,
+  type McpAuthType,
   type McpCredentialStorePort,
   type McpIdentityActor,
+  type McpOauthConfig,
   type McpServerConfig,
   type McpTransport,
-  type McpAuthType,
-  type McpOauthConfig,
   type StoredMcpOauthCredential,
   type StoredMcpOauthFlow,
   credentialId,
@@ -395,10 +395,7 @@ export class TenantObjectCredentialGrants {
    * two round trips would NOT be, and is exactly the race the marker on
    * {@link KvOauthFlowStore} describes for the KV half.
    */
-  async commit(
-    flow: StoredMcpOauthFlow,
-    credential: StoredMcpOauthCredential,
-  ): Promise<boolean> {
+  async commit(flow: StoredMcpOauthFlow, credential: StoredMcpOauthCredential): Promise<boolean> {
     if (
       flow.serverName !== credential.serverName ||
       flow.actor.tenantId !== credential.actor.tenantId ||

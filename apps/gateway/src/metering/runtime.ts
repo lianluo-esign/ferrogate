@@ -31,10 +31,11 @@
  * `BILLING_DB` / `BILLING` bindings vitest-pool-workers provisions from
  * `wrangler.toml`.
  */
+
+import { controlDatabaseFrom } from "../control-data.js";
 import type { UsageRecordContext } from "../inference/ports.js";
 import type { MeteringDatabase, MeteringQueue } from "./ports.js";
 import { usageDatabaseFrom } from "./usage-ledger.js";
-import { controlDatabaseFrom } from "../control-data.js";
 
 /**
  * The bindings metering reads, and NOTHING else.

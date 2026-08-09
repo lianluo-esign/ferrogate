@@ -44,15 +44,15 @@ import {
   sealTenantCredential,
 } from "@ferrogate/secrets";
 import {
+  type D1TenantProviderCredentialStore,
   backfillTenantConfigurationPolicy,
   credentialLast4,
-  type D1TenantProviderCredentialStore,
   tenantProviderCredentialStoreFor,
 } from "@ferrogate/storage";
+import type { Context } from "hono";
 import { z } from "zod";
 import { HttpError } from "../middleware/errors.js";
 import type { ControlPlaneEnv } from "../ports.js";
-import type { Context } from "hono";
 import {
   type GroupModule,
   type Handler,
@@ -119,9 +119,9 @@ async function storeOf(
  * binding; a missing or malformed key is a 503 naming the BINDING, never the
  * value.
  */
-async function keyringOf(c: Context<ControlPlaneEnv>): Promise<
-  Awaited<ReturnType<typeof byokKeyringFromEnvAsync>>
-> {
+async function keyringOf(
+  c: Context<ControlPlaneEnv>,
+): Promise<Awaited<ReturnType<typeof byokKeyringFromEnvAsync>>> {
   try {
     return await byokKeyringFromEnvAsync(
       c.env as unknown as Parameters<typeof byokKeyringFromEnvAsync>[0],
@@ -144,8 +144,7 @@ function aliasOf(c: Context<ControlPlaneEnv>): string {
     throw new HttpError(
       400,
       "invalid_request_body",
-      `alias must match ${BYOK_ALIAS_PATTERN.source} (lowercase alphanumerics plus . _ -, ` +
-        "no path separators, 1-64 chars)",
+      `alias must match ${BYOK_ALIAS_PATTERN.source} (lowercase alphanumerics plus . _ -, no path separators, 1-64 chars)`,
     );
   }
   return alias;

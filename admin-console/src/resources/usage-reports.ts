@@ -24,9 +24,21 @@ export const usageReportsConfig: ResourceConfig<AdminUsageReportRow> = {
   idField: "scope_id",
   readOnly: true,
   columns: [
-    { key: "period_month", headerKey: "resource.usageReports.col.month", render: (row) => row.period_month ?? "" },
-    { key: "scope_type", headerKey: "resource.usageReports.col.scope", render: (row) => row.scope_type ?? "" },
-    { key: "scope_id", headerKey: "resource.usageReports.col.scopeId", render: (row) => row.scope_id ?? "" },
+    {
+      key: "period_month",
+      headerKey: "resource.usageReports.col.month",
+      render: (row) => row.period_month ?? "",
+    },
+    {
+      key: "scope_type",
+      headerKey: "resource.usageReports.col.scope",
+      render: (row) => row.scope_type ?? "",
+    },
+    {
+      key: "scope_id",
+      headerKey: "resource.usageReports.col.scopeId",
+      render: (row) => row.scope_id ?? "",
+    },
     { key: "total_tokens", headerKey: "resource.usageReports.col.totalTokens" },
     { key: "cost_usd", headerKey: "resource.usageReports.col.cost" },
     { key: "request_count", headerKey: "resource.usageReports.col.requests" },

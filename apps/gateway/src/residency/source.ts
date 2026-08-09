@@ -42,18 +42,19 @@
  * Worker before applying `sql/d1-ts/control/0007_residency_policy.sql` would
  * 503 every request on every deployment with a bound `CONTROL_DB`.
  */
-import {
-  type ResidencyPolicy,
-  type ResidencyPolicyRow,
-  parseResidencyPolicyRow,
-} from "./policy.js";
-import { controlDatabaseFrom } from "../control-data.js";
+
 import {
   TENANT_JURISDICTIONS,
   TENANT_LOCATION_HINTS,
   type TenantJurisdiction,
   type TenantLocationHint,
 } from "@ferrogate/storage";
+import { controlDatabaseFrom } from "../control-data.js";
+import {
+  type ResidencyPolicy,
+  type ResidencyPolicyRow,
+  parseResidencyPolicyRow,
+} from "./policy.js";
 
 /** The `quota_policies` columns this module reads, named once. */
 const RESIDENCY_COLUMNS = "residency_regions_json, require_zero_data_retention, log_residency";
@@ -67,9 +68,7 @@ const RESIDENCY_COLUMNS = "residency_regions_json, require_zero_data_retention, 
  * B's US traffic, and (with the per-tenant cache key below) what stops tenant
  * B's unpoliced traffic from being served under tenant A's absent policy.
  */
-const SELECT_TENANT_POLICY =
-  `SELECT ${RESIDENCY_COLUMNS} FROM quota_policies ` +
-  "WHERE scope_type = 'tenant' AND scope_id = ?";
+const SELECT_TENANT_POLICY = `SELECT ${RESIDENCY_COLUMNS} FROM quota_policies WHERE scope_type = 'tenant' AND scope_id = ?`;
 
 const SELECT_TENANT_JURISDICTION =
   "SELECT jurisdiction, location_hint FROM tenant_databases WHERE tenant_id = ?";
@@ -197,9 +196,9 @@ export function d1ResidencyPolicySource(db: ResidencyDatabase): ResidencyPolicyS
         row === null || row === undefined
           ? ({ ok: true, policy: null } as const)
           : parseResidencyPolicyRow({
-              allowedRegions: jsonArrayColumn(row["residency_regions_json"]),
-              requireZeroDataRetention: row["require_zero_data_retention"],
-              logResidency: row["log_residency"],
+              allowedRegions: jsonArrayColumn(row.residency_regions_json),
+              requireZeroDataRetention: row.require_zero_data_retention,
+              logResidency: row.log_residency,
             });
       if (!parsed.ok) {
         return { ok: false, detail: `quota_policies row is unreadable: ${parsed.detail}` };
@@ -209,7 +208,7 @@ export function d1ResidencyPolicySource(db: ResidencyDatabase): ResidencyPolicyS
       let locationHint: TenantLocationHint | undefined;
       try {
         const addressRow = await db.prepare(SELECT_TENANT_JURISDICTION).bind(tenantId).first();
-        const raw = addressRow?.["jurisdiction"];
+        const raw = addressRow?.jurisdiction;
         if (raw !== null && raw !== undefined && raw !== "") {
           if (!TENANT_JURISDICTIONS.includes(raw as TenantJurisdiction)) {
             return {
@@ -219,7 +218,7 @@ export function d1ResidencyPolicySource(db: ResidencyDatabase): ResidencyPolicyS
           }
           jurisdiction = raw as TenantJurisdiction;
         }
-        const rawHint = addressRow?.["location_hint"];
+        const rawHint = addressRow?.location_hint;
         if (rawHint !== null && rawHint !== undefined && rawHint !== "") {
           if (!TENANT_LOCATION_HINTS.includes(rawHint as TenantLocationHint)) {
             return {

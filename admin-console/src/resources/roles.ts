@@ -1,4 +1,4 @@
-import { adminGet, type AdminSchema } from "@/lib/gateway-client";
+import { type AdminSchema, adminGet } from "@/lib/gateway-client";
 import type { ResourceConfig } from "@/lib/resource-config";
 
 /**

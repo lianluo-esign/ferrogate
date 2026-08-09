@@ -109,8 +109,7 @@ export function grandfatheredSiteDomainVerification(
   return {
     ...pendingSiteDomainVerification(tenantId, hostname, site, challengeToken, nowUnix),
     state: "grandfathered",
-    lastFailureReason:
-      "binding predates #488 DNS ownership verification; grandfathered at upgrade",
+    lastFailureReason: "binding predates #488 DNS ownership verification; grandfathered at upgrade",
   };
 }
 

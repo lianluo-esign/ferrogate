@@ -1,32 +1,38 @@
 import { describe, expect, test } from "vitest";
 import {
+  type CloudflareClient,
+  CloudflareError,
   DetectorError,
+  type DetectorInput,
   DetectorSecret,
   FixtureTransport,
   LlmGuardPromptInjectionDetector,
   PresidioDetector,
   WORKERS_AI_LLAMA_GUARD_DEFAULT_MODEL,
+  type WorkersAiBinding,
+  type WorkersAiClient,
+  type WorkersAiLlamaGuardConfig,
   WorkersAiLlamaGuardDetector,
   classifyCloudflareError,
-  CloudflareError,
   cloudflareRestWorkersAiClient,
   envelopeFromText,
   hazardName,
   interpretResponse,
   normalizeHazardCode,
   workersAiBindingClient,
-  type CloudflareClient,
-  type DetectorInput,
-  type WorkersAiBinding,
-  type WorkersAiClient,
-  type WorkersAiLlamaGuardConfig,
 } from "../src/index.js";
 
 const DEADLINE = () => Date.now() + 5_000;
 
 function userInput(text: string): DetectorInput {
   const env = envelopeFromText("chat_completions", "request", "user", "messages[0].content", text);
-  return { protocol: "chat_completions", stage: "request", tenant: { organization_id: "o" }, text, segments: env.segments };
+  return {
+    protocol: "chat_completions",
+    stage: "request",
+    tenant: { organization_id: "o" },
+    text,
+    segments: env.segments,
+  };
 }
 
 describe("PresidioDetector via fixture transport", () => {
@@ -101,7 +107,10 @@ describe("LlmGuardPromptInjectionDetector via fixture transport", () => {
 describe("WorkersAiLlamaGuard interpretation", () => {
   test("interpretResponse handles string / bool / object shapes", () => {
     expect(interpretResponse("safe")).toEqual({ isUnsafe: false, categories: [] });
-    expect(interpretResponse("unsafe\nS2,S9")).toEqual({ isUnsafe: true, categories: ["S2", "S9"] });
+    expect(interpretResponse("unsafe\nS2,S9")).toEqual({
+      isUnsafe: true,
+      categories: ["S2", "S9"],
+    });
     expect(interpretResponse(true)).toEqual({ isUnsafe: false, categories: [] });
     expect(interpretResponse({ safe: false, categories: ["S10"] })).toEqual({
       isUnsafe: true,
@@ -136,7 +145,7 @@ describe("WorkersAiLlamaGuard interpretation", () => {
     const result = await detector.evaluate(userInput("something bad"), DEADLINE());
     expect(result.verdict).toBe("fail");
     expect(result.findings[0]?.category).toBe("content_moderation.llama_guard.s2");
-    expect(result.findings[0]?.attributes["hazard_name"]).toBe("Non-Violent Crimes");
+    expect(result.findings[0]?.attributes.hazard_name).toBe("Non-Violent Crimes");
   });
 
   test("category allow-list filters non-selected hazards to a pass", async () => {
@@ -162,8 +171,12 @@ describe("WorkersAiLlamaGuard interpretation", () => {
   });
 
   test("cloudflare errors map into the detector taxonomy", () => {
-    expect(classifyCloudflareError(new CloudflareError("rate_limited", "x")).kind).toBe("overloaded");
-    expect(classifyCloudflareError(new CloudflareError("unauthorized", "x")).kind).toBe("unauthorized");
+    expect(classifyCloudflareError(new CloudflareError("rate_limited", "x")).kind).toBe(
+      "overloaded",
+    );
+    expect(classifyCloudflareError(new CloudflareError("unauthorized", "x")).kind).toBe(
+      "unauthorized",
+    );
     expect(classifyCloudflareError(new CloudflareError("transport", "x")).kind).toBe("unavailable");
   });
 });
@@ -208,7 +221,10 @@ async function evaluateWith(
   config: Partial<WorkersAiLlamaGuardConfig> = {},
 ) {
   const client = fakeWorkersAi(outcome);
-  const detector = WorkersAiLlamaGuardDetector.withWorkersAi({ ...LLAMA_CONFIG, ...config }, client);
+  const detector = WorkersAiLlamaGuardDetector.withWorkersAi(
+    { ...LLAMA_CONFIG, ...config },
+    client,
+  );
   return { client, detector, result: await detector.evaluate(userInput(PROBE), DEADLINE()) };
 }
 
@@ -235,8 +251,8 @@ describe("WorkersAiLlamaGuardDetector over the WorkersAiClient seam", () => {
       "content_moderation.llama_guard.s2",
       "content_moderation.llama_guard.s9",
     ]);
-    expect(result.findings.map((f) => f.attributes["hazard_code"])).toEqual(["S2", "S9"]);
-    expect(result.findings.map((f) => f.attributes["hazard_name"])).toEqual([
+    expect(result.findings.map((f) => f.attributes.hazard_code)).toEqual(["S2", "S9"]);
+    expect(result.findings.map((f) => f.attributes.hazard_name)).toEqual([
       "Non-Violent Crimes",
       "Indiscriminate Weapons",
     ]);
@@ -256,7 +272,7 @@ describe("WorkersAiLlamaGuardDetector over the WorkersAiClient seam", () => {
       result: { response: { safe: false, categories: ["S10"] } },
     });
     expect(result.verdict).toBe("fail");
-    expect(result.findings.map((f) => f.attributes["hazard_code"])).toEqual(["S10"]);
+    expect(result.findings.map((f) => f.attributes.hazard_code)).toEqual(["S10"]);
   });
 
   test("unsafe with no parseable category still fails, with a generic category", async () => {
@@ -264,7 +280,7 @@ describe("WorkersAiLlamaGuardDetector over the WorkersAiClient seam", () => {
     expect(result.verdict).toBe("fail");
     expect(result.findings).toHaveLength(1);
     expect(result.findings[0]?.category).toBe("content_moderation.llama_guard.unsafe");
-    expect(result.findings[0]?.attributes["hazard_code"]).toBeUndefined();
+    expect(result.findings[0]?.attributes.hazard_code).toBeUndefined();
   });
 
   describe("malformed model output → invalid_response, NEVER a pass", () => {
@@ -280,7 +296,9 @@ describe("WorkersAiLlamaGuardDetector over the WorkersAiClient seam", () => {
     ])("%s", async (_label, payload) => {
       const client = fakeWorkersAi({ result: payload });
       const detector = WorkersAiLlamaGuardDetector.withWorkersAi(LLAMA_CONFIG, client);
-      const outcome = await detector.evaluate(userInput(PROBE), DEADLINE()).catch((e: unknown) => e);
+      const outcome = await detector
+        .evaluate(userInput(PROBE), DEADLINE())
+        .catch((e: unknown) => e);
       expect(outcome).toBeInstanceOf(DetectorError);
       expect((outcome as DetectorError).kind).toBe("invalid_response");
       // The failure must not have been laundered into a verdict.
@@ -307,20 +325,28 @@ describe("WorkersAiLlamaGuardDetector over the WorkersAiClient seam", () => {
       ["cf missing scope", new CloudflareError("missing_scope", "x"), "unauthorized"],
       ["cf decode", new CloudflareError("decode", "x"), "invalid_response"],
       ["cf config", new CloudflareError("config", "x"), "invalid_configuration"],
-      ["cf token resolution", new CloudflareError("token_resolution", "x"), "invalid_configuration"],
+      [
+        "cf token resolution",
+        new CloudflareError("token_resolution", "x"),
+        "invalid_configuration",
+      ],
       ["cf api", new CloudflareError("api", "x"), "unavailable"],
       ["non-Error rejection", "a bare string", "unavailable"],
     ])("%s → %s", async (_label, error, expectedKind) => {
       const client = fakeWorkersAi({ error });
       const detector = WorkersAiLlamaGuardDetector.withWorkersAi(LLAMA_CONFIG, client);
-      const outcome = await detector.evaluate(userInput(PROBE), DEADLINE()).catch((e: unknown) => e);
+      const outcome = await detector
+        .evaluate(userInput(PROBE), DEADLINE())
+        .catch((e: unknown) => e);
       expect(outcome).toBeInstanceOf(DetectorError);
       expect((outcome as DetectorError).kind).toBe(expectedKind);
       // Fail-closed: an outage never produces a verdict of any kind, least of
       // all a `pass` that would wave the content through.
       expect(outcome).not.toHaveProperty("verdict");
       // ...and every declared failure mode stays inside the descriptor contract.
-      expect(detector.descriptor().declared_failure_modes).toContain((outcome as DetectorError).kind);
+      expect(detector.descriptor().declared_failure_modes).toContain(
+        (outcome as DetectorError).kind,
+      );
     });
 
     test("a failed evaluation is counted, and does not open a circuit", async () => {
@@ -341,18 +367,23 @@ describe("WorkersAiLlamaGuardDetector over the WorkersAiClient seam", () => {
   test("an expired deadline fails closed before the client is ever called", async () => {
     const client = fakeWorkersAi({ result: { response: "safe" } });
     const detector = WorkersAiLlamaGuardDetector.withWorkersAi(LLAMA_CONFIG, client);
-    const outcome = await detector.evaluate(userInput(PROBE), Date.now() - 1).catch((e: unknown) => e);
+    const outcome = await detector
+      .evaluate(userInput(PROBE), Date.now() - 1)
+      .catch((e: unknown) => e);
     expect(outcome).toBeInstanceOf(DetectorError);
     expect((outcome as DetectorError).kind).toBe("timeout");
     expect(client.calls).toHaveLength(0);
   });
 
   test("category allow-list retains only selected hazards", async () => {
-    const { result } = await evaluateWith({ result: { response: "unsafe\nS2,S9" } }, {
-      categories: ["S2"],
-    });
+    const { result } = await evaluateWith(
+      { result: { response: "unsafe\nS2,S9" } },
+      {
+        categories: ["S2"],
+      },
+    );
     expect(result.verdict).toBe("fail");
-    expect(result.findings.map((f) => f.attributes["hazard_code"])).toEqual(["S2"]);
+    expect(result.findings.map((f) => f.attributes.hazard_code)).toEqual(["S2"]);
   });
 });
 
@@ -371,9 +402,12 @@ describe("WorkersAiClient implementations", () => {
     );
     const result = await detector.evaluate(userInput(PROBE), DEADLINE());
     expect(result.verdict).toBe("fail");
-    expect(result.findings[0]?.attributes["hazard_name"]).toBe("Suicide & Self-Harm");
+    expect(result.findings[0]?.attributes.hazard_name).toBe("Suicide & Self-Harm");
     expect(seen).toEqual([
-      { model: "@cf/meta/llama-guard-3-8b", input: { messages: [{ role: "user", content: PROBE }] } },
+      {
+        model: "@cf/meta/llama-guard-3-8b",
+        input: { messages: [{ role: "user", content: PROBE }] },
+      },
     ]);
   });
 

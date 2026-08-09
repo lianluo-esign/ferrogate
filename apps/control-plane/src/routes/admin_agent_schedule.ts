@@ -46,11 +46,13 @@
  * tenancy it carries — which is also why {@link runScheduleNow} and the tick
  * both re-check the tenancy lifecycle before dispatching.
  */
-import { z } from "zod";
+
 import type { StoredAgentSchedule } from "@ferrogate/storage";
+import { z } from "zod";
 import { HttpError } from "../middleware/errors.js";
 import type { ControlPlaneDeps, StoreRecord } from "../ports.js";
 import { adminDeleted, adminItem, listResponse, parseListQuery } from "../responses.js";
+import { runTenantScheduleNow } from "../schedule/alarm-queue.js";
 import {
   SCHEDULE_FIRE_COLLECTION,
   type ScheduleEngineDeps,
@@ -58,16 +60,15 @@ import {
 } from "../schedule/engine.js";
 import { ScheduleSpecError, normalizeScheduleSpec } from "../schedule/model.js";
 import {
+  type TenantScheduleRepository,
   listTenantSchedules,
   openTenantScheduleRepository,
+  rearmTenantScheduleAlarm,
   recordFromStoredFire,
   recordFromStoredSchedule,
-  rearmTenantScheduleAlarm,
   storedScheduleFromRecord,
-  type TenantScheduleRepository,
   tenantForScheduleScope,
 } from "../schedule/tenant-schedule.js";
-import { runTenantScheduleNow } from "../schedule/alarm-queue.js";
 import {
   type CollectionSpec,
   type GroupModule,
@@ -298,8 +299,7 @@ const listSchedules: Handler = async (c) => {
       });
       items.push(
         ...legacy.items.filter(
-          (record) =>
-            typeof record.tenant_id === "string" && !typedTenantIds.has(record.tenant_id),
+          (record) => typeof record.tenant_id === "string" && !typedTenantIds.has(record.tenant_id),
         ),
       );
       return json(c, 200, listResponse({ items, total: items.length }, query));
@@ -336,9 +336,14 @@ const createSchedule: Handler = async (c) => {
   const now = nowSeconds();
   const typed = await typedRepository(deps, scope, body.tenant_id);
   if (typed !== null) {
-    const record = { ...withFiringState({ ...body, id }, null, now), id, tenant_id: typed.tenantId };
+    const record = {
+      ...withFiringState({ ...body, id }, null, now),
+      id,
+      tenant_id: typed.tenantId,
+    };
     const existing = await typed.repository.store.getSchedule(id);
-    if (existing !== undefined) throw new HttpError(409, "conflict", `agent_schedule ${id} already exists`);
+    if (existing !== undefined)
+      throw new HttpError(409, "conflict", `agent_schedule ${id} already exists`);
     const schedule = storedScheduleFromRecord(record, typed.tenantId, now);
     await typed.repository.store.upsertSchedule(schedule);
     await rearmTenantScheduleAlarm(deps.tenantDatabases, typed.tenantId, [schedule]);
@@ -361,12 +366,7 @@ const replaceSchedule: Handler = async (c) => {
   const scope = scopeOf(c);
   const id = pathParam(c, "id");
   const body = (await readJson(c, agentScheduleSchema)) as Record<string, unknown>;
-  const typed = await typedScheduleTarget(
-    deps,
-    scope,
-    body.tenant_id ?? requestedTenantId(c),
-    id,
-  );
+  const typed = await typedScheduleTarget(deps, scope, body.tenant_id ?? requestedTenantId(c), id);
   if (typed !== null) {
     const existing = typed.schedule;
     if (existing === undefined) throw notFound(id);
@@ -405,12 +405,7 @@ const mergeSchedule: Handler = async (c) => {
   const scope = scopeOf(c);
   const id = pathParam(c, "id");
   const body = (await readJson(c, agentScheduleSchema)) as Record<string, unknown>;
-  const typed = await typedScheduleTarget(
-    deps,
-    scope,
-    body.tenant_id ?? requestedTenantId(c),
-    id,
-  );
+  const typed = await typedScheduleTarget(deps, scope, body.tenant_id ?? requestedTenantId(c), id);
   if (typed !== null) {
     const existing = typed.schedule;
     if (existing === undefined) throw notFound(id);

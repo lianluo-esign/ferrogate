@@ -14,16 +14,8 @@
 import type { ObservabilityConfigError } from "./config.js";
 import { ObservabilitySignal } from "./config.js";
 import type { GatewayMetricsSnapshot } from "./metrics.js";
-import {
-  buildOtlpLogsRequest,
-  buildOtlpMetricsRequest,
-  buildOtlpTracesRequest,
-} from "./otlp.js";
-import type {
-  OtlpHttpRequest,
-  OtlpLogRecord,
-  OtlpSpanRecord,
-} from "./otlp.js";
+import { buildOtlpLogsRequest, buildOtlpMetricsRequest, buildOtlpTracesRequest } from "./otlp.js";
+import type { OtlpHttpRequest, OtlpLogRecord, OtlpSpanRecord } from "./otlp.js";
 
 /** A destination for FerroGate telemetry. */
 export interface TelemetryBackend {
@@ -32,14 +24,8 @@ export interface TelemetryBackend {
   /** Whether this backend carries `signal` at all. */
   supports(signal: ObservabilitySignal): boolean;
   metricsRequest(snapshot: GatewayMetricsSnapshot): OtlpHttpRequest | null;
-  tracesRequest(
-    serviceName: string,
-    spans: readonly OtlpSpanRecord[],
-  ): OtlpHttpRequest | null;
-  logsRequest(
-    serviceName: string,
-    logs: readonly OtlpLogRecord[],
-  ): OtlpHttpRequest | null;
+  tracesRequest(serviceName: string, spans: readonly OtlpSpanRecord[]): OtlpHttpRequest | null;
+  logsRequest(serviceName: string, logs: readonly OtlpLogRecord[]): OtlpHttpRequest | null;
   /** Checked once at startup; returns the error (or `null`) instead of throwing. */
   validate(): ObservabilityConfigError | null;
 }
@@ -88,20 +74,14 @@ export class OtlpBackend implements TelemetryBackend {
     return buildOtlpMetricsRequest(this.endpoint_, snapshot);
   }
 
-  tracesRequest(
-    serviceName: string,
-    spans: readonly OtlpSpanRecord[],
-  ): OtlpHttpRequest | null {
+  tracesRequest(serviceName: string, spans: readonly OtlpSpanRecord[]): OtlpHttpRequest | null {
     if (spans.length === 0 || !this.supports(ObservabilitySignal.Trace)) {
       return null;
     }
     return buildOtlpTracesRequest(this.endpoint_, serviceName, spans);
   }
 
-  logsRequest(
-    serviceName: string,
-    logs: readonly OtlpLogRecord[],
-  ): OtlpHttpRequest | null {
+  logsRequest(serviceName: string, logs: readonly OtlpLogRecord[]): OtlpHttpRequest | null {
     if (logs.length === 0 || !this.supports(ObservabilitySignal.Log)) {
       return null;
     }

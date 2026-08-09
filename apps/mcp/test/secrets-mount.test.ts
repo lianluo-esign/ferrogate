@@ -30,13 +30,13 @@ import { SELF, env } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
-  resolvePorts,
   type McpEnv,
   type OauthProviderPort,
   type OidcDiscovery,
+  resolvePorts,
 } from "../src/ports.js";
-import { EXEC_KEY, seedFixture, upstreamConfig, USER, type Fixture } from "./fixtures.js";
 import { setOauthProvider } from "../src/ports.js";
+import { EXEC_KEY, type Fixture, USER, seedFixture, upstreamConfig } from "./fixtures.js";
 
 const DISCOVERY: OidcDiscovery = {
   authorizationEndpoint: "https://idp.test/authorize",

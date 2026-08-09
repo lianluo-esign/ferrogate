@@ -24,21 +24,16 @@
 // in the generated client (#488 declared them so), so an absent value is
 // reported as `Unknown` — never guessed, exactly as the ACME posture is.
 import { Badge } from "@/components/ui/badge";
-import { useI18n, type TranslationKey } from "@/i18n";
+import { type TranslationKey, useI18n } from "@/i18n";
 import type { AdminSchema } from "@/lib/gateway-client";
 
 type SiteDomain = AdminSchema<"AdminSiteDomain">;
 export type SiteDomainVerification = AdminSchema<"AdminSiteDomainVerification">;
-export type SiteDomainVerificationState = NonNullable<
-  SiteDomain["verification_state"]
->;
+export type SiteDomainVerificationState = NonNullable<SiteDomain["verification_state"]>;
 
 /** One localized label per gateway verification state. Exhaustive by
  * construction: adding a state to the contract fails this record's type. */
-const VERIFICATION_STATE_LABEL: Record<
-  SiteDomainVerificationState,
-  TranslationKey
-> = {
+const VERIFICATION_STATE_LABEL: Record<SiteDomainVerificationState, TranslationKey> = {
   no_verification: "page.siteDomains.verification.none",
   pending_verification: "page.siteDomains.verification.pending",
   verified: "page.siteDomains.verification.verified",
@@ -124,6 +119,7 @@ export function SiteDomainChallenge({
   const { t, format } = useI18n();
   return (
     <div
+      // biome-ignore lint/a11y/useSemanticElements: ARIA live region for domain-challenge status; the flex-column border/background layout classes assume a div, which <output>'s inline default would break
       role="status"
       data-testid={`site-domain-challenge-${verification.hostname}`}
       className="flex flex-col gap-1 rounded-md border border-primary/40 bg-primary/5 px-3 py-2 text-xs"

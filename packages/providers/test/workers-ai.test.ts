@@ -42,8 +42,8 @@ describe("WorkersAiAdapter — chat completions", () => {
     // carry them raw, and encoding them 404s against the real API.
     expect(prepared.endpoint).toBe(`${BASE}/run/@cf/meta/llama-3.1-8b-instruct`);
     const body = prepared.body as Record<string, unknown>;
-    expect(body["messages"]).toEqual([{ role: "user", content: "hi" }]);
-    expect(body["stream"]).toBe(false);
+    expect(body.messages).toEqual([{ role: "user", content: "hi" }]);
+    expect(body.stream).toBe(false);
     // A stray `model` would read, in a request log, as the thing being invoked
     // while the PATH decided otherwise. Same reason `azure.rs` deletes it.
     expect("model" in body).toBe(false);
@@ -130,7 +130,7 @@ describe("WorkersAiAdapter — responses", () => {
     // Workers AI has no top-level `system` key; a `system` FIELD would be
     // silently dropped and the instruction would never reach the model.
     expect("system" in body).toBe(false);
-    expect(body["messages"]).toEqual([
+    expect(body.messages).toEqual([
       { role: "system", content: "be terse" },
       { role: "user", content: "hello" },
     ]);
@@ -155,7 +155,7 @@ describe("WorkersAiAdapter — structured outputs (issue #674's ninth row)", () 
     // Passing the caller's object through verbatim — which is what the
     // OpenAI family does — would hand Workers AI a schema whose top level is
     // `{name, schema, strict}`, constraining nothing the caller asked for.
-    expect((prepared.body as Record<string, unknown>)["response_format"]).toEqual({
+    expect((prepared.body as Record<string, unknown>).response_format).toEqual({
       type: "json_schema",
       json_schema: schema,
     });
@@ -169,7 +169,7 @@ describe("WorkersAiAdapter — structured outputs (issue #674's ninth row)", () 
       stream: false,
       body: { input: "hi", text: { format: { type: "json_schema", name: "s", schema } } },
     });
-    expect((prepared.body as Record<string, unknown>)["response_format"]).toEqual({
+    expect((prepared.body as Record<string, unknown>).response_format).toEqual({
       type: "json_schema",
       json_schema: schema,
     });
@@ -182,7 +182,7 @@ describe("WorkersAiAdapter — structured outputs (issue #674's ninth row)", () 
       stream: false,
       body: { messages: [], response_format: { type: "json_object" } },
     });
-    expect((prepared.body as Record<string, unknown>)["response_format"]).toEqual({
+    expect((prepared.body as Record<string, unknown>).response_format).toEqual({
       type: "json_object",
     });
   });
@@ -281,25 +281,25 @@ describe("WorkersAiAdapter — errors", () => {
       "req-1",
     );
     expect(normalized.status).toBe(400);
-    const error = (normalized.body as Record<string, Record<string, unknown>>)["error"] as Record<
+    const error = (normalized.body as Record<string, Record<string, unknown>>).error as Record<
       string,
       unknown
     >;
-    expect(error["message"]).toBe("no route for that URI");
+    expect(error.message).toBe("no route for that URI");
     // Cloudflare codes are integers; the client-visible `code` stays a string,
     // as it is for every other family.
-    expect(error["code"]).toBe("cloudflare_7003");
-    expect(error["request_id"]).toBe("req-1");
+    expect(error.code).toBe("cloudflare_7003");
+    expect(error.request_id).toBe("req-1");
   });
 
   test("falls back sanely when the body is not a Cloudflare envelope at all", () => {
     const normalized = adapter.normalizeErrorResponse(502, "text/html", bytes("<h1>bad</h1>"), "r");
-    const error = (normalized.body as Record<string, Record<string, unknown>>)["error"] as Record<
+    const error = (normalized.body as Record<string, Record<string, unknown>>).error as Record<
       string,
       unknown
     >;
-    expect(error["code"]).toBe("provider_error");
-    expect(typeof error["message"]).toBe("string");
+    expect(error.code).toBe("provider_error");
+    expect(typeof error.message).toBe("string");
   });
 });
 
@@ -308,7 +308,7 @@ describe("WorkersAiAdapter — tools", () => {
     const injected = adapter.injectTools({ messages: [] }, [
       { name: "lookup", description: "find", input_schema: { type: "object" } },
     ]) as Record<string, unknown>;
-    expect(injected["tools"]).toEqual([
+    expect(injected.tools).toEqual([
       {
         type: "function",
         function: { name: "lookup", parameters: { type: "object" }, description: "find" },
@@ -334,7 +334,7 @@ describe("WorkersAiAdapter — tools", () => {
     const appended = adapter.appendToolResults({ messages: [{ role: "user", content: "hi" }] }, [
       { tool_call_id: "workers_ai_tool_0", content: { ok: true }, is_error: false },
     ]) as Record<string, unknown>;
-    expect((appended["messages"] as unknown[])[1]).toEqual({
+    expect((appended.messages as unknown[])[1]).toEqual({
       role: "tool",
       tool_call_id: "workers_ai_tool_0",
       content: '{"ok":true}',

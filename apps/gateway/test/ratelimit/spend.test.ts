@@ -235,9 +235,7 @@ beforeAll(async () => {
   // `env.DB`. The deployed-app cases below assert the post-cutover posture
   // (the tenant's own object is the authority), so the cutover is recorded.
   await controlDb
-    .prepare(
-      "UPDATE tenant_databases SET migration_state = 'done' WHERE tenant_id IN (?, ?)",
-    )
+    .prepare("UPDATE tenant_databases SET migration_state = 'done' WHERE tenant_id IN (?, ?)")
     .bind("tenant_a", "tenant_b")
     .run();
 });

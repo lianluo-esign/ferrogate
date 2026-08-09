@@ -75,9 +75,9 @@
  * database — which is exactly the operator's action, and exactly what makes a
  * divergence here a divergence in production.
  */
-import { SELF, applyD1Migrations, env } from "cloudflare:test";
-import { controlNamespace } from "./support/control-namespace.js";
+import { SELF, type applyD1Migrations, env } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { controlNamespace } from "./support/control-namespace.js";
 
 import agentRuntimeApp from "../../agent-runtime/src/index.js";
 import gatewayApp from "../../gateway/src/index.js";
@@ -98,7 +98,7 @@ import {
   resetTenantObjectState,
   seedTenantRoleProjection,
   tenantObjectDb,
-  tenantObjectNamespace,
+  type tenantObjectNamespace,
   tenantObjectNamespaceWithQueryFailure,
 } from "./tenant-object.js";
 

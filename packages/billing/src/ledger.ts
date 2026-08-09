@@ -13,11 +13,17 @@
  *  - idempotency (#213): replay with byte-equal settlement is a no-op; replay
  *    with different data ⇒ `billing_idempotency_conflict`.
  */
-import { tenantContextSchema, type TenantContext } from "@ferrogate/core";
+import { type TenantContext, tenantContextSchema } from "@ferrogate/core";
 import { z } from "zod";
 import { BillingError, type BillingEvent } from "./event.js";
-import { PriceBook } from "./pricing.js";
+import type { PriceBook } from "./pricing.js";
 import {
+  type AudioQuantity,
+  type BillingUsageSource,
+  type CostEstimate,
+  type ModelPrice,
+  type ProviderAttempt,
+  type TokenUsage,
   audioQuantityUnpriced,
   billingUsageSourceSchema,
   costEstimateSchema,
@@ -30,12 +36,6 @@ import {
   u16,
   u32,
   u64,
-  type AudioQuantity,
-  type BillingUsageSource,
-  type CostEstimate,
-  type ModelPrice,
-  type ProviderAttempt,
-  type TokenUsage,
 } from "./usage.js";
 
 // ---------------------------------------------------------------------------
@@ -90,7 +90,10 @@ export const ledgerEntryWireSchema = z
   .object({
     id: z.string(),
     request_id: z.string(),
-    trace_id: z.string().nullish().transform((v) => v ?? undefined),
+    trace_id: z
+      .string()
+      .nullish()
+      .transform((v) => v ?? undefined),
     provider_attempt_id: z.string().default(""),
     provider_attempt_index: u32.default(0),
     tenant: tenantContextSchema,
@@ -103,36 +106,36 @@ export const ledgerEntryWireSchema = z
     cost: costEstimateSchema,
     credits: z.number(),
     unit_price: modelPriceSchema,
-    cost_source: z
-      .enum(["gateway_settled", "billing_price_book"])
-      .default("billing_price_book"),
+    cost_source: z.enum(["gateway_settled", "billing_price_book"]).default("billing_price_book"),
     occurred_at_unix: u64.nullish().transform((v) => v ?? undefined),
     wallet_delta_credits: optI64,
     wallet_balance_after_credits: optI64,
   })
-  .transform((w): LedgerEntry => ({
-    id: w.id,
-    request_id: w.request_id,
-    trace_id: w.trace_id,
-    provider_attempt: {
-      provider_attempt_id: w.provider_attempt_id,
-      provider_attempt_index: w.provider_attempt_index,
-    },
-    tenant: w.tenant,
-    logical_model: w.logical_model,
-    provider: w.provider,
-    provider_model: w.provider_model,
-    usage: w.usage,
-    usage_source: w.usage_source,
-    status_code: w.status_code,
-    cost: w.cost,
-    credits: w.credits,
-    unit_price: w.unit_price,
-    cost_source: w.cost_source,
-    occurred_at_unix: w.occurred_at_unix,
-    wallet_delta_credits: w.wallet_delta_credits,
-    wallet_balance_after_credits: w.wallet_balance_after_credits,
-  }));
+  .transform(
+    (w): LedgerEntry => ({
+      id: w.id,
+      request_id: w.request_id,
+      trace_id: w.trace_id,
+      provider_attempt: {
+        provider_attempt_id: w.provider_attempt_id,
+        provider_attempt_index: w.provider_attempt_index,
+      },
+      tenant: w.tenant,
+      logical_model: w.logical_model,
+      provider: w.provider,
+      provider_model: w.provider_model,
+      usage: w.usage,
+      usage_source: w.usage_source,
+      status_code: w.status_code,
+      cost: w.cost,
+      credits: w.credits,
+      unit_price: w.unit_price,
+      cost_source: w.cost_source,
+      occurred_at_unix: w.occurred_at_unix,
+      wallet_delta_credits: w.wallet_delta_credits,
+      wallet_balance_after_credits: w.wallet_balance_after_credits,
+    }),
+  );
 
 /**
  * The largest/smallest `i64` a JSON number can carry WITHOUT losing a unit.
@@ -176,9 +179,7 @@ function walletCreditsToWire(field: string, value: bigint): number {
   if (value > MAX_EXACT_WALLET_CREDITS || value < MIN_EXACT_WALLET_CREDITS) {
     throw new BillingError(
       "wallet_credits_unrepresentable",
-      `${field} = ${value} cannot be rendered as a JSON number without losing ` +
-        `precision (|value| > ${Number.MAX_SAFE_INTEGER}); refusing rather than ` +
-        `silently rounding a money field`,
+      `${field} = ${value} cannot be rendered as a JSON number without losing precision (|value| > ${Number.MAX_SAFE_INTEGER}); refusing rather than silently rounding a money field`,
     );
   }
   return Number(value);
@@ -555,11 +556,7 @@ export interface LedgerSink {
   /** Persist an entry; `true` if newly recorded, `false` on an idempotent replay. */
   record(entry: LedgerEntry): MaybePromise<boolean>;
   /** List recorded entries matching `filter`, newest last, paginated. */
-  list(
-    filter: LedgerListFilter,
-    offset: number,
-    limit: number,
-  ): MaybePromise<LedgerEntry[]>;
+  list(filter: LedgerListFilter, offset: number, limit: number): MaybePromise<LedgerEntry[]>;
   /** Fetch a single entry by its idempotency id. */
   get(id: string): MaybePromise<LedgerEntry | undefined>;
 }

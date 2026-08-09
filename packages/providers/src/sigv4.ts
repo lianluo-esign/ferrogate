@@ -139,7 +139,9 @@ export function canonicalQueryString(params: readonly [string, string][]): strin
   const encoded = params.map(
     ([name, value]) => [percentEncodeQuery(name), percentEncodeQuery(value)] as const,
   );
-  encoded.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0));
+  encoded.sort((a, b) =>
+    a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0,
+  );
   return encoded.map(([name, value]) => `${name}=${value}`).join("&");
 }
 
@@ -292,7 +294,8 @@ const hexByte = (byte: number): string => `%${byte.toString(16).toUpperCase().pa
 /** RFC 3986 encoding for a canonical query-string key or value (encodes `/`). */
 function percentEncodeQuery(value: string): string {
   let out = "";
-  for (const byte of utf8(value)) out += isUnreserved(byte) ? String.fromCharCode(byte) : hexByte(byte);
+  for (const byte of utf8(value))
+    out += isUnreserved(byte) ? String.fromCharCode(byte) : hexByte(byte);
   return out;
 }
 
@@ -327,7 +330,9 @@ function civilFromDays(zInput: number): [number, number, number] {
   const z = zInput + 719_468;
   const era = Math.floor((z >= 0 ? z : z - 146_096) / 146_097);
   const doe = z - era * 146_097;
-  const yoe = Math.floor((doe - Math.floor(doe / 1460) + Math.floor(doe / 36524) - Math.floor(doe / 146_096)) / 365);
+  const yoe = Math.floor(
+    (doe - Math.floor(doe / 1460) + Math.floor(doe / 36524) - Math.floor(doe / 146_096)) / 365,
+  );
   const y = yoe + era * 400;
   const doy = doe - (365 * yoe + Math.floor(yoe / 4) - Math.floor(yoe / 100));
   const mp = Math.floor((5 * doy + 2) / 153);
@@ -355,7 +360,7 @@ function percentEncodeSegment(segment: string): string {
       isHexDigit(bytes[index + 1]!) &&
       isHexDigit(bytes[index + 2]!)
     ) {
-      out += "%" + String.fromCharCode(bytes[index + 1]!) + String.fromCharCode(bytes[index + 2]!);
+      out += `%${String.fromCharCode(bytes[index + 1]!)}${String.fromCharCode(bytes[index + 2]!)}`;
       index += 3;
       continue;
     }

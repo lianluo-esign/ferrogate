@@ -1,4 +1,4 @@
-import { adminGet, type AdminSchema } from "@/lib/gateway-client";
+import { type AdminSchema, adminGet } from "@/lib/gateway-client";
 import type { ResourceConfig } from "@/lib/resource-config";
 
 /**
@@ -9,8 +9,7 @@ import type { ResourceConfig } from "@/lib/resource-config";
  * Row shape derived from the OpenAPI contract (#314): regenerate via
  * `npm run generate:api` if the contract changes.
  */
-export type AdminPermission = AdminSchema<"AdminPermission"> &
-  Record<string, unknown>;
+export type AdminPermission = AdminSchema<"AdminPermission"> & Record<string, unknown>;
 
 // Per-resource operator copy migrated onto the typed i18n catalog (#348):
 // `titleKey`/`descriptionKey`, column `headerKey`, field `labelKey` resolve
@@ -24,8 +23,7 @@ export const permissionsConfig: ResourceConfig<AdminPermission> = {
   idField: "id",
   noUpdate: true,
   pagination: "offset",
-  fetchList: (apiKey, request) =>
-    adminGet(apiKey, "/admin/v1/permissions", { query: request }),
+  fetchList: (apiKey, request) => adminGet(apiKey, "/admin/v1/permissions", { query: request }),
   columns: [
     { key: "key", headerKey: "resource.permissions.col.key" },
     { key: "name", headerKey: "resource.permissions.col.name" },

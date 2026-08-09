@@ -43,7 +43,7 @@
  * binding whose target script does not exist), which is the mechanical backstop
  * issue #666 asked for in place of a comment.
  */
-import { SELF, applyD1Migrations, env } from "cloudflare:test";
+import { SELF, type applyD1Migrations, env } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import {

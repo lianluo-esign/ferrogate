@@ -12,6 +12,23 @@
  */
 import { z } from "zod";
 import {
+  agentUpstreamConfigSchema,
+  agentWorkflowPolicySchema,
+  apiKeySchema,
+  cloudflareConfigSchema,
+  extensionConfigSchema,
+  gatewayConfigProfileSchema,
+  guardrailRuleSchema,
+  mcpServerConfigSchema,
+  modelSchema,
+  policyRuleSchema,
+  promptTemplateSchema,
+  providerSchema,
+  routeRuleSchema,
+  skillPackageSchema,
+  upstreamSchema,
+} from "./entities.js";
+import {
   adminApiConfigSchema,
   adminConfigSchema,
   agentRuntimeConfigSchema,
@@ -37,23 +54,6 @@ import {
   x402ReconcilerConfigSchema,
   x402SweeperConfigSchema,
 } from "./sections.js";
-import {
-  agentUpstreamConfigSchema,
-  agentWorkflowPolicySchema,
-  apiKeySchema,
-  cloudflareConfigSchema,
-  extensionConfigSchema,
-  gatewayConfigProfileSchema,
-  guardrailRuleSchema,
-  mcpServerConfigSchema,
-  modelSchema,
-  policyRuleSchema,
-  promptTemplateSchema,
-  providerSchema,
-  routeRuleSchema,
-  skillPackageSchema,
-  upstreamSchema,
-} from "./entities.js";
 import { sectionDefault } from "./util.js";
 
 export const configSchema = z.object({
@@ -150,8 +150,6 @@ export function durableApiKeyStore(config: Config): Config["storage"]["provider"
  */
 export function hasCredentialSource(config: Config): boolean {
   return (
-    config.api_keys.length > 0 ||
-    config.auth_service.enabled ||
-    durableApiKeyStore(config) !== null
+    config.api_keys.length > 0 || config.auth_service.enabled || durableApiKeyStore(config) !== null
   );
 }

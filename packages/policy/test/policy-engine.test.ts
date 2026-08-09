@@ -1,5 +1,5 @@
-import { describe, expect, test } from "vitest";
 import type { RequestContext } from "@ferrogate/core";
+import { describe, expect, test } from "vitest";
 import { ALLOW, BasicPolicyEngine, denyRule } from "../src/index.js";
 
 function request(organizationId: string, projectId: string, apiKeyId: string): RequestContext {

@@ -23,27 +23,33 @@ describe("the decision rule", () => {
   test("a missing project is not_found even when stale rows carry its id", () => {
     // Reporting `referenced` here would suggest a retry that can never work:
     // there is nothing to delete.
-    expect(
-      projectDeleteOutcomeFromCounts({ present: 0, workspaces: 3, virtualKeys: 2 }),
-    ).toEqual({ kind: "not_found" });
+    expect(projectDeleteOutcomeFromCounts({ present: 0, workspaces: 3, virtualKeys: 2 })).toEqual({
+      kind: "not_found",
+    });
   });
 
   test("either kind of reference blocks, and both counts are reported", () => {
-    expect(
-      projectDeleteOutcomeFromCounts({ present: 1, workspaces: 2, virtualKeys: 0 }),
-    ).toEqual({ kind: "referenced", workspaces: 2, virtualKeys: 0 });
-    expect(
-      projectDeleteOutcomeFromCounts({ present: 1, workspaces: 0, virtualKeys: 5 }),
-    ).toEqual({ kind: "referenced", workspaces: 0, virtualKeys: 5 });
-    expect(
-      projectDeleteOutcomeFromCounts({ present: 1, workspaces: 2, virtualKeys: 5 }),
-    ).toEqual({ kind: "referenced", workspaces: 2, virtualKeys: 5 });
+    expect(projectDeleteOutcomeFromCounts({ present: 1, workspaces: 2, virtualKeys: 0 })).toEqual({
+      kind: "referenced",
+      workspaces: 2,
+      virtualKeys: 0,
+    });
+    expect(projectDeleteOutcomeFromCounts({ present: 1, workspaces: 0, virtualKeys: 5 })).toEqual({
+      kind: "referenced",
+      workspaces: 0,
+      virtualKeys: 5,
+    });
+    expect(projectDeleteOutcomeFromCounts({ present: 1, workspaces: 2, virtualKeys: 5 })).toEqual({
+      kind: "referenced",
+      workspaces: 2,
+      virtualKeys: 5,
+    });
   });
 
   test("only a present, unreferenced project is deletable", () => {
-    expect(
-      projectDeleteOutcomeFromCounts({ present: 1, workspaces: 0, virtualKeys: 0 }),
-    ).toEqual({ kind: "deleted" });
+    expect(projectDeleteOutcomeFromCounts({ present: 1, workspaces: 0, virtualKeys: 0 })).toEqual({
+      kind: "deleted",
+    });
   });
 
   test("a workspace is blocked by virtual keys alone", () => {

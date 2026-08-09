@@ -1,3 +1,15 @@
+import { ResourceForm } from "@/components/resource/resource-form";
+import { ResourcePage } from "@/components/resource/resource-page";
+import { ResourceTable } from "@/components/resource/resource-table";
+import { en } from "@/i18n/locales/en";
+import { zhCN } from "@/i18n/locales/zh-CN";
+import { defaultFieldValues } from "@/lib/resource-config";
+import { permissionsConfig } from "@/resources/permissions";
+import { plansConfig } from "@/resources/plans";
+import { tenantAccountsConfig } from "@/resources/tenant-accounts";
+import { virtualKeysConfig } from "@/resources/virtual-keys";
+import { mockAdminList } from "@/test/msw";
+import { renderWithProviders, seedSession } from "@/test/test-utils";
 // Dual-locale coverage for the tenancy / IAM / billing per-resource copy (#348).
 //
 // Slice 4 threaded typed catalog keys into the resource-config layer and
@@ -11,18 +23,6 @@
 // untouched, and that catalog parity holds for the new namespaces.
 import { screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { ResourceForm } from "@/components/resource/resource-form";
-import { ResourcePage } from "@/components/resource/resource-page";
-import { ResourceTable } from "@/components/resource/resource-table";
-import { en } from "@/i18n/locales/en";
-import { zhCN } from "@/i18n/locales/zh-CN";
-import { defaultFieldValues } from "@/lib/resource-config";
-import { permissionsConfig } from "@/resources/permissions";
-import { plansConfig } from "@/resources/plans";
-import { tenantAccountsConfig } from "@/resources/tenant-accounts";
-import { virtualKeysConfig } from "@/resources/virtual-keys";
-import { mockAdminList } from "@/test/msw";
-import { renderWithProviders, seedSession } from "@/test/test-utils";
 
 function setDesktopViewport(matches: boolean) {
   Object.defineProperty(window, "matchMedia", {
@@ -154,8 +154,12 @@ describe("permissions form localizes field labels per locale", () => {
       />,
       { locale: "zh-CN" },
     );
-    expect(screen.getByLabelText(`${zhCN["resource.permissions.field.key"]} *`)).toBeInTheDocument();
-    expect(screen.getByLabelText(zhCN["resource.permissions.field.description"])).toBeInTheDocument();
+    expect(
+      screen.getByLabelText(`${zhCN["resource.permissions.field.key"]} *`),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByLabelText(zhCN["resource.permissions.field.description"]),
+    ).toBeInTheDocument();
   });
 });
 

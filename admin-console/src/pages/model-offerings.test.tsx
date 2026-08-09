@@ -1,16 +1,16 @@
-import { render, screen, waitFor } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
-import { HttpResponse, http } from "msw";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { QueryClientProvider } from "@tanstack/react-query";
-import { beforeEach, describe, expect, it } from "vitest";
 import { AuthProvider } from "@/hooks/use-auth";
 import { CatalogScopeProvider } from "@/hooks/use-catalog-scope";
 import { I18nProvider } from "@/i18n";
-import ModelOfferingsPage from "@/pages/model-offerings";
 import type { AdminSchema } from "@/lib/gateway-client";
+import ModelOfferingsPage from "@/pages/model-offerings";
 import { gatewayUrl, server } from "@/test/msw";
-import { createTestQueryClient, seedSession, TEST_GATEWAY_API_KEY } from "@/test/test-utils";
+import { TEST_GATEWAY_API_KEY, createTestQueryClient, seedSession } from "@/test/test-utils";
+import { QueryClientProvider } from "@tanstack/react-query";
+import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { http, HttpResponse } from "msw";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { beforeEach, describe, expect, it } from "vitest";
 
 const OPERATOR_KEY = "fg-platform-operator-key";
 const MODEL_ID = "m1";
@@ -58,10 +58,7 @@ function renderPage() {
           <CatalogScopeProvider>
             <QueryClientProvider client={createTestQueryClient()}>
               <Routes>
-                <Route
-                  path="/app/models/:modelId/offerings"
-                  element={<ModelOfferingsPage />}
-                />
+                <Route path="/app/models/:modelId/offerings" element={<ModelOfferingsPage />} />
               </Routes>
             </QueryClientProvider>
           </CatalogScopeProvider>

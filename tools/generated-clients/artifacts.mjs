@@ -110,9 +110,7 @@ function resolveGeneratorCli() {
   const found = candidates.find((candidate) => existsSync(candidate));
   if (!found) {
     throw new Error(
-      "openapi-typescript is not installed; looked in:\n" +
-        candidates.map((c) => `  ${c}`).join("\n") +
-        "\nRun `bun install` at the repo root (or `npm ci` in admin-console/).",
+      `openapi-typescript is not installed; looked in:\n${candidates.map((c) => `  ${c}`).join("\n")}\nRun \`bun install\` at the repo root (or \`npm ci\` in admin-console/).`,
     );
   }
   return found;
@@ -137,7 +135,7 @@ const renderedByArtifact = new Map();
  */
 export function render(artifact) {
   const format = artifact.format ?? "typescript";
-  const cacheKey = format + ":" + artifact.spec;
+  const cacheKey = `${format}:${artifact.spec}`;
   const cached = renderedByArtifact.get(cacheKey);
   if (cached !== undefined) return cached;
 
@@ -202,12 +200,7 @@ export function checkArtifact(artifact) {
   return {
     slug: artifact.slug,
     ok: false,
-    reason:
-      `${artifact.output} is STALE vs ${artifact.spec}.\n` +
-      "The committed client no longer describes the contract, and stale types still compile, " +
-      "so nothing downstream will notice.\n" +
-      `Fix: run \`${GENERATE_COMMAND}\` at the repo root and commit the regenerated file ` +
-      "(the diff is meant to be visible in review — it is how a reviewer sees the operation appear).",
+    reason: `${artifact.output} is STALE vs ${artifact.spec}.\nThe committed client no longer describes the contract, and stale types still compile, so nothing downstream will notice.\nFix: run \`${GENERATE_COMMAND}\` at the repo root and commit the regenerated file (the diff is meant to be visible in review — it is how a reviewer sees the operation appear).`,
   };
 }
 

@@ -845,25 +845,20 @@ export function createFerrogateConfigValidator(
         } else if (lowered.endsWith(".toml")) {
           if (parsers.toml === undefined) {
             throw new Error(
-              `cannot read ${fileName}: this runtime provides no TOML parser. The shipped ` +
-                "`ferrogate` binary is a Bun binary and uses Bun.TOML; under a non-Bun runtime " +
-                "pass the config as JSON (or a Caddyfile) rather than have the CLI guess at it",
+              `cannot read ${fileName}: this runtime provides no TOML parser. The shipped \`ferrogate\` binary is a Bun binary and uses Bun.TOML; under a non-Bun runtime pass the config as JSON (or a Caddyfile) rather than have the CLI guess at it`,
             );
           }
           loaded = config.loadConfigFromObject(parsers.toml(source) as Record<string, unknown>);
         } else if (lowered.endsWith(".yaml") || lowered.endsWith(".yml")) {
           if (parsers.yaml === undefined) {
             throw new Error(
-              `cannot read ${fileName}: this runtime provides no YAML parser. The shipped ` +
-                "`ferrogate` binary is a Bun binary and uses Bun.YAML; under a non-Bun runtime " +
-                "pass the config as JSON (or a Caddyfile) rather than have the CLI guess at it",
+              `cannot read ${fileName}: this runtime provides no YAML parser. The shipped \`ferrogate\` binary is a Bun binary and uses Bun.YAML; under a non-Bun runtime pass the config as JSON (or a Caddyfile) rather than have the CLI guess at it`,
             );
           }
           loaded = config.loadConfigFromObject(parsers.yaml(source) as Record<string, unknown>);
         } else {
           throw new Error(
-            `cannot infer the format of ${fileName}: name it 'Caddyfile' or give it a .toml, ` +
-              ".yaml or .json extension",
+            `cannot infer the format of ${fileName}: name it 'Caddyfile' or give it a .toml, .yaml or .json extension`,
           );
         }
       } catch (error) {

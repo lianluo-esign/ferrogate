@@ -108,7 +108,9 @@ describe("validate_plugins", () => {
       "an inverted compatibility range",
       {
         plugins: [
-          echoPlugin({ compatibility: { min_gateway_version: "2.0.0", max_gateway_version: "v1.9.0" } }),
+          echoPlugin({
+            compatibility: { min_gateway_version: "2.0.0", max_gateway_version: "v1.9.0" },
+          }),
         ],
       },
       "field plugins[0].compatibility: min_gateway_version must be <= max_gateway_version",
@@ -128,7 +130,10 @@ describe("validate_plugins", () => {
       "a required tool permission the grant does not cover",
       {
         plugins: [
-          echoPlugin({ manifest: { required_permissions: { tools: ["search"] } }, permissions: { tools: ["echo"] } }),
+          echoPlugin({
+            manifest: { required_permissions: { tools: ["search"] } },
+            permissions: { tools: ["echo"] },
+          }),
         ],
       },
       "field plugins[0].permissions.tools: must grant manifest.required_permissions.tools value search",
@@ -161,12 +166,16 @@ describe("validate_plugins", () => {
     ],
     [
       "mcp.http over https (this phase is http-only)",
-      { plugins: [echoPlugin({ id: "mcp.http", config: { endpoint: "https://mcp.internal/rpc" } })] },
+      {
+        plugins: [echoPlugin({ id: "mcp.http", config: { endpoint: "https://mcp.internal/rpc" } })],
+      },
       "field plugins[0].config.endpoint: mcp.http supports http endpoints only in this phase",
     ],
     [
       "mcp.http whose host the network grant does not allow",
-      { plugins: [echoPlugin({ id: "mcp.http", config: { endpoint: "http://mcp.internal/rpc" } })] },
+      {
+        plugins: [echoPlugin({ id: "mcp.http", config: { endpoint: "http://mcp.internal/rpc" } })],
+      },
       "field plugins[0].permissions.network: must allow MCP host mcp.internal",
     ],
     [
@@ -268,7 +277,12 @@ describe("validate_agent_workflows", () => {
     [
       "a duplicate node id",
       withWorkflows([
-        workflow({ nodes: [{ id: "n1", kind: "model" }, { id: "n1", kind: "checkpoint" }] }),
+        workflow({
+          nodes: [
+            { id: "n1", kind: "model" },
+            { id: "n1", kind: "checkpoint" },
+          ],
+        }),
       ]),
       "field agent_workflows[0].nodes[1].id: duplicate node id n1",
     ],
@@ -347,7 +361,9 @@ describe("validate_agent_workflows", () => {
   test("an MCP server's tools are addressable as <server>-<tool>", () => {
     expectAccepted({
       ...base,
-      mcp_servers: [{ name: "srv", transport: "stdio", command: "/usr/bin/srv", tools_to_execute: ["fetch"] }],
+      mcp_servers: [
+        { name: "srv", transport: "stdio", command: "/usr/bin/srv", tools_to_execute: ["fetch"] },
+      ],
       agent_workflows: [workflow({ nodes: [{ id: "n1", kind: "tool", tool: "srv-fetch" }] })],
     });
   });
@@ -426,7 +442,9 @@ describe("validate_prompt_templates", () => {
     ],
     [
       "an unsupported message role",
-      withTemplates([template({ versions: [{ messages: [{ role: "function", content: "hi" }] }] })]),
+      withTemplates([
+        template({ versions: [{ messages: [{ role: "function", content: "hi" }] }] }),
+      ]),
       "field prompt_templates[0].versions[0].messages[0].role: must be system, developer, user, " +
         "assistant, or tool",
     ],
@@ -563,7 +581,14 @@ describe("validate_skill_packages", () => {
       withPackages([
         pkg({
           resources: {
-            mcp_servers: [{ name: "srv", transport: "stdio", command: "/usr/bin/srv", tools_to_execute: ["fetch"] }],
+            mcp_servers: [
+              {
+                name: "srv",
+                transport: "stdio",
+                command: "/usr/bin/srv",
+                tools_to_execute: ["fetch"],
+              },
+            ],
           },
         }),
       ]),
@@ -608,7 +633,14 @@ describe("validate_skill_packages", () => {
             { kind: "mcp_tool", id: "srv-fetch" },
           ],
           resources: {
-            mcp_servers: [{ name: "srv", transport: "stdio", command: "/usr/bin/srv", tools_to_execute: ["fetch"] }],
+            mcp_servers: [
+              {
+                name: "srv",
+                transport: "stdio",
+                command: "/usr/bin/srv",
+                tools_to_execute: ["fetch"],
+              },
+            ],
           },
         }),
       ]),
@@ -635,9 +667,11 @@ describe("materialize_skill_package_resources", () => {
     });
     materializeSkillPackageResources(config);
     expect(config.plugins).toHaveLength(1);
-    expect(config.plugins[0]!.order).toBe(42);
+    expect((config.plugins[0] as NonNullable<(typeof config.plugins)[0]>).order).toBe(42);
     expect(config.mcp_servers).toHaveLength(1);
-    expect(config.mcp_servers[0]!.tools_to_execute).toEqual(["fresh"]);
+    expect(
+      (config.mcp_servers[0] as NonNullable<(typeof config.mcp_servers)[0]>).tools_to_execute,
+    ).toEqual(["fresh"]);
   });
 
   test("a DISABLED package's resources are evicted, not re-projected", () => {
@@ -665,7 +699,9 @@ describe("materialize_skill_package_resources", () => {
           name: "old",
           capabilities: [{ kind: "agent_workflow", id: "w" }],
           resources: {
-            agent_workflows: [{ id: "w", name: "w", version: 3, nodes: [{ id: "n", kind: "model" }] }],
+            agent_workflows: [
+              { id: "w", name: "w", version: 3, nodes: [{ id: "n", kind: "model" }] },
+            ],
           },
         },
       ],
@@ -874,7 +910,12 @@ describe("validate_guardrails", () => {
   test("accepts keyword, custom_http and presidio guardrails", () => {
     expectAccepted(
       withGuardrails([
-        guardrail({ regex: ["^sk-[a-z0-9]+$"], max_input_bytes: 4096, models: ["gpt"], providers: ["openai"] }),
+        guardrail({
+          regex: ["^sk-[a-z0-9]+$"],
+          max_input_bytes: 4096,
+          models: ["gpt"],
+          providers: ["openai"],
+        }),
         guardrail({
           id: "g2",
           provider: "custom_http",

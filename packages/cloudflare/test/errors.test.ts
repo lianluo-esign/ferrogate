@@ -20,11 +20,7 @@
  * codes) → generic API error.
  */
 import { describe, expect, test } from "vitest";
-import {
-  AUTHENTICATION_CODES,
-  CloudflareError,
-  MISSING_SCOPE_CODES,
-} from "../src/errors.js";
+import { AUTHENTICATION_CODES, CloudflareError, MISSING_SCOPE_CODES } from "../src/errors.js";
 import { REQUIRED_TOKEN_PERMISSION_GROUPS } from "../src/scopes.js";
 
 describe("code tables", () => {

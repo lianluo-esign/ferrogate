@@ -1,1 +1,27 @@
-{"latencies":{"total":975867580159194,"mean":1839056187,"50th":543979113,"95th":8941629617,"99th":10249815571,"max":13858324956},"bytes_in":{"total":11467812,"mean":21.611488122720893},"bytes_out":{"total":0,"mean":0},"earliest":"2026-05-05T23:31:20.196695469+08:00","latest":"2026-05-05T23:32:20.44234246+08:00","end":"2026-05-05T23:32:22.320090673+08:00","duration":60245646991,"wait":1877748213,"requests":530635,"rate":8807.856276807363,"throughput":1963.80123139414,"success":0.22990944811405203,"status_codes":{"0":378684,"200":121998,"502":29953},"errors":["Get \"http://127.0.0.1:8088/local/proxy-check?from=100k-sustained\": dial tcp 0.0.0.0:0-\u003e127.0.0.1:8088: bind: address already in use","502 Bad Gateway","Get \"http://127.0.0.1:8088/local/proxy-check?from=100k-sustained\": context deadline exceeded (Client.Timeout exceeded while awaiting headers)"]}
+{
+  "latencies": {
+    "total": 975867580159194,
+    "mean": 1839056187,
+    "50th": 543979113,
+    "95th": 8941629617,
+    "99th": 10249815571,
+    "max": 13858324956
+  },
+  "bytes_in": { "total": 11467812, "mean": 21.611488122720893 },
+  "bytes_out": { "total": 0, "mean": 0 },
+  "earliest": "2026-05-05T23:31:20.196695469+08:00",
+  "latest": "2026-05-05T23:32:20.44234246+08:00",
+  "end": "2026-05-05T23:32:22.320090673+08:00",
+  "duration": 60245646991,
+  "wait": 1877748213,
+  "requests": 530635,
+  "rate": 8807.856276807363,
+  "throughput": 1963.80123139414,
+  "success": 0.22990944811405203,
+  "status_codes": { "0": 378684, "200": 121998, "502": 29953 },
+  "errors": [
+    "Get \"http://127.0.0.1:8088/local/proxy-check?from=100k-sustained\": dial tcp 0.0.0.0:0-\u003e127.0.0.1:8088: bind: address already in use",
+    "502 Bad Gateway",
+    "Get \"http://127.0.0.1:8088/local/proxy-check?from=100k-sustained\": context deadline exceeded (Client.Timeout exceeded while awaiting headers)"
+  ]
+}

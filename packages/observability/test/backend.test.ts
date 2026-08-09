@@ -1,14 +1,14 @@
 import { describe, expect, test } from "vitest";
 import {
   CloudflareBackend,
-  defaultGatewayMetricsSnapshot,
+  type GatewayMetricsSnapshot,
   ObservabilitySignal,
   OtlpBackend,
-  otlpAttribute,
-  type GatewayMetricsSnapshot,
   type OtlpLogRecord,
   type OtlpSpanRecord,
   type TelemetryBackend,
+  defaultGatewayMetricsSnapshot,
+  otlpAttribute,
 } from "../src/index.js";
 
 function snapshot(): GatewayMetricsSnapshot {
@@ -38,15 +38,11 @@ function log(): OtlpLogRecord {
 describe("OtlpBackend", () => {
   test("builds a request per signal", () => {
     const backend = new OtlpBackend("http://collector:4318");
-    expect(backend.metricsRequest(snapshot())?.url).toBe(
-      "http://collector:4318/v1/metrics",
-    );
+    expect(backend.metricsRequest(snapshot())?.url).toBe("http://collector:4318/v1/metrics");
     expect(backend.tracesRequest("ferrogate", [span()])?.url).toBe(
       "http://collector:4318/v1/traces",
     );
-    expect(backend.logsRequest("ferrogate", [log()])?.url).toBe(
-      "http://collector:4318/v1/logs",
-    );
+    expect(backend.logsRequest("ferrogate", [log()])?.url).toBe("http://collector:4318/v1/logs");
   });
 
   test("skips empty batches", () => {
@@ -67,9 +63,7 @@ describe("OtlpBackend", () => {
   });
 
   test("validate rejects a scheme-less endpoint", () => {
-    expect(new OtlpBackend("collector:4318").validate()?.errorKind).toBe(
-      "InvalidEndpoint",
-    );
+    expect(new OtlpBackend("collector:4318").validate()?.errorKind).toBe("InvalidEndpoint");
   });
 
   test("validate rejects an empty endpoint", () => {
@@ -77,9 +71,7 @@ describe("OtlpBackend", () => {
   });
 
   test("carries no credential headers", () => {
-    const metrics = new OtlpBackend("http://collector:4318").metricsRequest(
-      snapshot(),
-    );
+    const metrics = new OtlpBackend("http://collector:4318").metricsRequest(snapshot());
     expect(metrics?.headers).toEqual([]);
   });
 });
@@ -88,10 +80,7 @@ describe("TelemetryBackend as a common contract", () => {
   test("backends are usable through the shared interface", () => {
     const backends: TelemetryBackend[] = [
       new OtlpBackend("http://collector:4318"),
-      new CloudflareBackend(
-        "https://collector.example.workers.dev",
-        "token",
-      ),
+      new CloudflareBackend("https://collector.example.workers.dev", "token"),
     ];
     expect(backends.map((b) => b.name())).toEqual(["otlp", "cloudflare"]);
     for (const backend of backends) {

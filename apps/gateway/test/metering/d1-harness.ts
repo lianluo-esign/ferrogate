@@ -221,9 +221,7 @@ export class RecordingDatabase implements MeteringDatabase {
     return this.#inner.batch(
       statements.map((statement, index) => {
         if (index === this.failBatchIndex) {
-          return this.#inner.prepare(
-            "SELECT * FROM billing_batch_statement_that_must_not_exist",
-          );
+          return this.#inner.prepare("SELECT * FROM billing_batch_statement_that_must_not_exist");
         }
         return statement instanceof RecordingStatement ? statement.inner : statement;
       }),

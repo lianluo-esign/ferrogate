@@ -1,5 +1,5 @@
 import { installAuthenticatedAdminApi } from "./support/admin-api";
-import { chooseTheme, THEME_STORAGE_KEY } from "./support/theme";
+import { THEME_STORAGE_KEY, chooseTheme } from "./support/theme";
 import {
   attachViewportScreenshot,
   expect,
@@ -22,7 +22,9 @@ test("System follows the OS while explicit themes remain stable", async ({ page 
   await expect(root).toHaveClass(/light/);
   await expect(root).toHaveCSS("color-scheme", "light");
   await expect(page.locator('meta[name="theme-color"]')).toHaveAttribute("content", "#ffffff");
-  await expect.poll(() => page.evaluate((key) => localStorage.getItem(key), THEME_STORAGE_KEY)).toBe("light");
+  await expect
+    .poll(() => page.evaluate((key) => localStorage.getItem(key), THEME_STORAGE_KEY))
+    .toBe("light");
 
   await page.emulateMedia({ colorScheme: "dark" });
   await expect(root).toHaveClass(/light/);
@@ -39,10 +41,10 @@ test("System follows the OS while explicit themes remain stable", async ({ page 
 
 test("stored dark theme survives reload and protected navigation", async ({ page }, testInfo) => {
   await installAuthenticatedAdminApi(page);
-  await page.addInitScript(
-    ({ key, value }) => localStorage.setItem(key, value),
-    { key: THEME_STORAGE_KEY, value: "dark" },
-  );
+  await page.addInitScript(({ key, value }) => localStorage.setItem(key, value), {
+    key: THEME_STORAGE_KEY,
+    value: "dark",
+  });
 
   await page.goto("/app/projects");
   const root = page.locator("html");

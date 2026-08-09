@@ -18,8 +18,7 @@ export const ZIP_MAGIC = [0x50, 0x4b, 0x03, 0x04];
  * can be checked without constructing a DOM `File`. */
 export function hasZipMagic(bytes: Uint8Array): boolean {
   return (
-    bytes.length >= ZIP_MAGIC.length &&
-    ZIP_MAGIC.every((byte, index) => bytes[index] === byte)
+    bytes.length >= ZIP_MAGIC.length && ZIP_MAGIC.every((byte, index) => bytes[index] === byte)
   );
 }
 

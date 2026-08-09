@@ -98,7 +98,7 @@ export function validateHeaders(
 export function validatePostgresIdentifier(field: string, rawValue: string): void {
   const value = rawValue.trim();
   if (value.length === 0) fail(field, "must not be empty");
-  const first = value[0]!;
+  const first = value[0] as NonNullable<(typeof value)[0]>;
   if (!(first === "_" || /^[A-Za-z]$/.test(first))) {
     fail(field, "must start with an ASCII letter or underscore");
   }
@@ -123,7 +123,10 @@ export function validateExtensionPermissionNames(
     const name = names[index]!;
     if (isBlank(name)) fail(`${section}[${extensionIndex}].${field}[${index}]`, "cannot be empty");
     if (seen.has(name)) {
-      fail(`${section}[${extensionIndex}].${field}[${index}]`, `duplicate permission value ${name}`);
+      fail(
+        `${section}[${extensionIndex}].${field}[${index}]`,
+        `duplicate permission value ${name}`,
+      );
     }
     seen.add(name);
   }
@@ -171,7 +174,11 @@ export function versionParts(value: string): [number, number, number] | null {
     if (!/^\d+$/.test(part)) return null;
     numbers.push(Number.parseInt(part, 10));
   }
-  return [numbers[0]!, numbers[1]!, numbers[2]!];
+  return [
+    numbers[0] as NonNullable<(typeof numbers)[0]>,
+    numbers[1] as NonNullable<(typeof numbers)[1]>,
+    numbers[2] as NonNullable<(typeof numbers)[2]>,
+  ];
 }
 
 /** `compare_version_parts`: unparsable sorts as `0.0.0`, then lexicographic. */

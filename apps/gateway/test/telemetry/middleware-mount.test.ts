@@ -146,9 +146,7 @@ async function waitForCollected(count: number): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 1));
   }
   throw new Error(
-    `timed out waiting for ${count} OTLP request(s); the deployed Worker emitted ` +
-      `${collected.length}. \`requestTelemetry()\` is not in GATEWAY_MIDDLEWARE, so the ` +
-      "25 non-inference operations emit nothing.",
+    `timed out waiting for ${count} OTLP request(s); the deployed Worker emitted ${collected.length}. \`requestTelemetry()\` is not in GATEWAY_MIDDLEWARE, so the 25 non-inference operations emit nothing.`,
   );
 }
 
@@ -211,11 +209,11 @@ describe("the deployed Worker emits telemetry for NON-inference operations", () 
     // A CONTRACT operation id from outside the inference group — proof the
     // emission came from the app-wide mount and not from
     // `src/inference/route-module.ts`, which never sees this request.
-    expect(attributes["route"]).toBe("putAsset");
-    expect(attributes["method"]).toBe("PUT");
-    expect(attributes["path"]).toBe("/v1/assets/binaries/probe/2.0.0");
-    expect(attributes["status_code"]).toBe("200");
+    expect(attributes.route).toBe("putAsset");
+    expect(attributes.method).toBe("PUT");
+    expect(attributes.path).toBe("/v1/assets/binaries/probe/2.0.0");
+    expect(attributes.status_code).toBe("200");
     expect(servedRequestId).toBeTruthy();
-    expect(attributes["request_id"]).toBe(servedRequestId);
+    expect(attributes.request_id).toBe(servedRequestId);
   });
 });

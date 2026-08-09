@@ -234,9 +234,7 @@ export function overviewControlPlaneData(
   };
 }
 
-export function overviewUsageData(
-  overrides: Partial<OverviewUsageWire> = {},
-): OverviewUsageWire {
+export function overviewUsageData(overrides: Partial<OverviewUsageWire> = {}): OverviewUsageWire {
   return {
     current_period_month: "2026-07",
     lifetime: {

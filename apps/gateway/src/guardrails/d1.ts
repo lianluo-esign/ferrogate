@@ -50,12 +50,12 @@ import {
   policyRevisionSchema,
   validatePolicyRevision,
 } from "@ferrogate/guardrails";
+import { controlDatabaseFrom } from "../control-data.js";
 import {
   type CasResult,
   type GuardrailPolicyBinding,
   InMemoryGuardrailPolicyStore,
 } from "./binding.js";
-import { controlDatabaseFrom } from "../control-data.js";
 
 // ---------------------------------------------------------------------------
 // The narrow database port

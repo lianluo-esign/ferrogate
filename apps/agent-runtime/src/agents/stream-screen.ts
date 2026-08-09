@@ -103,9 +103,7 @@ function terminalFrame(block: StreamBlock): Uint8Array {
   const body = JSON.stringify({
     error: { type: "ferrogate_error", code: block.code, message: block.message },
   });
-  return new TextEncoder().encode(
-    `event: ${GUARDRAIL_STREAM_BLOCK_EVENT}\ndata: ${body}\n\n`,
-  );
+  return new TextEncoder().encode(`event: ${GUARDRAIL_STREAM_BLOCK_EVENT}\ndata: ${body}\n\n`);
 }
 
 function blockOf(decision: GuardrailDecision, stage: GuardrailStage): StreamBlock | undefined {

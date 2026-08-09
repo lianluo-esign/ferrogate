@@ -75,16 +75,17 @@
  * top by `agentUpstreamVisibleToAuth` (and it matches the API-KEY id, not the
  * tenant — a Rust quirk documented in `./agent-discovery.ts`).
  */
-import type { AuthContext } from "../ports.js";
-import { controlDatabaseFrom } from "../control-data.js";
-import { callerScope } from "../ports.js";
+
 import type { TenantDatabaseRouter } from "@ferrogate/storage";
+import { controlDatabaseFrom } from "../control-data.js";
+import type { AuthContext } from "../ports.js";
+import { callerScope } from "../ports.js";
+import { type TenancyBindings, resolverForEnv } from "../tenancy/index.js";
 import type {
   AgentUpstreamCapability,
   AgentUpstreamProtocol,
   AgentUpstreamRecord,
 } from "./agent-discovery.js";
-import { resolverForEnv, type TenancyBindings } from "../tenancy/index.js";
 
 /**
  * `control_plane_resources.resource_kind` written by `apps/control-plane`'s
@@ -166,12 +167,12 @@ function nonEmptyString(value: unknown): string | undefined {
 export function decodeAgentUpstreamDocument(value: unknown): AgentUpstreamRecord | undefined {
   if (!isObject(value)) return undefined;
 
-  const id = nonEmptyString(value["id"]);
-  const name = nonEmptyString(value["name"]);
-  const endpoint = nonEmptyString(value["endpoint"]) ?? nonEmptyString(value["url"]);
+  const id = nonEmptyString(value.id);
+  const name = nonEmptyString(value.name);
+  const endpoint = nonEmptyString(value.endpoint) ?? nonEmptyString(value.url);
   if (id === undefined || name === undefined || endpoint === undefined) return undefined;
 
-  const rawDescription = value["description"];
+  const rawDescription = value.description;
   if (
     rawDescription !== undefined &&
     rawDescription !== null &&
@@ -180,15 +181,15 @@ export function decodeAgentUpstreamDocument(value: unknown): AgentUpstreamRecord
     return undefined;
   }
 
-  const rawEnabled = value["enabled"];
+  const rawEnabled = value.enabled;
   if (rawEnabled !== undefined && typeof rawEnabled !== "boolean") return undefined;
 
-  const rawProtocol = value["protocol"];
+  const rawProtocol = value.protocol;
   if (rawProtocol !== undefined && rawProtocol !== null && !PROTOCOLS.has(rawProtocol as string)) {
     return undefined;
   }
 
-  const rawTenantIds = value["tenant_ids"];
+  const rawTenantIds = value.tenant_ids;
   let tenantIds: readonly string[] | undefined;
   if (rawTenantIds !== undefined && rawTenantIds !== null) {
     if (!Array.isArray(rawTenantIds) || rawTenantIds.some((e) => typeof e !== "string")) {
@@ -197,7 +198,7 @@ export function decodeAgentUpstreamDocument(value: unknown): AgentUpstreamRecord
     tenantIds = rawTenantIds as readonly string[];
   }
 
-  const rawCapabilities = value["capabilities"];
+  const rawCapabilities = value.capabilities;
   let capabilities: readonly AgentUpstreamCapability[];
   if (rawCapabilities === undefined || rawCapabilities === null) {
     capabilities = ADMIN_DEFAULT_CAPABILITIES;
@@ -258,7 +259,7 @@ async function decodeRows(
     }
     if (
       expectedTenantId !== undefined &&
-      (!isObject(parsed) || parsed["tenant_id"] !== expectedTenantId)
+      (!isObject(parsed) || parsed.tenant_id !== expectedTenantId)
     ) {
       continue;
     }

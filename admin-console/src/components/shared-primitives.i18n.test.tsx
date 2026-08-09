@@ -1,12 +1,3 @@
-// Bilingual smoke coverage for the #348 final slice: the shared primitives and
-// components de-allowlisted from `ferrogate/no-untranslated-literal` must render
-// their operator copy AND sr-only/a11y labels from the typed catalog in BOTH
-// `en` and `zh-CN`. This is the runtime companion to the now-empty
-// I18N_UNMIGRATED_ALLOWLIST.
-import type { ReactElement } from "react";
-import { render, screen, within } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
-import { describe, expect, it } from "vitest";
 import { RouteLoading } from "@/components/route-load-boundary";
 import { ToolsTable } from "@/components/tools/tools-table";
 import {
@@ -16,6 +7,15 @@ import {
 import { I18nProvider, type Locale } from "@/i18n";
 import { en } from "@/i18n/locales/en";
 import { zhCN } from "@/i18n/locales/zh-CN";
+import { render, screen, within } from "@testing-library/react";
+// Bilingual smoke coverage for the #348 final slice: the shared primitives and
+// components de-allowlisted from `ferrogate/no-untranslated-literal` must render
+// their operator copy AND sr-only/a11y labels from the typed catalog in BOTH
+// `en` and `zh-CN`. This is the runtime companion to the now-empty
+// I18N_UNMIGRATED_ALLOWLIST.
+import type { ReactElement } from "react";
+import { MemoryRouter } from "react-router-dom";
+import { describe, expect, it } from "vitest";
 
 const CATALOGS = { en, "zh-CN": zhCN } as const;
 

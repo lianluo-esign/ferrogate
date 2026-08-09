@@ -1,3 +1,44 @@
+import { Badge } from "@/components/ui/badge";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { useAuth } from "@/hooks/use-auth";
+import { useVisibilityPolling } from "@/hooks/use-visibility-polling";
+import { useI18n } from "@/i18n";
+import type { TranslationKey } from "@/i18n";
+import { APP_ROUTES } from "@/lib/app-routes";
+import { adminGet } from "@/lib/gateway-client";
+import {
+  type OverviewControlPlaneData,
+  type OverviewEvidence,
+  type OverviewRuntimeData,
+  alertSeverityRank,
+  healthyWorkerCount,
+  parseAlerts,
+  parseControlPlane,
+  parseRuntime,
+  parseUsage,
+  sectionView,
+} from "@/lib/overview";
+import { useQuery } from "@tanstack/react-query";
+import {
+  Activity,
+  AlertTriangle,
+  ArrowUpRight,
+  Bot,
+  Boxes,
+  CheckCircle2,
+  Coins,
+  DollarSign,
+  HardDrive,
+  Network,
+  Server,
+} from "lucide-react";
 // Global control-plane cockpit (issue #343).
 //
 // The landing dashboard is the operator's resource + utilization overview. It
@@ -16,49 +57,8 @@
 // are rendered DISTINCT from a real zero; polling is bounded and pauses on a
 // backgrounded tab.
 import { useMemo } from "react";
-import { useQuery } from "@tanstack/react-query";
-import {
-  Activity,
-  AlertTriangle,
-  ArrowUpRight,
-  Bot,
-  Boxes,
-  CheckCircle2,
-  Coins,
-  DollarSign,
-  HardDrive,
-  Network,
-  Server,
-} from "lucide-react";
 import type { ComponentType, ReactNode } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { Badge } from "@/components/ui/badge";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
-import { useAuth } from "@/hooks/use-auth";
-import { useVisibilityPolling } from "@/hooks/use-visibility-polling";
-import { useI18n } from "@/i18n";
-import type { TranslationKey } from "@/i18n";
-import { APP_ROUTES } from "@/lib/app-routes";
-import { adminGet } from "@/lib/gateway-client";
-import {
-  alertSeverityRank,
-  healthyWorkerCount,
-  parseAlerts,
-  parseControlPlane,
-  parseRuntime,
-  parseUsage,
-  sectionView,
-  type OverviewControlPlaneData,
-  type OverviewEvidence,
-  type OverviewRuntimeData,
-} from "@/lib/overview";
 
 // Bounded polling cadence and the age past which the overview is flagged stale.
 const POLL_INTERVAL_MS = 30_000;
@@ -188,7 +188,9 @@ function MetricTile({
       <span className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
         <Icon className="size-4 shrink-0" />
         <span className="truncate">{label}</span>
-        {href ? <ArrowUpRight className="ml-auto size-3.5 shrink-0 opacity-60" aria-hidden="true" /> : null}
+        {href ? (
+          <ArrowUpRight className="ml-auto size-3.5 shrink-0 opacity-60" aria-hidden="true" />
+        ) : null}
       </span>
       <span
         className={`text-xl font-semibold tabular-nums ${
@@ -215,7 +217,7 @@ function MetricTile({
 export default function DashboardPage() {
   const { t, format } = useI18n();
   const { session } = useAuth();
-  const apiKey = session!.gatewayApiKey;
+  const apiKey = (session as NonNullable<typeof session>).gatewayApiKey;
 
   const [searchParams, setSearchParams] = useSearchParams();
   const period: Period = searchParams.get("period") === "month" ? "month" : "lifetime";
@@ -267,11 +269,12 @@ export default function DashboardPage() {
 
   // The period-scoped token/cost/request totals, or undefined when the usage
   // section failed (rendered as Unavailable, never zero).
-  const tokens = usage?.status === "ok"
-    ? period === "month"
-      ? usage.data.current_month
-      : usage.data.lifetime
-    : undefined;
+  const tokens =
+    usage?.status === "ok"
+      ? period === "month"
+        ? usage.data.current_month
+        : usage.data.lifetime
+      : undefined;
   const periodScope =
     usage?.status === "ok" && period === "month"
       ? t("dashboard.period.monthScope", {
@@ -340,8 +343,7 @@ export default function DashboardPage() {
     return rows.sort((a, b) => alertSeverityRank(a.severity) - alertSeverityRank(b.severity));
   }, [overview, runtime, controlPlane, usage, alerts, t]);
 
-  const unavailableSources =
-    alerts?.status === "ok" ? (alerts.data.unavailable_sources ?? []) : [];
+  const unavailableSources = alerts?.status === "ok" ? (alerts.data.unavailable_sources ?? []) : [];
   const alertsTruncated = alerts?.status === "ok" ? (alerts.data.truncated ?? false) : false;
 
   // #458 governance signals, read from the live payload. Three distinct states:
@@ -416,6 +418,7 @@ export default function DashboardPage() {
       {/* A failed refresh degrades the cockpit to "stale", never to a blank page. */}
       {refreshError ? (
         <p
+          // biome-ignore lint/a11y/useSemanticElements: ARIA live region for the refresh-error banner; keeping the block <p> preserves layout that <output>'s inline default would change
           role="status"
           className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs text-muted-foreground"
         >
@@ -438,6 +441,7 @@ export default function DashboardPage() {
             </p>
           </div>
           <div
+            // biome-ignore lint/a11y/useSemanticElements: a segmented period toggle grouped with role="group"; a native <fieldset> carries form-field semantics and default margins/border this inline toggle must not inherit
             role="group"
             aria-label={t("dashboard.period.label")}
             className="inline-flex shrink-0 rounded-md border p-0.5 text-xs"
@@ -472,7 +476,9 @@ export default function DashboardPage() {
             label={t("dashboard.metric.requests")}
             value={tokens ? format.number(tokens.request_count) : <Unavailable />}
             detail={
-              tokens ? t("dashboard.metric.requestsHint", { errors: format.number(tokens.error_count) }) : periodScope
+              tokens
+                ? t("dashboard.metric.requestsHint", { errors: format.number(tokens.error_count) })
+                : periodScope
             }
             tone={tokens && tokens.error_count > 0 ? "danger" : "default"}
           />
@@ -516,7 +522,9 @@ export default function DashboardPage() {
             }
             detail={t("dashboard.metric.mcpHint")}
             href="/app/mcp-servers"
-            viewLabel={t("dashboard.action.viewResource", { resource: t("dashboard.res.mcpServers") })}
+            viewLabel={t("dashboard.action.viewResource", {
+              resource: t("dashboard.res.mcpServers"),
+            })}
           />
           <MetricTile
             icon={HardDrive}
@@ -558,7 +566,9 @@ export default function DashboardPage() {
             }
             detail={t("dashboard.metric.agentRunsHint")}
             href={APP_ROUTES.agentRuns}
-            viewLabel={t("dashboard.action.viewResource", { resource: t("dashboard.res.agentRuns") })}
+            viewLabel={t("dashboard.action.viewResource", {
+              resource: t("dashboard.res.agentRuns"),
+            })}
           />
           {/*
             Healthy workers are DERIVED from the status labels the gateway
@@ -674,7 +684,10 @@ export default function DashboardPage() {
         </div>
         <div className="mt-2 flex flex-col gap-1 text-xs text-muted-foreground">
           {unavailableSources.length > 0 ? (
-            <p role="status">
+            <p
+              // biome-ignore lint/a11y/useSemanticElements: ARIA live region for the unavailable-sources alert; keeping the block <p> preserves layout that <output>'s inline default would change
+              role="status"
+            >
               {t("dashboard.alerts.unavailableSources", { sources: unavailableSources.join(", ") })}
             </p>
           ) : null}
@@ -720,7 +733,9 @@ export default function DashboardPage() {
           <InventoryTable
             title={t("dashboard.inventory.controlPlane.title")}
             description={t("dashboard.inventory.controlPlane.description")}
-            unavailableError={controlPlane?.status === "unavailable" ? controlPlane.error : undefined}
+            unavailableError={
+              controlPlane?.status === "unavailable" ? controlPlane.error : undefined
+            }
             rows={controlPlane?.status === "ok" ? controlPlaneRows(controlPlane.data) : []}
           />
         </div>
@@ -738,7 +753,10 @@ interface InventoryRow {
   labelKey: TranslationKey;
   total: number | undefined;
   totalHint?: TranslationKey;
-  breakdown?: (t: ReturnType<typeof useI18n>["t"], format: ReturnType<typeof useI18n>["format"]) => ReactNode;
+  breakdown?: (
+    t: ReturnType<typeof useI18n>["t"],
+    format: ReturnType<typeof useI18n>["format"],
+  ) => ReactNode;
   href?: string;
 }
 
@@ -783,7 +801,11 @@ function runtimeRows(data: OverviewRuntimeData): InventoryRow[] {
       href: "/app/plugins",
     },
     { labelKey: "dashboard.res.tools", total: data.tools, href: APP_ROUTES.tools },
-    { labelKey: "dashboard.res.promptTemplates", total: data.prompt_templates, href: "/app/prompt-templates" },
+    {
+      labelKey: "dashboard.res.promptTemplates",
+      total: data.prompt_templates,
+      href: "/app/prompt-templates",
+    },
     { labelKey: "dashboard.res.staticApiKeys", total: data.static_api_keys },
     {
       labelKey: "dashboard.res.mcpServers",

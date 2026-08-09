@@ -18,8 +18,8 @@
  * are read back out of the real control D1.
  */
 import { env as poolEnv } from "cloudflare:test";
-import { controlNamespace } from "../support/control-namespace.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { controlNamespace } from "../support/control-namespace.js";
 
 import {
   ONLINE_EVAL_SCORE_PROJECTION_UPSERT_SQL,
@@ -35,8 +35,8 @@ import {
   interceptProviderFetch,
   providerJson,
 } from "../inference/provider-mock.js";
-import { controlDb, resetOnlineEvalTables, storedRegressions, storedScores } from "./harness.js";
 import { tenantObjectDb } from "../tenant-object.js";
+import { controlDb, resetOnlineEvalTables, storedRegressions, storedScores } from "./harness.js";
 
 const CRITERIA = [{ id: "grounded", definition: "Is it supported by the context?" }];
 

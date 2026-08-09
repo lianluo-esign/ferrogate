@@ -1,9 +1,4 @@
-// Provider & runtime health board (issue #322): read-only status over
-// /admin/v1/provider-health, /provider-models, /framework-adapters and
-// /extensions. Each tab is an independent query so a slow/erroring upstream
-// probe (e.g. provider-models fanning out to live provider catalogs) doesn't
-// block the others.
-import { useQuery } from "@tanstack/react-query";
+import { BoolBadge, HealthBadge } from "@/components/ops/ops-primitives";
 import { Badge } from "@/components/ui/badge";
 import {
   Table,
@@ -14,11 +9,16 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { BoolBadge, HealthBadge } from "@/components/ops/ops-primitives";
 import { useAuth } from "@/hooks/use-auth";
-import { useI18n } from "@/i18n";
 import { useFormatUnix } from "@/hooks/use-format-unix";
-import { adminGet, type AdminSchema } from "@/lib/gateway-client";
+import { useI18n } from "@/i18n";
+import { type AdminSchema, adminGet } from "@/lib/gateway-client";
+// Provider & runtime health board (issue #322): read-only status over
+// /admin/v1/provider-health, /provider-models, /framework-adapters and
+// /extensions. Each tab is an independent query so a slow/erroring upstream
+// probe (e.g. provider-models fanning out to live provider catalogs) doesn't
+// block the others.
+import { useQuery } from "@tanstack/react-query";
 
 type ProviderHealthCheck = AdminSchema<"ProviderHealthCheck">;
 type ProviderModelCatalog = AdminSchema<"AdminProviderModelCatalog">;
@@ -28,7 +28,10 @@ type ExtensionPlugin = AdminSchema<"AdminPlugin">;
 function ErrorLine({ error }: { error: unknown }) {
   if (!error) return null;
   return (
-    <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+    <p
+      role="alert"
+      className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+    >
       {(error as Error).message}
     </p>
   );
@@ -79,9 +82,7 @@ function ProviderHealthTab({ apiKey }: { apiKey: string }) {
                     <div className="text-xs text-muted-foreground">
                       {row.kind} · {row.base_url}
                     </div>
-                    {row.error ? (
-                      <div className="text-xs text-destructive">{row.error}</div>
-                    ) : null}
+                    {row.error ? <div className="text-xs text-destructive">{row.error}</div> : null}
                   </TableCell>
                   <TableCell>
                     <div className="flex items-center gap-2">
@@ -106,12 +107,8 @@ function ProviderHealthTab({ apiKey }: { apiKey: string }) {
                       good="false"
                     />
                   </TableCell>
-                  <TableCell className="tabular-nums">
-                    {row.consecutive_failures}
-                  </TableCell>
-                  <TableCell className="text-xs">
-                    {formatUnix(row.checked_at_unix)}
-                  </TableCell>
+                  <TableCell className="tabular-nums">{row.consecutive_failures}</TableCell>
+                  <TableCell className="text-xs">{formatUnix(row.checked_at_unix)}</TableCell>
                 </TableRow>
               ))
             )}
@@ -214,9 +211,7 @@ function FrameworkAdaptersTab({ apiKey }: { apiKey: string }) {
                 <TableRow key={row.id}>
                   <TableCell>
                     <div className="font-medium">{row.adapter_name}</div>
-                    <div className="text-xs text-muted-foreground">
-                      v{row.adapter_version}
-                    </div>
+                    <div className="text-xs text-muted-foreground">v{row.adapter_version}</div>
                   </TableCell>
                   <TableCell>{row.framework}</TableCell>
                   <TableCell>
@@ -313,15 +308,13 @@ function ExtensionsTab({ apiKey }: { apiKey: string }) {
 export default function OpsProviderHealthPage() {
   const { session } = useAuth();
   const { t } = useI18n();
-  const apiKey = session!.gatewayApiKey;
+  const apiKey = (session as NonNullable<typeof session>).gatewayApiKey;
 
   return (
     <div className="flex flex-col gap-4">
       <div>
         <h1 className="text-lg font-semibold">{t("page.opsProviderHealth.title")}</h1>
-        <p className="text-sm text-muted-foreground">
-          {t("page.opsProviderHealth.description")}
-        </p>
+        <p className="text-sm text-muted-foreground">{t("page.opsProviderHealth.description")}</p>
       </div>
 
       <Tabs defaultValue="providers">

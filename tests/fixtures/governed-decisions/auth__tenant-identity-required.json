@@ -27,9 +27,7 @@
           "id": "key-undeclared",
           "name": "key that names neither a tenant nor platform root",
           "key": "secret-undeclared",
-          "scopes": [
-            "chat.completions"
-          ]
+          "scopes": ["chat.completions"]
         }
       ]
     }
@@ -55,9 +53,7 @@
     "outcome": "deny",
     "status": 403,
     "code": "tenant_identity_required",
-    "durable_writes": [
-      "request_log"
-    ],
+    "durable_writes": ["request_log"],
     "audit_events": []
   },
   "worker_shell": {

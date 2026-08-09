@@ -233,15 +233,7 @@ export function meaningOf(signal: SpendAnomalySignal, scopeId: string, windowSec
   const windowLabel =
     windowSecs % 3_600 === 0 ? `${windowSecs / 3_600}h` : `${Math.round(windowSecs / 60)}m`;
   if (signal === "burn_rate_spike") {
-    return (
-      `In the last closed ${windowLabel} window, tenant ${scopeId} spent more than its own ` +
-      "preceding baseline allows for. This says the tenant is spending unlike its own recent " +
-      "self; it does not say the spend is wrong, wasteful or unauthorised."
-    );
+    return `In the last closed ${windowLabel} window, tenant ${scopeId} spent more than its own preceding baseline allows for. This says the tenant is spending unlike its own recent self; it does not say the spend is wrong, wasteful or unauthorised.`;
   }
-  return (
-    `If tenant ${scopeId} keeps spending at the rate observed in the last closed ${windowLabel} ` +
-    "window, its month-to-date spend passes its configured monthly budget before the period " +
-    "ends. This is a linear extrapolation of one window, not a prediction of actual spend."
-  );
+  return `If tenant ${scopeId} keeps spending at the rate observed in the last closed ${windowLabel} window, its month-to-date spend passes its configured monthly budget before the period ends. This is a linear extrapolation of one window, not a prediction of actual spend.`;
 }

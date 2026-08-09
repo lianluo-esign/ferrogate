@@ -97,7 +97,11 @@ describe("validate_providers", () => {
     ],
     [
       "bedrock without an access key id",
-      { providers: [provider({ kind: "bedrock", aws_secret_access_key_env: "S", region: "us-east-1" })] },
+      {
+        providers: [
+          provider({ kind: "bedrock", aws_secret_access_key_env: "S", region: "us-east-1" }),
+        ],
+      },
       "field providers[0].aws_access_key_id: required when kind = bedrock",
     ],
     [
@@ -111,13 +115,17 @@ describe("validate_providers", () => {
     ],
     [
       "vertex without a project id",
-      { providers: [provider({ kind: "vertex", gcp_access_token_env: "T", region: "us-central1" })] },
+      {
+        providers: [provider({ kind: "vertex", gcp_access_token_env: "T", region: "us-central1" })],
+      },
       "field providers[0].gcp_project_id: required when kind = vertex",
     ],
     [
       "vertex without a region",
       {
-        providers: [provider({ kind: "vertex-ai", gcp_project_id: "p", gcp_access_token_env: "T" })],
+        providers: [
+          provider({ kind: "vertex-ai", gcp_project_id: "p", gcp_access_token_env: "T" }),
+        ],
       },
       "field providers[0].region: required when kind = vertex (this is the GCP location, e.g. us-central1)",
     ],
@@ -144,17 +152,16 @@ describe("validate_providers", () => {
 });
 
 describe("validate_models", () => {
-  const withProvider = (models: Record<string, unknown>[], extra: Record<string, unknown> = {}) => ({
+  const withProvider = (
+    models: Record<string, unknown>[],
+    extra: Record<string, unknown> = {},
+  ) => ({
     providers: [provider()],
     models,
     ...extra,
   });
   const cases: [string, Record<string, unknown>, string][] = [
-    [
-      "blank name",
-      withProvider([model({ name: " " })]),
-      "field models[0].name: cannot be empty",
-    ],
+    ["blank name", withProvider([model({ name: " " })]), "field models[0].name: cannot be empty"],
     [
       "duplicate name",
       withProvider([model(), model()]),
@@ -190,7 +197,9 @@ describe("validate_models", () => {
     ],
     [
       "fallback weight zero",
-      withProvider([model({ fallbacks: [{ provider: "openai", provider_model: "x", weight: 0 }] })]),
+      withProvider([
+        model({ fallbacks: [{ provider: "openai", provider_model: "x", weight: 0 }] }),
+      ]),
       "field models[0].fallbacks[0].weight: must be greater than zero",
     ],
     [
@@ -205,7 +214,9 @@ describe("validate_models", () => {
     ],
     [
       "shadow sample percent above 100",
-      withProvider([model({ shadow: { provider: "openai", provider_model: "x", sample_percent: 200 } })]),
+      withProvider([
+        model({ shadow: { provider: "openai", provider_model: "x", sample_percent: 200 } }),
+      ]),
       "field models[0].shadow.sample_percent: must be between 0 and 100 (got 200)",
     ],
   ];
@@ -215,7 +226,9 @@ describe("validate_models", () => {
 
   test("a DISABLED fallback is not cross-checked (Rust skips it)", () => {
     expectAccepted(
-      withProvider([model({ fallbacks: [{ provider: "nope", provider_model: "", enabled: false }] })]),
+      withProvider([
+        model({ fallbacks: [{ provider: "nope", provider_model: "", enabled: false }] }),
+      ]),
     );
   });
 
@@ -288,7 +301,11 @@ describe("validate_mcp_servers", () => {
       "an unauthenticated Cloudflare managed server (issue #408)",
       {
         mcp_servers: [
-          mcpServer({ transport: "sse", url: "https://acme.mcp.cloudflare.com/sse", auth_type: "none" }),
+          mcpServer({
+            transport: "sse",
+            url: "https://acme.mcp.cloudflare.com/sse",
+            auth_type: "none",
+          }),
         ],
       },
       "field mcp_servers[0].auth_type: Cloudflare managed MCP server srv requires authentication " +
@@ -310,7 +327,9 @@ describe("validate_mcp_servers", () => {
     ],
     [
       "an unauthenticated tenant workers.dev MCP endpoint on /sse (issue #408)",
-      { mcp_servers: [mcpServer({ transport: "sse", url: "https://tenant.workers.dev/agent/sse" })] },
+      {
+        mcp_servers: [mcpServer({ transport: "sse", url: "https://tenant.workers.dev/agent/sse" })],
+      },
       "field mcp_servers[0].auth_type: Cloudflare managed MCP server srv requires authentication " +
         "(shared_headers with a Cloudflare API bearer token, per_user_oauth, or " +
         "original_bearer); Cloudflare rejects unauthenticated requests",
@@ -423,7 +442,11 @@ describe("validate_mcp_server_config (ported from @ferrogate/mcp)", () => {
       "static headers under a per-user identity mode",
       {
         mcp_servers: [
-          mcpServer({ auth_type: "ferrogate_signed_jwt", signed_jwt_audience: "a", headers: sharedHeader }),
+          mcpServer({
+            auth_type: "ferrogate_signed_jwt",
+            signed_jwt_audience: "a",
+            headers: sharedHeader,
+          }),
         ],
       },
       "field mcp_servers[0]: per-user MCP identity modes cannot define static headers",
@@ -431,14 +454,21 @@ describe("validate_mcp_server_config (ported from @ferrogate/mcp)", () => {
     // --- oauth config ---
     [
       "a non-URL oauth issuer",
-      { mcp_servers: [mcpServer({ auth_type: "original_bearer", oauth: { ...oauth, issuer: "idp" } })] },
+      {
+        mcp_servers: [
+          mcpServer({ auth_type: "original_bearer", oauth: { ...oauth, issuer: "idp" } }),
+        ],
+      },
       "field mcp_servers[0]: MCP oauth.issuer is invalid",
     ],
     [
       "a non-http(s) oauth issuer",
       {
         mcp_servers: [
-          mcpServer({ auth_type: "original_bearer", oauth: { ...oauth, issuer: "ftp://idp.example" } }),
+          mcpServer({
+            auth_type: "original_bearer",
+            oauth: { ...oauth, issuer: "ftp://idp.example" },
+          }),
         ],
       },
       "field mcp_servers[0]: MCP oauth.issuer must be an http or https URL",
@@ -447,7 +477,10 @@ describe("validate_mcp_server_config (ported from @ferrogate/mcp)", () => {
       "a plaintext oauth issuer without allow_insecure_http",
       {
         mcp_servers: [
-          mcpServer({ auth_type: "original_bearer", oauth: { ...oauth, issuer: "http://idp.example" } }),
+          mcpServer({
+            auth_type: "original_bearer",
+            oauth: { ...oauth, issuer: "http://idp.example" },
+          }),
         ],
       },
       "field mcp_servers[0]: MCP oauth.issuer must use https unless allow_insecure_http is " +
@@ -455,12 +488,18 @@ describe("validate_mcp_server_config (ported from @ferrogate/mcp)", () => {
     ],
     [
       "a blank oauth client_id",
-      { mcp_servers: [mcpServer({ auth_type: "original_bearer", oauth: { ...oauth, client_id: " " } })] },
+      {
+        mcp_servers: [
+          mcpServer({ auth_type: "original_bearer", oauth: { ...oauth, client_id: " " } }),
+        ],
+      },
       "field mcp_servers[0]: MCP oauth.client_id cannot be empty",
     ],
     [
       "an empty oauth scope list",
-      { mcp_servers: [mcpServer({ auth_type: "original_bearer", oauth: { ...oauth, scopes: [] } })] },
+      {
+        mcp_servers: [mcpServer({ auth_type: "original_bearer", oauth: { ...oauth, scopes: [] } })],
+      },
       "field mcp_servers[0]: MCP oauth.scopes must contain non-empty values",
     ],
     [
@@ -504,7 +543,10 @@ describe("validate_mcp_server_config (ported from @ferrogate/mcp)", () => {
       "a protocol-owned static header",
       {
         mcp_servers: [
-          mcpServer({ auth_type: "shared_headers", headers: [{ name: "Mcp-Session-Id", value: "v" }] }),
+          mcpServer({
+            auth_type: "shared_headers",
+            headers: [{ name: "Mcp-Session-Id", value: "v" }],
+          }),
         ],
       },
       "field mcp_servers[0]: MCP static header Mcp-Session-Id is protocol-owned",
@@ -539,7 +581,10 @@ describe("validate_mcp_server_config (ported from @ferrogate/mcp)", () => {
       "a control character in a static header value",
       {
         mcp_servers: [
-          mcpServer({ auth_type: "shared_headers", headers: [{ name: "X-Key", value: `a${String.fromCharCode(1)}b` }] }),
+          mcpServer({
+            auth_type: "shared_headers",
+            headers: [{ name: "X-Key", value: `a${String.fromCharCode(1)}b` }],
+          }),
         ],
       },
       "field mcp_servers[0]: MCP static header value is invalid",
@@ -582,7 +627,10 @@ describe("validate_mcp_server_config (ported from @ferrogate/mcp)", () => {
   test("accepts a shared_headers network server with a value_env header", () => {
     expectAccepted({
       mcp_servers: [
-        httpServer({ auth_type: "shared_headers", headers: [{ name: "X-Key", value_env: "MCP_KEY" }] }),
+        httpServer({
+          auth_type: "shared_headers",
+          headers: [{ name: "X-Key", value_env: "MCP_KEY" }],
+        }),
       ],
     });
   });
@@ -611,7 +659,9 @@ describe("validate_mcp_server_config (ported from @ferrogate/mcp)", () => {
     const parsed = configSchema.parse({
       mcp_servers: [httpServer({ auth_type: "headers", headers: sharedHeader })],
     });
-    expect(parsed.mcp_servers[0]!.auth_type).toBe("shared_headers");
+    expect((parsed.mcp_servers[0] as NonNullable<(typeof parsed.mcp_servers)[0]>).auth_type).toBe(
+      "shared_headers",
+    );
     validateConfig(parsed);
   });
 
@@ -623,7 +673,9 @@ describe("validate_mcp_server_config (ported from @ferrogate/mcp)", () => {
    */
   describe("mcp tls is rejected, not silently ignored", () => {
     test("ca_cert_path", () => {
-      expect(firstError({ mcp_servers: [httpServer({ tls: { ca_cert_path: "/etc/ca.pem" } })] })).toBe(
+      expect(
+        firstError({ mcp_servers: [httpServer({ tls: { ca_cert_path: "/etc/ca.pem" } })] }),
+      ).toBe(
         "field mcp_servers[0]: MCP server srv: MCP tls.ca_cert_path is unsupported on Cloudflare " +
           "Workers: there is no filesystem to read the PEM from and fetch() exposes no hook to add " +
           "a custom CA root",
@@ -645,11 +697,7 @@ describe("validate_mcp_server_config (ported from @ferrogate/mcp)", () => {
 
 describe("validate_api_keys", () => {
   const cases: [string, Record<string, unknown>, string][] = [
-    [
-      "blank id",
-      { api_keys: [apiKey({ id: " " })] },
-      "field api_keys[0].id: cannot be empty",
-    ],
+    ["blank id", { api_keys: [apiKey({ id: " " })] }, "field api_keys[0].id: cannot be empty"],
     [
       "duplicate id",
       { api_keys: [apiKey(), apiKey()] },
@@ -785,7 +833,9 @@ describe("validate_policies + validate_gateway_configs", () => {
       providers: [provider()],
       models: [model()],
       api_keys: [apiKey()],
-      policies: [{ name: "p", effect: "DENY", api_key_ids: ["k1"], models: ["gpt"], providers: ["openai"] }],
+      policies: [
+        { name: "p", effect: "DENY", api_key_ids: ["k1"], models: ["gpt"], providers: ["openai"] },
+      ],
       gateway_configs: [{ id: "g", name: "g", cache_enabled: true, api_key_ids: ["k1"] }],
     });
   });
@@ -890,7 +940,9 @@ describe("validate_upstreams + validate_routes", () => {
     ],
     [
       "a header value carrying a newline (response splitting)",
-      withUpstream([route({ response_headers: [{ name: "x-trace", value: "a\r\nSet-Cookie: b" }] })]),
+      withUpstream([
+        route({ response_headers: [{ name: "x-trace", value: "a\r\nSet-Cookie: b" }] }),
+      ]),
       "field routes[0].response_headers[0].value: invalid header value",
     ],
     [

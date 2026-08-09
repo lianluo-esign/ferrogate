@@ -296,7 +296,7 @@ export const SPEND_ANOMALY_TUNING_FIELDS = [
  * {@link storedQuotaPolicy} applies to `enabled`.
  */
 function spendAnomalyEnabledOf(record: StoreRecord): number {
-  const raw = record["spend_anomaly_enabled"];
+  const raw = record.spend_anomaly_enabled;
   return raw === false || raw === 0 ? 0 : 1;
 }
 

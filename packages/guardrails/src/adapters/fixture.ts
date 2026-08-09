@@ -7,9 +7,10 @@
  * the adapter serializer and the recorded contract fails loudly. `"hang"`
  * exercises the adapter's own deadline enforcement.
  */
+
+import { PROBE_SECRET } from "../conformance.js";
 import { DetectorError } from "../contract.js";
 import type { DetectorTransport, TransportReply } from "./transport.js";
-import { PROBE_SECRET } from "../conformance.js";
 
 interface RecordedReply {
   status: number;
@@ -43,7 +44,9 @@ export class FixtureTransport implements DetectorTransport {
     if (typeof fixture === "string") {
       file = JSON.parse(fixture.replaceAll("${PROBE_SECRET}", PROBE_SECRET)) as RecordedFile;
     } else {
-      file = JSON.parse(JSON.stringify(fixture).replaceAll("${PROBE_SECRET}", PROBE_SECRET)) as RecordedFile;
+      file = JSON.parse(
+        JSON.stringify(fixture).replaceAll("${PROBE_SECRET}", PROBE_SECRET),
+      ) as RecordedFile;
     }
     return new FixtureTransport(file.exchanges);
   }
@@ -69,7 +72,10 @@ export class FixtureTransport implements DetectorTransport {
     }
     const reply = exchange.response;
     if (!reply) {
-      throw DetectorError.new("internal", "recorded fixture exchange has neither response nor outcome");
+      throw DetectorError.new(
+        "internal",
+        "recorded fixture exchange has neither response nor outcome",
+      );
     }
     let bodyBytes: Uint8Array;
     if (reply.body !== undefined) {
@@ -98,7 +104,9 @@ function deepEqual(a: unknown, b: unknown): boolean {
     const bk = Object.keys(b as object);
     return (
       ak.length === bk.length &&
-      ak.every((k) => deepEqual((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k]))
+      ak.every((k) =>
+        deepEqual((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k]),
+      )
     );
   }
   return false;

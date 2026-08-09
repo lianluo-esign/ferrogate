@@ -13,10 +13,7 @@
  * provider `fetch` is stubbed.
  */
 import { describe, expect, it } from "vitest";
-import {
-  encodeAzurePathSegment,
-  splitAzureBaseUrl,
-} from "../../src/inference/index.js";
+import { encodeAzurePathSegment, splitAzureBaseUrl } from "../../src/inference/index.js";
 import type { OpenRouterRoute, PhysicalRoute } from "../../src/inference/index.js";
 import { errorBody, harness } from "./fixtures.js";
 import { interceptProviderFetch, providerJson, providerSse } from "./provider-mock.js";
@@ -109,7 +106,7 @@ describe("grok / xai", () => {
       expect(res.status).toBe(200);
       const upstream = provider.lastRequest();
       expect(upstream.url).toBe("https://api.x.ai/v1/chat/completions");
-      expect(upstream.headers["authorization"]).toBe("Bearer provider-secret");
+      expect(upstream.headers.authorization).toBe("Bearer provider-secret");
       // The adapter owns `model`: the LOGICAL name must not reach xAI.
       expect((upstream.body as { model: string }).model).toBe("grok-4.20-fast");
     } finally {
@@ -193,7 +190,7 @@ describe("openrouter", () => {
       expect(res.status).toBe(200);
       const upstream = provider.lastRequest();
       expect(upstream.url).toBe("https://openrouter.ai/api/v1/chat/completions");
-      expect(upstream.headers["authorization"]).toBe("Bearer provider-secret");
+      expect(upstream.headers.authorization).toBe("Bearer provider-secret");
       expect(upstream.headers["http-referer"]).toBe("https://ferrogate.example");
       expect(upstream.headers["x-title"]).toBe("FerroGate");
       expect((upstream.body as { model: string }).model).toBe("openai/gpt-4o-mini");
@@ -231,7 +228,7 @@ describe("openrouter", () => {
       await res.text();
 
       const body = provider.lastRequest().body as Record<string, unknown>;
-      expect(body["stream"]).toBe(true);
+      expect(body.stream).toBe(true);
       // The OpenAI adapter injects this; OpenRouter must take it back off, or
       // the upstream sees a flag it has deprecated.
       expect("stream_options" in body).toBe(false);
@@ -289,8 +286,8 @@ describe("azure-openai", () => {
       const body = upstream.body as Record<string, unknown>;
       // Azure rejects a body carrying `model`; the deployment IS the model.
       expect("model" in body).toBe(false);
-      expect(body["stream"]).toBe(false);
-      expect(body["temperature"]).toBe(0.2);
+      expect(body.stream).toBe(false);
+      expect(body.temperature).toBe(0.2);
     } finally {
       provider.restore();
     }
@@ -308,7 +305,7 @@ describe("azure-openai", () => {
       expect(upstream.headers["api-key"]).toBe("provider-secret");
       // `authScheme: "bearer"` is set on the route on purpose; Azure's scheme is
       // a property of Azure, exactly as in the Rust adapter.
-      expect(upstream.headers["authorization"]).toBeUndefined();
+      expect(upstream.headers.authorization).toBeUndefined();
     } finally {
       provider.restore();
     }
@@ -362,9 +359,7 @@ describe("azure-openai", () => {
     try {
       const res = await family().post("/v1/responses", { model: "fast-chat", input: "hi" });
 
-      expect((await errorBody(res)).error.message).toBe(
-        "unsupported provider kind azure-openai",
-      );
+      expect((await errorBody(res)).error.message).toBe("unsupported provider kind azure-openai");
       expect(called).toBe(false);
     } finally {
       provider.restore();

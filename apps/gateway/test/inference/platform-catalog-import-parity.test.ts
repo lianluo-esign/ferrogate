@@ -1,5 +1,4 @@
 import { PriceBook } from "@ferrogate/billing";
-import { controlNamespaceOverD1 } from "../support/control-namespace.js";
 /**
  * Bootstrap-import parity (#892): a platform catalog built from the IMPORTED env
  * pair must produce the SAME flattened `PhysicalRoute` set the env tables produce
@@ -34,6 +33,7 @@ import { emptyModelResolver } from "../../src/inference/defaults.js";
 import { ControlDataPlatformModelCatalogSource } from "../../src/inference/platform-catalog.js";
 import type { PhysicalRoute } from "../../src/inference/ports.js";
 import type { CatalogJoinRow } from "../../src/inference/tenant-catalog.js";
+import { controlNamespaceOverD1 } from "../support/control-namespace.js";
 
 const PROVIDERS = [
   {
@@ -177,10 +177,18 @@ function fakeControlDb(
     },
   };
   const chainFor = (sql: string) => ({
-    bind() { return chainFor(sql); },
-    async first<T>() { return { revision: state.revision } as T; },
+    bind() {
+      return chainFor(sql);
+    },
+    async first<T>() {
+      return { revision: state.revision } as T;
+    },
     async all<T>() {
-      return { results: (sql.includes("platform_catalog_revisions") ? [{ revision: state.revision }] : rows) as T[] };
+      return {
+        results: (sql.includes("platform_catalog_revisions")
+          ? [{ revision: state.revision }]
+          : rows) as T[],
+      };
     },
   });
   void chain;
@@ -246,7 +254,10 @@ describe("platform catalog bootstrap-import parity (#892)", () => {
 
     // Re-reading at a bumped revision yields the identical set — "running it
     // twice changes nothing but the revision".
-    const reloadEnv = { ...loadEnv, CONTROL_DATA: controlNamespaceOverD1(fakeControlDb(joinRows(graph), 2).db) };
+    const reloadEnv = {
+      ...loadEnv,
+      CONTROL_DATA: controlNamespaceOverD1(fakeControlDb(joinRows(graph), 2).db),
+    };
     const reloaded = await source.load({ env: reloadEnv as never, fallback: emptyModelResolver });
     expect(reloaded.ok).toBe(true);
     if (!reloaded.ok) return;

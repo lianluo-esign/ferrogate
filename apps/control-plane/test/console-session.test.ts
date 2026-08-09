@@ -74,8 +74,8 @@ import {
 } from "../src/session/index.js";
 import { applySchema, db, resetD1 } from "./d1.js";
 import { BASE, arm } from "./harness.js";
-import { tenantObjectDb } from "./tenant-object.js";
 import { applyTenantSchema, resetTenantD1 } from "./tenant-db.js";
+import { tenantObjectDb } from "./tenant-object.js";
 
 // ---------------------------------------------------------------------------
 // The app, composed the way `src/index.ts` composes it
@@ -162,10 +162,7 @@ interface Session {
  * mint on.
  */
 async function makeSuperadmin(email: string): Promise<void> {
-  await db()
-    .prepare("UPDATE admin_users SET superadmin = 1 WHERE email = ?")
-    .bind(email)
-    .run();
+  await db().prepare("UPDATE admin_users SET superadmin = 1 WHERE email = ?").bind(email).run();
 }
 
 async function register(

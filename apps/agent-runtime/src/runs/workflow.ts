@@ -495,8 +495,7 @@ export function enforceWorkflowToolPolicy(
       ok: false,
       rejection: refuse(
         "workflow_parallelism_limit_exceeded",
-        `agent workflow ${workflow.id}@${workflow.version} declared ${declaredCalls} tool call(s), ` +
-          "exceeding configured parallelism limit",
+        `agent workflow ${workflow.id}@${workflow.version} declared ${declaredCalls} tool call(s), exceeding configured parallelism limit`,
       ),
     };
   }
@@ -523,8 +522,7 @@ export function enforceWorkflowToolPolicy(
       ok: false,
       rejection: refuse(
         "workflow_iteration_limit_exceeded",
-        `agent workflow ${workflow.id}@${workflow.version} requires ${requiredTurns} turn(s), ` +
-          "exceeding configured iteration limit",
+        `agent workflow ${workflow.id}@${workflow.version} requires ${requiredTurns} turn(s), exceeding configured iteration limit`,
       ),
     };
   }
@@ -617,38 +615,38 @@ const NODE_KINDS: readonly WorkflowNodeKind[] = ["model", "tool", "router", "hum
  */
 export function decodeWorkflowDocument(value: unknown): ToolWorkflowGraph | undefined {
   if (!isObject(value)) return undefined;
-  const id = value["id"];
+  const id = value.id;
   if (typeof id !== "string" || id === "") return undefined;
 
-  const version = value["version"] === undefined ? 1 : nonNegativeInt(value["version"]);
+  const version = value.version === undefined ? 1 : nonNegativeInt(value.version);
   if (version === undefined) return undefined;
 
-  const enabled = value["enabled"] === undefined ? true : value["enabled"];
+  const enabled = value.enabled === undefined ? true : value.enabled;
   if (typeof enabled !== "boolean") return undefined;
 
-  const organizationIds = stringList(value["organization_ids"]);
-  const projectIds = stringList(value["project_ids"]);
-  const apiKeyIds = stringList(value["api_key_ids"]);
+  const organizationIds = stringList(value.organization_ids);
+  const projectIds = stringList(value.project_ids);
+  const apiKeyIds = stringList(value.api_key_ids);
   if (organizationIds === undefined || projectIds === undefined || apiKeyIds === undefined) {
     return undefined;
   }
 
-  const rawNodes = value["nodes"];
+  const rawNodes = value.nodes;
   if (!Array.isArray(rawNodes)) return undefined;
   const nodes: WorkflowGraphNode[] = [];
   for (const raw of rawNodes) {
     if (!isObject(raw)) return undefined;
-    const nodeId = raw["id"];
+    const nodeId = raw.id;
     if (typeof nodeId !== "string" || nodeId === "") return undefined;
-    const kind = raw["kind"] === undefined ? "model" : raw["kind"];
+    const kind = raw.kind === undefined ? "model" : raw.kind;
     if (typeof kind !== "string" || !NODE_KINDS.includes(kind as WorkflowNodeKind)) {
       return undefined;
     }
-    const providers = stringList(raw["providers"]);
+    const providers = stringList(raw.providers);
     if (providers === undefined) return undefined;
-    const model = raw["model"];
+    const model = raw.model;
     if (model !== undefined && model !== null && typeof model !== "string") return undefined;
-    const tool = raw["tool"];
+    const tool = raw.tool;
     if (tool !== undefined && tool !== null && typeof tool !== "string") return undefined;
     nodes.push({
       id: nodeId,
@@ -656,22 +654,22 @@ export function decodeWorkflowDocument(value: unknown): ToolWorkflowGraph | unde
       ...(typeof model === "string" ? { model } : {}),
       providers,
       ...(typeof tool === "string" ? { tool } : {}),
-      ...(nonNegativeInt(raw["max_iterations"]) === undefined
+      ...(nonNegativeInt(raw.max_iterations) === undefined
         ? {}
-        : { max_iterations: nonNegativeInt(raw["max_iterations"]) }),
-      ...(nonNegativeInt(raw["token_budget"]) === undefined
+        : { max_iterations: nonNegativeInt(raw.max_iterations) }),
+      ...(nonNegativeInt(raw.token_budget) === undefined
         ? {}
-        : { token_budget: nonNegativeInt(raw["token_budget"]) }),
+        : { token_budget: nonNegativeInt(raw.token_budget) }),
     });
   }
 
-  const rawEdges = value["edges"];
+  const rawEdges = value.edges;
   if (rawEdges !== undefined && rawEdges !== null && !Array.isArray(rawEdges)) return undefined;
   const edges: { from: string; to: string }[] = [];
   for (const raw of (rawEdges as unknown[] | undefined) ?? []) {
     if (!isObject(raw)) return undefined;
-    const from = raw["from"];
-    const to = raw["to"];
+    const from = raw.from;
+    const to = raw.to;
     if (typeof from !== "string" || typeof to !== "string") return undefined;
     edges.push({ from, to });
   }
@@ -794,7 +792,7 @@ export function workflowCatalogFromEnv(env: WorkflowCatalogBindings): WorkflowCa
             .all<{ document_json: string }>();
           const base: ToolWorkflowGraph[] = [];
           const decode = (document: unknown): ToolWorkflowGraph | undefined => {
-            if (!isObject(document) || document["tenant_id"] !== tenantId) return undefined;
+            if (!isObject(document) || document.tenant_id !== tenantId) return undefined;
             return decodeWorkflowDocument(document);
           };
           for (const row of objectRows.results) {
@@ -834,7 +832,7 @@ export function workflowCatalogFromEnv(env: WorkflowCatalogBindings): WorkflowCa
               } catch {
                 continue;
               }
-              if (!isObject(parsed) || parsed["tenant_id"] !== provisionedTenant) continue;
+              if (!isObject(parsed) || parsed.tenant_id !== provisionedTenant) continue;
               const decoded = decodeWorkflowDocument(parsed);
               if (decoded !== undefined) base.push(decoded);
             }

@@ -36,7 +36,8 @@ function hex(bytes: Uint8Array): string {
 function unhex(text: string): Uint8Array {
   const clean = text.replace(/\s+/g, "");
   const out = new Uint8Array(clean.length / 2);
-  for (let i = 0; i < out.length; i += 1) out[i] = Number.parseInt(clean.slice(i * 2, i * 2 + 2), 16);
+  for (let i = 0; i < out.length; i += 1)
+    out[i] = Number.parseInt(clean.slice(i * 2, i * 2 + 2), 16);
   return out;
 }
 
@@ -160,19 +161,19 @@ describe("AEAD_CHACHA20_POLY1305 — RFC 8439 §2.8.2", () => {
 
   it("REFUSES a flipped AAD byte — the AAD really is authenticated", () => {
     const badAad = Uint8Array.from(AAD);
-    badAad[0]! ^= 0x01;
+    (badAad[0] as NonNullable<(typeof badAad)[0]>) ^= 0x01;
     expect(chacha20poly1305Open(KEY, NONCE, unhex(CIPHERTEXT + TAG), badAad)).toBeUndefined();
   });
 
   it("REFUSES a flipped ciphertext byte, returning NO plaintext at all", () => {
     const sealed = unhex(CIPHERTEXT + TAG);
-    sealed[3]! ^= 0x01;
+    sealed[3] = sealed[3]! ^ 0x01;
     expect(chacha20poly1305Open(KEY, NONCE, sealed, AAD)).toBeUndefined();
   });
 
   it("REFUSES a flipped tag byte", () => {
     const sealed = unhex(CIPHERTEXT + TAG);
-    sealed[sealed.length - 1]! ^= 0x01;
+    sealed[sealed.length - 1] = sealed[sealed.length - 1]! ^ 0x01;
     expect(chacha20poly1305Open(KEY, NONCE, sealed, AAD)).toBeUndefined();
   });
 
@@ -210,20 +211,20 @@ describe("XChaCha20-Poly1305 — draft-irtf-cfrg-xchacha §A.3", () => {
 
   it("REFUSES the same ciphertext under a one-bit-different 192-bit nonce", () => {
     const nonce = Uint8Array.from(NONCE24);
-    nonce[0]! ^= 0x01;
+    (nonce[0] as NonNullable<(typeof nonce)[0]>) ^= 0x01;
     expect(xchacha20poly1305Open(KEY, nonce, unhex(CIPHERTEXT + TAG), AAD)).toBeUndefined();
   });
 
   it("REFUSES a wrong key", () => {
     const key = Uint8Array.from(KEY);
-    key[31]! ^= 0x01;
+    (key[31] as NonNullable<(typeof key)[31]>) ^= 0x01;
     expect(xchacha20poly1305Open(key, NONCE24, unhex(CIPHERTEXT + TAG), AAD)).toBeUndefined();
   });
 
   it("rejects a nonce that is not 192 bits rather than padding it", () => {
-    expect(() =>
-      xchacha20poly1305Seal(KEY, new Uint8Array(12), SUNSCREEN, AAD),
-    ).toThrow(/24 bytes/);
+    expect(() => xchacha20poly1305Seal(KEY, new Uint8Array(12), SUNSCREEN, AAD)).toThrow(
+      /24 bytes/,
+    );
     expect(XCHACHA20_NONCE_BYTES).toBe(24);
   });
 

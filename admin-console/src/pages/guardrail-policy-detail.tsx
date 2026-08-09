@@ -1,7 +1,4 @@
-import { useEffect, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, useParams } from "react-router-dom";
-import { toast } from "sonner";
+import { EntityReferencePicker } from "@/components/resource/entity-reference-picker";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -12,16 +9,9 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { EntityReferencePicker } from "@/components/resource/entity-reference-picker";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import {
   Select,
@@ -40,16 +30,20 @@ import {
 } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
 import { useAuth } from "@/hooks/use-auth";
-import { useI18n } from "@/i18n";
 import { useOperatorError } from "@/hooks/use-operator-error";
+import { useI18n } from "@/i18n";
 import { adminGet, adminPost } from "@/lib/gateway-client";
 import {
+  type GuardrailPolicyDryRunResponse,
+  type GuardrailPolicyRevisionView,
   describeActions,
   formatUnix,
   verdictVariant,
-  type GuardrailPolicyDryRunResponse,
-  type GuardrailPolicyRevisionView,
 } from "@/lib/guardrails";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
+import { Link, useParams } from "react-router-dom";
+import { toast } from "sonner";
 
 // Sentinel Select value for "no explicit revision" — Radix Select forbids an
 // empty-string item value, so the auto/default option carries this constant and
@@ -108,7 +102,7 @@ export default function GuardrailPolicyDetailPage() {
   const { session } = useAuth();
   const { t } = useI18n();
   const { toastError } = useOperatorError();
-  const apiKey = session!.gatewayApiKey;
+  const apiKey = (session as NonNullable<typeof session>).gatewayApiKey;
   const queryClient = useQueryClient();
   const historyQueryKey = ["guardrail-policy-revisions", policyId];
 
@@ -130,7 +124,10 @@ export default function GuardrailPolicyDetailPage() {
     enabled: inspectedRevision !== null,
     queryFn: () =>
       adminGet(apiKey, "/admin/v1/guardrail-policies/{policy_id}/revisions/{revision}", {
-        params: { policy_id: policyId, revision: inspectedRevision! },
+        params: {
+          policy_id: policyId,
+          revision: inspectedRevision as NonNullable<typeof inspectedRevision>,
+        },
       }),
   });
 
@@ -183,13 +180,12 @@ export default function GuardrailPolicyDetailPage() {
   const [dryRunModel, setDryRunModel] = useState("");
   const [dryRunProvider, setDryRunProvider] = useState("");
   const [dryRunText, setDryRunText] = useState("");
-  const [dryRunResult, setDryRunResult] = useState<GuardrailPolicyDryRunResponse | null>(
-    null,
-  );
+  const [dryRunResult, setDryRunResult] = useState<GuardrailPolicyDryRunResponse | null>(null);
   // #341: a revision belongs to exactly one policy, so a chosen dry-run/rollback
   // target must not survive a switch to a different policy (which reloads a fresh
   // revision history). Clearing both back to the default null revision keeps the
   // canonical selectors from ever pointing at a stale, cross-policy revision.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: policyId is an intentional trigger dependency — the effect must clear the dry-run/rollback selection whenever the policy changes, even though its body only calls setters
   useEffect(() => {
     setDryRunRevision("");
     setRollbackRevision("");
@@ -218,8 +214,7 @@ export default function GuardrailPolicyDetailPage() {
       <div className="flex flex-wrap items-start justify-between gap-2">
         <div>
           <h1 className="text-lg font-semibold">
-            {t("page.guardrailPolicyDetail.title")}{" "}
-            <span className="font-mono">{policyId}</span>
+            {t("page.guardrailPolicyDetail.title")} <span className="font-mono">{policyId}</span>
           </h1>
           <p className="text-sm text-muted-foreground">
             <Link className="underline underline-offset-2" to="/app/guardrail-policies">
@@ -237,7 +232,10 @@ export default function GuardrailPolicyDetailPage() {
       </div>
 
       {error && (
-        <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <p
+          role="alert"
+          className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+        >
           {t("page.guardrailPolicyDetail.loadError", { message: error.message })}
         </p>
       )}
@@ -247,9 +245,7 @@ export default function GuardrailPolicyDetailPage() {
           <CardTitle className="text-base">
             {t("page.guardrailPolicyDetail.active.title")}
           </CardTitle>
-          <CardDescription>
-            {t("page.guardrailPolicyDetail.active.description")}
-          </CardDescription>
+          <CardDescription>{t("page.guardrailPolicyDetail.active.description")}</CardDescription>
         </CardHeader>
         <CardContent>
           {isLoading ? (
@@ -315,9 +311,7 @@ export default function GuardrailPolicyDetailPage() {
           <CardTitle className="text-base">
             {t("page.guardrailPolicyDetail.history.title")}
           </CardTitle>
-          <CardDescription>
-            {t("page.guardrailPolicyDetail.history.description")}
-          </CardDescription>
+          <CardDescription>{t("page.guardrailPolicyDetail.history.description")}</CardDescription>
         </CardHeader>
         <CardContent>
           <div className="rounded-md border">
@@ -347,9 +341,7 @@ export default function GuardrailPolicyDetailPage() {
                     <TableRow key={revision.revision}>
                       <TableCell className="font-mono text-xs">r{revision.revision}</TableCell>
                       <TableCell>
-                        <Badge
-                          variant={revision.status === "active" ? "secondary" : "outline"}
-                        >
+                        <Badge variant={revision.status === "active" ? "secondary" : "outline"}>
                           {revision.status}
                         </Badge>
                       </TableCell>
@@ -414,9 +406,7 @@ export default function GuardrailPolicyDetailPage() {
           <CardTitle className="text-base">
             {t("page.guardrailPolicyDetail.dryRun.title")}
           </CardTitle>
-          <CardDescription>
-            {t("page.guardrailPolicyDetail.dryRun.description")}
-          </CardDescription>
+          <CardDescription>{t("page.guardrailPolicyDetail.dryRun.description")}</CardDescription>
         </CardHeader>
         <CardContent>
           <form
@@ -428,9 +418,7 @@ export default function GuardrailPolicyDetailPage() {
             }}
           >
             <div className="grid gap-2">
-              <Label htmlFor="dry-run-stage">
-                {t("page.guardrailPolicyDetail.dryRun.stage")}
-              </Label>
+              <Label htmlFor="dry-run-stage">{t("page.guardrailPolicyDetail.dryRun.stage")}</Label>
               <Select
                 value={dryRunStage}
                 onValueChange={(value) => setDryRunStage(value as "request" | "response")}
@@ -465,9 +453,7 @@ export default function GuardrailPolicyDetailPage() {
               />
             </div>
             <div className="grid gap-2">
-              <Label htmlFor="dry-run-model">
-                {t("page.guardrailPolicyDetail.dryRun.model")}
-              </Label>
+              <Label htmlFor="dry-run-model">{t("page.guardrailPolicyDetail.dryRun.model")}</Label>
               {/* #341: the dry-run target model reuses the shared reference
                   picker so operators plan against a real routing-catalog model
                   (searchable, human labels) instead of typing a raw name. An
@@ -510,9 +496,7 @@ export default function GuardrailPolicyDetailPage() {
               />
             </div>
             <div className="grid gap-2 sm:col-span-2">
-              <Label htmlFor="dry-run-text">
-                {t("page.guardrailPolicyDetail.dryRun.text")}
-              </Label>
+              <Label htmlFor="dry-run-text">{t("page.guardrailPolicyDetail.dryRun.text")}</Label>
               <Textarea
                 id="dry-run-text"
                 value={dryRunText}
@@ -567,9 +551,7 @@ export default function GuardrailPolicyDetailPage() {
                           <TableCell className="font-mono text-xs">{check.id}</TableCell>
                           <TableCell>{check.detector}</TableCell>
                           <TableCell>
-                            <Badge variant={verdictVariant(check.result)}>
-                              {check.result}
-                            </Badge>
+                            <Badge variant={verdictVariant(check.result)}>{check.result}</Badge>
                           </TableCell>
                         </TableRow>
                       ))

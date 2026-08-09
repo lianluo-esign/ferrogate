@@ -1,17 +1,17 @@
 import { describe, expect, it } from "vitest";
 import {
-  charge,
-  costDiverges,
+  BillingError,
+  type BillingEvent,
   CostSource,
   InMemoryLedgerSink,
+  PriceBook,
+  charge,
+  costDiverges,
   ledgerEntryId,
   ledgerEntryToWire,
   modelPriceUsd,
   parseBillingEvent,
   priceEntry,
-  PriceBook,
-  BillingError,
-  type BillingEvent,
 } from "../src/index.js";
 
 function event(request_id: string, provider: string, model: string): BillingEvent {
@@ -85,7 +85,9 @@ describe("charge()", () => {
   it("invokes onDivergence but never overrides the gateway figure (#152)", () => {
     let seen = 0;
     const e = { ...event("req-8", "openai", "gpt-5.5"), cost_usd: 1.0 };
-    const entry = charge(book(), e, () => (seen += 1));
+    const entry = charge(book(), e, () => {
+      seen += 1;
+    });
     expect(seen).toBe(1);
     expect(entry.cost.total_cost).toBeCloseTo(1.0, 12);
   });
@@ -168,7 +170,9 @@ describe("the audio rails meet an invoice (#703)", () => {
         audio_seconds: seconds,
         cost_usd: priced.cost.total_cost,
       }),
-      () => (warned += 1),
+      () => {
+        warned += 1;
+      },
     );
     expect(warned).toBe(0);
   });
@@ -185,7 +189,9 @@ describe("the audio rails meet an invoice (#703)", () => {
         // Ten times the true cost — the shape of a rate typo'd by one decimal.
         cost_usd: priced.cost.total_cost * 10,
       }),
-      (info) => (seen = info),
+      (info) => {
+        seen = info;
+      },
     );
     expect(seen).toBeDefined();
     expect(seen?.price_book_estimate_usd).toBeCloseTo(priced.cost.total_cost, 12);
@@ -343,10 +349,16 @@ describe("costDiverges (#152)", () => {
 describe("InMemoryLedgerSink idempotency", () => {
   it("settles distinct attempts and replays byte-equal entries as no-ops", () => {
     const primary = event("req-multi", "openai", "gpt-5.5");
-    primary.provider_attempt = { provider_attempt_id: "req-multi:provider-attempt:0", provider_attempt_index: 0 };
+    primary.provider_attempt = {
+      provider_attempt_id: "req-multi:provider-attempt:0",
+      provider_attempt_index: 0,
+    };
     primary.usage = { prompt_tokens: 1_000, completion_tokens: 500, total_tokens: 1_500 };
     const fallback = event("req-multi", "openai", "gpt-5.5");
-    fallback.provider_attempt = { provider_attempt_id: "req-multi:provider-attempt:1", provider_attempt_index: 1 };
+    fallback.provider_attempt = {
+      provider_attempt_id: "req-multi:provider-attempt:1",
+      provider_attempt_index: 1,
+    };
     fallback.usage = { prompt_tokens: 2_000, completion_tokens: 1_000, total_tokens: 3_000 };
 
     const pe = charge(book(), primary);

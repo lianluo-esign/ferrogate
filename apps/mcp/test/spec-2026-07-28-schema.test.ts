@@ -54,7 +54,7 @@ import {
   MCP_PROTOCOL_VERSION_HEADER,
   modernRequestMeta,
 } from "../src/protocol.js";
-import { EXEC_KEY, READ_KEY, TENANT, rpcRequest, seedFixture, type Fixture } from "./fixtures.js";
+import { EXEC_KEY, type Fixture, READ_KEY, TENANT, rpcRequest, seedFixture } from "./fixtures.js";
 import {
   SPEC_PROVENANCE,
   VENDORED_SCHEMA_BYTES,
@@ -202,7 +202,7 @@ describe("server/discover conforms to #/$defs/DiscoverResultResponse", () => {
   /** `extensions` VALUES are per-extension settings objects (minor change 1). */
   it("REJECTS an extensions map whose value is not a settings object", async () => {
     const { body } = await modernCall("server/discover", {});
-    const capabilities = patched(resultOf(body)["capabilities"], {
+    const capabilities = patched(resultOf(body).capabilities, {
       extensions: { "io.modelcontextprotocol/tasks": "yes" },
     });
     const broken = patched(body, { result: patched(resultOf(body), { capabilities }) });
@@ -228,7 +228,7 @@ describe("tools/list conforms to #/$defs/ListToolsResultResponse", () => {
     expect(status).toBe(200);
     // Not vacuous on an empty catalogue: the fixture's allowlisted `echo` is
     // listed, so `#/$defs/Tool` is actually exercised.
-    expect((resultOf(body)["tools"] as unknown[]).length).toBeGreaterThan(0);
+    expect((resultOf(body).tools as unknown[]).length).toBeGreaterThan(0);
     expectConformsToSpec("ListToolsResultResponse", body);
   });
 
@@ -247,7 +247,7 @@ describe("tools/list conforms to #/$defs/ListToolsResultResponse", () => {
    */
   it("REJECTS a serverInfo that is not an Implementation", async () => {
     const { body } = await modernCall("tools/list", {});
-    const meta = patched(resultOf(body)["_meta"], {
+    const meta = patched(resultOf(body)._meta, {
       "io.modelcontextprotocol/serverInfo": { name: 7, version: "1.0.0" },
     });
     const broken = patched(body, { result: patched(resultOf(body), { _meta: meta }) });
@@ -257,9 +257,7 @@ describe("tools/list conforms to #/$defs/ListToolsResultResponse", () => {
   /** A tool without `inputSchema` is not a `#/$defs/Tool`. */
   it("REJECTS a tool entry missing inputSchema", async () => {
     const { body } = await modernCall("tools/list", {});
-    const tools = (resultOf(body)["tools"] as unknown[]).map((tool) =>
-      without(tool, "inputSchema"),
-    );
+    const tools = (resultOf(body).tools as unknown[]).map((tool) => without(tool, "inputSchema"));
     const broken = patched(body, { result: patched(resultOf(body), { tools }) });
     expect(violatedKeywords("ListToolsResultResponse", broken)).toContain("required");
   });
@@ -303,7 +301,7 @@ describe("tools/call conforms to #/$defs/CallToolResultResponse", () => {
     // empty for the wrong reason.
     expect(fixture.calls).toHaveLength(1);
     expectConformsToSpec("CallToolResultResponse", body);
-    expect(resultOf(body)["resultType"]).toBe("complete");
+    expect(resultOf(body).resultType).toBe("complete");
     expectConformsToSpec("CallToolResult", resultOf(body));
   });
 
@@ -356,19 +354,17 @@ describe("resources/read conforms to #/$defs/ReadResourceResultResponse", () => 
   it("validates the real response off the wire", async () => {
     const { status, body } = await read();
     expect(status).toBe(200);
-    expect((resultOf(body)["contents"] as unknown[]).length).toBeGreaterThan(0);
+    expect((resultOf(body).contents as unknown[]).length).toBeGreaterThan(0);
     expectConformsToSpec("ReadResourceResultResponse", body);
     // The selected branch, for the reason in the block comment above.
-    expect(resultOf(body)["resultType"]).toBe("complete");
+    expect(resultOf(body).resultType).toBe("complete");
     expectConformsToSpec("ReadResourceResult", resultOf(body));
   });
 
   /** Every `contents` entry needs a `uri` — a blob with no identity is not one. */
   it("REJECTS a contents entry with no uri", async () => {
     const { body } = await read();
-    const contents = (resultOf(body)["contents"] as unknown[]).map((entry) =>
-      without(entry, "uri"),
-    );
+    const contents = (resultOf(body).contents as unknown[]).map((entry) => without(entry, "uri"));
     const broken = patched(resultOf(body), { contents });
     expect(violatedKeywords("ReadResourceResult", broken)).toContain("anyOf");
   });
@@ -474,7 +470,7 @@ describe("-32022 conforms to #/$defs/UnsupportedProtocolVersionError", () => {
   it("REJECTS the same refusal with data.supported removed", async () => {
     const { body } = await unsupportedVersion();
     const rawError = (body as { error: JsonRecord }).error;
-    const error = patched(rawError, { data: without(rawError["data"], "supported") });
+    const error = patched(rawError, { data: without(rawError.data, "supported") });
     expect(violatedKeywords("UnsupportedProtocolVersionError", patched(body, { error }))).toContain(
       "required",
     );

@@ -7,6 +7,13 @@
  * helpers (`openaiMessagesToGeminiContents`, `embeddingsTextInputs`,
  * `openaiEmbeddingsResponse`, …) are re-used by the Vertex and Bedrock adapters.
  */
+
+import { assertPromptCacheForAutomaticFamily } from "./caching.js";
+import { CanonicalAiRequest } from "./canonical.js";
+import { asI64, asStr, asU64, getField, isObject, parseJson } from "./json.js";
+import type { Json, JsonObject } from "./json.js";
+import { fallbackErrorMessage, hasAnyUsage } from "./openai.js";
+import { applyStructuredOutputToGemini, structuredOutputFromChatBody } from "./structured.js";
 import { AdapterError, BaseProviderAdapter, SecretValue } from "./types.js";
 import type {
   ChatCompletionPlan,
@@ -18,12 +25,6 @@ import type {
   ProviderUsage,
   ResponsesPlan,
 } from "./types.js";
-import { CanonicalAiRequest } from "./canonical.js";
-import { applyStructuredOutputToGemini, structuredOutputFromChatBody } from "./structured.js";
-import { assertPromptCacheForAutomaticFamily } from "./caching.js";
-import { asI64, asStr, asU64, getField, isObject, parseJson } from "./json.js";
-import type { Json, JsonObject } from "./json.js";
-import { fallbackErrorMessage, hasAnyUsage } from "./openai.js";
 
 export class GeminiAdapter extends BaseProviderAdapter {
   override kind(): string {
@@ -44,9 +45,9 @@ export class GeminiAdapter extends BaseProviderAdapter {
 
     const geminiBody: JsonObject = { contents: openaiMessagesToGeminiContents(body) };
     const instruction = systemInstruction(body);
-    if (instruction !== undefined) geminiBody["systemInstruction"] = instruction;
+    if (instruction !== undefined) geminiBody.systemInstruction = instruction;
     const config = structuredGenerationConfig(body, provider.kind);
-    if (config !== undefined) geminiBody["generationConfig"] = config;
+    if (config !== undefined) geminiBody.generationConfig = config;
 
     return {
       provider: provider.name,
@@ -57,22 +58,19 @@ export class GeminiAdapter extends BaseProviderAdapter {
     };
   }
 
-  override prepareResponses(
-    provider: ProviderConfig,
-    request: ResponsesPlan,
-  ): ProviderHttpRequest {
+  override prepareResponses(provider: ProviderConfig, request: ResponsesPlan): ProviderHttpRequest {
     validateKind(provider.kind);
     const body = CanonicalAiRequest.fromResponsesBody(request.body).intoGeminiBody();
 
     const geminiBody: JsonObject = { contents: getField(body, "contents") ?? [] };
     const instruction = getField(body, "systemInstruction");
-    if (instruction !== undefined) geminiBody["systemInstruction"] = instruction;
+    if (instruction !== undefined) geminiBody.systemInstruction = instruction;
     const config = getField(body, "generationConfig");
-    if (config !== undefined) geminiBody["generationConfig"] = config;
+    if (config !== undefined) geminiBody.generationConfig = config;
     const tools = getField(body, "tools");
-    if (tools !== undefined) geminiBody["tools"] = tools;
+    if (tools !== undefined) geminiBody.tools = tools;
     const toolConfig = getField(body, "toolConfig");
-    if (toolConfig !== undefined) geminiBody["toolConfig"] = toolConfig;
+    if (toolConfig !== undefined) geminiBody.toolConfig = toolConfig;
 
     return {
       provider: provider.name,
@@ -109,7 +107,9 @@ export class GeminiAdapter extends BaseProviderAdapter {
     const value = parseEmbeddingsResponseBody(body);
     const embeddings = getField(value, "embeddings");
     if (!Array.isArray(embeddings)) {
-      throw AdapterError.invalidRequest("Gemini embeddings response is missing an embeddings array");
+      throw AdapterError.invalidRequest(
+        "Gemini embeddings response is missing an embeddings array",
+      );
     }
     const vectors = embeddings.map((entry) => getField(entry, "values") ?? []);
     return openaiEmbeddingsResponse(vectors, model, undefined);
@@ -227,8 +227,8 @@ function contentParts(content: Json | undefined): Json[] {
   if (typeof content === "string") return [{ text: content }];
   if (Array.isArray(content)) {
     return content.map((block) => {
-      if (isObject(block) && asStr(block["type"]) === "text") {
-        return { text: asStr(block["text"]) ?? "" };
+      if (isObject(block) && asStr(block.type) === "text") {
+        return { text: asStr(block.text) ?? "" };
       }
       if (typeof block === "string") return { text: block };
       throw AdapterError.invalidRequest("Gemini adapter supports text message content only");
@@ -246,8 +246,8 @@ export function generationConfig(body: Json): Json | undefined {
   copyConfig(body, config, "top_k", "topK");
   copyConfig(body, config, "max_tokens", "maxOutputTokens");
   const stop = getField(body, "stop");
-  if (typeof stop === "string") config["stopSequences"] = [stop];
-  else if (Array.isArray(stop)) config["stopSequences"] = [...stop];
+  if (typeof stop === "string") config.stopSequences = [stop];
+  else if (Array.isArray(stop)) config.stopSequences = [...stop];
   return Object.keys(config).length > 0 ? config : undefined;
 }
 
@@ -259,10 +259,7 @@ export function generationConfig(body: Json): Json | undefined {
  * share one object: building them separately is how the requirement got dropped
  * (issue #674). Shared with Vertex, which speaks the same body.
  */
-export function structuredGenerationConfig(
-  body: Json,
-  providerKind: string,
-): Json | undefined {
+export function structuredGenerationConfig(body: Json, providerKind: string): Json | undefined {
   const config = generationConfig(body);
   const structured = structuredOutputFromChatBody(body);
   if (structured === undefined) return config;
@@ -323,7 +320,7 @@ export function openaiEmbeddingsResponse(
   }));
   const response: JsonObject = { object: "list", data, model };
   if (promptTokens !== undefined) {
-    response["usage"] = { prompt_tokens: promptTokens, total_tokens: promptTokens };
+    response.usage = { prompt_tokens: promptTokens, total_tokens: promptTokens };
   }
   return response;
 }

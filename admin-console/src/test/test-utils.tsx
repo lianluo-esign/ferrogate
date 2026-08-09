@@ -1,3 +1,9 @@
+import { AuthProvider } from "@/hooks/use-auth";
+import { CatalogScopeProvider } from "@/hooks/use-catalog-scope";
+import { I18nProvider, type Locale } from "@/i18n";
+import { type StoredSession, saveStoredSession } from "@/lib/session-storage";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { type RenderResult, render } from "@testing-library/react";
 // Shared render helpers for component tests.
 //
 // ## The pattern
@@ -14,13 +20,7 @@
 // renderWithProviders(<ResourcePage config={plansConfig} />);
 // ```
 import type { ReactElement, ReactNode } from "react";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, type RenderResult } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
-import { AuthProvider } from "@/hooks/use-auth";
-import { CatalogScopeProvider } from "@/hooks/use-catalog-scope";
-import { I18nProvider, type Locale } from "@/i18n";
-import { saveStoredSession, type StoredSession } from "@/lib/session-storage";
 
 export const TEST_GATEWAY_API_KEY = "fg-test-gateway-key";
 
@@ -65,9 +65,7 @@ export function AllProviders({
       <I18nProvider initialLocale={locale}>
         <AuthProvider>
           <CatalogScopeProvider>
-            <QueryClientProvider client={createTestQueryClient()}>
-              {children}
-            </QueryClientProvider>
+            <QueryClientProvider client={createTestQueryClient()}>{children}</QueryClientProvider>
           </CatalogScopeProvider>
         </AuthProvider>
       </I18nProvider>
@@ -85,8 +83,6 @@ export function renderWithProviders(
   options: { locale?: Locale } = {},
 ): RenderResult {
   return render(ui, {
-    wrapper: ({ children }) => (
-      <AllProviders locale={options.locale}>{children}</AllProviders>
-    ),
+    wrapper: ({ children }) => <AllProviders locale={options.locale}>{children}</AllProviders>,
   });
 }

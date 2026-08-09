@@ -1,8 +1,8 @@
-import { describe, expect, it } from "vitest";
 import {
   aggregateReportedCorrelation,
   parseReportedCorrelation,
 } from "@/components/worker-ops/worker-ops-primitives";
+import { describe, expect, it } from "vitest";
 
 describe("parseReportedCorrelation", () => {
   it("lifts root-level correlation fields", () => {

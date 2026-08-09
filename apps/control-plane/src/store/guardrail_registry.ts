@@ -74,31 +74,15 @@ export const GUARDRAIL_BINDINGS_TABLE = "guardrail_policy_bindings";
  * duplicate `(policy_id, revision)` without a read-then-write race; an
  * `INSERT OR REPLACE` here would silently rewrite history.
  */
-export const GUARDRAIL_REVISION_INSERT_SQL =
-  `INSERT INTO ${GUARDRAIL_REVISIONS_TABLE} ` +
-  "(policy_id, revision, immutable_id, created_at_unix, created_by, revision_json) " +
-  "VALUES (?1, ?2, ?3, ?4, ?5, ?6) " +
-  "ON CONFLICT (policy_id, revision) DO NOTHING " +
-  "RETURNING policy_id";
+export const GUARDRAIL_REVISION_INSERT_SQL = `INSERT INTO ${GUARDRAIL_REVISIONS_TABLE} (policy_id, revision, immutable_id, created_at_unix, created_by, revision_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT (policy_id, revision) DO NOTHING RETURNING policy_id`;
 
-export const GUARDRAIL_BINDING_SELECT_SQL =
-  "SELECT policy_id, active_revision, generation, binding_json " +
-  `FROM ${GUARDRAIL_BINDINGS_TABLE} WHERE policy_id = ?1`;
+export const GUARDRAIL_BINDING_SELECT_SQL = `SELECT policy_id, active_revision, generation, binding_json FROM ${GUARDRAIL_BINDINGS_TABLE} WHERE policy_id = ?1`;
 
 /** The INSERT arm of the CAS: only when no row exists yet (generation 0). */
-export const GUARDRAIL_BINDING_INSERT_CAS_SQL =
-  `INSERT INTO ${GUARDRAIL_BINDINGS_TABLE} ` +
-  "(policy_id, active_revision, updated_at_unix, generation, binding_json) " +
-  "SELECT ?1, ?2, ?3, ?4, ?5 " +
-  `WHERE NOT EXISTS (SELECT 1 FROM ${GUARDRAIL_BINDINGS_TABLE} WHERE policy_id = ?1) ` +
-  "RETURNING policy_id";
+export const GUARDRAIL_BINDING_INSERT_CAS_SQL = `INSERT INTO ${GUARDRAIL_BINDINGS_TABLE} (policy_id, active_revision, updated_at_unix, generation, binding_json) SELECT ?1, ?2, ?3, ?4, ?5 WHERE NOT EXISTS (SELECT 1 FROM ${GUARDRAIL_BINDINGS_TABLE} WHERE policy_id = ?1) RETURNING policy_id`;
 
 /** The UPDATE arm of the CAS. An empty `RETURNING` set is the lost update. */
-export const GUARDRAIL_BINDING_UPDATE_CAS_SQL =
-  `UPDATE ${GUARDRAIL_BINDINGS_TABLE} ` +
-  "SET active_revision = ?2, updated_at_unix = ?3, generation = ?4, binding_json = ?5 " +
-  "WHERE policy_id = ?1 AND generation = ?6 " +
-  "RETURNING policy_id";
+export const GUARDRAIL_BINDING_UPDATE_CAS_SQL = `UPDATE ${GUARDRAIL_BINDINGS_TABLE} SET active_revision = ?2, updated_at_unix = ?3, generation = ?4, binding_json = ?5 WHERE policy_id = ?1 AND generation = ?6 RETURNING policy_id`;
 
 // ---------------------------------------------------------------------------
 // Revisions
@@ -203,14 +187,7 @@ async function commitBinding(
           .all()
       : await db
           .prepare(GUARDRAIL_BINDING_UPDATE_CAS_SQL)
-          .bind(
-            policyId,
-            next.activeRevision,
-            nowUnix,
-            generation,
-            document,
-            current.generation,
-          )
+          .bind(policyId, next.activeRevision, nowUnix, generation, document, current.generation)
           .all();
   if ((written.results ?? []).length === 0) {
     // The row moved between the read and the write. Never retried here:

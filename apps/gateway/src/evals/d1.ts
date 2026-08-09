@@ -44,9 +44,10 @@
  * a score row records the model as it was AT SCORING TIME, which is what a
  * point-in-time measurement wants anyway.
  */
-import type { OnlineEvalScoreRecord } from "./record.js";
+
 import { controlDatabaseFrom } from "../control-data.js";
 import { evidenceProjectionKey, requestLogTenantDatabaseFrom } from "../requestlog/d1.js";
+import type { OnlineEvalScoreRecord } from "./record.js";
 
 export const ONLINE_EVAL_SCORE_TABLE = "online_eval_scores";
 export const ONLINE_EVAL_REGRESSION_TABLE = "online_eval_regressions";

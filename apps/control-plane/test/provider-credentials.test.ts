@@ -63,9 +63,9 @@ function revoke(secret: string, alias: string): Promise<Response> {
   });
 }
 
-async function rows(tenantId: string): Promise<
-  { tenant_id: string; alias: string; ciphertext: string; last4: string }[]
-> {
+async function rows(
+  tenantId: string,
+): Promise<{ tenant_id: string; alias: string; ciphertext: string; last4: string }[]> {
   const result = await tenantObjectDb(tenantId)
     .prepare("SELECT tenant_id, alias, ciphertext, last4 FROM tenant_provider_credentials")
     .all<{ tenant_id: string; alias: string; ciphertext: string; last4: string }>();

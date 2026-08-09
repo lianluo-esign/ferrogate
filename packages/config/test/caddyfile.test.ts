@@ -1,13 +1,16 @@
 import { describe, expect, test } from "vitest";
+import { adaptSiteAddress, envReference } from "../src/caddyfile/parser-support.js";
 import { parseCaddyfile } from "../src/caddyfile/parser.js";
 import { CaddyfileDiagnostic } from "../src/diagnostic.js";
-import { adaptSiteAddress, envReference } from "../src/caddyfile/parser-support.js";
 import { fromCaddyfileStr, fromGatewayConfig, isCaddyfilePath } from "../src/loader.js";
 
 describe("caddyfile helpers", () => {
   test("adaptSiteAddress maps :PORT / host:port / 0.0.0.0 / bare host", () => {
     expect(adaptSiteAddress(":8080")).toEqual({ listen: "127.0.0.1:8080", host: null });
-    expect(adaptSiteAddress("localhost:9000")).toEqual({ listen: "127.0.0.1:9000", host: "localhost" });
+    expect(adaptSiteAddress("localhost:9000")).toEqual({
+      listen: "127.0.0.1:9000",
+      host: "localhost",
+    });
     expect(adaptSiteAddress("0.0.0.0:8080")).toEqual({ listen: "0.0.0.0:8080", host: null });
     expect(adaptSiteAddress("api.example.com")).toEqual({ listen: null, host: "api.example.com" });
   });
@@ -30,9 +33,14 @@ describe("parseCaddyfile", () => {
     const config = parseCaddyfile(src, "Caddyfile");
     expect(config.listen).toBe("127.0.0.1:8080");
     expect(config.upstreams).toHaveLength(1);
-    expect(config.upstreams[0]).toMatchObject({ name: "caddyfile-upstream-1", url: "http://127.0.0.1:9001" });
+    expect(config.upstreams[0]).toMatchObject({
+      name: "caddyfile-upstream-1",
+      url: "http://127.0.0.1:9001",
+    });
     expect(config.routes[0]).toMatchObject({ upstream: "caddyfile-upstream-1" });
-    expect(config.routes[0]!.request_headers).toEqual([{ name: "X-Env", value: "prod" }]);
+    expect((config.routes[0] as NonNullable<(typeof config.routes)[0]>).request_headers).toEqual([
+      { name: "X-Env", value: "prod" },
+    ]);
   });
 
   test("parses the ai_gateway block (provider / model / api_key) and auth off", () => {
@@ -56,14 +64,27 @@ describe("parseCaddyfile", () => {
     }`;
     const config = parseCaddyfile(src, "Caddyfile");
     expect(config.auth_disabled).toBe(true);
-    expect(config.providers[0]).toMatchObject({ name: "openai", base_url: "https://api.openai.com", api_key_env: "OPENAI_KEY" });
-    expect(config.models[0]).toMatchObject({ name: "gpt4", provider: "openai", provider_model: "gpt-4o" });
-    expect(config.models[0]!.capabilities).toEqual(["chat", "streaming"]);
+    expect(config.providers[0]).toMatchObject({
+      name: "openai",
+      base_url: "https://api.openai.com",
+      api_key_env: "OPENAI_KEY",
+    });
+    expect(config.models[0]).toMatchObject({
+      name: "gpt4",
+      provider: "openai",
+      provider_model: "gpt-4o",
+    });
+    expect((config.models[0] as NonNullable<(typeof config.models)[0]>).capabilities).toEqual([
+      "chat",
+      "streaming",
+    ]);
     expect(config.api_keys[0]).toMatchObject({ id: "k1", key_env: "K1", organization_id: "org-1" });
   });
 
   test("throws a CaddyfileDiagnostic on an unsupported directive", () => {
-    expect(() => parseCaddyfile(":8080 {\n  bogus_directive x\n}", "Caddyfile")).toThrow(CaddyfileDiagnostic);
+    expect(() => parseCaddyfile(":8080 {\n  bogus_directive x\n}", "Caddyfile")).toThrow(
+      CaddyfileDiagnostic,
+    );
   });
 
   /**
@@ -80,7 +101,7 @@ describe("parseCaddyfile", () => {
         withCapabilities("chat streaming vision images embeddings tools structured_output"),
         "Caddyfile",
       );
-      expect(config.models[0]!.capabilities).toEqual([
+      expect((config.models[0] as NonNullable<(typeof config.models)[0]>).capabilities).toEqual([
         "chat",
         "streaming",
         "vision",
@@ -121,7 +142,9 @@ describe("parseCaddyfile", () => {
       }
     }`;
     const config = parseCaddyfile(src, "Caddyfile", { ORG: "tenant-9" });
-    expect(config.api_keys[0]!.organization_id).toBe("tenant-9");
+    expect((config.api_keys[0] as NonNullable<(typeof config.api_keys)[0]>).organization_id).toBe(
+      "tenant-9",
+    );
     expect(() => parseCaddyfile(src, "Caddyfile", {})).toThrow(/is not set/);
   });
 });
@@ -146,7 +169,9 @@ describe("loader bridge", () => {
       }
     }`;
     const { config } = fromCaddyfileStr(declared, "Caddyfile");
-    expect(config.api_keys[0]!.platform_operator).toBe(true);
+    expect((config.api_keys[0] as NonNullable<(typeof config.api_keys)[0]>).platform_operator).toBe(
+      true,
+    );
 
     const undeclared = `{
       auth off
@@ -162,7 +187,10 @@ describe("loader bridge", () => {
   });
 
   test("fromGatewayConfig carries auth_disabled and maps upstream/routes", () => {
-    const gateway = parseCaddyfile("{\n auth off\n}\n:8080 {\n reverse_proxy http://u:9000\n}", "Caddyfile");
+    const gateway = parseCaddyfile(
+      "{\n auth off\n}\n:8080 {\n reverse_proxy http://u:9000\n}",
+      "Caddyfile",
+    );
     const raw = fromGatewayConfig(gateway);
     expect(raw.auth).toEqual({ disabled: true });
     expect((raw.upstreams as unknown[]).length).toBe(1);

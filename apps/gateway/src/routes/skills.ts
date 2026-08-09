@@ -103,10 +103,7 @@ export function parseSkillPackages(raw: string | undefined): readonly SkillPacka
  * tenant. Narrowing or widening that to the tenant would silently change which
  * packages an existing deployment's callers can see.
  */
-export function skillPackageVisibleToAuth(
-  pkg: SkillPackage,
-  auth: AuthContext | null,
-): boolean {
+export function skillPackageVisibleToAuth(pkg: SkillPackage, auth: AuthContext | null): boolean {
   if (!pkg.enabled) return false;
   if (pkg.api_key_ids.length === 0) return true;
   const apiKeyId = auth?.subject ?? null;
@@ -141,9 +138,7 @@ export function agentSkillListDocument(
 ): AgentSkillListDocument {
   return {
     object: "list",
-    data: packages
-      .filter((pkg) => skillPackageVisibleToAuth(pkg, auth))
-      .map(agentSkillPackage),
+    data: packages.filter((pkg) => skillPackageVisibleToAuth(pkg, auth)).map(agentSkillPackage),
   };
 }
 

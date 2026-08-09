@@ -5,54 +5,40 @@ import {
   SecretResolverRegistry,
   parseSecretRef,
 } from "../src/index.js";
-import {
-  BASE,
-  okEnvelope,
-  readRoutes,
-  resolverWith,
-  secretsListingJson,
-} from "./support.js";
+import { BASE, okEnvelope, readRoutes, resolverWith, secretsListingJson } from "./support.js";
 
 describe("CloudflareSecretResolver.resolve (existence check only)", () => {
   it("surfaces a write-only value as a precise error", async () => {
     const resolver = resolverWith(readRoutes());
     const ref = parseSecretRef("cf://provider-keys/openai-api-key");
     await expect(resolver.resolve(ref)).rejects.toThrow(/write-only/);
-    await expect(resolver.resolve(ref)).rejects.toThrow(
-      /FERROGATE_CF_SECRET_OPENAI_API_KEY/,
-    );
+    await expect(resolver.resolve(ref)).rejects.toThrow(/FERROGATE_CF_SECRET_OPENAI_API_KEY/);
     await expect(resolver.resolve(ref)).rejects.toThrow(/vault:\/\//);
   });
 
   it("accepts the store segment as a store id", async () => {
     const resolver = resolverWith(readRoutes());
-    await expect(
-      resolver.resolve(parseSecretRef("cf://store-1/openai-api-key")),
-    ).rejects.toThrow(/write-only/);
+    await expect(resolver.resolve(parseSecretRef("cf://store-1/openai-api-key"))).rejects.toThrow(
+      /write-only/,
+    );
   });
 
   it("returns null for a missing secret", async () => {
     const routes = readRoutes();
     routes.set(`GET ${BASE}/stores/store-1/secrets`, [200, okEnvelope("[]")]);
     const resolver = resolverWith(routes);
-    expect(
-      await resolver.resolve(parseSecretRef("cf://provider-keys/nope")),
-    ).toBeNull();
+    expect(await resolver.resolve(parseSecretRef("cf://provider-keys/nope"))).toBeNull();
   });
 
   it("returns null for a missing store", async () => {
-    const resolver = resolverWith(
-      new Map([[`GET ${BASE}/stores`, [200, okEnvelope("[]")]]]),
-    );
-    expect(
-      await resolver.resolve(parseSecretRef("cf://absent/whatever")),
-    ).toBeNull();
+    const resolver = resolverWith(new Map([[`GET ${BASE}/stores`, [200, okEnvelope("[]")]]]));
+    expect(await resolver.resolve(parseSecretRef("cf://absent/whatever"))).toBeNull();
   });
 
   it("rejects a non-cf reference", async () => {
-    await expect(
-      resolverWith(readRoutes()).resolve(parseSecretRef("env://X")),
-    ).rejects.toThrow(/non-cf/);
+    await expect(resolverWith(readRoutes()).resolve(parseSecretRef("env://X"))).rejects.toThrow(
+      /non-cf/,
+    );
   });
 });
 
@@ -67,8 +53,14 @@ describe("CloudflareSecretResolver.createSecret (write plane + caps)", () => {
   it("writes via REST and returns the new secret id", async () => {
     const routes = new Map<string, [number, string]>([
       [`GET ${BASE}/stores`, [200, okEnvelope(`[{"id":"store-1","name":"provider-keys"}]`)]],
-      [`GET ${BASE}/stores/store-1/secrets`, [200, okEnvelope(`[{"id":"sec-1","name":"openai-api-key"}]`)]],
-      [`POST ${BASE}/stores/store-1/secrets`, [200, okEnvelope(`[{"id":"sec-new","name":"new-key"}]`)]],
+      [
+        `GET ${BASE}/stores/store-1/secrets`,
+        [200, okEnvelope(`[{"id":"sec-1","name":"openai-api-key"}]`)],
+      ],
+      [
+        `POST ${BASE}/stores/store-1/secrets`,
+        [200, okEnvelope(`[{"id":"sec-new","name":"new-key"}]`)],
+      ],
     ]);
     const resolver = resolverWith(routes);
     expect(
@@ -85,9 +77,9 @@ describe("CloudflareSecretResolver.createSecret (write plane + caps)", () => {
     const resolver = resolverWith(routes);
     const err = resolver.createSecret("provider-keys", "one-too-many", "sk");
     await expect(err).rejects.toThrow(/100 secrets.*budget/);
-    await expect(
-      resolver.createSecret("provider-keys", "one-too-many", "sk"),
-    ).rejects.not.toThrow(/unscripted request/);
+    await expect(resolver.createSecret("provider-keys", "one-too-many", "sk")).rejects.not.toThrow(
+      /unscripted request/,
+    );
   });
 
   it("allows overwriting an existing name at the budget (logs soft warning)", async () => {
@@ -95,7 +87,10 @@ describe("CloudflareSecretResolver.createSecret (write plane + caps)", () => {
     const routes = new Map<string, [number, string]>([
       [`GET ${BASE}/stores`, [200, okEnvelope(`[{"id":"store-1","name":"provider-keys"}]`)]],
       [`GET ${BASE}/stores/store-1/secrets`, [200, okEnvelope(secretsListingJson(100))]],
-      [`POST ${BASE}/stores/store-1/secrets`, [200, okEnvelope(`[{"id":"sec-7","name":"bulk-7"}]`)]],
+      [
+        `POST ${BASE}/stores/store-1/secrets`,
+        [200, okEnvelope(`[{"id":"sec-7","name":"bulk-7"}]`)],
+      ],
     ]);
     const resolver = resolverWith(routes);
     expect(await resolver.createSecret("provider-keys", "bulk-7", "rotated")).toBe("sec-7");
@@ -106,9 +101,9 @@ describe("CloudflareSecretResolver.createSecret (write plane + caps)", () => {
   it("refuses a non-canonical name before reaching the store", async () => {
     // Unscripted transport: a refusal after the call would surface loudly.
     const resolver = resolverWith(new Map());
-    await expect(
-      resolver.createSecret("provider-keys", "openai_api_key", "sk"),
-    ).rejects.toThrow(/not canonical/);
+    await expect(resolver.createSecret("provider-keys", "openai_api_key", "sk")).rejects.toThrow(
+      /not canonical/,
+    );
     await expect(
       resolver.createSecret("provider-keys", "openai_api_key", "sk"),
     ).rejects.not.toThrow(/unscripted request/);
@@ -122,12 +117,8 @@ describe("CloudflareSecretResolver.createSecret (write plane + caps)", () => {
   });
 
   it("errors when the target store is not found", async () => {
-    const resolver = resolverWith(
-      new Map([[`GET ${BASE}/stores`, [200, okEnvelope("[]")]]]),
-    );
-    await expect(
-      resolver.createSecret("absent", "new-key", "sk"),
-    ).rejects.toThrow(/not found/);
+    const resolver = resolverWith(new Map([[`GET ${BASE}/stores`, [200, okEnvelope("[]")]]]));
+    await expect(resolver.createSecret("absent", "new-key", "sk")).rejects.toThrow(/not found/);
   });
 });
 
@@ -158,9 +149,7 @@ describe("CfSecretsStoreConfig + registry REST wiring", () => {
     const routes = readRoutes();
     routes.set(`GET ${BASE}/stores/store-1/secrets`, [200, okEnvelope("[]")]);
     const registry = SecretResolverRegistry.new({}).withCloudflare(resolverWith(routes));
-    expect(
-      await registry.resolve("cf://provider-keys/registry-rest-missing-key"),
-    ).toBeNull();
+    expect(await registry.resolve("cf://provider-keys/registry-rest-missing-key")).toBeNull();
   });
 
   it("registry prefers a binding value over the REST backend", async () => {
@@ -170,9 +159,7 @@ describe("CfSecretsStoreConfig + registry REST wiring", () => {
     const registry = SecretResolverRegistry.new({
       FERROGATE_CF_SECRET_OPENAI_API_KEY: "sk-bound-wins",
     }).withCloudflare(rest);
-    expect(await registry.resolve("cf://provider-keys/openai-api-key")).toBe(
-      "sk-bound-wins",
-    );
+    expect(await registry.resolve("cf://provider-keys/openai-api-key")).toBe("sk-bound-wins");
   });
 
   it("CloudflareSecretResolver.create builds a client offline and holds a token ref", () => {

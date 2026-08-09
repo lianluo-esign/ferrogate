@@ -142,8 +142,7 @@ export class ResponsesOutputScraper {
     // The provider's own completed `response.output` WINS over the assembled
     // text: it carries reasoning items and tool calls the deltas never showed.
     const output =
-      this.#completedOutput ??
-      (this.#text === "" ? [] : [assistantMessageItem(this.#text)]);
+      this.#completedOutput ?? (this.#text === "" ? [] : [assistantMessageItem(this.#text)]);
     return {
       output,
       ...(this.#upstreamResponseId !== undefined
@@ -199,11 +198,10 @@ export class ResponsesOutputScraper {
     // The event name may arrive on the `event:` line (our normalizer, and the
     // OpenAI wire format) or as the payload's own `type` (some relays send only
     // `data:`). Both are accepted; neither is required to be present.
-    const type =
-      this.#eventName ?? (typeof record["type"] === "string" ? record["type"] : undefined);
+    const type = this.#eventName ?? (typeof record.type === "string" ? record.type : undefined);
 
     if (type === "response.output_text.delta") {
-      const delta = record["delta"];
+      const delta = record.delta;
       if (typeof delta === "string" && !this.#truncated) {
         if (this.#text.length + delta.length > MAX_CAPTURED_TEXT) {
           this.#truncated = true;
@@ -215,12 +213,12 @@ export class ResponsesOutputScraper {
     }
 
     if (type === "response.completed" || type === "response.incomplete") {
-      const response = record["response"];
+      const response = record.response;
       if (typeof response === "object" && response !== null && !Array.isArray(response)) {
         const body = response as Record<string, unknown>;
-        const output = body["output"];
+        const output = body.output;
         if (Array.isArray(output)) this.#completedOutput = [...output];
-        const id = body["id"];
+        const id = body.id;
         if (typeof id === "string" && id !== "") this.#upstreamResponseId = id;
       }
     }

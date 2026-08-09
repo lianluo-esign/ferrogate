@@ -1,21 +1,19 @@
+import { en } from "@/i18n/locales/en";
+import { zhCN } from "@/i18n/locales/zh-CN";
+import OpsDrainPage from "@/pages/ops-drain";
+import { drainStatus } from "@/test/fixtures/ops";
+import { gatewayUrl, server } from "@/test/msw";
+import { renderWithProviders, seedSession } from "@/test/test-utils";
 // Bilingual smoke test for the migrated ops-* pages (#348). Proves the operator
 // copy now flows through the typed `@/i18n` catalog and renders in BOTH the
 // default English locale and Simplified Chinese, rather than hard-coded literals.
 import { screen } from "@testing-library/react";
-import { HttpResponse, http } from "msw";
+import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it } from "vitest";
-import OpsDrainPage from "@/pages/ops-drain";
-import { en } from "@/i18n/locales/en";
-import { zhCN } from "@/i18n/locales/zh-CN";
-import { drainStatus } from "@/test/fixtures/ops";
-import { gatewayUrl, server } from "@/test/msw";
-import { renderWithProviders, seedSession } from "@/test/test-utils";
 
 beforeEach(() => {
   seedSession();
-  server.use(
-    http.get(gatewayUrl("/admin/v1/drain"), () => HttpResponse.json(drainStatus())),
-  );
+  server.use(http.get(gatewayUrl("/admin/v1/drain"), () => HttpResponse.json(drainStatus())));
 });
 
 describe("ops pages i18n", () => {

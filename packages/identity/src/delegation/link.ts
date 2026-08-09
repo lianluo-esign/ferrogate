@@ -309,15 +309,15 @@ export function parseDelegationClaims(input: unknown): DelegationClaimsResult {
   }
   const raw = input as Record<string, unknown>;
 
-  if (raw["v"] !== DELEGATION_FORMAT_VERSION) return { ok: false, field: "version" };
-  if (!nonEmptyString(raw["jti"])) return { ok: false, field: "jti" };
-  if (!nonEmptyString(raw["iss"])) return { ok: false, field: "iss" };
-  if (!nonEmptyString(raw["tenant"])) return { ok: false, field: "tenant" };
-  if (!isDelegationPrincipal(raw["act"])) return { ok: false, field: "act" };
-  if (!isDelegationPrincipal(raw["sub"])) return { ok: false, field: "sub" };
-  if (!nonEmptyString(raw["sub_key"])) return { ok: false, field: "sub_key" };
+  if (raw.v !== DELEGATION_FORMAT_VERSION) return { ok: false, field: "version" };
+  if (!nonEmptyString(raw.jti)) return { ok: false, field: "jti" };
+  if (!nonEmptyString(raw.iss)) return { ok: false, field: "iss" };
+  if (!nonEmptyString(raw.tenant)) return { ok: false, field: "tenant" };
+  if (!isDelegationPrincipal(raw.act)) return { ok: false, field: "act" };
+  if (!isDelegationPrincipal(raw.sub)) return { ok: false, field: "sub" };
+  if (!nonEmptyString(raw.sub_key)) return { ok: false, field: "sub_key" };
 
-  const scope = raw["scope"];
+  const scope = raw.scope;
   // An EMPTY scope array is refused rather than read as "grants nothing" or
   // "grants everything". Both readings are defensible, which is exactly why the
   // format must not contain the question: `ports.ts::hasScope` already gives an
@@ -329,28 +329,28 @@ export function parseDelegationClaims(input: unknown): DelegationClaimsResult {
   }
   if (!scope.every((entry) => nonEmptyString(entry))) return { ok: false, field: "scope" };
 
-  if (!finiteUnixSecond(raw["iat"])) return { ok: false, field: "iat" };
-  if (!finiteUnixSecond(raw["exp"])) return { ok: false, field: "exp" };
-  if (raw["exp"] <= raw["iat"]) return { ok: false, field: "exp" };
+  if (!finiteUnixSecond(raw.iat)) return { ok: false, field: "iat" };
+  if (!finiteUnixSecond(raw.exp)) return { ok: false, field: "exp" };
+  if (raw.exp <= raw.iat) return { ok: false, field: "exp" };
 
-  const prev = raw["prev"];
+  const prev = raw.prev;
   if (prev !== undefined && !nonEmptyString(prev)) return { ok: false, field: "prev" };
-  const run = raw["run"];
+  const run = raw.run;
   if (run !== undefined && !nonEmptyString(run)) return { ok: false, field: "run" };
 
   return {
     ok: true,
     claims: {
       v: DELEGATION_FORMAT_VERSION,
-      jti: raw["jti"] as string,
-      iss: raw["iss"] as string,
-      tenant: raw["tenant"] as string,
-      act: raw["act"] as string,
-      sub: raw["sub"] as string,
-      sub_key: raw["sub_key"] as string,
+      jti: raw.jti as string,
+      iss: raw.iss as string,
+      tenant: raw.tenant as string,
+      act: raw.act as string,
+      sub: raw.sub as string,
+      sub_key: raw.sub_key as string,
       scope: (scope as string[]).slice(),
-      iat: raw["iat"] as number,
-      exp: raw["exp"] as number,
+      iat: raw.iat as number,
+      exp: raw.exp as number,
       ...(prev === undefined ? {} : { prev: prev as string }),
       ...(run === undefined ? {} : { run: run as string }),
     },
@@ -409,8 +409,8 @@ export function splitDelegationLink(token: string): SplitDelegationLink | null {
 
   const header = decodeBase64UrlJson(headerSegment);
   if (header === null) return null;
-  if (header["alg"] !== DELEGATION_JWS_ALGORITHM) return null;
-  if (header["typ"] !== DELEGATION_JWS_TYPE) return null;
+  if (header.alg !== DELEGATION_JWS_ALGORITHM) return null;
+  if (header.typ !== DELEGATION_JWS_TYPE) return null;
 
   return { headerSegment, payloadSegment, signature };
 }

@@ -1,3 +1,11 @@
+import {
+  contractOperation,
+  contractSchema,
+  fieldShapes,
+  responseSchemaRef,
+  sortedRequired,
+} from "@/lib/contract-pin";
+import { parseAlerts, parseControlPlane, parseRuntime, parseUsage } from "@/lib/overview";
 // Wire-contract drift alarm for GET /admin/v1/overview (issue #343).
 //
 // Why this exists: the #339 contract types each section's `data` as an OPEN
@@ -32,19 +40,6 @@
 // The server↔contract half (the backend actually serializing this document) is
 // #884's acceptance, not this file's.
 import { describe, expect, it } from "vitest";
-import {
-  contractOperation,
-  contractSchema,
-  fieldShapes,
-  responseSchemaRef,
-  sortedRequired,
-} from "@/lib/contract-pin";
-import {
-  parseAlerts,
-  parseControlPlane,
-  parseRuntime,
-  parseUsage,
-} from "@/lib/overview";
 
 describe("admin overview envelope (docs/openapi/admin-api.openapi.json)", () => {
   it("GET /admin/v1/overview still answers 200 with AdminOverview", () => {

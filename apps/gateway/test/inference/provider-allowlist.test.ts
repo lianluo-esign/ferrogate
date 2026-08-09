@@ -111,9 +111,7 @@ const OK_BODY = {
   id: "chatcmpl-1",
   object: "chat.completion",
   model: "m",
-  choices: [
-    { index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" },
-  ],
+  choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
 };
 
 // ---------------------------------------------------------------------------
@@ -135,15 +133,13 @@ describe("callerCanUseProvider is the Rust can_use_provider predicate", () => {
     // `allowed_providers.is_empty() || allowed_providers.contains(p)`. A
     // credential source with no such column must not read as "may use nothing".
     expect(callerCanUseProvider({ scope: restricted.scope }, "beta")).toBe(true);
-    expect(
-      callerCanUseProvider({ ...restricted, allowedProviders: [] }, "beta"),
-    ).toBe(true);
+    expect(callerCanUseProvider({ ...restricted, allowedProviders: [] }, "beta")).toBe(true);
   });
 
   it("lets a DENY win over an allowlist that names the provider", () => {
-    expect(
-      callerCanUseProvider({ ...restricted, deniedProviders: ["alpha"] }, "alpha"),
-    ).toBe(false);
+    expect(callerCanUseProvider({ ...restricted, deniedProviders: ["alpha"] }, "alpha")).toBe(
+      false,
+    );
   });
 });
 
@@ -216,9 +212,7 @@ describe("dispatchWithFailover places the provider gate exactly where Rust does"
     if (outcome.ok) return;
     expect(outcome.rejection.status).toBe(403);
     expect(outcome.rejection.code).toBe("provider_not_allowed");
-    expect(outcome.rejection.message).toBe(
-      "API key is not allowed to use provider alpha",
-    );
+    expect(outcome.rejection.message).toBe("API key is not allowed to use provider alpha");
     // The assertion a route-EXCLUSION implementation cannot satisfy: `beta` is
     // allowed and eligible, and it is still never reached.
     expect(tried).toEqual([]);

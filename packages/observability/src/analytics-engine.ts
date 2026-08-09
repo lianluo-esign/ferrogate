@@ -99,9 +99,7 @@ function byteLength(value: string): number {
  * Validate one data point against the Analytics Engine per-point limits.
  * Returns `null` when it is writable, otherwise the reason it would be dropped.
  */
-export function analyticsEngineDataPointViolation(
-  point: AnalyticsEngineDataPoint,
-): string | null {
+export function analyticsEngineDataPointViolation(point: AnalyticsEngineDataPoint): string | null {
   if (point.indexes.length !== 1) {
     return `analytics engine requires exactly 1 index, got ${point.indexes.length}`;
   }

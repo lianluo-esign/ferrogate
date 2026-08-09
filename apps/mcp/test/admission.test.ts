@@ -44,7 +44,11 @@ import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { hashApiKeySecret } from "../src/auth.js";
 import { type Fixture, rpcRequest, seedFixture } from "./fixtures.js";
-import { resetTenantObjectState, seedTenantRoleProjection, tenantObjectDb } from "./tenant-object.js";
+import {
+  resetTenantObjectState,
+  seedTenantRoleProjection,
+  tenantObjectDb,
+} from "./tenant-object.js";
 
 interface AdmissionBindings {
   readonly DB: D1Database;

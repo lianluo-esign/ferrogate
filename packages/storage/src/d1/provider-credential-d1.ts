@@ -114,9 +114,7 @@ const COLUMNS =
  * is decided in application code after the row is already in memory is a
  * revocation with a window in it.
  */
-export const LOOKUP_TENANT_PROVIDER_CREDENTIAL_SQL =
-  `SELECT ${COLUMNS} FROM tenant_provider_credentials ` +
-  "WHERE tenant_id = ? AND alias = ? AND revoked_at_unix IS NULL";
+export const LOOKUP_TENANT_PROVIDER_CREDENTIAL_SQL = `SELECT ${COLUMNS} FROM tenant_provider_credentials WHERE tenant_id = ? AND alias = ? AND revoked_at_unix IS NULL`;
 
 interface CredentialRow {
   tenant_id: string;
@@ -166,10 +164,7 @@ export class D1TenantProviderCredentialStore {
    * another tenant's — deliberately the same answer for all three, so this is
    * not an oracle for other tenants' alias names.
    */
-  async lookup(
-    tenantId: string,
-    alias: string,
-  ): Promise<StoredTenantProviderCredential | null> {
+  async lookup(tenantId: string, alias: string): Promise<StoredTenantProviderCredential | null> {
     try {
       const row = await this.db
         .prepare(LOOKUP_TENANT_PROVIDER_CREDENTIAL_SQL)
@@ -191,20 +186,11 @@ export class D1TenantProviderCredentialStore {
    * REVIVED by a rotation — `revoked_at_unix` resets to NULL — because the
    * alternative is a tenant permanently burning an alias name they own.
    */
-  async upsert(
-    write: TenantProviderCredentialWrite,
-    nowUnix: number,
-  ): Promise<void> {
+  async upsert(write: TenantProviderCredentialWrite, nowUnix: number): Promise<void> {
     try {
       await this.db
         .prepare(
-          "INSERT INTO tenant_provider_credentials " +
-            `(${COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL) ` +
-            "ON CONFLICT(tenant_id, alias) DO UPDATE SET " +
-            "provider = excluded.provider, key_version = excluded.key_version, " +
-            "iv = excluded.iv, ciphertext = excluded.ciphertext, " +
-            "last4 = excluded.last4, rotated_at_unix = excluded.rotated_at_unix, " +
-            "revoked_at_unix = NULL",
+          `INSERT INTO tenant_provider_credentials (${COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL) ON CONFLICT(tenant_id, alias) DO UPDATE SET provider = excluded.provider, key_version = excluded.key_version, iv = excluded.iv, ciphertext = excluded.ciphertext, last4 = excluded.last4, rotated_at_unix = excluded.rotated_at_unix, revoked_at_unix = NULL`,
         )
         .bind(
           write.tenantId,

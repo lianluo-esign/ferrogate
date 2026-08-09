@@ -1,14 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
-  billingErrorHttpStatus,
   BillingError,
+  type BillingServiceConfig,
+  InMemoryLedgerSink,
+  PriceBook,
+  billingErrorHttpStatus,
   constantTimeEq,
   createBillingService,
-  InMemoryLedgerSink,
   modelPriceUsd,
   priceEntry,
-  PriceBook,
-  type BillingServiceConfig,
 } from "../src/index.js";
 
 function config(token?: string): BillingServiceConfig & { sink: InMemoryLedgerSink } {
@@ -54,7 +54,10 @@ describe("billing service routing", () => {
     const svc = createBillingService(cfg);
     const res = await svc(post("/v1/billing/charge", eventBody("openai", "gpt-5.5")));
     expect(res.status).toBe(200);
-    const entry = (await res.json()) as { cost: { total_cost: number }; provider_attempt_id: string };
+    const entry = (await res.json()) as {
+      cost: { total_cost: number };
+      provider_attempt_id: string;
+    };
     expect(entry.cost.total_cost).toBeCloseTo(0.035, 12);
     expect(entry.provider_attempt_id).toBe("req-http:provider-attempt:0");
     expect(cfg.sink.length).toBe(1);
@@ -70,12 +73,16 @@ describe("billing service routing", () => {
 
   it("rejects a provider-attempt key collision with 409", async () => {
     const svc = createBillingService(config());
-    expect((await svc(post("/v1/billing/charge", eventBody("openai", "gpt-5.5")))).status).toBe(200);
+    expect((await svc(post("/v1/billing/charge", eventBody("openai", "gpt-5.5")))).status).toBe(
+      200,
+    );
     const collision = JSON.parse(eventBody("openai", "gpt-5.5"));
     collision.tenant = { organization_id: "different-tenant" };
     const res = await svc(post("/v1/billing/charge", JSON.stringify(collision)));
     expect(res.status).toBe(409);
-    expect(((await res.json()) as { error: { code: string } }).error.code).toBe("billing_idempotency_conflict");
+    expect(((await res.json()) as { error: { code: string } }).error.code).toBe(
+      "billing_idempotency_conflict",
+    );
   });
 
   it("rejects a malformed body with 400 invalid_json", async () => {
@@ -100,11 +107,13 @@ describe("billing service routing", () => {
     await svc(post("/v1/billing/charge", eventBody("openai", "gpt-5.5", "org-b")));
     const all = (await (await svc(get("/v1/billing/ledger"))).json()) as { entries: unknown[] };
     expect(all.entries).toHaveLength(2);
-    const scoped = (await (
-      await svc(get("/v1/billing/ledger?organization_id=org-a"))
-    ).json()) as { entries: Array<{ tenant: { organization_id: string } }> };
+    const scoped = (await (await svc(get("/v1/billing/ledger?organization_id=org-a"))).json()) as {
+      entries: Array<{ tenant: { organization_id: string } }>;
+    };
     expect(scoped.entries).toHaveLength(1);
-    expect(scoped.entries[0]!.tenant.organization_id).toBe("org-a");
+    expect(
+      (scoped.entries[0] as NonNullable<(typeof scoped.entries)[0]>).tenant.organization_id,
+    ).toBe("org-a");
   });
 
   it("fetches a single entry by id and 404s a miss", async () => {
@@ -128,7 +137,9 @@ describe("bearer auth (issue #136)", () => {
     const svc = createBillingService(cfg);
     expect((await svc(get("/v1/billing/ledger"))).status).toBe(401);
     expect((await svc(get("/v1/billing/ledger", "nope"))).status).toBe(401);
-    expect((await svc(post("/v1/billing/charge", eventBody("openai", "gpt-5.5")))).status).toBe(401);
+    expect((await svc(post("/v1/billing/charge", eventBody("openai", "gpt-5.5")))).status).toBe(
+      401,
+    );
     expect(cfg.sink.length).toBe(0);
   });
 

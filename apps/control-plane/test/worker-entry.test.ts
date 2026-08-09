@@ -39,7 +39,11 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   await resetD1();
-  arm({ store: "d1", staticKeys: [operatorKey], nativeKeys: [tenantKey(TENANT_KEY, "tenant_entry")] });
+  arm({
+    store: "d1",
+    staticKeys: [operatorKey],
+    nativeKeys: [tenantKey(TENANT_KEY, "tenant_entry")],
+  });
 });
 
 /** The bindings a cron invocation gets, with the D1 store selected. */
@@ -91,7 +95,11 @@ describe("the deploy entrypoint exports what the platform dispatches to", () => 
     await worker.queue?.(
       {
         messages: [
-          { body: tenantScheduleAlarmMessage("tenant_entry", slot), ack: () => {}, retry: () => {} },
+          {
+            body: tenantScheduleAlarmMessage("tenant_entry", slot),
+            ack: () => {},
+            retry: () => {},
+          },
         ],
       } as never,
       cronEnv(),

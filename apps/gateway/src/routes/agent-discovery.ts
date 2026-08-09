@@ -32,10 +32,7 @@
  */
 import type { Context } from "hono";
 import type { AuthContext, GatewayEnv } from "../ports.js";
-import {
-  type AgentUpstreamRegistryBindings,
-  agentUpstreamsForCaller,
-} from "./agent-upstreams.js";
+import { type AgentUpstreamRegistryBindings, agentUpstreamsForCaller } from "./agent-upstreams.js";
 
 /** JSON array of `AgentUpstreamConfig` records — Rust `[[agent_upstreams]]`. */
 export const AGENT_UPSTREAMS_VAR = "GATEWAY_AGENT_UPSTREAMS";
@@ -117,9 +114,9 @@ export function parseAgentUpstreams(raw: string | undefined): readonly AgentUpst
     if (typeof entry !== "object" || entry === null) return false;
     const record = entry as Record<string, unknown>;
     return (
-      typeof record["id"] === "string" &&
-      typeof record["name"] === "string" &&
-      typeof record["endpoint"] === "string"
+      typeof record.id === "string" &&
+      typeof record.name === "string" &&
+      typeof record.endpoint === "string"
     );
   });
 }
@@ -148,9 +145,7 @@ export function agentUpstreamVisibleToAuth(
 }
 
 /** `agent_upstream_discovery` — the config record projected onto the wire. */
-export function agentUpstreamDiscovery(
-  upstream: AgentUpstreamRecord,
-): AgentUpstreamDiscovery {
+export function agentUpstreamDiscovery(upstream: AgentUpstreamRecord): AgentUpstreamDiscovery {
   return {
     object: "agent_upstream",
     id: upstream.id,
@@ -171,7 +166,9 @@ export function agentDiscoveryDocument(
   return {
     object: "list",
     data: upstreams
-      .filter((upstream) => (upstream.enabled ?? true) && agentUpstreamVisibleToAuth(upstream, auth))
+      .filter(
+        (upstream) => (upstream.enabled ?? true) && agentUpstreamVisibleToAuth(upstream, auth),
+      )
       .map(agentUpstreamDiscovery),
   };
 }

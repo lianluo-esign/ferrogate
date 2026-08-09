@@ -42,9 +42,9 @@ export {
 } from "@ferrogate/storage";
 
 import {
-  quotaScopeKindFromString,
   type QuotaScopeKind,
   type WorkflowBudgetDimension,
+  quotaScopeKindFromString,
 } from "@ferrogate/storage";
 
 /**

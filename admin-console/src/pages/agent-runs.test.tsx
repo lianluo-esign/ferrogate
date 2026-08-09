@@ -1,8 +1,3 @@
-import { screen, waitFor } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
-import { HttpResponse, http } from "msw";
-import { useSearchParams } from "react-router-dom";
-import { beforeEach, describe, expect, it } from "vitest";
 import AgentRunsPage, {
   type AgentRunSummary,
   type ObservedAgentActivity,
@@ -10,6 +5,11 @@ import AgentRunsPage, {
 } from "@/pages/agent-runs";
 import { gatewayUrl, server } from "@/test/msw";
 import { renderWithProviders, seedSession } from "@/test/test-utils";
+import { screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { http, HttpResponse } from "msw";
+import { useSearchParams } from "react-router-dom";
+import { beforeEach, describe, expect, it } from "vitest";
 
 /** Surfaces the live URL query string so URL-state assertions can read it. */
 function SearchProbe() {
@@ -132,10 +132,7 @@ beforeEach(() => {
 
 describe("AgentRunsPage", () => {
   it("lists agent runs with status and correlated counts", async () => {
-    mockRuns([
-      run(),
-      run({ id: "run-2", status: "blocked", tenant: { project_id: "proj-beta" } }),
-    ]);
+    mockRuns([run(), run({ id: "run-2", status: "blocked", tenant: { project_id: "proj-beta" } })]);
 
     renderWithProviders(<AgentRunsPage />);
 
@@ -175,10 +172,7 @@ describe("AgentRunsPage", () => {
 
   it("filters by tenant id substring", async () => {
     const user = userEvent.setup();
-    mockRuns([
-      run(),
-      run({ id: "run-2", tenant: { project_id: "proj-beta" } }),
-    ]);
+    mockRuns([run(), run({ id: "run-2", tenant: { project_id: "proj-beta" } })]);
 
     renderWithProviders(<AgentRunsPage />);
     await screen.findByText("run-1");
@@ -205,22 +199,16 @@ describe("AgentRunsPage", () => {
     // keeps DISPLAYING the localized human label.
     await user.click(screen.getByRole("combobox"));
     await user.click(await screen.findByRole("option", { name: "Blocked" }));
-    await waitFor(() =>
-      expect(screen.getByTestId("search")).toHaveTextContent("status=blocked"),
-    );
+    await waitFor(() => expect(screen.getByTestId("search")).toHaveTextContent("status=blocked"));
 
     // The free-text tenant correlation filter also persists to the URL.
     await user.type(screen.getByLabelText("Tenant"), "proj-beta");
-    await waitFor(() =>
-      expect(screen.getByTestId("search")).toHaveTextContent("tenant=proj-beta"),
-    );
+    await waitFor(() => expect(screen.getByTestId("search")).toHaveTextContent("tenant=proj-beta"));
 
     // Returning to the default status prunes the param (clean canonical URL).
     await user.click(screen.getByRole("combobox"));
     await user.click(await screen.findByRole("option", { name: "All statuses" }));
-    await waitFor(() =>
-      expect(screen.getByTestId("search")).not.toHaveTextContent("status="),
-    );
+    await waitFor(() => expect(screen.getByTestId("search")).not.toHaveTextContent("status="));
   });
 
   it("links each run to its timeline detail page", async () => {
@@ -269,14 +257,17 @@ describe("AgentRunsPage — unattributed activity", () => {
   it("renders unavailable usage as unavailable, never as zero", async () => {
     const user = userEvent.setup();
     mockObservedActivity([
-      activity({}, {
-        usage_evidence_available: false,
-        prompt_tokens: undefined,
-        completion_tokens: undefined,
-        total_tokens: undefined,
-        cost_usd: undefined,
-        reason: "no usage rows recorded for this key",
-      }),
+      activity(
+        {},
+        {
+          usage_evidence_available: false,
+          prompt_tokens: undefined,
+          completion_tokens: undefined,
+          total_tokens: undefined,
+          cost_usd: undefined,
+          reason: "no usage rows recorded for this key",
+        },
+      ),
     ]);
 
     await openUnattributedTab(user);
@@ -436,17 +427,13 @@ describe("AgentRunsPage — unattributed activity", () => {
     expect(screen.getByText("Running window (seconds)")).toBeInTheDocument();
     expect(screen.getByText("Within running window")).toBeInTheDocument();
     expect(screen.getByText("Reason")).toBeInTheDocument();
-    expect(
-      screen.getByText("12 requests in the last 30s (ttl 300s)"),
-    ).toBeInTheDocument();
+    expect(screen.getByText("12 requests in the last 30s (ttl 300s)")).toBeInTheDocument();
     expect(screen.getByText("request_logs")).toBeInTheDocument();
     expect(screen.getByText("recent_api_key_activity")).toBeInTheDocument();
     expect(toggle).toHaveAttribute("aria-expanded", "true");
 
     await user.click(screen.getByRole("button", { name: /evidence for observed/ }));
-    await waitFor(() =>
-      expect(screen.queryByText("Requests observed")).not.toBeInTheDocument(),
-    );
+    await waitFor(() => expect(screen.queryByText("Requests observed")).not.toBeInTheDocument());
   });
 
   it("keeps the open view in the URL query state", async () => {
@@ -466,8 +453,6 @@ describe("AgentRunsPage — unattributed activity", () => {
 
     // Back to the default tab prunes the param (clean canonical URL).
     await user.click(screen.getByRole("tab", { name: "Runs" }));
-    await waitFor(() =>
-      expect(screen.getByTestId("search")).not.toHaveTextContent("view="),
-    );
+    await waitFor(() => expect(screen.getByTestId("search")).not.toHaveTextContent("view="));
   });
 });

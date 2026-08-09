@@ -1,9 +1,9 @@
-import { screen, within } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ResourceTable } from "@/components/resource/resource-table";
 import type { ColumnConfig } from "@/lib/resource-config";
 import { renderWithProviders } from "@/test/test-utils";
+import { screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 interface WidgetRow extends Record<string, unknown> {
   id: string;
@@ -41,9 +41,7 @@ beforeEach(() => setDesktopViewport(true));
 
 describe("ResourceTable", () => {
   it("renders column headers and one row per record (custom render applied)", () => {
-    renderWithProviders(
-      <ResourceTable columns={columns} rows={rows} isLoading={false} readOnly />,
-    );
+    renderWithProviders(<ResourceTable columns={columns} rows={rows} isLoading={false} readOnly />);
 
     expect(screen.getByText("Name")).toBeInTheDocument();
     expect(screen.getByText("Size")).toBeInTheDocument();
@@ -60,9 +58,7 @@ describe("ResourceTable", () => {
   });
 
   it("shows the empty state when there are no rows", () => {
-    renderWithProviders(
-      <ResourceTable columns={columns} rows={[]} isLoading={false} readOnly />,
-    );
+    renderWithProviders(<ResourceTable columns={columns} rows={[]} isLoading={false} readOnly />);
     expect(screen.getByText("No records yet.")).toBeInTheDocument();
   });
 

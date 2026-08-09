@@ -1,3 +1,7 @@
+import type { AdminSchema } from "@/lib/gateway-client";
+import BillingWalletsPage from "@/pages/billing-wallets";
+import { gatewayUrl, mockAdminError, server } from "@/test/msw";
+import { renderWithProviders, seedSession } from "@/test/test-utils";
 // Component tests for the wallet ops surface (#319).
 //
 // Load-bearing assertions: the overview + ledger render; adjust POSTs the exact
@@ -6,12 +10,8 @@
 // (adjust/charge are platform-operator-only, #229/#232).
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { HttpResponse, http } from "msw";
+import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it } from "vitest";
-import BillingWalletsPage from "@/pages/billing-wallets";
-import type { AdminSchema } from "@/lib/gateway-client";
-import { gatewayUrl, mockAdminError, server } from "@/test/msw";
-import { renderWithProviders, seedSession } from "@/test/test-utils";
 
 type AdminWallet = AdminSchema<"AdminWallet">;
 
@@ -32,9 +32,7 @@ function wallet(overrides: Partial<AdminWallet> = {}): AdminWallet {
 
 function mockWallets(rows: AdminWallet[]): void {
   server.use(
-    http.get(gatewayUrl(WALLETS_PATH), () =>
-      HttpResponse.json({ object: "list", data: rows }),
-    ),
+    http.get(gatewayUrl(WALLETS_PATH), () => HttpResponse.json({ object: "list", data: rows })),
   );
 }
 
@@ -183,9 +181,7 @@ describe("BillingWalletsPage adjust action", () => {
     await user.type(within(dialog).getByLabelText("Delta (credits)"), "100000");
     await user.click(within(dialog).getByRole("button", { name: "Apply adjustment" }));
 
-    expect(
-      await within(dialog).findByText("platform operator scope required"),
-    ).toBeInTheDocument();
+    expect(await within(dialog).findByText("platform operator scope required")).toBeInTheDocument();
   });
 });
 

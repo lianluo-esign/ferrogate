@@ -36,21 +36,21 @@
 import { createHash, createHmac } from "node:crypto";
 import { describe, expect, test } from "vitest";
 import {
+  type DetectorInput,
   DetectorSecret,
   DeterministicDetector,
   FixtureTransport,
+  type LlmGuardPromptInjectionConfig,
   LlmGuardPromptInjectionDetector,
   PresidioDetector,
+  type PresidioDetectorConfig,
   WORKERS_AI_LLAMA_GUARD_DEFAULT_MODEL,
+  type WorkersAiClient,
+  type WorkersAiLlamaGuardConfig,
   WorkersAiLlamaGuardDetector,
   envelopeFromText,
   hmacEvidenceFingerprint,
   normalizeRequest,
-  type DetectorInput,
-  type LlmGuardPromptInjectionConfig,
-  type PresidioDetectorConfig,
-  type WorkersAiClient,
-  type WorkersAiLlamaGuardConfig,
 } from "../src/index.js";
 
 const DEADLINE = () => Date.now() + 5_000;
@@ -106,7 +106,9 @@ describe("the pre-existing shape assertion cannot hold the keying", () => {
     expect(emptyKeyOracle(value)).toMatch(SHAPE);
     // ...and they are three genuinely different strings, so a test that only
     // checks the shape passes for all three.
-    expect(new Set([keyedOracle(KEY_A, value), unkeyedDigestOracle(value), emptyKeyOracle(value)]).size).toBe(3);
+    expect(
+      new Set([keyedOracle(KEY_A, value), unkeyedDigestOracle(value), emptyKeyOracle(value)]).size,
+    ).toBe(3);
   });
 });
 
@@ -125,16 +127,24 @@ describe("SITE 1 hmacEvidenceFingerprint — the shared adapter helper", () => {
   });
 
   test("2a. the fingerprint is NOT the unkeyed SHA-256 of the input", () => {
-    expect(hmacEvidenceFingerprint(DetectorSecret.new(KEY_A), VALUE)).not.toBe(unkeyedDigestOracle(VALUE));
+    expect(hmacEvidenceFingerprint(DetectorSecret.new(KEY_A), VALUE)).not.toBe(
+      unkeyedDigestOracle(VALUE),
+    );
   });
 
   test("2b. the fingerprint is NOT the empty-key HMAC of the input", () => {
-    expect(hmacEvidenceFingerprint(DetectorSecret.new(KEY_A), VALUE)).not.toBe(emptyKeyOracle(VALUE));
+    expect(hmacEvidenceFingerprint(DetectorSecret.new(KEY_A), VALUE)).not.toBe(
+      emptyKeyOracle(VALUE),
+    );
   });
 
   test("2c. it IS exactly HMAC-SHA-256(key, value), per an independent implementation", () => {
-    expect(hmacEvidenceFingerprint(DetectorSecret.new(KEY_A), VALUE)).toBe(keyedOracle(KEY_A, VALUE));
-    expect(hmacEvidenceFingerprint(DetectorSecret.new(KEY_B), VALUE)).toBe(keyedOracle(KEY_B, VALUE));
+    expect(hmacEvidenceFingerprint(DetectorSecret.new(KEY_A), VALUE)).toBe(
+      keyedOracle(KEY_A, VALUE),
+    );
+    expect(hmacEvidenceFingerprint(DetectorSecret.new(KEY_B), VALUE)).toBe(
+      keyedOracle(KEY_B, VALUE),
+    );
   });
 
   test("3. same key ⇒ stable fingerprint; and it still varies with the input", () => {
@@ -322,7 +332,10 @@ async function presidioFingerprint(key: string): Promise<string> {
     exchanges: [
       {
         request: { text: EMAIL_PROMPT, language: "en", score_threshold: 0.5 },
-        response: { status: 200, body: [{ entity_type: "EMAIL_ADDRESS", start: 12, end: 19, score: 0.9 }] },
+        response: {
+          status: 200,
+          body: [{ entity_type: "EMAIL_ADDRESS", start: 12, end: 19, score: 0.9 }],
+        },
       },
     ],
   });
@@ -335,32 +348,35 @@ describe.each([
   ["WorkersAiLlamaGuardDetector", (k: string) => llamaFingerprint(k), PROBE],
   ["LlmGuardPromptInjectionDetector", (k: string) => llmGuardFingerprint(k), PROBE],
   ["PresidioDetector", (k: string) => presidioFingerprint(k), EMAIL],
-] as const)("SITE 3 %s — evidence fingerprints are keyed", (_name, fingerprintOf, fingerprinted) => {
-  test("1. different keys ⇒ different fingerprints for the same input", async () => {
-    const a = await fingerprintOf(KEY_A);
-    const b = await fingerprintOf(KEY_B);
-    expect(a).toMatch(SHAPE);
-    expect(b).toMatch(SHAPE);
-    expect(a).not.toBe(b);
-  });
+] as const)(
+  "SITE 3 %s — evidence fingerprints are keyed",
+  (_name, fingerprintOf, fingerprinted) => {
+    test("1. different keys ⇒ different fingerprints for the same input", async () => {
+      const a = await fingerprintOf(KEY_A);
+      const b = await fingerprintOf(KEY_B);
+      expect(a).toMatch(SHAPE);
+      expect(b).toMatch(SHAPE);
+      expect(a).not.toBe(b);
+    });
 
-  test("2a. NOT the unkeyed SHA-256 of the fingerprinted value", async () => {
-    expect(await fingerprintOf(KEY_A)).not.toBe(unkeyedDigestOracle(fingerprinted));
-  });
+    test("2a. NOT the unkeyed SHA-256 of the fingerprinted value", async () => {
+      expect(await fingerprintOf(KEY_A)).not.toBe(unkeyedDigestOracle(fingerprinted));
+    });
 
-  test("2b. NOT the empty-key HMAC of the fingerprinted value", async () => {
-    expect(await fingerprintOf(KEY_A)).not.toBe(emptyKeyOracle(fingerprinted));
-  });
+    test("2b. NOT the empty-key HMAC of the fingerprinted value", async () => {
+      expect(await fingerprintOf(KEY_A)).not.toBe(emptyKeyOracle(fingerprinted));
+    });
 
-  test("2c. IS exactly HMAC-SHA-256(configured key, fingerprinted value)", async () => {
-    expect(await fingerprintOf(KEY_A)).toBe(keyedOracle(KEY_A, fingerprinted));
-    expect(await fingerprintOf(KEY_B)).toBe(keyedOracle(KEY_B, fingerprinted));
-  });
+    test("2c. IS exactly HMAC-SHA-256(configured key, fingerprinted value)", async () => {
+      expect(await fingerprintOf(KEY_A)).toBe(keyedOracle(KEY_A, fingerprinted));
+      expect(await fingerprintOf(KEY_B)).toBe(keyedOracle(KEY_B, fingerprinted));
+    });
 
-  test("3. same key ⇒ stable fingerprint across evaluations", async () => {
-    expect(await fingerprintOf(KEY_A)).toBe(await fingerprintOf(KEY_A));
-  });
-});
+    test("3. same key ⇒ stable fingerprint across evaluations", async () => {
+      expect(await fingerprintOf(KEY_A)).toBe(await fingerprintOf(KEY_A));
+    });
+  },
+);
 
 /* ==========================================================================
  * 4. EVIDENCE IS NOT PERSISTED.

@@ -188,12 +188,13 @@ async function seedServerRow(
   transport: string,
   url: string | null,
 ): Promise<void> {
-  await tenantDatabase(TENANT_DATA, tenantId).prepare(
-    `INSERT OR REPLACE INTO mcp_servers
+  await tenantDatabase(TENANT_DATA, tenantId)
+    .prepare(
+      `INSERT OR REPLACE INTO mcp_servers
        (tenant_id, name, transport, url, auth_type, tools_to_execute,
         tools_to_auto_execute, headers, oauth, signed_jwt_audience, timeout_ms)
      VALUES (?, ?, ?, ?, 'none', ?, ?, NULL, NULL, NULL, 5000)`,
-  )
+    )
     .bind(tenantId, name, transport, url, JSON.stringify(["echo"]), JSON.stringify([]))
     .run();
 }

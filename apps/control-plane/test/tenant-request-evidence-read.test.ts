@@ -29,9 +29,9 @@ async function routeTenant(tenantId: string): Promise<D1Database> {
     )
     .bind(tenantId)
     .run();
-  const handle = await resolveTenantDatabases(
-    env as unknown as ControlPlaneBindings,
-  ).forTenant(tenantId);
+  const handle = await resolveTenantDatabases(env as unknown as ControlPlaneBindings).forTenant(
+    tenantId,
+  );
   expect(handle.source).toBe("durable_object");
   return handle.db;
 }
@@ -219,10 +219,9 @@ describe("tenant-authoritative request evidence reads", () => {
   it("uses exact tenant objects for investigation requests, runs, and ordered events", async () => {
     await seedAuthoritativeEvidence();
 
-    const response = await SELF.fetch(
-      `${BASE}/admin/v1/investigations?request_id=${REQUEST_ID}`,
-      { headers: bearer("evidence-key") },
-    );
+    const response = await SELF.fetch(`${BASE}/admin/v1/investigations?request_id=${REQUEST_ID}`, {
+      headers: bearer("evidence-key"),
+    });
     expect(response.status, await response.clone().text()).toBe(200);
     const body = (await response.json()) as Record<string, unknown>;
     expect(body.requests).toEqual(

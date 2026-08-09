@@ -1,4 +1,4 @@
-import { booleanColumn, type ResourceConfig } from "@/lib/resource-config";
+import { type ResourceConfig, booleanColumn } from "@/lib/resource-config";
 
 export interface AdminPlugin extends Record<string, unknown> {
   id: string;
@@ -31,7 +31,13 @@ export const pluginsConfig: ResourceConfig<AdminPlugin> = {
     { key: "last_error", headerKey: "resource.plugins.col.lastError" },
   ],
   fields: [
-    { name: "id", labelKey: "resource.plugins.field.id", type: "text", required: true, createOnly: true },
+    {
+      name: "id",
+      labelKey: "resource.plugins.field.id",
+      type: "text",
+      required: true,
+      createOnly: true,
+    },
     {
       name: "kind",
       labelKey: "resource.plugins.field.kind",

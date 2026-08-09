@@ -33,9 +33,10 @@
  * it. `docs/structured-outputs.md` is the caller-facing statement of the same
  * table.
  */
-import { AdapterError } from "./types.js";
+
 import { asObject, asStr, getField, isArray, isObject } from "./json.js";
 import type { Json, JsonObject, OwnedJsonObject } from "./json.js";
+import { AdapterError } from "./types.js";
 
 // ---------------------------------------------------------------------------
 // Canonical representation
@@ -97,7 +98,7 @@ function parseStructuredOutputFormat(
   if (!object) {
     throw AdapterError.invalidRequest(`\`${field}\` must be a JSON object`);
   }
-  const type = asStr(object["type"]);
+  const type = asStr(object.type);
   if (type === undefined) {
     throw AdapterError.invalidRequest(`\`${field}\` must carry a string \`type\``);
   }
@@ -109,21 +110,21 @@ function parseStructuredOutputFormat(
       return { kind: "json_object" };
     case "json_schema": {
       // Chat nests the members under `json_schema`; Responses hoists them.
-      const nested = asObject(object["json_schema"]) ?? object;
-      const schema = nested["schema"];
+      const nested = asObject(object.json_schema) ?? object;
+      const schema = nested.schema;
       if (!isObject(schema)) {
         throw AdapterError.invalidRequest(
           `\`${field}\` of type json_schema requires an object \`schema\``,
         );
       }
-      const name = asStr(nested["name"]);
-      const description = asStr(nested["description"]);
+      const name = asStr(nested.name);
+      const description = asStr(nested.description);
       return {
         kind: "json_schema",
         name: name !== undefined && name.trim().length > 0 ? name : DEFAULT_SCHEMA_NAME,
         ...(description !== undefined ? { description } : {}),
         schema,
-        strict: nested["strict"] === true,
+        strict: nested.strict === true,
       };
     }
     default:
@@ -185,7 +186,7 @@ export function applyStructuredOutputToAnthropic(
   }
 
   const name = coercionToolName(structured.name);
-  const tools = isArray(body["tools"]) ? [...(body["tools"] as Json[])] : [];
+  const tools = isArray(body.tools) ? [...(body.tools as Json[])] : [];
   for (const tool of tools) {
     // Both spellings, because `/v1/responses` reaches this with the caller's
     // OpenAI-shaped `{"type":"function","function":{"name":…}}` tools in place.
@@ -197,13 +198,13 @@ export function applyStructuredOutputToAnthropic(
       );
     }
   }
-  assertToolChoiceAllowsCoercion(body["tool_choice"], name);
+  assertToolChoiceAllowsCoercion(body.tool_choice, name);
 
   const coercionTool: JsonObject = { name, input_schema: structured.schema };
-  if (structured.description !== undefined) coercionTool["description"] = structured.description;
+  if (structured.description !== undefined) coercionTool.description = structured.description;
   tools.push(coercionTool);
-  body["tools"] = tools;
-  body["tool_choice"] = { type: "tool", name };
+  body.tools = tools;
+  body.tool_choice = { type: "tool", name };
 }
 
 /**
@@ -259,8 +260,8 @@ export function applyStructuredOutputToBedrockConverse(
 
   const name = coercionToolName(structured.name);
   const toolSpec: JsonObject = { name, inputSchema: { json: structured.schema } };
-  if (structured.description !== undefined) toolSpec["description"] = structured.description;
-  body["toolConfig"] = { tools: [{ toolSpec }], toolChoice: { tool: { name } } };
+  if (structured.description !== undefined) toolSpec.description = structured.description;
+  body.toolConfig = { tools: [{ toolSpec }], toolChoice: { tool: { name } } };
 }
 
 // ---------------------------------------------------------------------------
@@ -280,9 +281,9 @@ export function applyStructuredOutputToGemini(
   providerKind: string,
 ): void {
   if (structured.kind === "unmodeled") throw unmodeledRefusal(structured.type, providerKind);
-  config["responseMimeType"] = "application/json";
+  config.responseMimeType = "application/json";
   if (structured.kind === "json_object") return;
-  config["responseSchema"] = geminiResponseSchema(structured.schema, providerKind);
+  config.responseSchema = geminiResponseSchema(structured.schema, providerKind);
 }
 
 /**

@@ -83,7 +83,7 @@ function send(
   const headers: Record<string, string> = {};
   if (init.session !== undefined) headers[SESSION_HEADER] = init.session;
   if (init.lastEventId !== undefined) headers[LAST_EVENT_ID] = init.lastEventId;
-  if (init.sse !== false) headers["accept"] = "text/event-stream";
+  if (init.sse !== false) headers.accept = "text/event-stream";
   return SELF.fetch(rpcRequest(body, { key: init.key ?? EXEC_KEY, headers }));
 }
 
@@ -435,12 +435,13 @@ describe("an upstream drop recorded on one request is visible to the client on t
     // `streamable_http` with no url: the config decodes, the session is
     // configured, and the FIRST thing the handshake does is refuse for want of
     // an endpoint. That failure is what `fanIn` reports as `degraded`.
-    await tenantDatabase(TENANT_DATA, TENANT).prepare(
-      `INSERT INTO mcp_servers
+    await tenantDatabase(TENANT_DATA, TENANT)
+      .prepare(
+        `INSERT INTO mcp_servers
          (tenant_id, name, transport, url, auth_type, tools_to_execute,
           tools_to_auto_execute, headers, oauth, signed_jwt_audience, timeout_ms)
        VALUES (?, 'offline', 'streamable_http', NULL, 'none', ?, ?, NULL, NULL, NULL, 5000)`,
-    )
+      )
       .bind(TENANT, JSON.stringify(["ping"]), JSON.stringify([]))
       .run();
     // Swap the dev bundle's in-memory host for the real D1-backed one. An

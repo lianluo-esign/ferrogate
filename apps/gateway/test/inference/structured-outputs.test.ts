@@ -61,11 +61,11 @@ const ANTHROPIC_MESSAGE = {
 };
 const OPENAI_COMPLETION = {
   id: "chatcmpl-1",
-  choices: [{ index: 0, message: { role: "assistant", content: "{\"total\":12}" } }],
+  choices: [{ index: 0, message: { role: "assistant", content: '{"total":12}' } }],
   usage: { prompt_tokens: 5, completion_tokens: 3, total_tokens: 8 },
 };
 const GEMINI_COMPLETION = {
-  candidates: [{ content: { parts: [{ text: "{\"total\":12}" }], role: "model" } }],
+  candidates: [{ content: { parts: [{ text: '{"total":12}' }], role: "model" } }],
   usageMetadata: { promptTokenCount: 5, candidatesTokenCount: 3, totalTokenCount: 8 },
 };
 
@@ -80,8 +80,8 @@ describe("the requested schema reaches every family's wire", () => {
       });
       expect(res.status).toBe(200);
       const body = provider.lastRequest().body as Record<string, any>;
-      expect(body["tools"]).toEqual([{ name: "invoice", input_schema: SCHEMA }]);
-      expect(body["tool_choice"]).toEqual({ type: "tool", name: "invoice" });
+      expect(body.tools).toEqual([{ name: "invoice", input_schema: SCHEMA }]);
+      expect(body.tool_choice).toEqual({ type: "tool", name: "invoice" });
     } finally {
       provider.restore();
     }
@@ -96,9 +96,9 @@ describe("the requested schema reaches every family's wire", () => {
         response_format: JSON_SCHEMA_FORMAT,
       });
       expect(res.status).toBe(200);
-      const config = (provider.lastRequest().body as Record<string, any>)["generationConfig"];
-      expect(config["responseMimeType"]).toBe("application/json");
-      expect(config["responseSchema"]).toEqual(SCHEMA);
+      const config = (provider.lastRequest().body as Record<string, any>).generationConfig;
+      expect(config.responseMimeType).toBe("application/json");
+      expect(config.responseSchema).toEqual(SCHEMA);
     } finally {
       provider.restore();
     }
@@ -112,7 +112,7 @@ describe("the requested schema reaches every family's wire", () => {
         messages: [{ role: "user", content: "parse it" }],
         response_format: JSON_SCHEMA_FORMAT,
       });
-      expect((provider.lastRequest().body as Record<string, any>)["response_format"]).toEqual(
+      expect((provider.lastRequest().body as Record<string, any>).response_format).toEqual(
         JSON_SCHEMA_FORMAT,
       );
     } finally {
@@ -136,7 +136,7 @@ describe("a family that cannot honour the contract is dropped from the ladder", 
       expect(res.status).toBe(200);
       expect(provider.requests).toHaveLength(1);
       expect(provider.lastRequest().url).toContain("api.openai.example");
-      expect((provider.lastRequest().body as Record<string, any>)["response_format"]).toEqual({
+      expect((provider.lastRequest().body as Record<string, any>).response_format).toEqual({
         type: "json_object",
       });
     } finally {

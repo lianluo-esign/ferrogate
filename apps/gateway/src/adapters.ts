@@ -34,17 +34,17 @@
  */
 import {
   DurableObjectTenantDatabaseRouter,
-  backfillTenantConfigurationPolicy,
   type LifecycleStatus as LifecycleStatusValue,
   type TenantDatabaseRouter,
+  backfillTenantConfigurationPolicy,
   lifecycleStatusAllowsRecovery,
   lifecycleStatusAllowsRequests,
   parseLifecycleStatus,
 } from "@ferrogate/storage";
 import type { TenantDataNamespace } from "@ferrogate/storage/durable-objects";
 import type { ApiOperation } from "./contract.js";
-import { d1ApiKeyResolverFromEnv } from "./keys/index.js";
 import { controlDatabaseFrom } from "./control-data.js";
+import { d1ApiKeyResolverFromEnv } from "./keys/index.js";
 import type {
   ApiKeyAuthenticatorPort,
   ApiKeyResolution,
@@ -1018,9 +1018,7 @@ export class D1RbacAuthorizer implements RbacAuthorizerPort {
    * catalog is still checked in CONTROL so a stale object snapshot can never
    * mint a grant after an operator deletes the role.
    */
-  async #tenantRoleGrants(
-    tenantId: string,
-  ): Promise<{ results: unknown[] }> {
+  async #tenantRoleGrants(tenantId: string): Promise<{ results: unknown[] }> {
     const router = this.#tenantDatabases;
     if (router === undefined) throw new Error("tenant object router is not configured");
     await backfillTenantConfigurationPolicy(this.#db as unknown as D1Database, router, tenantId);
@@ -1039,9 +1037,7 @@ export class D1RbacAuthorizer implements RbacAuthorizerPort {
         .prepare("SELECT permission_keys_json FROM roles WHERE id = ?1")
         .bind(row.role_id)
         .all();
-      const role = (shared.results ?? [])[0] as
-        | { permission_keys_json?: unknown }
-        | undefined;
+      const role = (shared.results ?? [])[0] as { permission_keys_json?: unknown } | undefined;
       if (role !== undefined) {
         valid.push({
           permission_keys_json:

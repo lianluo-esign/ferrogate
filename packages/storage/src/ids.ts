@@ -96,11 +96,7 @@ export function paymentMethodId(
 }
 
 /** `{tenant}:{resource_type}:{scope}` retention-policy id (#263). */
-export function retentionPolicyId(
-  tenantId: string,
-  resourceType: string,
-  scope: string,
-): string {
+export function retentionPolicyId(tenantId: string, resourceType: string, scope: string): string {
   return `${tenantId}:${resourceType}:${scope}`;
 }
 
@@ -142,7 +138,9 @@ function civilFromDays(daysSinceEpoch: number): [number, number, number] {
   const z = daysSinceEpoch + 719_468;
   const era = Math.floor(z / 146_097);
   const doe = z - era * 146_097; // [0, 146096]
-  const yoe = Math.floor((doe - Math.floor(doe / 1_460) + Math.floor(doe / 36_524) - Math.floor(doe / 146_096)) / 365); // [0, 399]
+  const yoe = Math.floor(
+    (doe - Math.floor(doe / 1_460) + Math.floor(doe / 36_524) - Math.floor(doe / 146_096)) / 365,
+  ); // [0, 399]
   const y = yoe + era * 400;
   const doy = doe - (365 * yoe + Math.floor(yoe / 4) - Math.floor(yoe / 100)); // [0, 365]
   const mp = Math.floor((5 * doy + 2) / 153); // [0, 11]

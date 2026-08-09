@@ -146,7 +146,8 @@ async function storeUpstream(
   tenantId: string | null,
 ): Promise<void> {
   const stored: Record<string, unknown> = { ...document, tenant_id: tenantId };
-  const now = (clock += 1);
+  clock += 1;
+  const now = clock;
   const target = tenantId === null ? controlDb() : (await tenantRouter().forTenant(tenantId)).db;
   const table = tenantId === null ? RESOURCE_TABLE : TENANT_RESOURCE_TABLE;
   await target
@@ -157,7 +158,7 @@ async function storeUpstream(
        ON CONFLICT (resource_kind, resource_id) DO UPDATE SET
          document_json = excluded.document_json`,
     )
-    .bind(AGENT_UPSTREAM_COLLECTION, stored["id"], JSON.stringify(stored), now, now)
+    .bind(AGENT_UPSTREAM_COLLECTION, stored.id, JSON.stringify(stored), now, now)
     .run();
 }
 

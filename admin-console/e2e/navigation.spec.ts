@@ -32,14 +32,12 @@ test("native API key deep link has one active destination and the correct breadc
     }),
   ).toHaveAttribute("aria-current", "page");
   await openMobileNavigationIfNeeded(page, testInfo.project.name);
-  await expect(page.locator('[data-sidebar="menu-sub-button"][href="/app/api-keys-native"]')).toHaveAttribute(
-    "data-active",
-    "true",
-  );
-  await expect(page.locator('[data-sidebar="menu-sub-button"][href="/app/api-keys"]')).toHaveAttribute(
-    "data-active",
-    "false",
-  );
+  await expect(
+    page.locator('[data-sidebar="menu-sub-button"][href="/app/api-keys-native"]'),
+  ).toHaveAttribute("data-active", "true");
+  await expect(
+    page.locator('[data-sidebar="menu-sub-button"][href="/app/api-keys"]'),
+  ).toHaveAttribute("data-active", "false");
   await expect(page.locator('[data-sidebar="menu-sub-button"][data-active="true"]')).toHaveCount(1);
   await attachViewportScreenshot(page, testInfo, "gateway-api-keys-navigation");
 });

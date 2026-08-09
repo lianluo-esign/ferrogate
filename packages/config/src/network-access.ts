@@ -63,9 +63,7 @@ export class IpCidr {
       prefixLen = Number.parseInt(prefixPart, 10);
     }
     if (prefixLen > maxPrefix) {
-      throw new Error(
-        `prefix length /${prefixLen} exceeds maximum /${maxPrefix} for ${ipPart}`,
-      );
+      throw new Error(`prefix length /${prefixLen} exceeds maximum /${maxPrefix} for ${ipPart}`);
     }
     return new IpCidr(parsed.value, prefixLen, parsed.isV6);
   }
@@ -134,8 +132,14 @@ function parseIpv6(s: string): bigint | null {
     head = s.split(":");
     tail = [];
   } else {
-    head = s.slice(0, doubleColon).split(":").filter((g) => g !== "");
-    tail = s.slice(doubleColon + 2).split(":").filter((g) => g !== "");
+    head = s
+      .slice(0, doubleColon)
+      .split(":")
+      .filter((g) => g !== "");
+    tail = s
+      .slice(doubleColon + 2)
+      .split(":")
+      .filter((g) => g !== "");
   }
 
   // Expand a trailing embedded IPv4 (`::ffff:1.2.3.4`) into two hex groups.

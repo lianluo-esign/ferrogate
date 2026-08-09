@@ -294,16 +294,15 @@ export async function hydrateEntityReference(
   }
 
   try {
-    const body = await gatewayGet<Record<string, unknown>>(
-      apiKey,
-      adapter.detailPath(value),
-      { signal },
-    );
+    const body = await gatewayGet<Record<string, unknown>>(apiKey, adapter.detailPath(value), {
+      signal,
+    });
     const record = adapter.unwrapDetail(body);
     const matchesFilters =
       record &&
       Object.entries(filters).every(([key, expected]) => recordValue(record, key) === expected);
-    const option = matchesFilters && record ? toEntityReferenceOption(record, reference) : undefined;
+    const option =
+      matchesFilters && record ? toEntityReferenceOption(record, reference) : undefined;
     if (!option || option.value !== value) {
       return { value, primaryLabel: value, unresolved: true };
     }

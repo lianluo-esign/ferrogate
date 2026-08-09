@@ -1,11 +1,11 @@
 import type { Locator, Page, TestInfo } from "@playwright/test";
 import { installAuthenticatedAdminApi } from "./support/admin-api";
 import {
-  chooseLanguage,
   HTML_LANG,
   LOCALE_AUTONYM,
-  seedLocale,
   type MatrixLocale,
+  chooseLanguage,
+  seedLocale,
 } from "./support/i18n";
 import {
   attachViewportScreenshot,
@@ -120,9 +120,7 @@ async function expectActionUnclipped(
 // ---------------------------------------------------------------------------
 test.describe("auth routes render fully in one locale", () => {
   test.use({
-    expectedConsoleErrors: [
-      /Failed to load resource: the server responded with a status of 401/,
-    ],
+    expectedConsoleErrors: [/Failed to load resource: the server responded with a status of 401/],
   });
 
   const AUTH_ROUTES: {
@@ -164,9 +162,9 @@ test.describe("auth routes render fully in one locale", () => {
         await expect(
           page.getByRole("heading", { level: 1, name: route.heading[other(locale)] }),
         ).toHaveCount(0);
-        await expect(
-          page.getByRole("button", { name: route.submit[other(locale)] }),
-        ).toHaveCount(0);
+        await expect(page.getByRole("button", { name: route.submit[other(locale)] })).toHaveCount(
+          0,
+        );
 
         await expectActionUnclipped(page, submit, testInfo);
         await expectNoDocumentOverflow(page, testInfo);
@@ -254,12 +252,10 @@ test.describe("protected route matrix renders fully in one locale", () => {
 
         // Eager shell chrome is in the active locale; the other locale's chrome
         // copy is absent (no mixed-language shell / breadcrumb).
-        await expect(
-          page.getByRole("link", { name: SHELL_SKIP_LINK[locale] }),
-        ).toBeVisible();
-        await expect(
-          page.getByRole("link", { name: SHELL_SKIP_LINK[other(locale)] }),
-        ).toHaveCount(0);
+        await expect(page.getByRole("link", { name: SHELL_SKIP_LINK[locale] })).toBeVisible();
+        await expect(page.getByRole("link", { name: SHELL_SKIP_LINK[other(locale)] })).toHaveCount(
+          0,
+        );
         await expect(page.getByText(SHELL_BREADCRUMB_ROOT[other(locale)])).toHaveCount(0);
 
         // Lazy page copy resolves to the active locale (poll for it), and the
@@ -320,18 +316,16 @@ test.describe("relationship form + create dialog localize", () => {
 
       // The relationship (entity-reference) field label localizes, keeping the
       // required marker.
-      await expect(
-        dialog.getByRole("combobox", { name: TENANT_FIELD[locale] }),
-      ).toBeVisible();
+      await expect(dialog.getByRole("combobox", { name: TENANT_FIELD[locale] })).toBeVisible();
 
       // Primary (submit) + secondary (cancel) actions localize; the other
       // locale's submit label is absent inside the dialog.
       const create = dialog.getByRole("button", { name: CREATE_ACTION[locale] });
       await expect(create).toBeVisible();
       await expect(dialog.getByRole("button", { name: CANCEL_ACTION[locale] })).toBeVisible();
-      await expect(
-        dialog.getByRole("button", { name: CREATE_ACTION[other(locale)] }),
-      ).toHaveCount(0);
+      await expect(dialog.getByRole("button", { name: CREATE_ACTION[other(locale)] })).toHaveCount(
+        0,
+      );
 
       await expectActionUnclipped(page, create, testInfo);
       await expectNoDocumentOverflow(page, testInfo);
@@ -356,9 +350,7 @@ test.describe("mobile navigation sheet localizes", () => {
   const ORG_GROUP: LocalizedText = { en: "Organization", "zh-CN": "组织" };
 
   for (const locale of LOCALES) {
-    test(`sidebar sheet chrome + nav group localize in ${locale}`, async ({
-      page,
-    }, testInfo) => {
+    test(`sidebar sheet chrome + nav group localize in ${locale}`, async ({ page }, testInfo) => {
       test.skip(
         testInfo.project.name !== "mobile-390",
         "mobile navigation sheet only exists at the mobile viewport",
@@ -398,9 +390,7 @@ test("identifiers stay byte-for-byte identical across an en -> zh-CN switch", as
   await seedLocale(page, "en");
   await page.goto("/app/request-logs");
 
-  await expect(
-    page.getByRole("heading", { level: 1, name: "Request logs" }),
-  ).toBeVisible();
+  await expect(page.getByRole("heading", { level: 1, name: "Request logs" })).toBeVisible();
 
   // The request_id copyable: the full identifier lives in `title`; the visible
   // text is `TruncatedCopyable`'s deterministic prefix + ellipsis.
@@ -415,9 +405,7 @@ test("identifiers stay byte-for-byte identical across an en -> zh-CN switch", as
 
   // The switch localized the shell + heading (proving the locale really changed)
   await expectHtmlLang(page, "zh-CN");
-  await expect(
-    page.getByRole("heading", { level: 1, name: "请求日志" }),
-  ).toBeVisible();
+  await expect(page.getByRole("heading", { level: 1, name: "请求日志" })).toBeVisible();
 
   // ... while the identifier is byte-for-byte unchanged: same count, same
   // visible text, same full title value.

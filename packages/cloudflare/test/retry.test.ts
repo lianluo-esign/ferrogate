@@ -104,10 +104,9 @@ describe("executeWithRetry", () => {
     const clock = new RecordingClock();
     const statuses = [503, 503, 200];
     let call = 0;
-    const result = await executeWithRetry(
-      async () => ({ status: statuses[call++] as number }),
-      { clock },
-    );
+    const result = await executeWithRetry(async () => ({ status: statuses[call++] as number }), {
+      clock,
+    });
     expect(result.attempts).toBe(3);
     expect(clock.slept).toEqual([1_000, 2_000]);
   });

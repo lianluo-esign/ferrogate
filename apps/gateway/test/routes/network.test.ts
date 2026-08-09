@@ -53,7 +53,12 @@ function gatedApp(now = 60) {
     networkAccess: networkAccess({ limiter, now: () => now }),
   });
   return {
-    call: (path: string, env: Record<string, string>, ip?: string, extra?: Record<string, string>) =>
+    call: (
+      path: string,
+      env: Record<string, string>,
+      ip?: string,
+      extra?: Record<string, string>,
+    ) =>
       app.request(
         `${BASE}${path}`,
         { headers: { ...(ip === undefined ? {} : { [CLIENT_IP_HEADER]: ip }), ...extra } },
@@ -208,9 +213,9 @@ describe("checkNetworkAccess — Rust `check_network_access`", () => {
     expect(
       checkNetworkAccess(headers({ [CLIENT_IP_HEADER]: "203.0.113.9" }), v6, limiter(), 0),
     ).toBe("ip_denied");
-    expect(checkNetworkAccess(headers({ [CLIENT_IP_HEADER]: "2001:db8::1" }), v6, limiter(), 0)).toBe(
-      "allowed",
-    );
+    expect(
+      checkNetworkAccess(headers({ [CLIENT_IP_HEADER]: "2001:db8::1" }), v6, limiter(), 0),
+    ).toBe("allowed");
   });
 
   it("ignores X-Forwarded-For unless the chain is explicitly trusted", () => {

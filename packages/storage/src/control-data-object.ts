@@ -218,9 +218,7 @@ export class ControlDataObject extends DurableObject {
   async #admitAddress(address: string): Promise<void> {
     if (typeof address !== "string" || address !== CONTROL_DATA_ADDRESS) {
       throw new Error(
-        `${REFUSAL}: this object is the control database and answers only address ` +
-          `"${CONTROL_DATA_ADDRESS}"; it was addressed as "${String(address)}". ` +
-          "A tenant id here means a routing seam leaked tenant traffic to control storage.",
+        `${REFUSAL}: this object is the control database and answers only address "${CONTROL_DATA_ADDRESS}"; it was addressed as "${String(address)}". A tenant id here means a routing seam leaked tenant traffic to control storage.`,
       );
     }
   }

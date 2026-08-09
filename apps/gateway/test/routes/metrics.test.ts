@@ -30,12 +30,12 @@
  * assertion below claims a fleet-wide total.
  */
 import { SELF, env } from "cloudflare:test";
-import { afterEach, describe, expect, it } from "vitest";
 import {
   defaultGatewayMetricsSnapshot,
   renderCacheTenantText,
   renderPrometheusText,
 } from "@ferrogate/observability";
+import { afterEach, describe, expect, it } from "vitest";
 import { operationById } from "../../src/contract.js";
 import { PROMETHEUS_CONTENT_TYPE, gatewayMetricsSnapshot } from "../../src/routes/metrics.js";
 
@@ -44,6 +44,7 @@ const mutable = env as unknown as Record<string, unknown>;
 const ROOT = { authorization: "Bearer fg_root" } as const;
 
 afterEach(() => {
+  // biome-ignore lint/performance/noDelete: removes the own-property key entirely; assigning undefined would leave an enumerable undefined-valued key and change JSON serialization, the 'in' operator, and Object.keys semantics
   delete mutable.GATEWAY_NATIVE_API_KEYS;
 });
 

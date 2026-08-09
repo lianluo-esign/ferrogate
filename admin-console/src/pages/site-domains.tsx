@@ -1,3 +1,39 @@
+import { EntityReferencePicker } from "@/components/resource/entity-reference-picker";
+import {
+  SiteDomainChallenge,
+  SiteDomainLiveness,
+  bindAcmeNoteKey,
+} from "@/components/site-domain-liveness";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { useAuth } from "@/hooks/use-auth";
+import { useFormatUnix } from "@/hooks/use-format-unix";
+import { useOperatorError } from "@/hooks/use-operator-error";
+import { useI18n } from "@/i18n";
+import { type AdminSchema, adminDelete, adminGet, adminPost } from "@/lib/gateway-client";
+import { validateSiteDomainHostname } from "@/lib/hostname";
+import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 // Site domains bind/unbind console (#265, #323): the admin surface over
 // /admin/v1/site-domains (+ /{hostname}). Lists custom hostnames bound to
 // hosted static sites and lets an operator bind a new hostname or unbind an
@@ -17,48 +53,7 @@
 // components/site-domain-liveness.tsx — because a bound timestamp on its own
 // makes a hostname whose requests are REFUSED look identical to a live one.
 import { useMemo, useRef, useState } from "react";
-import {
-  useMutation,
-  useQueries,
-  useQuery,
-  useQueryClient,
-} from "@tanstack/react-query";
 import { toast } from "sonner";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import {
-  bindAcmeNoteKey,
-  SiteDomainChallenge,
-  SiteDomainLiveness,
-} from "@/components/site-domain-liveness";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { EntityReferencePicker } from "@/components/resource/entity-reference-picker";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
-import { useAuth } from "@/hooks/use-auth";
-import { useI18n } from "@/i18n";
-import { useFormatUnix } from "@/hooks/use-format-unix";
-import { useOperatorError } from "@/hooks/use-operator-error";
-import { adminDelete, adminGet, adminPost, type AdminSchema } from "@/lib/gateway-client";
-import { validateSiteDomainHostname } from "@/lib/hostname";
 
 type SiteDomain = AdminSchema<"AdminSiteDomain">;
 
@@ -67,7 +62,7 @@ export default function SiteDomainsPage() {
   const { t } = useI18n();
   const formatUnix = useFormatUnix();
   const { toastError } = useOperatorError();
-  const apiKey = session!.gatewayApiKey;
+  const apiKey = (session as NonNullable<typeof session>).gatewayApiKey;
   const queryClient = useQueryClient();
   const queryKey = ["site-domains"];
 
@@ -82,7 +77,11 @@ export default function SiteDomainsPage() {
   // keyboard operator dismissing the dialog is dropped onto <body>.
   const unbindTriggerRef = useRef<HTMLElement | null>(null);
 
-  const { data, isLoading, error: listError } = useQuery({
+  const {
+    data,
+    isLoading,
+    error: listError,
+  } = useQuery({
     queryKey,
     queryFn: () => adminGet(apiKey, "/admin/v1/site-domains"),
   });
@@ -112,15 +111,13 @@ export default function SiteDomainsPage() {
   });
   const challenges = challengeQueries.flatMap((query) => {
     const verification = query.data?.verification;
-    return verification && verification.state === "pending_verification"
-      ? [verification]
-      : [];
+    return verification && verification.state === "pending_verification" ? [verification] : [];
   });
 
   // The session tenant's PUBLISHED static-site slugs, from the same `/v1/assets`
   // enumeration the Static sites page derives its list from. Only read while the
   // bind form targets the session tenant (see the field comment below).
-  const sessionTenantId = session!.tenant.id;
+  const sessionTenantId = (session as NonNullable<typeof session>).tenant.id;
   const bindsSessionTenant = tenantId.trim() === sessionTenantId;
   const { data: assetData } = useQuery({
     queryKey: ["assets"],
@@ -206,16 +203,12 @@ export default function SiteDomainsPage() {
     <div className="flex flex-col gap-4">
       <div>
         <h1 className="text-lg font-semibold">{t("page.siteDomains.title")}</h1>
-        <p className="text-sm text-muted-foreground">
-          {t("page.siteDomains.description")}
-        </p>
+        <p className="text-sm text-muted-foreground">{t("page.siteDomains.description")}</p>
       </div>
 
       <Card>
         <CardHeader className="pb-3">
-          <CardTitle className="text-sm font-medium">
-            {t("page.siteDomains.bind.title")}
-          </CardTitle>
+          <CardTitle className="text-sm font-medium">{t("page.siteDomains.bind.title")}</CardTitle>
         </CardHeader>
         <CardContent className="grid gap-3 sm:grid-cols-3">
           <div className="grid gap-1.5">
@@ -283,9 +276,7 @@ export default function SiteDomainsPage() {
                 <option key={name} value={name} />
               ))}
             </datalist>
-            <p className="text-xs text-muted-foreground">
-              {t("page.siteDomains.field.site.hint")}
-            </p>
+            <p className="text-xs text-muted-foreground">{t("page.siteDomains.field.site.hint")}</p>
           </div>
           {bindError ? (
             <p className="sm:col-span-3 rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
@@ -307,7 +298,10 @@ export default function SiteDomainsPage() {
       </Card>
 
       {listError ? (
-        <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <p
+          role="alert"
+          className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+        >
           {t("page.siteDomains.loadError", { message: listError.message })}
         </p>
       ) : null}

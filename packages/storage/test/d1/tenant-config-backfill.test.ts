@@ -54,9 +54,9 @@ beforeEach(async () => {
       db.prepare("DELETE FROM delegation_revocations"),
       db.prepare("DELETE FROM control_plane_replay_floors"),
       db.prepare("DELETE FROM budget_alert_notifications"),
-      db.prepare("DELETE FROM tenant_provisioning_marks WHERE mark = ?").bind(
-        TENANT_CONFIGURATION_BACKFILL_MARK,
-      ),
+      db
+        .prepare("DELETE FROM tenant_provisioning_marks WHERE mark = ?")
+        .bind(TENANT_CONFIGURATION_BACKFILL_MARK),
     ]);
   }
 });

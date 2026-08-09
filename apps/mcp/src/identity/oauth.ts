@@ -22,14 +22,14 @@
  *    dispatch — it never falls back to an unauthenticated upstream call.
  */
 import {
-  credentialId,
-  McpDispatchHeaders,
   type DispatchContext,
+  McpDispatchHeaders,
   type McpIdentityActor,
   type McpOauthConfig,
   type McpPorts,
   type McpServerConfig,
   type StoredMcpOauthCredential,
+  credentialId,
 } from "../ports.js";
 
 /** OAuth authorization flows live 10 minutes. */
@@ -644,7 +644,7 @@ async function refreshCredential(
   );
   const discovery = await ports.oauth.discover(oauth);
   const clientSecret = await resolveClientSecret(ports, oauth);
-  let token;
+  let token: Awaited<ReturnType<typeof ports.oauth.refresh>>;
   try {
     token = await ports.oauth.refresh(discovery, oauth, { refreshToken, clientSecret });
   } catch (cause) {

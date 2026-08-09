@@ -57,7 +57,7 @@ describe("decodeEnvelope", () => {
   });
 
   test("error entries default their missing halves rather than dropping the entry", () => {
-    const envelope = decodeEnvelope("{\"errors\":[{\"code\":9109},{\"message\":\"x\"}]}", "test");
+    const envelope = decodeEnvelope('{"errors":[{"code":9109},{"message":"x"}]}', "test");
     expect(envelope.errors).toEqual([
       { code: 9109, message: "" },
       { code: 0, message: "x" },

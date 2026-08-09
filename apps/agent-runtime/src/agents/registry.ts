@@ -212,8 +212,8 @@ function nonEmptyString(value: unknown): string | undefined {
 export function decodeAgentUpstreamDocument(value: unknown): AgentUpstream | undefined {
   if (!isObject(value)) return undefined;
 
-  const id = nonEmptyString(value["id"]);
-  const url = nonEmptyString(value["endpoint"]) ?? nonEmptyString(value["url"]);
+  const id = nonEmptyString(value.id);
+  const url = nonEmptyString(value.endpoint) ?? nonEmptyString(value.url);
   if (id === undefined || url === undefined) return undefined;
 
   // A relative or otherwise unparseable endpoint would throw inside the
@@ -225,17 +225,17 @@ export function decodeAgentUpstreamDocument(value: unknown): AgentUpstream | und
     return undefined;
   }
 
-  const rawEnabled = value["enabled"];
+  const rawEnabled = value.enabled;
   if (rawEnabled !== undefined && rawEnabled !== null && typeof rawEnabled !== "boolean") {
     return undefined;
   }
 
-  const rawProtocol = value["protocol"];
+  const rawProtocol = value.protocol;
   if (rawProtocol !== undefined && rawProtocol !== null && !PROTOCOLS.has(rawProtocol as string)) {
     return undefined;
   }
 
-  const rawTenantIds = value["tenant_ids"];
+  const rawTenantIds = value.tenant_ids;
   let visibleToTenantIds: readonly string[] = [];
   if (rawTenantIds !== undefined && rawTenantIds !== null) {
     if (!Array.isArray(rawTenantIds) || rawTenantIds.some((e) => typeof e !== "string")) {
@@ -244,7 +244,7 @@ export function decodeAgentUpstreamDocument(value: unknown): AgentUpstream | und
     visibleToTenantIds = rawTenantIds as readonly string[];
   }
 
-  const rawOperatorOnly = value["operator_only"];
+  const rawOperatorOnly = value.operator_only;
   if (
     rawOperatorOnly !== undefined &&
     rawOperatorOnly !== null &&
@@ -379,7 +379,7 @@ async function tenantObjectAgentUpstream(
     } catch {
       continue;
     }
-    if (!isObject(parsed) || parsed["tenant_id"] !== tenantId) continue;
+    if (!isObject(parsed) || parsed.tenant_id !== tenantId) continue;
     const decoded = decodeAgentUpstreamDocument(parsed);
     if (decoded !== undefined && decoded.id === agentId) {
       return { present: true, result: { outcome: "found", upstream: decoded } };

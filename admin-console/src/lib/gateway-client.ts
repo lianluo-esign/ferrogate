@@ -1,6 +1,6 @@
+import type { components, paths } from "@/lib/api-types.generated";
 import { baseUrlForRequestPath } from "@/lib/config";
 import { ApiError, type ApiErrorBody } from "@/types/auth";
-import type { components, paths } from "@/lib/api-types.generated";
 
 export interface AdminPage<T> {
   data: T[];
@@ -25,8 +25,7 @@ export interface AdminPage<T> {
 // ---------------------------------------------------------------------------
 
 /** Named schema from the Admin API contract, e.g. `AdminSchema<"AdminPlan">`. */
-export type AdminSchema<K extends keyof components["schemas"]> =
-  components["schemas"][K];
+export type AdminSchema<K extends keyof components["schemas"]> = components["schemas"][K];
 
 type HttpMethod = "get" | "post" | "put" | "patch" | "delete";
 
@@ -35,8 +34,12 @@ export type AdminPathWith<M extends HttpMethod> = {
   [P in keyof paths]: paths[P] extends Record<M, unknown> ? P : never;
 }[keyof paths];
 
-export type OpFor<P extends keyof paths, M extends HttpMethod> =
-  paths[P] extends Record<M, infer Op> ? Op : never;
+export type OpFor<P extends keyof paths, M extends HttpMethod> = paths[P] extends Record<
+  M,
+  infer Op
+>
+  ? Op
+  : never;
 
 type SuccessCode = 200 | 201 | 202 | 204;
 
@@ -88,10 +91,7 @@ interface TypedRequestOptions<Op> {
 }
 
 /** Substitutes `{name}` placeholders; throws if a placeholder has no value. */
-function resolvePathTemplate(
-  template: string,
-  params?: Record<string, string | number>,
-): string {
+function resolvePathTemplate(template: string, params?: Record<string, string | number>): string {
   return template.replace(/\{([^}]+)\}/g, (_match, name: string) => {
     const value = params?.[name];
     if (value === undefined) {
@@ -294,11 +294,7 @@ export function gatewayGet<T>(
   return gatewayRequest<T>(path, { method: "GET" }, apiKey, options);
 }
 
-export function gatewayPost<T>(
-  apiKey: string,
-  path: string,
-  body?: unknown,
-): Promise<T> {
+export function gatewayPost<T>(apiKey: string, path: string, body?: unknown): Promise<T> {
   return gatewayRequest<T>(
     path,
     { method: "POST", body: body !== undefined ? JSON.stringify(body) : undefined },
@@ -306,11 +302,7 @@ export function gatewayPost<T>(
   );
 }
 
-export function gatewayPut<T>(
-  apiKey: string,
-  path: string,
-  body?: unknown,
-): Promise<T> {
+export function gatewayPut<T>(apiKey: string, path: string, body?: unknown): Promise<T> {
   return gatewayRequest<T>(
     path,
     { method: "PUT", body: body !== undefined ? JSON.stringify(body) : undefined },
@@ -318,11 +310,7 @@ export function gatewayPut<T>(
   );
 }
 
-export function gatewayPatch<T>(
-  apiKey: string,
-  path: string,
-  body?: unknown,
-): Promise<T> {
+export function gatewayPatch<T>(apiKey: string, path: string, body?: unknown): Promise<T> {
   return gatewayRequest<T>(
     path,
     { method: "PATCH", body: body !== undefined ? JSON.stringify(body) : undefined },

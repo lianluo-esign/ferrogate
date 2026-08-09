@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 import {
+  type ContentPatch,
   applyContentPatchesToDocument,
   contentFingerprint,
   normalizeRequest,
@@ -7,7 +8,6 @@ import {
   parseProtocolPath,
   validateContentPatchPermissions,
   validateContentPatchesForSegments,
-  type ContentPatch,
 } from "../src/index.js";
 
 describe("normalizeRequest (chat)", () => {
@@ -61,7 +61,7 @@ describe("normalizeResponse (chat SSE)", () => {
 describe("content patches", () => {
   const doc = { messages: [{ role: "user", content: "leak AKIA1234 here" }] };
   const env = normalizeRequest("chat_completions", doc);
-  const segment = env.segments[0]!;
+  const segment = env.segments[0] as NonNullable<(typeof env.segments)[0]>;
   const start = 5; // byte offset of AKIA...
   const end = 13;
 

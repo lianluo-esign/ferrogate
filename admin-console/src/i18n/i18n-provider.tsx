@@ -5,25 +5,26 @@
 // here `<html lang>`. Switching locale updates React state only: it never
 // reloads the document and never resets route/form/sidebar state.
 import {
+  type ReactNode,
   createContext,
   useCallback,
   useContext,
   useEffect,
   useMemo,
   useState,
-  type ReactNode,
 } from "react";
 import {
   BOOTSTRAP_CATALOG,
-  getLoadedCatalog,
-  loadCatalog,
   LOCALE_META,
   type Locale,
   type Messages,
   type TranslationKey,
+  getLoadedCatalog,
+  loadCatalog,
 } from "./catalog";
 import { resolveInitialLocale, writeStoredLocale } from "./detect";
 import {
+  type InterpolationValues,
   formatBytes,
   formatCurrency,
   formatDate,
@@ -34,7 +35,6 @@ import {
   formatTokens,
   interpolate,
   selectPlural,
-  type InterpolationValues,
 } from "./format";
 
 /**
@@ -92,9 +92,7 @@ export interface I18nProviderProps {
 }
 
 export function I18nProvider({ children, initialLocale }: I18nProviderProps) {
-  const [locale, setLocaleState] = useState<Locale>(
-    () => initialLocale ?? resolveInitialLocale(),
-  );
+  const [locale, setLocaleState] = useState<Locale>(() => initialLocale ?? resolveInitialLocale());
 
   // The active message catalog. A locale whose FULL chunk is already cached
   // resolves SYNCHRONOUSLY here (including under the test suite, which warms the

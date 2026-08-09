@@ -190,9 +190,7 @@ function decodeKey(name: string, encoded: string): Uint8Array {
     // The LENGTH is safe to state; the value is not. A short key would still
     // "work" for AES-GCM-128 in some libraries, which is exactly the kind of
     // silent downgrade this refuses.
-    throw new Error(
-      `${name} must decode to exactly ${KEY_BYTES} bytes (got ${bytes.byteLength})`,
-    );
+    throw new Error(`${name} must decode to exactly ${KEY_BYTES} bytes (got ${bytes.byteLength})`);
   }
   return bytes;
 }
@@ -221,9 +219,7 @@ export function byokKeyringFromEnv(env: EnvLike = defaultEnv()): ByokKeyring {
  * form the Workers request path uses, because the master key is exactly the kind
  * of credential an operator SHOULD put in Secrets Store.
  */
-export async function byokKeyringFromEnvAsync(
-  env: EnvLike = defaultEnv(),
-): Promise<ByokKeyring> {
+export async function byokKeyringFromEnvAsync(env: EnvLike = defaultEnv()): Promise<ByokKeyring> {
   const keys = new Map<number, Uint8Array>();
   for (const name of Object.keys(env)) {
     const version = keyVersionOfBinding(name);
@@ -349,10 +345,7 @@ export async function openTenantCredential(
   const material = keyring.keyFor(record.keyVersion);
   if (material === null) {
     throw new Error(
-      `BYOK alias ${record.alias} was sealed with master key version ` +
-        `${record.keyVersion}, which is not bound; keep the old ` +
-        `${BYOK_KEY_VERSION_ENV_PREFIX}${record.keyVersion} binding in place until every ` +
-        "row has been re-sealed",
+      `BYOK alias ${record.alias} was sealed with master key version ${record.keyVersion}, which is not bound; keep the old ${BYOK_KEY_VERSION_ENV_PREFIX}${record.keyVersion} binding in place until every row has been re-sealed`,
     );
   }
 
@@ -361,10 +354,7 @@ export async function openTenantCredential(
       {
         name: "AES-GCM",
         iv: decodeBase64(record.iv) as unknown as BufferSource,
-        additionalData: additionalData(
-          record.tenantId,
-          record.alias,
-        ) as unknown as BufferSource,
+        additionalData: additionalData(record.tenantId, record.alias) as unknown as BufferSource,
       },
       await importKey(material),
       decodeBase64(record.ciphertext) as unknown as BufferSource,
@@ -376,9 +366,7 @@ export async function openTenantCredential(
     // including a fragment of the input. Alias + version is everything an
     // operator can act on.
     throw new Error(
-      `BYOK credential for alias ${record.alias} could not be decrypted with master key ` +
-        `version ${record.keyVersion}. The row is bound to its (tenant, alias) pair, so this ` +
-        "means the key is wrong or the row was moved between tenants or aliases.",
+      `BYOK credential for alias ${record.alias} could not be decrypted with master key version ${record.keyVersion}. The row is bound to its (tenant, alias) pair, so this means the key is wrong or the row was moved between tenants or aliases.`,
     );
   }
 }

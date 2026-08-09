@@ -1,10 +1,5 @@
-// Agent schedules (issues #251/#317): CRUD over /admin/v1/agent-schedules,
-// per-schedule fire history (GET .../{id}/fires) and a confirmed manual
-// "Run now" (POST .../{id}/run-now) that surfaces the recorded fire
-// (outcome + dispatch/run ids) from the 202 response.
-import { useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { toast } from "sonner";
+import { fireOutcomeBadgeVariant, formatUnix } from "@/components/agent-ops/agent-ops-primitives";
+import { EntityReferencePicker } from "@/components/resource/entity-reference-picker";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -17,19 +12,8 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -49,23 +33,19 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
-import {
-  fireOutcomeBadgeVariant,
-  formatUnix,
-} from "@/components/agent-ops/agent-ops-primitives";
-import { EntityReferencePicker } from "@/components/resource/entity-reference-picker";
 import { useAuth } from "@/hooks/use-auth";
-import { useI18n } from "@/i18n";
-import { LocalizedError } from "@/lib/localized-error";
 import { useOperatorError } from "@/hooks/use-operator-error";
+import { useI18n } from "@/i18n";
 import type { InterpolationValues, TranslationKey } from "@/i18n";
-import {
-  adminDelete,
-  adminGet,
-  adminPost,
-  adminPut,
-  type AdminSchema,
-} from "@/lib/gateway-client";
+import { type AdminSchema, adminDelete, adminGet, adminPost, adminPut } from "@/lib/gateway-client";
+import { LocalizedError } from "@/lib/localized-error";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+// Agent schedules (issues #251/#317): CRUD over /admin/v1/agent-schedules,
+// per-schedule fire history (GET .../{id}/fires) and a confirmed manual
+// "Run now" (POST .../{id}/run-now) that surfaces the recorded fire
+// (outcome + dispatch/run ids) from the 202 response.
+import { useState } from "react";
+import { toast } from "sonner";
 
 /** Locale-bound translator threaded into module-scope helpers. */
 type Translate = (key: TranslationKey, values?: InterpolationValues) => string;
@@ -192,7 +172,7 @@ export default function AgentSchedulesPage() {
   const { session } = useAuth();
   const { t } = useI18n();
   const { toastError } = useOperatorError();
-  const apiKey = session!.gatewayApiKey;
+  const apiKey = (session as NonNullable<typeof session>).gatewayApiKey;
   const queryClient = useQueryClient();
   const listQueryKey = ["agent-schedules"];
 
@@ -216,7 +196,7 @@ export default function AgentSchedulesPage() {
     queryKey: ["agent-schedule-fires", firesFor?.id],
     queryFn: () =>
       adminGet(apiKey, "/admin/v1/agent-schedules/{id}/fires", {
-        params: { id: firesFor!.id },
+        params: { id: (firesFor as NonNullable<typeof firesFor>).id },
       }),
     enabled: Boolean(firesFor),
   });
@@ -234,9 +214,7 @@ export default function AgentSchedulesPage() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: listQueryKey });
       toast.success(
-        editing
-          ? t("page.agentSchedules.toast.updated")
-          : t("page.agentSchedules.toast.created"),
+        editing ? t("page.agentSchedules.toast.updated") : t("page.agentSchedules.toast.created"),
       );
       setFormOpen(false);
       setEditing(null);
@@ -252,9 +230,7 @@ export default function AgentSchedulesPage() {
       }),
     onSuccess: (response, schedule) => {
       setLastFire({ scheduleName: schedule.name, fire: response.fire });
-      toast.success(
-        t("page.agentSchedules.toast.manualFire", { outcome: response.fire.outcome }),
-      );
+      toast.success(t("page.agentSchedules.toast.manualFire", { outcome: response.fire.outcome }));
       queryClient.invalidateQueries({ queryKey: listQueryKey });
       queryClient.invalidateQueries({ queryKey: ["agent-schedule-fires", schedule.id] });
     },
@@ -294,15 +270,16 @@ export default function AgentSchedulesPage() {
       <div className="flex items-start justify-between gap-4">
         <div>
           <h1 className="text-lg font-semibold">{t("page.agentSchedules.title")}</h1>
-          <p className="text-sm text-muted-foreground">
-            {t("page.agentSchedules.description")}
-          </p>
+          <p className="text-sm text-muted-foreground">{t("page.agentSchedules.description")}</p>
         </div>
         <Button onClick={openCreate}>{t("page.agentSchedules.new")}</Button>
       </div>
 
       {error && (
-        <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <p
+          role="alert"
+          className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+        >
           {t("page.agentSchedules.loadError", { message: error.message })}
         </p>
       )}
@@ -393,11 +370,7 @@ export default function AgentSchedulesPage() {
                   </TableCell>
                   <TableCell>
                     <div className="flex flex-wrap gap-2">
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => setRunNowTarget(schedule)}
-                      >
+                      <Button variant="outline" size="sm" onClick={() => setRunNowTarget(schedule)}>
                         {t("page.agentSchedules.action.runNow")}
                       </Button>
                       <Button variant="outline" size="sm" onClick={() => setFiresFor(schedule)}>
@@ -631,7 +604,9 @@ export default function AgentSchedulesPage() {
                   />
                 </div>
                 <div className="grid gap-2">
-                  <Label htmlFor="schedule-timezone">{t("page.agentSchedules.form.timezone")}</Label>
+                  <Label htmlFor="schedule-timezone">
+                    {t("page.agentSchedules.form.timezone")}
+                  </Label>
                   <Input
                     id="schedule-timezone"
                     value={form.timezone}
@@ -704,9 +679,7 @@ export default function AgentSchedulesPage() {
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="skip">
-                    {t("page.agentSchedules.form.overlap.skip")}
-                  </SelectItem>
+                  <SelectItem value="skip">{t("page.agentSchedules.form.overlap.skip")}</SelectItem>
                   <SelectItem value="allow">
                     {t("page.agentSchedules.form.overlap.allow")}
                   </SelectItem>

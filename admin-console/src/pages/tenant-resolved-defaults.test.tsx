@@ -1,3 +1,6 @@
+import TenantResolvedDefaultsPage from "@/pages/tenant-resolved-defaults";
+import { gatewayUrl, server } from "@/test/msw";
+import { renderWithProviders, seedSession } from "@/test/test-utils";
 // #340 acceptance box 7: the tenancy module's resolved-defaults lookup was the
 // last entity-backed field still asking an operator to paste a raw tenant id
 // (`<Input id="tenant-id" placeholder="tenant-abc123">`). It now uses the same
@@ -6,11 +9,8 @@
 // `/admin/v1/tenant-accounts/{id}/resolved-defaults`.
 import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { HttpResponse, http } from "msw";
+import { http, HttpResponse } from "msw";
 import { beforeEach, expect, it } from "vitest";
-import TenantResolvedDefaultsPage from "@/pages/tenant-resolved-defaults";
-import { gatewayUrl, server } from "@/test/msw";
-import { renderWithProviders, seedSession } from "@/test/test-utils";
 
 const tenant = {
   id: "tenant-acme-01",
@@ -82,22 +82,20 @@ it("looks a tenant up by picking it, never by typing an id", async () => {
 // They now go through the locale-bound `format.*` helpers.
 async function lookUpResolvedDefaults(locale: "en" | "zh-CN"): Promise<void> {
   server.use(
-    http.get(
-      gatewayUrl(`/admin/v1/tenant-accounts/${tenant.id}/resolved-defaults`),
-      () =>
-        HttpResponse.json({
-          tenant_id: tenant.id,
-          plan_id: "enterprise",
-          model_allowlist: ["fast-chat"],
-          rpm_limit: 1_234_567,
-          tpm_limit: null,
-          monthly_budget_usd: 1234.5,
-          mcp_enabled: true,
-          extension_tools_enabled: false,
-          self_hosted_workers_enabled: true,
-          asset_hosting_enabled: true,
-          default_asset_storage_quota_bytes: null,
-        }),
+    http.get(gatewayUrl(`/admin/v1/tenant-accounts/${tenant.id}/resolved-defaults`), () =>
+      HttpResponse.json({
+        tenant_id: tenant.id,
+        plan_id: "enterprise",
+        model_allowlist: ["fast-chat"],
+        rpm_limit: 1_234_567,
+        tpm_limit: null,
+        monthly_budget_usd: 1234.5,
+        mcp_enabled: true,
+        extension_tools_enabled: false,
+        self_hosted_workers_enabled: true,
+        asset_hosting_enabled: true,
+        default_asset_storage_quota_bytes: null,
+      }),
     ),
   );
   const user = userEvent.setup();
@@ -106,9 +104,7 @@ async function lookUpResolvedDefaults(locale: "en" | "zh-CN"): Promise<void> {
     screen.getByRole("combobox", { name: locale === "en" ? "Tenant ID" : "租户 ID" }),
   );
   await user.click(await screen.findByRole("option", { name: /Acme operations/ }));
-  await user.click(
-    screen.getByRole("button", { name: locale === "en" ? "Look up" : "查询" }),
-  );
+  await user.click(screen.getByRole("button", { name: locale === "en" ? "Look up" : "查询" }));
 }
 
 it("formats the quota limit and the monthly budget for the ACTIVE locale (zh-CN)", async () => {

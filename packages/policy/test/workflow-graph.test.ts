@@ -183,9 +183,7 @@ describe("the ladder's ORDER", () => {
   it("refuses an unknown node BEFORE any counter", () => {
     const capped = graph({ max_model_calls: 1, timeout_millis: 1 });
     expect(
-      code(
-        decide([capped], { workflowNodeId: "ghost" }, { ...NO_FACTS, modelCallCount: 99 }),
-      ),
+      code(decide([capped], { workflowNodeId: "ghost" }, { ...NO_FACTS, modelCallCount: 99 })),
     ).toBe("workflow_node_not_found");
   });
 
@@ -203,9 +201,7 @@ describe("the ladder's ORDER", () => {
   });
 
   it("refuses a missing node id before looking the node up", () => {
-    expect(code(decide([graph()], { workflowNodeId: undefined }))).toBe(
-      "workflow_node_required",
-    );
+    expect(code(decide([graph()], { workflowNodeId: undefined }))).toBe("workflow_node_required");
   });
 });
 
@@ -300,9 +296,7 @@ describe("node model pinning", () => {
   it("a pinned node accepts only its model", () => {
     const pinned = graph({ nodes: [node("a", { model: "gpt" }), node("b")] });
     expect(code(decide([pinned], { logicalModel: "gpt" }))).toBe("<admitted>");
-    expect(code(decide([pinned], { logicalModel: "claude" }))).toBe(
-      "workflow_model_not_allowed",
-    );
+    expect(code(decide([pinned], { logicalModel: "claude" }))).toBe("workflow_model_not_allowed");
   });
 
   it("a non-model node may not dispatch model traffic, whatever its other fields", () => {

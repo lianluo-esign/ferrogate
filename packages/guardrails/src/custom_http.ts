@@ -8,27 +8,27 @@
  * host/IP-literal validation (see `./net` PORT-TODO). Deadlines are epoch-millis.
  */
 import { z } from "zod";
-import { byteLen, encodeUtf8, isCharBoundary } from "./bytes.js";
 import { Semaphore, TIMED_OUT, withTimeout } from "./async.js";
-import { detectorEndpointRejection } from "./net.js";
-import { validateContentPatchesForSegments } from "./envelope.js";
+import { byteLen, encodeUtf8, isCharBoundary } from "./bytes.js";
 import {
   CONTRACT_VERSION,
-  DetectorError,
-  DetectorSecret,
-  MAX_DETECTOR_TIMEOUT_MS,
-  contentPatchSchema,
-  findingSchema,
   type ContentSegment,
   type ContentSource,
   type DetectorDescriptor,
+  DetectorError,
   type DetectorErrorKind,
   type DetectorHealth,
   type DetectorInput,
   type DetectorResult,
+  type DetectorSecret,
   type Finding,
   type GuardrailDetector,
+  MAX_DETECTOR_TIMEOUT_MS,
+  contentPatchSchema,
+  findingSchema,
 } from "./contract.js";
+import { validateContentPatchesForSegments } from "./envelope.js";
+import { detectorEndpointRejection } from "./net.js";
 
 export interface CustomHttpDetectorConfig {
   id: string;
@@ -67,7 +67,11 @@ export class CustomHttpDetector implements GuardrailDetector {
   private config: CustomHttpDetectorConfig;
   private endpoint: URL;
   private permits: Semaphore;
-  private circuit: CircuitState = { consecutiveFailures: 0, openedAt: undefined, halfOpenProbe: false };
+  private circuit: CircuitState = {
+    consecutiveFailures: 0,
+    openedAt: undefined,
+    halfOpenProbe: false,
+  };
   private requestTotal = 0;
   private successTotal = 0;
   private failureTotal = 0;
@@ -84,7 +88,10 @@ export class CustomHttpDetector implements GuardrailDetector {
     try {
       endpoint = new URL(config.endpoint);
     } catch {
-      throw DetectorError.new("invalid_configuration", "guardrail detector endpoint is not a valid URL");
+      throw DetectorError.new(
+        "invalid_configuration",
+        "guardrail detector endpoint is not a valid URL",
+      );
     }
     validateCustomHttpEndpoint(endpoint, config.allowPrivateNetwork);
     return new CustomHttpDetector(config, endpoint);
@@ -159,14 +166,17 @@ export class CustomHttpDetector implements GuardrailDetector {
     }
   }
 
-  private async sendOnce(requestBody: Uint8Array, attemptTimeoutMs: number): Promise<DetectorResult> {
+  private async sendOnce(
+    requestBody: Uint8Array,
+    attemptTimeoutMs: number,
+  ): Promise<DetectorResult> {
     const controller = new AbortController();
     const headers: Record<string, string> = {
       "content-type": "application/json",
       accept: "application/json",
     };
     if (this.config.bearerToken) {
-      headers["authorization"] = `Bearer ${this.config.bearerToken.expose()}`;
+      headers.authorization = `Bearer ${this.config.bearerToken.expose()}`;
     }
     let response: Response;
     try {
@@ -193,8 +203,14 @@ export class CustomHttpDetector implements GuardrailDetector {
       throw statusError(response.status);
     }
     const contentLength = response.headers.get("content-length");
-    if (contentLength !== null && Number.parseInt(contentLength, 10) > this.config.maxResponseBytes) {
-      throw DetectorError.new("payload_too_large", "guardrail detector response exceeds configured limit");
+    if (
+      contentLength !== null &&
+      Number.parseInt(contentLength, 10) > this.config.maxResponseBytes
+    ) {
+      throw DetectorError.new(
+        "payload_too_large",
+        "guardrail detector response exceeds configured limit",
+      );
     }
     const bytes = await this.readBounded(response);
     return parseDetectorResponse(bytes);
@@ -205,7 +221,10 @@ export class CustomHttpDetector implements GuardrailDetector {
     if (!reader) {
       const buf = new Uint8Array(await response.arrayBuffer());
       if (buf.length > this.config.maxResponseBytes) {
-        throw DetectorError.new("payload_too_large", "guardrail detector response exceeds configured limit");
+        throw DetectorError.new(
+          "payload_too_large",
+          "guardrail detector response exceeds configured limit",
+        );
       }
       return buf;
     }
@@ -223,7 +242,10 @@ export class CustomHttpDetector implements GuardrailDetector {
       }
       const remaining = this.config.maxResponseBytes - total;
       if (chunk.value.length > remaining) {
-        throw DetectorError.new("payload_too_large", "guardrail detector response exceeds configured limit");
+        throw DetectorError.new(
+          "payload_too_large",
+          "guardrail detector response exceeds configured limit",
+        );
       }
       chunks.push(chunk.value);
       total += chunk.value.length;
@@ -241,7 +263,10 @@ export class CustomHttpDetector implements GuardrailDetector {
     this.requestTotal += 1;
     const now = Date.now();
     if (now >= deadlineMs) {
-      const error = DetectorError.new("timeout", "guardrail detector deadline expired before execution");
+      const error = DetectorError.new(
+        "timeout",
+        "guardrail detector deadline expired before execution",
+      );
       this.recordFailure(error, now);
       throw error;
     }
@@ -252,13 +277,18 @@ export class CustomHttpDetector implements GuardrailDetector {
       throw error;
     }
 
-    const projectedSegments = input.segments.filter((s) => this.config.supportedSources.includes(s.source));
+    const projectedSegments = input.segments.filter((s) =>
+      this.config.supportedSources.includes(s.source),
+    );
     const projectedText =
       input.segments.length === 0 && this.config.supportedSources.includes("unknown")
         ? input.text
         : projectedSegments.map((s) => s.text).join("\n");
     if (byteLen(projectedText) > this.config.maxPayloadBytes) {
-      const error = DetectorError.new("payload_too_large", "guardrail detector request exceeds configured limit");
+      const error = DetectorError.new(
+        "payload_too_large",
+        "guardrail detector request exceeds configured limit",
+      );
       this.recordFailure(error, Date.now());
       throw error;
     }
@@ -275,14 +305,20 @@ export class CustomHttpDetector implements GuardrailDetector {
     };
     const requestBody = encodeUtf8(JSON.stringify(request));
     if (requestBody.length > this.config.maxPayloadBytes) {
-      const error = DetectorError.new("payload_too_large", "guardrail detector request exceeds configured limit");
+      const error = DetectorError.new(
+        "payload_too_large",
+        "guardrail detector request exceeds configured limit",
+      );
       this.recordFailure(error, Date.now());
       throw error;
     }
 
     const permit = await this.permits.acquire(Math.max(0, deadlineMs - Date.now()));
     if (!permit) {
-      const error = DetectorError.new("overloaded", "guardrail detector concurrency wait exceeded deadline");
+      const error = DetectorError.new(
+        "overloaded",
+        "guardrail detector concurrency wait exceeded deadline",
+      );
       this.recordFailure(error, Date.now());
       throw error;
     }
@@ -351,7 +387,10 @@ export function parseDetectorResponse(bytes: Uint8Array): DetectorResult {
     throw DetectorError.new("invalid_response", "guardrail detector response is missing verdict");
   }
   if (wire.match === true && wire.matched_text === undefined) {
-    throw DetectorError.new("invalid_response", "legacy guardrail detector match is missing matched_text");
+    throw DetectorError.new(
+      "invalid_response",
+      "legacy guardrail detector match is missing matched_text",
+    );
   }
   const findings: Finding[] = wire.findings as Finding[];
   if (wire.matched_text !== undefined) {
@@ -409,7 +448,10 @@ export function validateDetectorResult(
       !isCharBoundary(coordinateText, start) ||
       !isCharBoundary(coordinateText, end)
     ) {
-      throw DetectorError.new("invalid_response", "guardrail detector returned an invalid finding byte range");
+      throw DetectorError.new(
+        "invalid_response",
+        "guardrail detector returned an invalid finding byte range",
+      );
     }
   }
 }
@@ -444,13 +486,19 @@ function validateConfig(config: CustomHttpDetectorConfig): void {
  * only the mapping onto the two ported Rust messages. Accepts a raw string as
  * well as a `URL` so callers that have not parsed yet get the same checks.
  */
-export function validateCustomHttpEndpoint(endpoint: URL | string, allowPrivateNetwork: boolean): void {
+export function validateCustomHttpEndpoint(
+  endpoint: URL | string,
+  allowPrivateNetwork: boolean,
+): void {
   const rejection = detectorEndpointRejection(endpoint, allowPrivateNetwork);
   if (rejection === undefined) {
     return;
   }
   if (rejection === "invalid_url") {
-    throw DetectorError.new("invalid_configuration", "guardrail detector endpoint is not a valid URL");
+    throw DetectorError.new(
+      "invalid_configuration",
+      "guardrail detector endpoint is not a valid URL",
+    );
   }
   if (rejection === "private_network_host") {
     throw DetectorError.new(

@@ -109,14 +109,14 @@ export function parsePromptReference(raw: unknown): PromptReference {
     if (!known.has(key)) throw invalid(`unknown member ${key}`);
   }
 
-  const id = raw["id"];
+  const id = raw.id;
   if (typeof id !== "string" || id.trim() === "") throw invalid("prompt.id is required");
 
-  const label = raw["label"];
+  const label = raw.label;
   if (label !== undefined && (typeof label !== "string" || label.trim() === "")) {
     throw invalid("prompt.label must be a non-empty string");
   }
-  const revision = raw["revision"];
+  const revision = raw.revision;
   if (revision !== undefined && !Number.isInteger(revision)) {
     throw invalid("prompt.revision must be a whole number");
   }
@@ -126,7 +126,7 @@ export function parsePromptReference(raw: unknown): PromptReference {
     throw invalid("prompt must not name both a label and a revision");
   }
 
-  const variables = raw["variables"];
+  const variables = raw.variables;
   if (variables !== undefined && !isRecord(variables)) {
     throw invalid("prompt.variables must be an object");
   }
@@ -154,18 +154,10 @@ export async function renderPromptReference(
     (candidate) => candidate.id === reference.id,
   );
   if (template === undefined) {
-    throw reject(
-      404,
-      "prompt_template_not_found",
-      `prompt template ${reference.id} was not found`,
-    );
+    throw reject(404, "prompt_template_not_found", `prompt template ${reference.id} was not found`);
   }
   if (template.status !== "active") {
-    throw reject(
-      409,
-      "prompt_template_inactive",
-      `prompt template ${reference.id} is not active`,
-    );
+    throw reject(409, "prompt_template_inactive", `prompt template ${reference.id} is not active`);
   }
 
   let revision = reference.revision;
@@ -187,11 +179,7 @@ export async function renderPromptReference(
     // Reachable from a LABEL as well as from an explicit revision: the control
     // plane cannot see the operator's version table, so it accepts a pointer to
     // any revision and the edge is where an impossible one is caught.
-    throw reject(
-      404,
-      "prompt_template_version_not_found",
-      "prompt template version was not found",
-    );
+    throw reject(404, "prompt_template_version_not_found", "prompt template version was not found");
   }
   if (version.status !== "active") {
     throw reject(
@@ -228,7 +216,7 @@ export function mergeRenderedPrompt(
   // `expandPromptReference` refuses a body that does — so re-asserting the
   // template's values here is belt-and-braces against a future edit that
   // relaxes that guard without noticing this line.
-  merged["model"] = rendered["model"];
+  merged.model = rendered.model;
   for (const member of RENDERED_MESSAGE_MEMBERS) {
     if (member in rendered) merged[member] = rendered[member];
     else delete merged[member];

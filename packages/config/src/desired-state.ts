@@ -308,8 +308,7 @@ export function planKind(input: PlanKindInput): readonly PlannedChange[] {
     const { id } = identity;
     if (claimed.has(id)) {
       throw new DesiredStateError(
-        `${shape.kind}: '${id}' is declared twice in the same document; a desired state ` +
-          "cannot name one resource two ways",
+        `${shape.kind}: '${id}' is declared twice in the same document; a desired state cannot name one resource two ways`,
       );
     }
     claimed.add(id);

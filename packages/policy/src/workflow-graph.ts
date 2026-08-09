@@ -339,10 +339,7 @@ export function workflowEdgeTransitionError(
   }
   for (const edge of workflow.edges) {
     if (edge.to === nodeId) {
-      return (
-        `agent workflow ${workflow.id}@${workflow.version} node ${nodeId} has incoming ` +
-        "edges and cannot start this run"
-      );
+      return `agent workflow ${workflow.id}@${workflow.version} node ${nodeId} has incoming edges and cannot start this run`;
     }
   }
   return null;
@@ -456,11 +453,7 @@ export function enforceWorkflowGraphPolicy(
     };
   }
 
-  const edgeError = workflowEdgeTransitionError(
-    workflow,
-    nodeId,
-    facts.previousSuccessfulNodeId,
-  );
+  const edgeError = workflowEdgeTransitionError(workflow, nodeId, facts.previousSuccessfulNodeId);
   if (edgeError !== null) {
     return { ok: false, rejection: refuse("workflow_edge_not_allowed", edgeError) };
   }
@@ -519,8 +512,7 @@ export function enforceWorkflowGraphPolicy(
       ok: false,
       rejection: refuse(
         "workflow_token_budget_exceeded",
-        `agent workflow ${workflow.id}@${workflow.version} token budget cannot cover the ` +
-          "estimated request usage",
+        `agent workflow ${workflow.id}@${workflow.version} token budget cannot cover the estimated request usage`,
       ),
     };
   }
@@ -544,9 +536,7 @@ export function enforceWorkflowGraphPolicy(
   return {
     ok: true,
     constraint:
-      node.providers.length === 0
-        ? null
-        : { nodeId: node.id, providers: [...node.providers] },
+      node.providers.length === 0 ? null : { nodeId: node.id, providers: [...node.providers] },
   };
 }
 

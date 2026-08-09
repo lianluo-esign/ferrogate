@@ -24,10 +24,7 @@
           "id": "key-1",
           "name": "conformance key",
           "key": "secret-1",
-          "scopes": [
-            "chat.completions",
-            "responses.create"
-          ],
+          "scopes": ["chat.completions", "responses.create"],
           "organization_id": "tenant-1",
           "project_id": "project-1"
         }
@@ -63,9 +60,7 @@
     "outcome": "deny",
     "status": 429,
     "code": "monthly_budget_exceeded",
-    "durable_writes": [
-      "request_log"
-    ],
+    "durable_writes": ["request_log"],
     "audit_events": []
   },
   "worker_shell": {

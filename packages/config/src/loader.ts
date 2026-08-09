@@ -25,9 +25,9 @@
  */
 import { parseCaddyfile } from "./caddyfile/parser.js";
 import type { GatewayConfig } from "./caddyfile/types.js";
+import { type Config, parseConfig } from "./schema/config.js";
 import type { EnvSource } from "./secrets.js";
-import { parseConfig, type Config } from "./schema/config.js";
-import { validateConfig, type ValidateOptions } from "./validate.js";
+import { type ValidateOptions, validateConfig } from "./validate.js";
 import { inertBillingServiceWarnings, inertTlsWarnings } from "./validate/sections.js";
 
 /** Whether a path's filename is exactly `Caddyfile` (case-insensitive). */
@@ -77,6 +77,7 @@ export function migrateControlPlaneAliases(raw: Record<string, unknown>): AliasM
     );
     // admin_api already holds the alias value (the effective section).
   }
+  // biome-ignore lint/performance/noDelete: removes the own-property key entirely; assigning undefined would leave an enumerable undefined-valued key and change JSON serialization, the 'in' operator, and Object.keys semantics
   delete config.control_api;
   return { config, warnings };
 }
@@ -114,7 +115,12 @@ export function loadConfigFromObject(
 export function fromGatewayConfig(gateway: GatewayConfig): Record<string, unknown> {
   let tls: Record<string, unknown> | undefined;
   if (gateway.tls !== null) {
-    tls = { enabled: true, cert_path: gateway.tls.cert_path, key_path: gateway.tls.key_path, http2: false };
+    tls = {
+      enabled: true,
+      cert_path: gateway.tls.cert_path,
+      key_path: gateway.tls.key_path,
+      http2: false,
+    };
   } else if (gateway.tls_acme !== null) {
     const acme = gateway.tls_acme;
     const acmeOut: Record<string, unknown> = {
@@ -129,14 +135,16 @@ export function fromGatewayConfig(gateway: GatewayConfig): Record<string, unknow
     };
     if (acme.directory_url !== null) acmeOut.directory_url = acme.directory_url;
     if (acme.challenge !== null) acmeOut.challenge = acme.challenge;
-    if (acme.http_challenge_listen !== null) acmeOut.http_challenge_listen = acme.http_challenge_listen;
+    if (acme.http_challenge_listen !== null)
+      acmeOut.http_challenge_listen = acme.http_challenge_listen;
     if (acme.storage_dir !== null) acmeOut.storage_dir = acme.storage_dir;
     if (acme.renewal_window_secs !== null) acmeOut.renewal_window_secs = acme.renewal_window_secs;
     if (acme.renewal_check_interval_secs !== null)
       acmeOut.renewal_check_interval_secs = acme.renewal_check_interval_secs;
     if (acme.renewal_retry_interval_secs !== null)
       acmeOut.renewal_retry_interval_secs = acme.renewal_retry_interval_secs;
-    if (acme.auto_graceful_reload !== null) acmeOut.auto_graceful_reload = acme.auto_graceful_reload;
+    if (acme.auto_graceful_reload !== null)
+      acmeOut.auto_graceful_reload = acme.auto_graceful_reload;
     tls = { enabled: true, cert_path: null, key_path: null, http2: false, acme: acmeOut };
   }
 

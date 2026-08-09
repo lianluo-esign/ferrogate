@@ -19,10 +19,9 @@
  * Worker as OTLP (the container-side shape, ported faithfully here), the AE
  * sink when the gateway holds the binding itself.
  */
-import {
-  ObservabilityConfigError,
-  ObservabilitySignal,
-} from "./config.js";
+
+import { ALL_SIGNALS, type TelemetryBackend } from "./backend.js";
+import { ObservabilityConfigError, ObservabilitySignal } from "./config.js";
 import type { GatewayMetricsSnapshot } from "./metrics.js";
 import {
   buildOtlpGaugeMetricsRequest,
@@ -30,13 +29,7 @@ import {
   buildOtlpMetricsRequest,
   buildOtlpTracesRequest,
 } from "./otlp.js";
-import type {
-  OtlpGaugePoint,
-  OtlpHttpRequest,
-  OtlpLogRecord,
-  OtlpSpanRecord,
-} from "./otlp.js";
-import { ALL_SIGNALS, type TelemetryBackend } from "./backend.js";
+import type { OtlpGaugePoint, OtlpHttpRequest, OtlpLogRecord, OtlpSpanRecord } from "./otlp.js";
 
 /**
  * Header carrying the fallback tenant for records that have no tenant
@@ -62,8 +55,7 @@ export class CloudflareBackend implements TelemetryBackend {
   }
 
   withDefaultTenant(tenant: string | undefined): this {
-    this.defaultTenant_ =
-      tenant !== undefined && tenant.trim() !== "" ? tenant : undefined;
+    this.defaultTenant_ = tenant !== undefined && tenant.trim() !== "" ? tenant : undefined;
     return this;
   }
 
@@ -81,9 +73,7 @@ export class CloudflareBackend implements TelemetryBackend {
   }
 
   private headers(): Array<[string, string]> {
-    const headers: Array<[string, string]> = [
-      ["Authorization", `Bearer ${this.token}`],
-    ];
+    const headers: Array<[string, string]> = [["Authorization", `Bearer ${this.token}`]];
     if (this.defaultTenant_ !== undefined) {
       headers.push([TENANT_HEADER, this.defaultTenant_]);
     }
@@ -107,9 +97,7 @@ export class CloudflareBackend implements TelemetryBackend {
     if (!this.supports(ObservabilitySignal.Metric)) {
       return null;
     }
-    return this.authorize(
-      buildOtlpMetricsRequest(this.collectorEndpoint_, snapshot),
-    );
+    return this.authorize(buildOtlpMetricsRequest(this.collectorEndpoint_, snapshot));
   }
 
   /**
@@ -135,28 +123,18 @@ export class CloudflareBackend implements TelemetryBackend {
     );
   }
 
-  tracesRequest(
-    serviceName: string,
-    spans: readonly OtlpSpanRecord[],
-  ): OtlpHttpRequest | null {
+  tracesRequest(serviceName: string, spans: readonly OtlpSpanRecord[]): OtlpHttpRequest | null {
     if (spans.length === 0 || !this.supports(ObservabilitySignal.Trace)) {
       return null;
     }
-    return this.authorize(
-      buildOtlpTracesRequest(this.collectorEndpoint_, serviceName, spans),
-    );
+    return this.authorize(buildOtlpTracesRequest(this.collectorEndpoint_, serviceName, spans));
   }
 
-  logsRequest(
-    serviceName: string,
-    logs: readonly OtlpLogRecord[],
-  ): OtlpHttpRequest | null {
+  logsRequest(serviceName: string, logs: readonly OtlpLogRecord[]): OtlpHttpRequest | null {
     if (logs.length === 0 || !this.supports(ObservabilitySignal.Log)) {
       return null;
     }
-    return this.authorize(
-      buildOtlpLogsRequest(this.collectorEndpoint_, serviceName, logs),
-    );
+    return this.authorize(buildOtlpLogsRequest(this.collectorEndpoint_, serviceName, logs));
   }
 
   validate(): ObservabilityConfigError | null {
@@ -199,14 +177,10 @@ export class CloudflareBackend implements TelemetryBackend {
   /** Redacted debug string — never leaks the bearer token into logs. */
   redactedDebug(): string {
     const tenant =
-      this.defaultTenant_ === undefined
-        ? "undefined"
-        : JSON.stringify(this.defaultTenant_);
+      this.defaultTenant_ === undefined ? "undefined" : JSON.stringify(this.defaultTenant_);
     return `CloudflareBackend { collectorEndpoint: ${JSON.stringify(
       this.collectorEndpoint_,
-    )}, token: "<redacted>", defaultTenant: ${tenant}, signals: [${this.signals.join(
-      ", ",
-    )}] }`;
+    )}, token: "<redacted>", defaultTenant: ${tenant}, signals: [${this.signals.join(", ")}] }`;
   }
 
   toString(): string {

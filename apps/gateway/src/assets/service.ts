@@ -23,6 +23,17 @@
  * `handlers.ts` renders it into the gateway error envelope. That is what keeps
  * the status/code taxonomy assertable without a Worker.
  */
+
+import {
+  type AssetEgressCounters,
+  type AssetEgressMeter,
+  InMemoryAssetEgressCounters,
+  NO_ASSET_EGRESS_METER,
+  assetEgressQuotaDenial,
+  assetEgressTargetId,
+  assetPullAuditMessage,
+  recordAssetEgress,
+} from "@ferrogate/billing";
 import {
   bundlePathRejection,
   detectArchiveFormat,
@@ -35,21 +46,11 @@ import {
 import {
   ASSET_REJECTED_CODE,
   ASSET_REJECTED_STATUS,
-  assetContentRejection,
   EICAR_SIGNATURE,
+  assetContentRejection,
   streamedAssetContentRejection,
 } from "./content-gate.js";
-import {
-  type AssetEgressCounters,
-  type AssetEgressMeter,
-  InMemoryAssetEgressCounters,
-  NO_ASSET_EGRESS_METER,
-  assetEgressQuotaDenial,
-  assetEgressTargetId,
-  assetPullAuditMessage,
-  recordAssetEgress,
-} from "@ferrogate/billing";
-import { randomHex128, sha256Hex, StreamingSha256, toHex } from "./hash.js";
+import { StreamingSha256, randomHex128, sha256Hex, toHex } from "./hash.js";
 import {
   type AssetObjectRef,
   CrossTenantKeyError,
@@ -65,12 +66,12 @@ import {
   storedAssetVariantId,
 } from "./keys.js";
 import {
-  type AssetObjectBody,
   type AssetAuditSink,
   type AssetBundleIndexStore,
   type AssetBundleScreeningVerdict,
   type AssetCaller,
   type AssetMetadataStore,
+  type AssetObjectBody,
   type AssetObjectStore,
   type AssetPresigner,
   type AssetScreener,
@@ -82,8 +83,8 @@ import {
   PresignUnavailableError,
   type PresignedUpload,
   type StoredAsset,
-  type StoredAssetMetadata,
   type StoredAssetChannel,
+  type StoredAssetMetadata,
   type StoredBundleFile,
   isDownloadable,
   isScreeningRejection,
@@ -995,7 +996,11 @@ export class AssetService {
       ),
     );
     if (asset === null) {
-      return fail(503, "storage_unavailable", "the file metadata row was not available after upload");
+      return fail(
+        503,
+        "storage_unavailable",
+        "the file metadata row was not available after upload",
+      );
     }
     return { ok: true, status, body: fileObject(asset) };
   }
@@ -1008,15 +1013,13 @@ export class AssetService {
     if (denied) return denied;
     let files = (await this.#metadata.listAssets(caller.tenantId, OPENAI_FILE_ASSET_TYPE))
       .filter((asset) => asset.asset_type === OPENAI_FILE_ASSET_TYPE && asset.variant === "")
-      .filter(
-        (asset) =>
-          input.purpose === undefined || asset.metadata?.purpose === input.purpose,
-      )
+      .filter((asset) => input.purpose === undefined || asset.metadata?.purpose === input.purpose)
       .sort((left, right) => {
         const byCreated = right.created_at_unix - left.created_at_unix;
         return byCreated !== 0 ? byCreated : right.name.localeCompare(left.name);
       });
-    const afterIndex = input.after === undefined ? -1 : files.findIndex((file) => file.name === input.after);
+    const afterIndex =
+      input.after === undefined ? -1 : files.findIndex((file) => file.name === input.after);
     if (afterIndex >= 0) files = files.slice(afterIndex + 1);
     const limit = input.limit ?? 10_000;
     const data = files.slice(0, limit).map(fileObject);
@@ -1078,7 +1081,11 @@ export class AssetService {
       context,
     );
     if (!deleted.ok) return deleted;
-    return { ok: true, status: deleted.status, body: { id: fileId, object: "file", deleted: true } };
+    return {
+      ok: true,
+      status: deleted.status,
+      body: { id: fileId, object: "file", deleted: true },
+    };
   }
 
   // -------------------------------------------------------------------------
@@ -2306,13 +2313,15 @@ export class AssetService {
       );
     }
     if (head.size > this.#limits.inlineMaxBytes) {
-      return this.#commitStreamedUpload(
-        caller,
-        ref,
-        request,
-        context,
-        { id, objectRef, stagingKey, staged, sha256, contentType, bundle },
-      );
+      return this.#commitStreamedUpload(caller, ref, request, context, {
+        id,
+        objectRef,
+        stagingKey,
+        staged,
+        sha256,
+        contentType,
+        bundle,
+      });
     }
     const bytes = new Uint8Array(await staged.arrayBuffer());
     const actualSha256 = await sha256Hex(bytes);

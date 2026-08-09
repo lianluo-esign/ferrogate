@@ -1,9 +1,6 @@
-import { Fragment, useEffect, useRef } from "react";
-import { Link, Outlet, useLocation } from "react-router-dom";
 import { AppSidebar } from "@/components/layout/app-sidebar";
+import { findNavigationLeaf } from "@/components/layout/nav-config";
 import { ThemeSwitcher } from "@/components/theme-switcher";
-import { LanguageSwitcher, useI18n } from "@/i18n";
-import type { TranslationKey } from "@/i18n";
 import {
   Breadcrumb,
   BreadcrumbItem,
@@ -13,12 +10,11 @@ import {
   BreadcrumbSeparator,
 } from "@/components/ui/breadcrumb";
 import { Separator } from "@/components/ui/separator";
-import {
-  SidebarInset,
-  SidebarProvider,
-  SidebarTrigger,
-} from "@/components/ui/sidebar";
-import { findNavigationLeaf } from "@/components/layout/nav-config";
+import { SidebarInset, SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
+import { LanguageSwitcher, useI18n } from "@/i18n";
+import type { TranslationKey } from "@/i18n";
+import { Fragment, useEffect, useRef } from "react";
+import { Link, Outlet, useLocation } from "react-router-dom";
 
 function currentPageTitleKey(pathname: string): TranslationKey {
   return findNavigationLeaf(pathname)?.titleKey ?? "nav.dashboard";
@@ -42,6 +38,7 @@ export function AppShell() {
     (location.state as { focusMainHeading?: boolean } | null)?.focusMainHeading,
   );
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: location.key is an intentional trigger dependency so the heading-focus observer re-attaches on every navigation, including to the same pathname
   useEffect(() => {
     let preparedHeading: HTMLElement | null = null;
     const prepareAndFocus = () => {
@@ -62,6 +59,7 @@ export function AppShell() {
 
   return (
     <SidebarProvider>
+      {/* biome-ignore lint/a11y/useValidAnchor: genuine skip-to-content link — href="#main-content" is a real in-page fragment target, progressively enhanced with onClick focus management for the main heading */}
       <a
         href="#main-content"
         className="fixed left-3 top-3 z-[100] -translate-y-20 rounded-md bg-background px-3 py-2 text-sm font-medium shadow ring-2 ring-ring transition-transform focus:translate-y-0"

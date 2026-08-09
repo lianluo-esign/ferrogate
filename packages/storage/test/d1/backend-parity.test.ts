@@ -72,7 +72,6 @@ describe("which backend this run is actually exercising", () => {
       expect(requireAtomicBatch(handleA, operation)).toBe(handleA);
     }
   });
-
 });
 
 describe("the routed handle and the harness's direct database are the same place", () => {

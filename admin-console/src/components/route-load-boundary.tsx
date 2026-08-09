@@ -1,12 +1,13 @@
-import { Component, Suspense, type ErrorInfo, type ReactNode } from "react";
-import { RotateCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useI18n } from "@/i18n";
+import { RotateCw } from "lucide-react";
+import { Component, type ErrorInfo, type ReactNode, Suspense } from "react";
 
 export function RouteLoading() {
   const { t } = useI18n();
   return (
     <div
+      // biome-ignore lint/a11y/useSemanticElements: ARIA live region for route-loading; the min-height/flex centering classes assume a div, which <output>'s inline default would break
       role="status"
       aria-live="polite"
       aria-busy="true"
@@ -26,9 +27,7 @@ function RouteLoadErrorFallback({ onReload }: { onReload: () => void }) {
   const { t } = useI18n();
   return (
     <div className="flex min-h-48 flex-col items-start justify-center gap-3">
-      <h1 className="text-lg font-semibold">
-        {t("component.routeBoundary.errorTitle")}
-      </h1>
+      <h1 className="text-lg font-semibold">{t("component.routeBoundary.errorTitle")}</h1>
       <p role="alert" className="text-sm text-destructive">
         {t("component.routeBoundary.errorBody")}
       </p>
@@ -67,9 +66,7 @@ export class RouteLoadErrorBoundary extends Component<
     if (!this.state.error) return this.props.children;
 
     return (
-      <RouteLoadErrorFallback
-        onReload={this.props.onReload ?? (() => window.location.reload())}
-      />
+      <RouteLoadErrorFallback onReload={this.props.onReload ?? (() => window.location.reload())} />
     );
   }
 }

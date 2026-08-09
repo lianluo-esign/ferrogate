@@ -45,10 +45,10 @@
  * devDependency of this workspace ONLY, so nothing under `src/**` can reach it
  * and the deployed bundle never carries a JSON-Schema engine.
  */
-import { Validator, type OutputUnit } from "@cfworker/json-schema";
+import { type OutputUnit, Validator } from "@cfworker/json-schema";
 
-import schemaText from "../spec/2026-07-28/schema.json?raw";
 import provenance from "../spec/2026-07-28/PROVENANCE.json";
+import schemaText from "../spec/2026-07-28/schema.json?raw";
 
 /** The parsed vendored schema. Draft 2020-12, per its own `$schema`. */
 const SPEC = JSON.parse(schemaText) as {

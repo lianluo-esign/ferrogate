@@ -33,8 +33,8 @@ describe("OpenAiCompatibleAdapter", () => {
       body: { model: "fast-chat", messages: [{ role: "user", content: "hello" }] },
     });
     expect(prepared.endpoint).toBe("https://api.openai.example/v1/chat/completions");
-    expect((prepared.body as Record<string, unknown>)["model"]).toBe("gpt-4o-mini");
-    expect((prepared.body as Record<string, unknown>)["stream"]).toBe(false);
+    expect((prepared.body as Record<string, unknown>).model).toBe("gpt-4o-mini");
+    expect((prepared.body as Record<string, unknown>).stream).toBe(false);
   });
 
   test("streaming sets include_usage and never leaks the secret in inspection", () => {
@@ -44,7 +44,9 @@ describe("OpenAiCompatibleAdapter", () => {
     );
     expect(prepared.stream).toBe(true);
     const body = prepared.body as Record<string, Record<string, unknown>>;
-    expect(body["stream_options"]!["include_usage"]).toBe(true);
+    expect((body.stream_options as NonNullable<typeof body.stream_options>).include_usage).toBe(
+      true,
+    );
     expect(hasBearer(prepared.headers, "provider-secret")).toBe(true);
     // SecretValue redaction: no plaintext through JSON or string coercion.
     expect(JSON.stringify(prepared.headers)).not.toContain("provider-secret");
@@ -58,7 +60,7 @@ describe("OpenAiCompatibleAdapter", () => {
         { ...openaiProvider(), kind },
         { logicalModel: "l", providerModel: "provider-chat", stream: false, body: { model: "l" } },
       );
-      expect((prepared.body as Record<string, unknown>)["model"]).toBe("provider-chat");
+      expect((prepared.body as Record<string, unknown>).model).toBe("provider-chat");
     }
     expect(() =>
       adapter.prepareChatCompletions(
@@ -80,7 +82,9 @@ describe("OpenAiCompatibleAdapter", () => {
     } catch (error) {
       expect(error).toBeInstanceOf(AdapterError);
       expect((error as AdapterError).kind).toBe("InvalidRequest");
-      expect((error as AdapterError).message).toBe("chat completion request body must be a JSON object");
+      expect((error as AdapterError).message).toBe(
+        "chat completion request body must be a JSON object",
+      );
     }
   });
 
@@ -89,25 +93,33 @@ describe("OpenAiCompatibleAdapter", () => {
     const normalized = adapter.normalizeErrorResponse(
       429,
       "application/json",
-      bytes('{"error":{"message":"rate limited","type":"rate_limit_error","code":"rate_limit_exceeded"}}'),
+      bytes(
+        '{"error":{"message":"rate limited","type":"rate_limit_error","code":"rate_limit_exceeded"}}',
+      ),
       "fg-test",
     );
-    const error = (normalized.body as Record<string, Record<string, unknown>>)["error"]!;
-    expect(error["message"]).toBe("rate limited");
-    expect(error["provider_type"]).toBe("rate_limit_error");
-    expect(error["code"]).toBe("rate_limit_exceeded");
+    const error = (normalized.body as Record<string, Record<string, unknown>>).error!;
+    expect(error.message).toBe("rate limited");
+    expect(error.provider_type).toBe("rate_limit_error");
+    expect(error.code).toBe("rate_limit_exceeded");
 
-    expect(adapter.extractUsage(bytes('{"usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18}}'))).toEqual(
-      { promptTokens: 11, completionTokens: 7, totalTokens: 18 },
-    );
+    expect(
+      adapter.extractUsage(
+        bytes('{"usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18}}'),
+      ),
+    ).toEqual({ promptTokens: 11, completionTokens: 7, totalTokens: 18 });
     expect(adapter.extractUsage(bytes('{"id":"x"}'))).toBeUndefined();
 
     const calls = adapter.extractToolCalls(
-      bytes('{"choices":[{"message":{"tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup_weather","arguments":"{\\"city\\":\\"Shanghai\\"}"}}]}}]}'),
+      bytes(
+        '{"choices":[{"message":{"tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup_weather","arguments":"{\\"city\\":\\"Shanghai\\"}"}}]}}]}',
+      ),
     );
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({ id: "call_1", name: "lookup_weather" });
-    expect((calls[0]!.arguments as Record<string, unknown>)["city"]).toBe("Shanghai");
+    expect(
+      ((calls[0] as NonNullable<(typeof calls)[0]>).arguments as Record<string, unknown>).city,
+    ).toBe("Shanghai");
   });
 
   test("non-JSON error falls back to the raw body text", () => {
@@ -117,9 +129,9 @@ describe("OpenAiCompatibleAdapter", () => {
       bytes("upstream unavailable"),
       "fg-test",
     );
-    const error = (normalized.body as Record<string, Record<string, unknown>>)["error"]!;
-    expect(error["message"]).toBe("upstream unavailable");
-    expect(error["code"]).toBe("provider_error");
+    const error = (normalized.body as Record<string, Record<string, unknown>>).error!;
+    expect(error.message).toBe("upstream unavailable");
+    expect(error.code).toBe("provider_error");
   });
 
   test("images generation is supported; embeddings + catalog work", () => {
@@ -130,10 +142,12 @@ describe("OpenAiCompatibleAdapter", () => {
       body: { model: "art", prompt: "a red fox", n: 2 },
     });
     expect(images.endpoint).toBe("https://api.openai.example/v1/images/generations");
-    expect((images.body as Record<string, unknown>)["model"]).toBe("gpt-image-1");
+    expect((images.body as Record<string, unknown>).model).toBe("gpt-image-1");
 
     const catalog = adapter.parseModelCatalog(
-      bytes('{"object":"list","data":[{"id":"gpt-4o-mini","owned_by":"openai","created":1715367049,"context_window":128000,"capabilities":["chat","tools"]}]}'),
+      bytes(
+        '{"object":"list","data":[{"id":"gpt-4o-mini","owned_by":"openai","created":1715367049,"context_window":128000,"capabilities":["chat","tools"]}]}',
+      ),
     );
     expect(catalog[0]).toMatchObject({
       id: "gpt-4o-mini",
@@ -141,7 +155,10 @@ describe("OpenAiCompatibleAdapter", () => {
       created: 1715367049,
       contextWindow: 128000,
     });
-    expect(catalog[0]!.capabilities).toEqual(["chat", "tools"]);
+    expect((catalog[0] as NonNullable<(typeof catalog)[0]>).capabilities).toEqual([
+      "chat",
+      "tools",
+    ]);
   });
 });
 
@@ -167,10 +184,10 @@ describe("AnthropicAdapter", () => {
     });
     expect(prepared.endpoint).toBe("https://api.anthropic.example/v1/messages");
     const body = prepared.body as Record<string, unknown>;
-    expect(body["model"]).toBe("claude-3-5-sonnet-latest");
-    expect(body["max_tokens"]).toBe(256);
-    expect(body["system"]).toBe("be concise");
-    expect(body["stream"]).toBe(true);
+    expect(body.model).toBe("claude-3-5-sonnet-latest");
+    expect(body.max_tokens).toBe(256);
+    expect(body.system).toBe("be concise");
+    expect(body.stream).toBe(true);
     expect(headerValue(prepared.headers, "x-api-key")).toBe("provider-secret");
   });
 
@@ -231,12 +248,17 @@ describe("Azure / Grok / OpenRouter", () => {
         baseUrl: "https://example.openai.azure.com/?api-version=2024-02-15-preview",
         apiKey: "provider-secret",
       },
-      { logicalModel: "fast", providerModel: "gpt-4o mini", stream: false, body: { model: "fast" } },
+      {
+        logicalModel: "fast",
+        providerModel: "gpt-4o mini",
+        stream: false,
+        body: { model: "fast" },
+      },
     );
     expect(prepared.endpoint).toBe(
       "https://example.openai.azure.com/openai/deployments/gpt-4o%20mini/chat/completions?api-version=2024-02-15-preview",
     );
-    expect((prepared.body as Record<string, unknown>)["model"]).toBeUndefined();
+    expect((prepared.body as Record<string, unknown>).model).toBeUndefined();
     expect(headerValue(prepared.headers, "api-key")).toBe("provider-secret");
   });
 
@@ -253,10 +275,15 @@ describe("Azure / Grok / OpenRouter", () => {
   test("Grok delegates to the OpenAI-compatible shape and accepts the xai alias", () => {
     const prepared = new GrokAdapter().prepareChatCompletions(
       { name: "xai", kind: "xai", baseUrl: "https://api.x.ai/v1/", apiKey: "s" },
-      { logicalModel: "grok-chat", providerModel: "grok-4.20-fast", stream: false, body: { messages: [] } },
+      {
+        logicalModel: "grok-chat",
+        providerModel: "grok-4.20-fast",
+        stream: false,
+        body: { messages: [] },
+      },
     );
     expect(prepared.endpoint).toBe("https://api.x.ai/v1/chat/completions");
-    expect((prepared.body as Record<string, unknown>)["model"]).toBe("grok-4.20-fast");
+    expect((prepared.body as Record<string, unknown>).model).toBe("grok-4.20-fast");
   });
 
   test("OpenRouter injects attribution headers and strips stream_options", () => {
@@ -269,9 +296,14 @@ describe("Azure / Grok / OpenRouter", () => {
         openrouterHttpReferer: "https://ferrogate.example",
         openrouterXTitle: "FerroGate",
       },
-      { logicalModel: "router", providerModel: "openai/gpt-4o-mini", stream: true, body: { messages: [] } },
+      {
+        logicalModel: "router",
+        providerModel: "openai/gpt-4o-mini",
+        stream: true,
+        body: { messages: [] },
+      },
     );
-    expect((prepared.body as Record<string, unknown>)["stream_options"]).toBeUndefined();
+    expect((prepared.body as Record<string, unknown>).stream_options).toBeUndefined();
     expect(headerValue(prepared.headers, "http-referer")).toBe("https://ferrogate.example");
     expect(headerValue(prepared.headers, "x-title")).toBe("FerroGate");
   });
@@ -370,7 +402,13 @@ describe("Bedrock + Vertex (credentialed)", () => {
         logicalModel: "chat",
         providerModel: "anthropic.claude-3-5-sonnet-20241022-v2:0",
         stream: false,
-        body: { messages: [{ role: "system", content: "be concise" }, { role: "user", content: "hello" }], max_tokens: 256 },
+        body: {
+          messages: [
+            { role: "system", content: "be concise" },
+            { role: "user", content: "hello" },
+          ],
+          max_tokens: 256,
+        },
       },
     );
     expect(prepared.endpoint).toBe(
@@ -380,7 +418,9 @@ describe("Bedrock + Vertex (credentialed)", () => {
     expect(body.messages[0].content[0].text).toBe("hello");
     expect(body.system[0].text).toBe("be concise");
     expect(body.inferenceConfig.maxTokens).toBe(256);
-    expect(headerValue(prepared.headers, "authorization")).toMatch(/^AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE\//);
+    expect(headerValue(prepared.headers, "authorization")).toMatch(
+      /^AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE\//,
+    );
     expect(JSON.stringify(prepared)).not.toContain("wJalrXUtnFEMI");
   });
 
@@ -416,9 +456,15 @@ describe("Bedrock + Vertex (credentialed)", () => {
     );
     expect(headerValue(prepared.headers, "authorization")).toBe("Bearer ya29.EXAMPLE");
 
-    const raw = bytes('{"predictions":[{"embeddings":{"values":[0.1,0.2],"statistics":{"token_count":3}}},{"embeddings":{"values":[0.3,0.4],"statistics":{"token_count":4}}}]}');
+    const raw = bytes(
+      '{"predictions":[{"embeddings":{"values":[0.1,0.2],"statistics":{"token_count":3}}},{"embeddings":{"values":[0.3,0.4],"statistics":{"token_count":4}}}]}',
+    );
     const normalized = adapter.translateEmbeddingsResponse(raw, "vertex-embed") as any;
     expect(normalized.usage.prompt_tokens).toBe(7);
-    expect(adapter.extractUsage(raw)).toEqual({ promptTokens: 7, completionTokens: undefined, totalTokens: 7 });
+    expect(adapter.extractUsage(raw)).toEqual({
+      promptTokens: 7,
+      completionTokens: undefined,
+      totalTokens: 7,
+    });
   });
 });

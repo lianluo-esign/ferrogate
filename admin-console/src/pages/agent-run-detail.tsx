@@ -1,19 +1,15 @@
-// Agent run timeline (issue #317): renders GET /admin/v1/agent-runs/{run_id}
-// as the #304 evidence chain — agent events (capability/guardrail/lifecycle
-// kinds) merged with the run's audit events into one time-ordered timeline,
-// with the structured governance columns (action_fingerprint, decision,
-// decision_reason, output_disposition) and correlation ids
-// (request_id/trace_id) on every row.
-import { useMemo } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { Link, useParams } from "react-router-dom";
-import { Badge } from "@/components/ui/badge";
 import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+  DecisionBadge,
+  EventFamilyBadge,
+  type TimelineEventFamily,
+  TruncatedCopyable,
+  eventFamily,
+  formatUnix,
+  runStatusBadgeVariant,
+  tenantLabel,
+} from "@/components/agent-ops/agent-ops-primitives";
+import { Badge } from "@/components/ui/badge";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Table,
   TableBody,
@@ -22,19 +18,18 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import {
-  DecisionBadge,
-  EventFamilyBadge,
-  eventFamily,
-  formatUnix,
-  runStatusBadgeVariant,
-  tenantLabel,
-  TruncatedCopyable,
-  type TimelineEventFamily,
-} from "@/components/agent-ops/agent-ops-primitives";
 import { useAuth } from "@/hooks/use-auth";
 import { useI18n } from "@/i18n";
-import { adminGet, type AdminSchema } from "@/lib/gateway-client";
+import { type AdminSchema, adminGet } from "@/lib/gateway-client";
+import { useQuery } from "@tanstack/react-query";
+// Agent run timeline (issue #317): renders GET /admin/v1/agent-runs/{run_id}
+// as the #304 evidence chain — agent events (capability/guardrail/lifecycle
+// kinds) merged with the run's audit events into one time-ordered timeline,
+// with the structured governance columns (action_fingerprint, decision,
+// decision_reason, output_disposition) and correlation ids
+// (request_id/trace_id) on every row.
+import { useMemo } from "react";
+import { Link, useParams } from "react-router-dom";
 
 export type AgentRunTimeline = AdminSchema<"AgentRunTimeline">;
 
@@ -97,8 +92,7 @@ export function mergeTimeline(timeline: AgentRunTimeline): TimelineEntry[] {
   // Array.prototype.sort is stable, so ties keep agent-before-audit order.
   return [...agentEntries, ...auditEntries].sort(
     (a, b) =>
-      (a.occurredAtUnix ?? Number.MAX_SAFE_INTEGER) -
-      (b.occurredAtUnix ?? Number.MAX_SAFE_INTEGER),
+      (a.occurredAtUnix ?? Number.MAX_SAFE_INTEGER) - (b.occurredAtUnix ?? Number.MAX_SAFE_INTEGER),
   );
 }
 
@@ -106,13 +100,13 @@ export default function AgentRunDetailPage() {
   const { runId } = useParams<{ runId: string }>();
   const { session } = useAuth();
   const { t } = useI18n();
-  const apiKey = session!.gatewayApiKey;
+  const apiKey = (session as NonNullable<typeof session>).gatewayApiKey;
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["agent-run-timeline", runId],
     queryFn: () =>
       adminGet(apiKey, "/admin/v1/agent-runs/{run_id}", {
-        params: { run_id: runId! },
+        params: { run_id: runId as NonNullable<typeof runId> },
       }),
     enabled: Boolean(runId),
   });
@@ -120,13 +114,14 @@ export default function AgentRunDetailPage() {
   const entries = useMemo(() => (data ? mergeTimeline(data) : []), [data]);
 
   if (isLoading) {
-    return (
-      <p className="text-sm text-muted-foreground">{t("page.agentRunDetail.loading")}</p>
-    );
+    return <p className="text-sm text-muted-foreground">{t("page.agentRunDetail.loading")}</p>;
   }
   if (error) {
     return (
-      <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+      <p
+        role="alert"
+        className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+      >
         {t("page.agentRunDetail.loadError", { message: error.message })}
       </p>
     );
@@ -139,8 +134,7 @@ export default function AgentRunDetailPage() {
     <div className="flex flex-col gap-4">
       <div className="flex flex-wrap items-center gap-3">
         <h1 className="text-lg font-semibold">
-          {t("page.agentRunDetail.heading")}{" "}
-          <span className="font-mono text-base">{data.id}</span>
+          {t("page.agentRunDetail.heading")} <span className="font-mono text-base">{data.id}</span>
         </h1>
         <Badge variant={runStatusBadgeVariant(summary.status)}>{summary.status}</Badge>
         <Link

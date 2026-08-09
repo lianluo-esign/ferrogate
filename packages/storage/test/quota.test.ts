@@ -1,12 +1,12 @@
 import { describe, expect, test } from "vitest";
 import {
   StorageError,
+  type StoredQuotaPolicy,
   accumulateOverviewUsage,
   emptyOverviewUsageTotals,
   quotaScopeKindFromString,
   storedQuotaPolicySchema,
   validateQuotaPolicy,
-  type StoredQuotaPolicy,
 } from "../src/index.js";
 
 function tenantPolicy(overrides: Partial<StoredQuotaPolicy> = {}): StoredQuotaPolicy {

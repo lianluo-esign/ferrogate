@@ -51,7 +51,7 @@ async function readCosts(secret: string, query = ""): Promise<ListBody> {
 }
 
 async function ids(secret: string, query = ""): Promise<unknown[]> {
-  return (await readCosts(secret, query)).data.map((row) => row["request_id"]);
+  return (await readCosts(secret, query)).data.map((row) => row.request_id);
 }
 
 const BASE_ROW = {
@@ -128,15 +128,15 @@ describe("#691 — a delegated run is queryable by the principal responsible", (
   it("publishes the whole chain and its root on the cost record", async () => {
     const rows = (await readCosts(operatorKey.secret)).data;
 
-    const delegated = rows.find((row) => row["request_id"] === DELEGATED_A.requestId);
-    expect(delegated?.["delegation_chain"]).toBe("user:u_alice>agent:planner>agent:writer");
-    expect(delegated?.["delegation_root"]).toBe("user:u_alice");
+    const delegated = rows.find((row) => row.request_id === DELEGATED_A.requestId);
+    expect(delegated?.delegation_chain).toBe("user:u_alice>agent:planner>agent:writer");
+    expect(delegated?.delegation_root).toBe("user:u_alice");
 
     // Absence, recorded as absence. `null` and not `""`: "nobody delegated" and
     // "we did not look" have to stay distinguishable in a chargeback export.
-    const plain = rows.find((row) => row["request_id"] === PLAIN.requestId);
-    expect(plain?.["delegation_chain"]).toBeNull();
-    expect(plain?.["delegation_root"]).toBeNull();
+    const plain = rows.find((row) => row.request_id === PLAIN.requestId);
+    expect(plain?.delegation_chain).toBeNull();
+    expect(plain?.delegation_root).toBeNull();
   });
 
   it("groups spend by the ROOT principal, and does not over-match a prefix", async () => {

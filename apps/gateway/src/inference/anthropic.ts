@@ -970,8 +970,6 @@ export function stopReasonToFinishReason(stopReason: string | undefined): string
       return "tool_calls";
     case "max_tokens":
       return "length";
-    case "end_turn":
-    case "stop_sequence":
     default:
       return "stop";
   }

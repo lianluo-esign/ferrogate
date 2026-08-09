@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
 import { RESOURCE_ROUTES } from "@/resources";
 import { RESOURCE_ROUTE_PATHS } from "@/resources/route-paths";
+import { describe, expect, it } from "vitest";
 
 describe("resource route registry", () => {
   it("keeps the initial lightweight path registry equal to the lazy config registry", () => {

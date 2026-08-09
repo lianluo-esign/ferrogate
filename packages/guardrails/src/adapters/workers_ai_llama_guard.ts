@@ -43,27 +43,28 @@
  * error allows or blocks the request is the policy's `on_error`, not the
  * detector's.
  */
+
+import type { JsonValue } from "@ferrogate/core";
 import { TIMED_OUT, withTimeout } from "../async.js";
+import {
+  type ContentSource,
+  type DetectorDescriptor,
+  DetectorError,
+  type DetectorErrorKind,
+  type DetectorHealth,
+  type DetectorInput,
+  type DetectorResult,
+  type DetectorSecret,
+  type Finding,
+  MAX_DETECTOR_TIMEOUT_MS,
+} from "../contract.js";
+import type { GuardrailDetector } from "../contract.js";
 import {
   AdapterCounters,
   configDigest,
   hmacEvidenceFingerprint,
   nativeAdapterFailureModes,
 } from "./transport.js";
-import {
-  DetectorError,
-  DetectorSecret,
-  MAX_DETECTOR_TIMEOUT_MS,
-  type ContentSource,
-  type DetectorDescriptor,
-  type DetectorErrorKind,
-  type DetectorHealth,
-  type DetectorInput,
-  type DetectorResult,
-  type Finding,
-} from "../contract.js";
-import type { GuardrailDetector } from "../contract.js";
-import type { JsonValue } from "@ferrogate/core";
 
 /** A sensible default Llama Guard model slug. */
 export const DEFAULT_MODEL = "@cf/meta/llama-guard-3-8b";
@@ -266,7 +267,10 @@ export class WorkersAiLlamaGuardDetector implements GuardrailDetector {
     client: WorkersAiClient,
   ): WorkersAiLlamaGuardDetector {
     validateConfig(config);
-    const digest = configDigest([config.model, config.categories ? config.categories.join(",") : ""]);
+    const digest = configDigest([
+      config.model,
+      config.categories ? config.categories.join(",") : "",
+    ]);
     return new WorkersAiLlamaGuardDetector(
       config,
       client,
@@ -276,7 +280,10 @@ export class WorkersAiLlamaGuardDetector implements GuardrailDetector {
   }
 
   /** Build against the REST {@link CloudflareClient}, as the Rust constructor did. */
-  static new(config: WorkersAiLlamaGuardConfig, client: CloudflareClient): WorkersAiLlamaGuardDetector {
+  static new(
+    config: WorkersAiLlamaGuardConfig,
+    client: CloudflareClient,
+  ): WorkersAiLlamaGuardDetector {
     return WorkersAiLlamaGuardDetector.withWorkersAi(config, cloudflareRestWorkersAiClient(client));
   }
 
@@ -311,8 +318,8 @@ export class WorkersAiLlamaGuardDetector implements GuardrailDetector {
     let category: string;
     const code = hazardCode !== undefined ? normalizeHazardCode(hazardCode) : undefined;
     if (code !== undefined) {
-      attributes["hazard_code"] = code;
-      attributes["hazard_name"] = hazardName(code);
+      attributes.hazard_code = code;
+      attributes.hazard_name = hazardName(code);
       category = `content_moderation.llama_guard.${code.toLowerCase()}`;
     } else {
       category = "content_moderation.llama_guard.unsafe";
@@ -448,8 +455,8 @@ function interpretText(text: string): LlamaGuardVerdict {
 }
 
 function interpretObject(map: Record<string, JsonValue>): LlamaGuardVerdict | undefined {
-  if (typeof map["safe"] === "boolean") {
-    const rawCategories = map["categories"];
+  if (typeof map.safe === "boolean") {
+    const rawCategories = map.categories;
     const categories = Array.isArray(rawCategories)
       ? dedup(
           rawCategories
@@ -458,7 +465,7 @@ function interpretObject(map: Record<string, JsonValue>): LlamaGuardVerdict | un
             .filter((c): c is string => c !== undefined),
         )
       : [];
-    return { isUnsafe: !map["safe"], categories };
+    return { isUnsafe: !map.safe, categories };
   }
 
   const categories: string[] = [];
@@ -473,7 +480,7 @@ function interpretObject(map: Record<string, JsonValue>): LlamaGuardVerdict | un
     if (typeof value === "boolean") {
       categorySafe = value;
     } else if (value !== null && typeof value === "object" && !Array.isArray(value)) {
-      const inner = (value as Record<string, JsonValue>)["safe"];
+      const inner = (value as Record<string, JsonValue>).safe;
       categorySafe = typeof inner === "boolean" ? inner : true;
     }
     if (!categorySafe) {
@@ -489,7 +496,11 @@ function interpretObject(map: Record<string, JsonValue>): LlamaGuardVerdict | un
 
 function dedup(codes: string[]): string[] {
   const seen = new Set<string>();
-  return codes.filter((c) => (seen.has(c) ? false : (seen.add(c), true)));
+  return codes.filter((c) => {
+    if (seen.has(c)) return false;
+    seen.add(c);
+    return true;
+  });
 }
 
 /** Normalize a hazard token to a canonical `S<n>` (1..=14), or `undefined`. */

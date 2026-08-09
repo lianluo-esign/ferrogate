@@ -81,9 +81,9 @@ import type {
 } from "@ferrogate/observability";
 import {
   DEFAULT_TELEMETRY_SERVICE_NAME,
-  SERVICE_BINDING_ORIGIN,
   type GatewayTelemetryBindings,
   type RequestTelemetry,
+  SERVICE_BINDING_ORIGIN,
   type TelemetryEmitter,
   type TelemetryService,
 } from "./ports.js";

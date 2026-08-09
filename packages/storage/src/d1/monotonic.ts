@@ -38,10 +38,11 @@
  * second must both count. That asymmetry is why `request_count` cannot be
  * folded with the timestamps and is stated here rather than being inferred.
  */
-import { d1Error } from "./rows.js";
+
 import type { StoredAgentCostBurn } from "../agent-cost-burn.js";
 import type { ObservedAgentPresenceTouch, StoredObservedAgentPresence } from "../presence.js";
 import type { TenantDatabaseHandle, TenantDatabaseRouter } from "../tenant-router.js";
+import { d1Error } from "./rows.js";
 
 // The DTOs are the SAME types the in-memory stores use (`../presence.js`,
 // `../agent-cost-burn.js`) rather than D1-local copies. That is deliberate: a

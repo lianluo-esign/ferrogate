@@ -110,6 +110,7 @@ function validateJsonShape(shape: JsonShape): string | null {
 function normalizeHost(host: string): { host: string } | { error: string } {
   const value = host.trim().replace(/\.+$/, "").toLowerCase();
   // eslint-disable-next-line no-control-regex
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: the control-character range is deliberate — this validates the host is ASCII-only and rejects anything outside U+0000..U+007F
   const asciiOnly = /^[\u0000-\u007f]*$/.test(value);
   if (value.length === 0 || !asciiOnly || value.includes("%") || /\s/.test(value)) {
     return { error: "host notation is ambiguous" };

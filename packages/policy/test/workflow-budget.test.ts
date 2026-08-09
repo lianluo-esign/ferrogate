@@ -1,25 +1,25 @@
 import { describe, expect, test } from "vitest";
 import {
+  type StoredWorkflowRunBudget,
+  WORKFLOW_NODE_MODEL_NOT_ALLOWED_CODE,
+  WORKFLOW_NODE_PROVIDER_NOT_ALLOWED_CODE,
+  WORKFLOW_RUN_BUDGET_ACTIVE,
+  WORKFLOW_RUN_BUDGET_EXHAUSTED,
+  type WorkflowBudgetCaps,
   deadlineUnix,
   evaluateNodeDispatch,
   isUnbounded,
   preflightWorkflowBudget,
   resolveWorkflowBudgetEnvelope,
-  WORKFLOW_NODE_MODEL_NOT_ALLOWED_CODE,
-  WORKFLOW_NODE_PROVIDER_NOT_ALLOWED_CODE,
-  WORKFLOW_RUN_BUDGET_ACTIVE,
-  WORKFLOW_RUN_BUDGET_EXHAUSTED,
-  type StoredWorkflowRunBudget,
-  type WorkflowBudgetCaps,
 } from "../src/index.js";
 
-function caps(
-  cost?: number,
-  tokens?: number,
-  tools?: number,
-  wall?: number,
-): WorkflowBudgetCaps {
-  return { costBudgetCredits: cost, tokenBudget: tokens, toolCallBudget: tools, wallClockMillis: wall };
+function caps(cost?: number, tokens?: number, tools?: number, wall?: number): WorkflowBudgetCaps {
+  return {
+    costBudgetCredits: cost,
+    tokenBudget: tokens,
+    toolCallBudget: tools,
+    wallClockMillis: wall,
+  };
 }
 
 function budget(c: WorkflowBudgetCaps, spent: [number, number, number]): StoredWorkflowRunBudget {

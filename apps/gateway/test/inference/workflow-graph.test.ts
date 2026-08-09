@@ -39,9 +39,7 @@ const COMPLETION = {
   id: "chatcmpl-wf",
   object: "chat.completion",
   model: "gpt-4o-mini-2024-07-18",
-  choices: [
-    { index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" },
-  ],
+  choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
   usage: { prompt_tokens: 7, completion_tokens: 3, total_tokens: 10 },
 };
 
@@ -185,10 +183,7 @@ describe("the workflow graph gate — thirteen Rust refusals", () => {
   it("403 workflow_not_allowed when the caller is outside api_key_ids", async () => {
     const provider = interceptProviderFetch(() => providerJson(COMPLETION));
     try {
-      const res = await step(
-        workflowHarness([workflow({ api_key_ids: ["key_other"] })]),
-        LEGAL,
-      );
+      const res = await step(workflowHarness([workflow({ api_key_ids: ["key_other"] })]), LEGAL);
       expect(res.status).toBe(403);
       expect((await errorBody(res)).error.code).toBe("workflow_not_allowed");
       expect(provider.requests.length).toBe(0);
@@ -224,9 +219,7 @@ describe("the workflow graph gate — thirteen Rust refusals", () => {
       expect(res.status).toBe(400);
       const body = await errorBody(res);
       expect(body.error.code).toBe("workflow_node_not_found");
-      expect(body.error.message).toBe(
-        "agent workflow wf_review@3 does not contain node ghost",
-      );
+      expect(body.error.message).toBe("agent workflow wf_review@3 does not contain node ghost");
       expect(provider.requests.length).toBe(0);
     } finally {
       provider.restore();
@@ -317,9 +310,7 @@ describe("the workflow graph gate — thirteen Rust refusals", () => {
       expect(res.status).toBe(429);
       const body = await errorBody(res);
       expect(body.error.code).toBe("workflow_model_call_limit_exceeded");
-      expect(body.error.message).toBe(
-        "agent workflow wf_review@3 model call limit is exhausted",
-      );
+      expect(body.error.message).toBe("agent workflow wf_review@3 model call limit is exhausted");
       expect(provider.requests.length).toBe(0);
     } finally {
       provider.restore();
@@ -384,10 +375,7 @@ describe("the workflow graph gate — thirteen Rust refusals", () => {
     const provider = interceptProviderFetch(() => providerJson(COMPLETION));
     try {
       const graph = workflow({
-        nodes: [
-          node("start", { token_budget: 5 }),
-          node("review", { model: "gpt-4o-mini" }),
-        ],
+        nodes: [node("start", { token_budget: 5 }), node("review", { model: "gpt-4o-mini" })],
         edges: [{ from: "start", to: "review" }],
       });
       const h = workflowHarness([graph], { nodeTokensUsed: 5 });
@@ -524,9 +512,7 @@ describe("the provider pin NARROWS dispatch, it does not merely refuse", () => {
         { headers: LEGAL },
       );
       expect(res.status).toBe(200);
-      expect(provider.lastRequest().url).toBe(
-        "https://secondary.example/v1/chat/completions",
-      );
+      expect(provider.lastRequest().url).toBe("https://secondary.example/v1/chat/completions");
     } finally {
       provider.restore();
     }
@@ -584,9 +570,7 @@ describe("the header contract", () => {
       expect(res.status).toBe(400);
       const body = await errorBody(res);
       expect(body.error.code).toBe("invalid_workflow_header");
-      expect(body.error.message).toBe(
-        "x-ferrogate-workflow-version must be an unsigned integer",
-      );
+      expect(body.error.message).toBe("x-ferrogate-workflow-version must be an unsigned integer");
       expect(provider.requests.length).toBe(0);
     } finally {
       provider.restore();
@@ -756,11 +740,7 @@ describe("the header contract", () => {
 describe("the gate applies to EVERY dispatched inference operation", () => {
   const cases: readonly [string, string, unknown][] = [
     ["/v1/chat/completions", "gpt-4o-mini", { messages: [{ role: "user", content: "hi" }] }],
-    [
-      "/v1/responses",
-      "gpt-4o-mini",
-      { input: "hi" },
-    ],
+    ["/v1/responses", "gpt-4o-mini", { input: "hi" }],
     [
       "/v1/messages",
       "claude-logical",

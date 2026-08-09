@@ -91,7 +91,9 @@ export function fieldShape(property: OpenApiSchema): string {
   }
   if (property.const !== undefined) return `const:${String(property.const)}`;
   if (property.enum !== undefined) return `enum:${property.enum.map(String).join("|")}`;
-  const type = Array.isArray(property.type) ? property.type.join("|") : (property.type ?? "unknown");
+  const type = Array.isArray(property.type)
+    ? property.type.join("|")
+    : (property.type ?? "unknown");
   if (type === "array") {
     const items = property.items === undefined ? "unknown" : fieldShape(property.items);
     return `array<${items}>${property.nullable === true ? "|null" : ""}`;

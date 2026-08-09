@@ -10,12 +10,12 @@
  */
 import { env, runInDurableObject } from "cloudflare:test";
 import { beforeEach, describe, expect, test } from "vitest";
+import { ShadowBudgetLedger } from "../../src/index.js";
 import {
   DurableObjectShadowBudgetLedger,
   type ShadowBudgetDurableObject,
   type ShadowBudgetNamespace,
 } from "../../src/shadow-budget-do.js";
-import { ShadowBudgetLedger } from "../../src/index.js";
 
 declare global {
   namespace Cloudflare {

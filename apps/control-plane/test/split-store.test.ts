@@ -1,8 +1,7 @@
-import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { env } from "cloudflare:test";
-import type { ControlPlaneBindings } from "../src/ports.js";
+import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { resolveTenantStorage } from "../src/adapters.js";
-import { SplitControlPlaneStore } from "../src/store/split.js";
+import type { ControlPlaneBindings } from "../src/ports.js";
 import {
   D1ControlPlaneStore,
   RESOURCE_TABLE,
@@ -14,13 +13,14 @@ import {
   RESOURCE_BACKFILL_BATCH_SIZE,
   backfillTenantResourceKinds,
 } from "../src/store/resource-backfill.js";
+import { SplitControlPlaneStore } from "../src/store/split.js";
 import { applySchema, db, resetD1 } from "./d1.js";
 import {
+  TENANT_A,
+  TENANT_B,
   applyTenantSchema,
   registerTenantDatabases,
   resetTenantD1,
-  TENANT_A,
-  TENANT_B,
 } from "./tenant-db.js";
 
 const PLATFORM = { kind: "platform_operator" } as const;
@@ -134,13 +134,17 @@ describe("SplitControlPlaneStore", () => {
   });
 
   it("bounds each legacy backfill call and resumes from copied rows", async () => {
-    const rows = Array.from({ length: RESOURCE_BACKFILL_BATCH_SIZE + 1 }, (_, index) => [
-      `legacy-workflow-${String(index).padStart(3, "0")}`,
-      JSON.stringify({
-        id: `legacy-workflow-${String(index).padStart(3, "0")}`,
-        tenant_id: TENANT_A,
-      }),
-    ] as const);
+    const rows = Array.from(
+      { length: RESOURCE_BACKFILL_BATCH_SIZE + 1 },
+      (_, index) =>
+        [
+          `legacy-workflow-${String(index).padStart(3, "0")}`,
+          JSON.stringify({
+            id: `legacy-workflow-${String(index).padStart(3, "0")}`,
+            tenant_id: TENANT_A,
+          }),
+        ] as const,
+    );
     for (let index = 0; index < rows.length; index += 50) {
       await db().batch(
         rows.slice(index, index + 50).map(([id, document]) =>

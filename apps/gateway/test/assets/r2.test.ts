@@ -135,7 +135,7 @@ describe("the deployed Worker writes asset bytes to the R2 binding", () => {
     // that against the real bucket matters: the bytes provably exist in R2 and
     // the gateway still answers 404, which is the isolation property — unproven
     // is indistinguishable from absent.
-    const eicar = `X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*`;
+    const eicar = "X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*";
     const response = await push("malware", "1.0.0", eicar);
     expect(response.status).toBe(202);
     expect((await assetsBucket().list()).objects).toHaveLength(1);

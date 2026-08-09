@@ -30,8 +30,8 @@
  * authenticated; `503` for a dependency this deployment cannot reach.
  */
 import { SELF, applyD1Migrations, env } from "cloudflare:test";
-import { controlNamespace } from "./support/control-namespace.js";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { controlNamespace } from "./support/control-namespace.js";
 
 import {
   API_KEY_DIRECTORY_TABLE,
@@ -424,10 +424,20 @@ describe("the durable row DECIDES — a dev key can never overrule it", () => {
 
 describe("readiness now tracks the binding, not the dev flag", () => {
   it("a Worker with only the control database bound is READY", () => {
-    expect(durableAuthBound({ DB: control(), CONTROL_DATA: controlNamespace() as DurableObjectNamespace })).toBe(true);
-    expect(portsBound({ DB: control(), CONTROL_DATA: controlNamespace() as DurableObjectNamespace })).toBe(true);
+    expect(
+      durableAuthBound({
+        DB: control(),
+        CONTROL_DATA: controlNamespace() as DurableObjectNamespace,
+      }),
+    ).toBe(true);
+    expect(
+      portsBound({ DB: control(), CONTROL_DATA: controlNamespace() as DurableObjectNamespace }),
+    ).toBe(true);
     // ...and the port it reports on really is the durable one.
-    expect(resolvePorts({ DB: control(), CONTROL_DATA: controlNamespace() as DurableObjectNamespace }).auth).toBeInstanceOf(D1McpAuth);
+    expect(
+      resolvePorts({ DB: control(), CONTROL_DATA: controlNamespace() as DurableObjectNamespace })
+        .auth,
+    ).toBeInstanceOf(D1McpAuth);
   });
 
   it("a Worker with NO database and no dev flag is still not ready", () => {

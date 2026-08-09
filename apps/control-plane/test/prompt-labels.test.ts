@@ -23,8 +23,9 @@
  * contract table, the real auth middleware and the real store — a handler
  * wired into the group module but missing from the contract JSON 404s here.
  */
-import { promptLabelPointerKey } from "@ferrogate/config";
+
 import { SELF, env } from "cloudflare:test";
+import { promptLabelPointerKey } from "@ferrogate/config";
 import { beforeEach, describe, expect, it } from "vitest";
 import { BASE, arm, bearer, jsonRequest, operatorKey, tenantKey } from "./harness.js";
 
@@ -240,10 +241,10 @@ describe("THE TENANT FENCE", () => {
 describe("DELETE /admin/v1/prompt-templates/{id}/labels/{label}", () => {
   it("removes the pointer so the edge stops resolving it", async () => {
     await put(KEY_A, "tpl_a", "production", { revision: 3 });
-    const res = await SELF.fetch(
-      `${BASE}/admin/v1/prompt-templates/tpl_a/labels/production`,
-      { method: "DELETE", headers: bearer(KEY_A) },
-    );
+    const res = await SELF.fetch(`${BASE}/admin/v1/prompt-templates/tpl_a/labels/production`, {
+      method: "DELETE",
+      headers: bearer(KEY_A),
+    });
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({
       object: "prompt_template_label",

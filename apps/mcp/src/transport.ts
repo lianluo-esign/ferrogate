@@ -896,12 +896,12 @@ export class HttpMcpUpstreams implements McpUpstreamPort {
       response.json !== null &&
       typeof response.json === "object" &&
       !Array.isArray(response.json) &&
-      typeof response.json["result"] === "object" &&
-      response.json["result"] !== null &&
-      !Array.isArray(response.json["result"])
-        ? (response.json["result"] as Record<string, JsonValue>)
+      typeof response.json.result === "object" &&
+      response.json.result !== null &&
+      !Array.isArray(response.json.result)
+        ? (response.json.result as Record<string, JsonValue>)
         : undefined;
-    const raw = result?.["protocolVersion"];
+    const raw = result?.protocolVersion;
     const version = resolveLegacyProtocolVersion(typeof raw === "string" ? raw : undefined);
     if (version === undefined) {
       throw new McpExecutionError(

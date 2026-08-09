@@ -1,14 +1,14 @@
+import VirtualKeysPage from "@/pages/virtual-keys";
+import type { AdminVirtualApiKey } from "@/resources/virtual-keys";
+import { gatewayUrl, mockAdminError, mockAdminList, server } from "@/test/msw";
+import { renderWithProviders, seedSession } from "@/test/test-utils";
 // Virtual-key lifecycle page (#321): list + create + enable/disable/rotate/revoke
 // action endpoints, each behind a confirmation; rotate + create reveal the secret
 // once.
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { HttpResponse, http } from "msw";
+import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it } from "vitest";
-import VirtualKeysPage from "@/pages/virtual-keys";
-import type { AdminVirtualApiKey } from "@/resources/virtual-keys";
-import { gatewayUrl, mockAdminError, mockAdminList, server } from "@/test/msw";
-import { renderWithProviders, seedSession } from "@/test/test-utils";
 
 function vkey(overrides: Partial<AdminVirtualApiKey> = {}): AdminVirtualApiKey {
   return {

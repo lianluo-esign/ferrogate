@@ -359,7 +359,12 @@ export function parseLooseIpv4(host: string): [number, number, number, number] |
   numbers.forEach((n, index) => {
     value += n * 256 ** (3 - index);
   });
-  return [(value / 0x1000000) & 0xff, (value / 0x10000) & 0xff, (value / 0x100) & 0xff, value & 0xff];
+  return [
+    (value / 0x1000000) & 0xff,
+    (value / 0x10000) & 0xff,
+    (value / 0x100) & 0xff,
+    value & 0xff,
+  ];
 }
 
 function parseLooseIpv4Part(part: string): number | undefined {

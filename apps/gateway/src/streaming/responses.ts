@@ -21,37 +21,24 @@
  * further is emitted.
  */
 import {
+  DONE_SENTINEL,
   type SseFrame,
   bytesThroughFrames,
   frameJson,
   isDoneFrame,
   jsonSseFrame,
   sseFrame,
-  DONE_SENTINEL,
 } from "./sse.js";
 import { ToolCallAccumulator, type ToolCallUpdate } from "./toolcalls.js";
-import {
-  asArray,
-  asRecord,
-  asString,
-  asUint,
-  get,
-  getString,
-  getUint,
-} from "./values.js";
+import { asArray, asRecord, asString, asUint, get, getString, getUint } from "./values.js";
 
 /** `ResponsesStreamProviderKind`. */
-export type ResponsesStreamProviderKind =
-  | "openai_compatible"
-  | "anthropic"
-  | "gemini"
-  | "other";
+export type ResponsesStreamProviderKind = "openai_compatible" | "anthropic" | "gemini" | "other";
 
 /** Fallback error code for a provider stream failure (Rust literal). */
 export const RESPONSES_STREAM_ERROR_CODE = "provider_stream_error";
 /** Fallback error message for a provider stream failure (Rust literal). */
-export const RESPONSES_STREAM_ERROR_MESSAGE =
-  "provider returned a streaming error";
+export const RESPONSES_STREAM_ERROR_MESSAGE = "provider returned a streaming error";
 
 /**
  * `ProviderUsageState`.
@@ -147,7 +134,11 @@ export class ResponsesStreamNormalizer {
   }
 
   /** Merged usage observed so far (`null` fields = not reported). */
-  get usage(): { prompt_tokens: number | null; completion_tokens: number | null; total_tokens: number | null } {
+  get usage(): {
+    prompt_tokens: number | null;
+    completion_tokens: number | null;
+    total_tokens: number | null;
+  } {
     return this.#usage.toJson();
   }
 
@@ -260,13 +251,9 @@ export class ResponsesStreamNormalizer {
       return undefined;
     }
     const message =
-      asString(get(error, "message")) ??
-      asString(parsed) ??
-      RESPONSES_STREAM_ERROR_MESSAGE;
+      asString(get(error, "message")) ?? asString(parsed) ?? RESPONSES_STREAM_ERROR_MESSAGE;
     const code =
-      asString(get(error, "code")) ??
-      asString(get(error, "type")) ??
-      RESPONSES_STREAM_ERROR_CODE;
+      asString(get(error, "code")) ?? asString(get(error, "type")) ?? RESPONSES_STREAM_ERROR_CODE;
     return [
       jsonSseFrame("response.failed", {
         request_id: this.#requestId,
@@ -278,10 +265,7 @@ export class ResponsesStreamNormalizer {
 }
 
 /** `is_done_frame`. */
-export function isDoneEvent(
-  eventName: string | undefined,
-  parsed: unknown,
-): boolean {
+export function isDoneEvent(eventName: string | undefined, parsed: unknown): boolean {
   if (eventName === "response.completed" || eventName === "message_stop") {
     return true;
   }
@@ -303,10 +287,7 @@ export function extractTextDeltas(
     return [];
   }
   if (kind === "anthropic") {
-    if (
-      eventName !== "content_block_delta" &&
-      eventName !== "response.output_text.delta"
-    ) {
+    if (eventName !== "content_block_delta" && eventName !== "response.output_text.delta") {
       return [];
     }
     const text = asString(get(get(parsed, "delta"), "text"));
@@ -393,10 +374,7 @@ export function extractFunctionCallDeltas(
   }
 
   if (kind === "anthropic") {
-    if (
-      eventName !== "content_block_delta" &&
-      eventName !== "response.output_item.delta"
-    ) {
+    if (eventName !== "content_block_delta" && eventName !== "response.output_item.delta") {
       return [];
     }
     const delta = get(parsed, "delta");
@@ -404,8 +382,7 @@ export function extractFunctionCallDeltas(
       return [];
     }
     const index = getUint(parsed, "index") ?? 0;
-    const fragment =
-      asString(get(delta, "text")) ?? asString(get(delta, "input"));
+    const fragment = asString(get(delta, "text")) ?? asString(get(delta, "input"));
     const update = accumulator.applyFragment({
       index,
       id: getString(parsed, "id"),
@@ -430,8 +407,7 @@ export function extractFunctionCallDeltas(
       for (let partIndex = 0; partIndex < parts.length; partIndex += 1) {
         const call = get(parts[partIndex], "functionCall");
         const index = candidateIndex + partIndex;
-        const args =
-          asString(get(call, "args")) ?? asString(get(call, "arguments"));
+        const args = asString(get(call, "args")) ?? asString(get(call, "arguments"));
         const update = accumulator.applyFragment({
           index,
           id: asString(get(call, "id")),
@@ -461,10 +437,7 @@ export function extractFunctionCallDeltas(
         updates.push(update);
       }
     }
-    for (const update of accumulator.applyToolCallDeltas(
-      get(delta, "tool_calls"),
-      choiceIndex,
-    )) {
+    for (const update of accumulator.applyToolCallDeltas(get(delta, "tool_calls"), choiceIndex)) {
       if (update.argumentsDelta.length > 0) {
         updates.push(update);
       }

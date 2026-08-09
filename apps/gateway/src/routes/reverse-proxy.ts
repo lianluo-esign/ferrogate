@@ -182,9 +182,7 @@ export class RuntimeRouteTable implements RouteMatcher {
         route.match_headers.length === 0 &&
         matchesRequest(route, host === undefined ? null : normalizeHost(host), path, {}),
     );
-    return rule === undefined
-      ? undefined
-      : { routeName: rule.name, upstreamName: rule.upstream };
+    return rule === undefined ? undefined : { routeName: rule.name, upstreamName: rule.upstream };
   }
 
   /** Rust `match_runtime_route`: FIRST enabled route that matches, in order. */

@@ -1,30 +1,30 @@
 import type { ResourceConfig } from "@/lib/resource-config";
 import { agentUpstreamsConfig } from "@/resources/agent-upstreams";
 import { agentWorkflowsConfig } from "@/resources/agent-workflows";
+// IAM completion (#321): RBAC + native api-keys generic resources. Virtual keys
+// moved to a bespoke page (src/pages/virtual-keys.tsx) for lifecycle actions.
+import { apiKeysConfig } from "@/resources/api-keys";
 import { auditEventsConfig } from "@/resources/audit-events";
 import { billingEventsConfig } from "@/resources/billing-events";
 import { managedWorkersConfig } from "@/resources/managed-workers";
 import { mcpServersConfig } from "@/resources/mcp-servers";
 import { modelsConfig } from "@/resources/models";
+import { permissionsConfig } from "@/resources/permissions";
 import { plansConfig } from "@/resources/plans";
 import { pluginsConfig } from "@/resources/plugins";
+import { policiesConfig } from "@/resources/policies";
 import { projectsConfig } from "@/resources/projects";
 import { promptTemplatesConfig } from "@/resources/prompt-templates";
 import { providersConfig } from "@/resources/providers";
 import { quotaPoliciesConfig } from "@/resources/quota-policies";
 import { requestLogsConfig } from "@/resources/request-logs";
+import { rolesConfig } from "@/resources/roles";
+import { RESOURCE_ROUTE_PATHS } from "@/resources/route-paths";
 import { selfHostedWorkersConfig } from "@/resources/self-hosted-workers";
 import { skillPackagesConfig } from "@/resources/skill-packages";
 import { tenantAccountsConfig } from "@/resources/tenant-accounts";
 import { usageReportsConfig } from "@/resources/usage-reports";
 import { workspacesConfig } from "@/resources/workspaces";
-// IAM completion (#321): RBAC + native api-keys generic resources. Virtual keys
-// moved to a bespoke page (src/pages/virtual-keys.tsx) for lifecycle actions.
-import { apiKeysConfig } from "@/resources/api-keys";
-import { permissionsConfig } from "@/resources/permissions";
-import { policiesConfig } from "@/resources/policies";
-import { rolesConfig } from "@/resources/roles";
-import { RESOURCE_ROUTE_PATHS } from "@/resources/route-paths";
 
 export interface ResourceRoute {
   path: string;

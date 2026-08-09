@@ -1,10 +1,10 @@
-import { screen, within } from "@testing-library/react";
-import { HttpResponse, http } from "msw";
-import { beforeEach, describe, expect, it } from "vitest";
-import ToolsCatalogPage from "@/pages/tools-catalog";
 import type { AdminSchema } from "@/lib/gateway-client";
+import ToolsCatalogPage from "@/pages/tools-catalog";
 import { gatewayUrl, server } from "@/test/msw";
 import { renderWithProviders, seedSession } from "@/test/test-utils";
+import { screen, within } from "@testing-library/react";
+import { http, HttpResponse } from "msw";
+import { beforeEach, describe, expect, it } from "vitest";
 
 type AdminTool = AdminSchema<"AdminTool">;
 

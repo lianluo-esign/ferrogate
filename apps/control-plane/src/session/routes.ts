@@ -79,10 +79,7 @@ import {
   membershipRoleFromStored,
   parseMembershipRole,
 } from "./membership_role.js";
-import {
-  provisionPlatformOperatorApiKey,
-  revokePlatformOperatorApiKey,
-} from "./operator_key.js";
+import { provisionPlatformOperatorApiKey, revokePlatformOperatorApiKey } from "./operator_key.js";
 import {
   type AdminConsoleSessionStore,
   type AdminMembershipRow,

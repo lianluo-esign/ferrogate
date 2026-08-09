@@ -1,5 +1,5 @@
-import { adminGet, type AdminSchema } from "@/lib/gateway-client";
-import { booleanColumn, type ResourceConfig } from "@/lib/resource-config";
+import { type AdminSchema, adminGet } from "@/lib/gateway-client";
+import { type ResourceConfig, booleanColumn } from "@/lib/resource-config";
 
 /**
  * Access-control policy rules (#321) over `/admin/v1/policies`. Full CRUD:
@@ -98,7 +98,12 @@ export const policiesConfig: ResourceConfig<PolicyRule> = {
         secondaryLabelKeys: ["kind", "base_url"],
       },
     },
-    { name: "code", labelKey: "resource.policies.field.code", type: "text", placeholder: "policy_denied" },
+    {
+      name: "code",
+      labelKey: "resource.policies.field.code",
+      type: "text",
+      placeholder: "policy_denied",
+    },
     {
       name: "message",
       labelKey: "resource.policies.field.message",

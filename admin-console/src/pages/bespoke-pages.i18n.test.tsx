@@ -1,3 +1,33 @@
+import { AuthProvider } from "@/hooks/use-auth";
+import { I18nProvider, type Locale } from "@/i18n";
+import { en } from "@/i18n/locales/en";
+import { zhCN } from "@/i18n/locales/zh-CN";
+import AgentRunsPage from "@/pages/agent-runs";
+import AgentSchedulesPage from "@/pages/agent-schedules";
+import AssetsPage from "@/pages/assets";
+import BillingDeadLettersPage from "@/pages/billing-dead-letters";
+import BillingMeteringPage from "@/pages/billing-metering";
+import BillingPaymentMethodsPage from "@/pages/billing-payment-methods";
+import BillingWalletsPage from "@/pages/billing-wallets";
+import GuardrailEvaluationsPage from "@/pages/guardrail-evaluations";
+import GuardrailPoliciesPage from "@/pages/guardrail-policies";
+import GuardrailPolicyDetailPage from "@/pages/guardrail-policy-detail";
+import InvestigationsPage from "@/pages/investigations";
+import ManagedWorkerSessionsPage from "@/pages/managed-worker-sessions";
+import McpIdentitiesPage from "@/pages/mcp-identities";
+import OpsStatusPage from "@/pages/ops-status";
+import PluginToolsPage from "@/pages/plugin-tools";
+import SelfHostedRunsPage from "@/pages/self-hosted-runs";
+import SelfHostedWorkerDetailPage from "@/pages/self-hosted-worker-detail";
+import SiteDomainsPage from "@/pages/site-domains";
+import TenantRolesPage from "@/pages/tenant-roles";
+import ToolApprovalsPage from "@/pages/tool-approvals";
+import ToolSessionsPage from "@/pages/tool-sessions";
+import ToolsCatalogPage from "@/pages/tools-catalog";
+import VirtualKeysPage from "@/pages/virtual-keys";
+import { policyRevision } from "@/test/fixtures/guardrails";
+import { gatewayUrl, mockAdminList, server } from "@/test/msw";
+import { createTestQueryClient, renderWithProviders, seedSession } from "@/test/test-utils";
 // Bilingual smoke coverage for the #348 bespoke-page slice: virtual-keys,
 // site-domains, and ops-status must render their page-local copy from the typed
 // catalog in BOTH `en` and `zh-CN`. This proves the migration actually routes
@@ -6,43 +36,10 @@
 import { QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { HttpResponse, http } from "msw";
+import { http, HttpResponse } from "msw";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it } from "vitest";
-import { AuthProvider } from "@/hooks/use-auth";
-import { I18nProvider, type Locale } from "@/i18n";
-import { en } from "@/i18n/locales/en";
-import { zhCN } from "@/i18n/locales/zh-CN";
-import VirtualKeysPage from "@/pages/virtual-keys";
-import SiteDomainsPage from "@/pages/site-domains";
-import OpsStatusPage from "@/pages/ops-status";
-import AgentRunsPage from "@/pages/agent-runs";
-import AgentSchedulesPage from "@/pages/agent-schedules";
-import GuardrailPoliciesPage from "@/pages/guardrail-policies";
-import GuardrailEvaluationsPage from "@/pages/guardrail-evaluations";
-import GuardrailPolicyDetailPage from "@/pages/guardrail-policy-detail";
-import BillingWalletsPage from "@/pages/billing-wallets";
-import BillingPaymentMethodsPage from "@/pages/billing-payment-methods";
-import BillingMeteringPage from "@/pages/billing-metering";
-import BillingDeadLettersPage from "@/pages/billing-dead-letters";
-import ToolsCatalogPage from "@/pages/tools-catalog";
-import ToolSessionsPage from "@/pages/tool-sessions";
-import ToolApprovalsPage from "@/pages/tool-approvals";
-import TenantRolesPage from "@/pages/tenant-roles";
-import McpIdentitiesPage from "@/pages/mcp-identities";
-import InvestigationsPage from "@/pages/investigations";
-import AssetsPage from "@/pages/assets";
-import ManagedWorkerSessionsPage from "@/pages/managed-worker-sessions";
-import PluginToolsPage from "@/pages/plugin-tools";
-import SelfHostedRunsPage from "@/pages/self-hosted-runs";
-import SelfHostedWorkerDetailPage from "@/pages/self-hosted-worker-detail";
-import { policyRevision } from "@/test/fixtures/guardrails";
-import { gatewayUrl, mockAdminList, server } from "@/test/msw";
-import {
-  createTestQueryClient,
-  renderWithProviders,
-  seedSession,
-} from "@/test/test-utils";
+const nn = <T,>(v: T): NonNullable<T> => v as NonNullable<T>;
 
 beforeEach(() => {
   seedSession();
@@ -164,9 +161,7 @@ function statusFixture() {
 
 describe("ops-status page copy is localized", () => {
   beforeEach(() => {
-    server.use(
-      http.get(gatewayUrl("/admin/v1/status"), () => HttpResponse.json(statusFixture())),
-    );
+    server.use(http.get(gatewayUrl("/admin/v1/status"), () => HttpResponse.json(statusFixture())));
   });
 
   it("renders English board copy and reuses common.yes for boolean cells", async () => {
@@ -177,7 +172,7 @@ describe("ops-status page copy is localized", () => {
     expect(await screen.findByText(en["page.opsStatus.acme.title"])).toBeInTheDocument();
     expect(screen.getByText(en["page.opsStatus.cluster.title"])).toBeInTheDocument();
     // Boolean posture chips reuse the #385 common.yes key (cluster is enabled).
-    const cluster = screen.getByText(en["page.opsStatus.cluster.enabled"]).closest("div")!;
+    const cluster = nn(screen.getByText(en["page.opsStatus.cluster.enabled"]).closest("div"));
     expect(within(cluster).getByText(en["common.yes"])).toBeInTheDocument();
   });
 
@@ -188,7 +183,7 @@ describe("ops-status page copy is localized", () => {
     ).toBeInTheDocument();
     expect(await screen.findByText(zhCN["page.opsStatus.acme.title"])).toBeInTheDocument();
     expect(screen.getByText(zhCN["page.opsStatus.cluster.title"])).toBeInTheDocument();
-    const cluster = screen.getByText(zhCN["page.opsStatus.cluster.enabled"]).closest("div")!;
+    const cluster = nn(screen.getByText(zhCN["page.opsStatus.cluster.enabled"]).closest("div"));
     expect(within(cluster).getByText(zhCN["common.yes"])).toBeInTheDocument();
   });
 });
@@ -235,9 +230,7 @@ describe("agent-runs unattributed tab copy is localized", () => {
     expect(
       await screen.findByText(en["page.agentRuns.unattributed.description"]),
     ).toBeInTheDocument();
-    expect(
-      await screen.findByText(en["page.agentRuns.unattributed.empty"]),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(en["page.agentRuns.unattributed.empty"])).toBeInTheDocument();
   });
 
   it("renders Simplified Chinese tab label, description, and empty state", async () => {
@@ -249,9 +242,7 @@ describe("agent-runs unattributed tab copy is localized", () => {
     expect(
       await screen.findByText(zhCN["page.agentRuns.unattributed.description"]),
     ).toBeInTheDocument();
-    expect(
-      await screen.findByText(zhCN["page.agentRuns.unattributed.empty"]),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(zhCN["page.agentRuns.unattributed.empty"])).toBeInTheDocument();
   });
 });
 
@@ -265,9 +256,7 @@ describe("agent-schedules page copy is localized", () => {
     expect(
       await screen.findByRole("heading", { name: en["page.agentSchedules.title"] }),
     ).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: en["page.agentSchedules.new"] }),
-    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: en["page.agentSchedules.new"] })).toBeInTheDocument();
     expect(await screen.findByText(en["page.agentSchedules.empty"])).toBeInTheDocument();
   });
 
@@ -324,9 +313,7 @@ describe("guardrail-evaluations page copy is localized", () => {
     expect(
       screen.getByRole("button", { name: en["page.guardrailEvaluations.filter.apply"] }),
     ).toBeInTheDocument();
-    expect(
-      await screen.findByText(en["page.guardrailEvaluations.empty"]),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(en["page.guardrailEvaluations.empty"])).toBeInTheDocument();
   });
 
   it("renders Simplified Chinese title, filter action, and empty state", async () => {
@@ -337,9 +324,7 @@ describe("guardrail-evaluations page copy is localized", () => {
     expect(
       screen.getByRole("button", { name: zhCN["page.guardrailEvaluations.filter.apply"] }),
     ).toBeInTheDocument();
-    expect(
-      await screen.findByText(zhCN["page.guardrailEvaluations.empty"]),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(zhCN["page.guardrailEvaluations.empty"])).toBeInTheDocument();
   });
 });
 
@@ -382,12 +367,8 @@ describe("guardrail-policy-detail page copy is localized", () => {
     expect(
       await screen.findByText(en["page.guardrailPolicyDetail.active.title"]),
     ).toBeInTheDocument();
-    expect(
-      screen.getByText(en["page.guardrailPolicyDetail.history.title"]),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText(en["page.guardrailPolicyDetail.dryRun.title"]),
-    ).toBeInTheDocument();
+    expect(screen.getByText(en["page.guardrailPolicyDetail.history.title"])).toBeInTheDocument();
+    expect(screen.getByText(en["page.guardrailPolicyDetail.dryRun.title"])).toBeInTheDocument();
   });
 
   it("renders Simplified Chinese active-revision, history, and dry-run copy", async () => {
@@ -395,12 +376,8 @@ describe("guardrail-policy-detail page copy is localized", () => {
     expect(
       await screen.findByText(zhCN["page.guardrailPolicyDetail.active.title"]),
     ).toBeInTheDocument();
-    expect(
-      screen.getByText(zhCN["page.guardrailPolicyDetail.history.title"]),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText(zhCN["page.guardrailPolicyDetail.dryRun.title"]),
-    ).toBeInTheDocument();
+    expect(screen.getByText(zhCN["page.guardrailPolicyDetail.history.title"])).toBeInTheDocument();
+    expect(screen.getByText(zhCN["page.guardrailPolicyDetail.dryRun.title"])).toBeInTheDocument();
   });
 });
 
@@ -411,9 +388,7 @@ describe("guardrail-policy-detail page copy is localized", () => {
 
 /** The locale currency/number formatters the pages bind through `useI18n()`. */
 function localeUsd(locale: Locale, amount: number): string {
-  return new Intl.NumberFormat(locale, { style: "currency", currency: "USD" }).format(
-    amount,
-  );
+  return new Intl.NumberFormat(locale, { style: "currency", currency: "USD" }).format(amount);
 }
 function localeNumber(locale: Locale, value: number): string {
   return new Intl.NumberFormat(locale).format(value);
@@ -458,9 +433,7 @@ describe("billing-wallets page copy is localized", () => {
     expect(
       await screen.findByRole("heading", { name: zhCN["page.billingWallets.title"] }),
     ).toBeInTheDocument();
-    expect(
-      screen.getByText(zhCN["page.billingWallets.col.balance"]),
-    ).toBeInTheDocument();
+    expect(screen.getByText(zhCN["page.billingWallets.col.balance"])).toBeInTheDocument();
     expect(await screen.findByText(localeNumber("zh-CN", 250_000))).toBeInTheDocument();
   });
 });
@@ -473,13 +446,9 @@ describe("billing-payment-methods page copy is localized", () => {
         name: en["page.billingPaymentMethods.title"],
       }),
     ).toBeInTheDocument();
-    expect(
-      await screen.findByText(en["page.billingPaymentMethods.prompt"]),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(en["page.billingPaymentMethods.prompt"])).toBeInTheDocument();
     // #340: the tenant filter is a localized entity picker, not a free-text id.
-    expect(
-      screen.getByRole("combobox", { name: en["common.tenant"] }),
-    ).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: en["common.tenant"] })).toBeInTheDocument();
   });
 
   it("renders Simplified Chinese title and tenant prompt", async () => {
@@ -489,12 +458,8 @@ describe("billing-payment-methods page copy is localized", () => {
         name: zhCN["page.billingPaymentMethods.title"],
       }),
     ).toBeInTheDocument();
-    expect(
-      await screen.findByText(zhCN["page.billingPaymentMethods.prompt"]),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("combobox", { name: zhCN["common.tenant"] }),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(zhCN["page.billingPaymentMethods.prompt"])).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: zhCN["common.tenant"] })).toBeInTheDocument();
   });
 });
 
@@ -610,9 +575,7 @@ describe("billing-dead-letters page copy is localized", () => {
       await screen.findByRole("button", { name: en["page.billingDeadLetters.details"] }),
     );
     const dialog = await screen.findByRole("dialog");
-    expect(
-      within(dialog).getByText(en["page.billingDeadLetters.detail.cost"]),
-    ).toBeInTheDocument();
+    expect(within(dialog).getByText(en["page.billingDeadLetters.detail.cost"])).toBeInTheDocument();
     expect(within(dialog).getByText(localeUsd("en", 0.42))).toBeInTheDocument();
   });
 
@@ -702,9 +665,7 @@ describe("tool-approvals page copy is localized", () => {
     expect(
       screen.getByRole("tab", { name: en["page.toolApprovals.tab.history"] }),
     ).toBeInTheDocument();
-    expect(
-      await screen.findByText(en["page.toolApprovals.pending.empty"]),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(en["page.toolApprovals.pending.empty"])).toBeInTheDocument();
   });
 
   it("renders Simplified Chinese title, tabs, and empty state", async () => {
@@ -715,9 +676,7 @@ describe("tool-approvals page copy is localized", () => {
     expect(
       screen.getByRole("tab", { name: zhCN["page.toolApprovals.tab.history"] }),
     ).toBeInTheDocument();
-    expect(
-      await screen.findByText(zhCN["page.toolApprovals.pending.empty"]),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(zhCN["page.toolApprovals.pending.empty"])).toBeInTheDocument();
   });
 });
 
@@ -728,7 +687,10 @@ describe("tenant-roles page copy is localized", () => {
     // tenant on mount; mock its detail lookup (onUnhandledRequest is "error").
     server.use(
       http.get(gatewayUrl("/admin/v1/tenant-accounts/tenant-1"), () =>
-        HttpResponse.json({ object: "tenant", tenant: { id: "tenant-1", name: "Acme", slug: "acme" } }),
+        HttpResponse.json({
+          object: "tenant",
+          tenant: { id: "tenant-1", name: "Acme", slug: "acme" },
+        }),
       ),
     );
   });
@@ -738,9 +700,7 @@ describe("tenant-roles page copy is localized", () => {
     expect(
       await screen.findByRole("heading", { name: en["page.tenantRoles.title"] }),
     ).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: en["page.tenantRoles.assign"] }),
-    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: en["page.tenantRoles.assign"] })).toBeInTheDocument();
     expect(await screen.findByText(en["page.tenantRoles.empty"])).toBeInTheDocument();
   });
 
@@ -828,9 +788,7 @@ describe("assets page copy is localized", () => {
       await screen.findByRole("heading", { name: en["page.assets.title"] }),
     ).toBeInTheDocument();
     expect(screen.getByText(en["page.assets.push.title"])).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: en["page.assets.push.submit"] }),
-    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: en["page.assets.push.submit"] })).toBeInTheDocument();
     expect(await screen.findByText(en["page.assets.empty"])).toBeInTheDocument();
   });
 
@@ -859,12 +817,8 @@ describe("managed-worker-sessions page copy is localized", () => {
         name: en["page.managedWorkerSessions.title"],
       }),
     ).toBeInTheDocument();
-    expect(
-      screen.getByText(en["page.managedWorkerSessions.description"]),
-    ).toBeInTheDocument();
-    expect(
-      await screen.findByText(en["page.managedWorkerSessions.empty"]),
-    ).toBeInTheDocument();
+    expect(screen.getByText(en["page.managedWorkerSessions.description"])).toBeInTheDocument();
+    expect(await screen.findByText(en["page.managedWorkerSessions.empty"])).toBeInTheDocument();
   });
 
   it("renders Simplified Chinese title, description, and empty state", async () => {
@@ -874,12 +828,8 @@ describe("managed-worker-sessions page copy is localized", () => {
         name: zhCN["page.managedWorkerSessions.title"],
       }),
     ).toBeInTheDocument();
-    expect(
-      screen.getByText(zhCN["page.managedWorkerSessions.description"]),
-    ).toBeInTheDocument();
-    expect(
-      await screen.findByText(zhCN["page.managedWorkerSessions.empty"]),
-    ).toBeInTheDocument();
+    expect(screen.getByText(zhCN["page.managedWorkerSessions.description"])).toBeInTheDocument();
+    expect(await screen.findByText(zhCN["page.managedWorkerSessions.empty"])).toBeInTheDocument();
   });
 });
 
@@ -891,10 +841,7 @@ function renderPluginTools(locale: Locale, pluginId = "plg-1") {
         <AuthProvider>
           <QueryClientProvider client={createTestQueryClient()}>
             <Routes>
-              <Route
-                path="/app/plugins/:pluginId/tools"
-                element={<PluginToolsPage />}
-              />
+              <Route path="/app/plugins/:pluginId/tools" element={<PluginToolsPage />} />
             </Routes>
           </QueryClientProvider>
         </AuthProvider>
@@ -1015,9 +962,7 @@ describe("self-hosted-worker-detail page copy is localized", () => {
     expect(
       await screen.findByRole("button", { name: en["page.selfHostedWorkerDetail.rotate"] }),
     ).toBeInTheDocument();
-    expect(
-      screen.getByText(en["page.selfHostedWorkerDetail.count.telemetry"]),
-    ).toBeInTheDocument();
+    expect(screen.getByText(en["page.selfHostedWorkerDetail.count.telemetry"])).toBeInTheDocument();
     expect(
       screen.getByRole("tab", { name: en["page.selfHostedWorkerDetail.tab.overview"] }),
     ).toBeInTheDocument();

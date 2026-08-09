@@ -39,7 +39,9 @@ export async function rawTenantDocument(
   id: string,
 ): Promise<Record<string, unknown> | null> {
   const row = await tenantObjectDb(tenantId)
-    .prepare("SELECT document_json FROM tenant_resources WHERE resource_kind = ? AND resource_id = ?")
+    .prepare(
+      "SELECT document_json FROM tenant_resources WHERE resource_kind = ? AND resource_id = ?",
+    )
     .bind(collection, id)
     .first<{ document_json: string }>();
   return row === null ? null : (JSON.parse(row.document_json) as Record<string, unknown>);

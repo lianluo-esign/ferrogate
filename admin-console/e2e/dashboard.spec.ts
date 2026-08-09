@@ -44,9 +44,10 @@ test("cockpit surfaces inventory, traffic, health, and filtered-view links", asy
     "href",
     "/app/agent-runs",
   );
-  await expect(
-    traffic.getByRole("link", { name: "View Self-hosted workers" }),
-  ).toHaveAttribute("href", "/app/workers/self-hosted");
+  await expect(traffic.getByRole("link", { name: "View Self-hosted workers" })).toHaveAttribute(
+    "href",
+    "/app/workers/self-hosted",
+  );
 
   // Prioritized alerts with an evidence link to the source page.
   const alerts = page.getByRole("region", { name: "Alerts" });

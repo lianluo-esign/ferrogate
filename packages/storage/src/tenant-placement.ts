@@ -180,7 +180,5 @@ export function tenantObjectStubFor<TStub, TId = string>(
   const selected = tenantObjectNamespaceFor(namespace, address);
   const id = selected.idFromName(tenantId);
   const locationHint = address?.locationHint;
-  return locationHint === undefined
-    ? selected.get(id)
-    : selected.get(id, { locationHint });
+  return locationHint === undefined ? selected.get(id) : selected.get(id, { locationHint });
 }

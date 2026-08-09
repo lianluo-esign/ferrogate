@@ -53,13 +53,14 @@ const OTHER_KEY = "fg_test_fence_b_key";
 
 /** One `mcp_servers` row. `stdio` needs no network to be LISTED. */
 async function seedServerRow(tenantId: string, name: string): Promise<void> {
-  await tenantDatabase(TENANT_DATA, tenantId).prepare(
-    `INSERT OR REPLACE INTO mcp_servers
+  await tenantDatabase(TENANT_DATA, tenantId)
+    .prepare(
+      `INSERT OR REPLACE INTO mcp_servers
        (tenant_id, name, transport, url, auth_type, tools_to_execute,
         tools_to_auto_execute, tools_to_exclude, headers, oauth,
         signed_jwt_audience, timeout_ms)
      VALUES (?, ?, 'stdio', NULL, 'none', ?, ?, NULL, NULL, NULL, NULL, 5000)`,
-  )
+    )
     .bind(tenantId, name, JSON.stringify(["ping"]), JSON.stringify(["ping"]))
     .run();
 }

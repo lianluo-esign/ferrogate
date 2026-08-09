@@ -1,12 +1,12 @@
+import TenantRolesPage from "@/pages/tenant-roles";
+import { gatewayUrl, mockAdminError, mockAdminList, server } from "@/test/msw";
+import { renderWithProviders, seedSession } from "@/test/test-utils";
 // Tenant role bindings page (#321 / #232): assign + remove role bindings for the
 // signed-in tenant, and surface a 403 when a tenant-scoped caller is denied.
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { HttpResponse, http } from "msw";
+import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it } from "vitest";
-import TenantRolesPage from "@/pages/tenant-roles";
-import { gatewayUrl, mockAdminError, mockAdminList, server } from "@/test/msw";
-import { renderWithProviders, seedSession } from "@/test/test-utils";
 
 function binding(role_id: string) {
   return { id: `bind-${role_id}`, tenant_id: "tenant-1", role_id, created_at_unix: 1 };
@@ -19,7 +19,10 @@ function binding(role_id: string) {
 function installPickerHandlers() {
   server.use(
     http.get(gatewayUrl("/admin/v1/tenant-accounts/tenant-1"), () =>
-      HttpResponse.json({ object: "tenant", tenant: { id: "tenant-1", name: "Acme", slug: "acme" } }),
+      HttpResponse.json({
+        object: "tenant",
+        tenant: { id: "tenant-1", name: "Acme", slug: "acme" },
+      }),
     ),
     http.get(gatewayUrl("/admin/v1/tenant-accounts"), () =>
       HttpResponse.json({ object: "list", data: [{ id: "tenant-1", name: "Acme", slug: "acme" }] }),

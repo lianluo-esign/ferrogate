@@ -1,11 +1,11 @@
-import { screen, waitFor } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
-import { HttpResponse, http } from "msw";
-import { beforeEach, describe, expect, it } from "vitest";
-import McpIdentitiesPage from "@/pages/mcp-identities";
 import type { AdminSchema } from "@/lib/gateway-client";
+import McpIdentitiesPage from "@/pages/mcp-identities";
 import { gatewayUrl, server } from "@/test/msw";
 import { renderWithProviders, seedSession } from "@/test/test-utils";
+import { screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { http, HttpResponse } from "msw";
+import { beforeEach, describe, expect, it } from "vitest";
 
 type IdentityStatus = AdminSchema<"McpIdentityStatus">;
 
@@ -34,9 +34,7 @@ function mockServers(): void {
 }
 
 function mockIdentity(record: IdentityStatus): void {
-  server.use(
-    http.get(gatewayUrl("/v1/mcp/identity/github-mcp"), () => HttpResponse.json(record)),
-  );
+  server.use(http.get(gatewayUrl("/v1/mcp/identity/github-mcp"), () => HttpResponse.json(record)));
 }
 
 function renderPage() {
@@ -50,9 +48,7 @@ beforeEach(() => {
 describe("McpIdentitiesPage", () => {
   it("renders identity status for a looked-up server", async () => {
     mockServers();
-    mockIdentity(
-      status({ connected: true, subject: "user-42", auth_type: "per_user_oauth" }),
-    );
+    mockIdentity(status({ connected: true, subject: "user-42", auth_type: "per_user_oauth" }));
     const user = userEvent.setup();
     renderPage();
 

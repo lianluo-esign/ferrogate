@@ -59,8 +59,7 @@ export function resolveRoutePath(template: string): string {
       const sample = ROUTE_PARAM_SAMPLES[name];
       if (sample === undefined) {
         throw new Error(
-          `No ROUTE_PARAM_SAMPLES entry for ":${name}" in "${template}" — ` +
-            "add one so the route is swept in both locales.",
+          `No ROUTE_PARAM_SAMPLES entry for ":${name}" in "${template}" — add one so the route is swept in both locales.`,
         );
       }
       return sample;

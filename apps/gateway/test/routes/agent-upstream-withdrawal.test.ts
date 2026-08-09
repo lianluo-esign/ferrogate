@@ -41,8 +41,8 @@
  * implementations, which is what makes the 404 here the deployed answer.
  */
 import { SELF, env } from "cloudflare:test";
-import { controlNamespaceOverD1 } from "../support/control-namespace.js";
 import { beforeEach, describe, expect, it } from "vitest";
+import { controlNamespaceOverD1 } from "../support/control-namespace.js";
 
 import { AGENT_UPSTREAM_COLLECTION, RESOURCE_TABLE } from "../../src/routes/agent-upstreams.js";
 import { createGatewayApp } from "../../src/routes/index.js";
@@ -78,7 +78,8 @@ async function storeUpstream(
   tenantId: string | null,
 ): Promise<void> {
   const stored: Record<string, unknown> = { ...document, tenant_id: tenantId };
-  const now = (clock += 1);
+  clock += 1;
+  const now = clock;
   await controlDb()
     .prepare(
       `INSERT INTO ${RESOURCE_TABLE}
@@ -87,7 +88,7 @@ async function storeUpstream(
        ON CONFLICT (resource_kind, resource_id) DO NOTHING
        RETURNING revision`,
     )
-    .bind(AGENT_UPSTREAM_COLLECTION, stored["id"], JSON.stringify(stored), now, now)
+    .bind(AGENT_UPSTREAM_COLLECTION, stored.id, JSON.stringify(stored), now, now)
     .first<{ revision: number }>();
 }
 

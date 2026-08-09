@@ -17,7 +17,10 @@ export const TIMED_OUT = Symbol("timed_out");
  * Race `promise` against a `ms`-millisecond timer. Resolves to the value, or
  * {@link TIMED_OUT} if the timer wins. The timer is always cleared.
  */
-export async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | typeof TIMED_OUT> {
+export async function withTimeout<T>(
+  promise: Promise<T>,
+  ms: number,
+): Promise<T | typeof TIMED_OUT> {
   let handle: ReturnType<typeof setTimeout> | undefined;
   const timer = new Promise<typeof TIMED_OUT>((resolve) => {
     handle = setTimeout(() => resolve(TIMED_OUT), Math.max(0, ms));

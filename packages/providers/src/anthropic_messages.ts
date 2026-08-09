@@ -21,30 +21,30 @@ export function toChatCompletions(body: Json): Json {
   for (const key of ["model", "max_tokens", "temperature", "top_p", "stream"]) {
     if (object[key] !== undefined) out[key] = object[key]!;
   }
-  if (object["stop_sequences"] !== undefined) out["stop"] = object["stop_sequences"];
+  if (object.stop_sequences !== undefined) out.stop = object.stop_sequences;
 
   const messages: Json[] = [];
-  const system = object["system"];
+  const system = object.system;
   if (system !== undefined) {
     const text = anthropicSystemToText(system);
     if (text !== undefined) messages.push({ role: "system", content: text });
   }
 
-  const items = object["messages"];
+  const items = object.messages;
   if (isArray(items)) {
     for (const message of items) anthropicMessageToChat(message, messages);
   }
-  out["messages"] = messages;
+  out.messages = messages;
 
-  const tools = object["tools"];
+  const tools = object.tools;
   if (isArray(tools)) {
     const converted = tools.map(anthropicToolToOpenai);
-    if (converted.length > 0) out["tools"] = converted;
+    if (converted.length > 0) out.tools = converted;
   }
-  const toolChoice = object["tool_choice"];
+  const toolChoice = object.tool_choice;
   if (toolChoice !== undefined) {
     const converted = anthropicToolChoiceToOpenai(toolChoice);
-    if (converted !== undefined) out["tool_choice"] = converted;
+    if (converted !== undefined) out.tool_choice = converted;
   }
 
   // Every conversion above rebuilds its blocks, so a native `cache_control`
@@ -83,7 +83,7 @@ function findCacheControl(value: Json | undefined): Json | undefined {
     return undefined;
   }
   if (!isObject(value)) return undefined;
-  if (value["cache_control"] !== undefined) return value["cache_control"];
+  if (value.cache_control !== undefined) return value.cache_control;
   for (const entry of Object.values(value)) {
     const found = findCacheControl(entry);
     if (found !== undefined) return found;
@@ -164,7 +164,7 @@ function anthropicMessageToChat(message: Json, out: Json[]): void {
 function collapseContent(parts: Json[]): Json {
   if (parts.length === 0) return null;
   if (parts.length === 1) {
-    const single = parts[0]!;
+    const single = parts[0] as NonNullable<(typeof parts)[0]>;
     if (asStr(getField(single, "type")) === "text") return getField(single, "text") ?? "";
   }
   return [...parts];
@@ -207,8 +207,8 @@ function stringifyArguments(input: Json | undefined): string {
 function anthropicToolToOpenai(tool: Json): Json {
   const fn: JsonObject = { name: getField(tool, "name") ?? null };
   const description = getField(tool, "description");
-  if (description !== undefined) fn["description"] = description;
-  fn["parameters"] = getField(tool, "input_schema") ?? { type: "object" };
+  if (description !== undefined) fn.description = description;
+  fn.parameters = getField(tool, "input_schema") ?? { type: "object" };
   return { type: "function", function: fn };
 }
 
@@ -328,8 +328,6 @@ export function stopReasonToFinishReason(stopReason: string | undefined): string
       return "tool_calls";
     case "max_tokens":
       return "length";
-    case "end_turn":
-    case "stop_sequence":
     default:
       return "stop";
   }

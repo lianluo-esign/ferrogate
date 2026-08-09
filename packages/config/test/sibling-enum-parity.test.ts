@@ -16,7 +16,7 @@
  *      the schema being wired to a stale local list while the export looks right
  *      — the "implemented but never mounted" failure this repo keeps hitting).
  */
-import { describe, expect, test } from "vitest";
+
 import {
   ALL_CONTENT_SOURCES as GUARDRAILS_ALL_CONTENT_SOURCES,
   contentSourceSchema as guardrailsContentSourceSchema,
@@ -30,10 +30,12 @@ import {
   providerIsDurable,
   providerIsImplemented,
 } from "@ferrogate/storage";
+import { describe, expect, test } from "vitest";
+import { configSchema } from "../src/schema/config.js";
 import {
   ALL_CONTENT_SOURCES,
-  contentSourceSchema,
   DEFAULT_DURABLE_PROVIDER_ORDER,
+  contentSourceSchema,
   mcpAuthTypeSchema,
   mcpTransportSchema,
   modelCapabilitySchema,
@@ -41,7 +43,6 @@ import {
   routingStrategySchema,
   storageProviderKindSchema,
 } from "../src/schema/enums.js";
-import { configSchema } from "../src/schema/config.js";
 import { validateConfig } from "../src/validate.js";
 
 function firstError(raw: Record<string, unknown>): string | null {
@@ -68,8 +69,12 @@ describe("ContentSource is @ferrogate/guardrails'", () => {
     const config = configSchema.parse({
       guardrails: [{ id: "g", name: "g", keywords: ["secret"] }],
     });
-    expect(config.guardrails[0]!.sources).toEqual([...GUARDRAILS_ALL_CONTENT_SOURCES]);
-    expect(config.guardrails[0]!.sources).toContain("unknown");
+    expect((config.guardrails[0] as NonNullable<(typeof config.guardrails)[0]>).sources).toEqual([
+      ...GUARDRAILS_ALL_CONTENT_SOURCES,
+    ]);
+    expect((config.guardrails[0] as NonNullable<(typeof config.guardrails)[0]>).sources).toContain(
+      "unknown",
+    );
   });
 
   test("a rule may name `unknown` explicitly, and a bogus source is still refused", () => {
@@ -97,7 +102,9 @@ describe("ModelCapability / RoutingStrategy are @ferrogate/providers'", () => {
     const parsed = configSchema.parse({
       models: [{ name: "m", provider: "p", provider_model: "pm" }],
     });
-    expect(parsed.models[0]!.routing_strategy).toBe("priority");
+    expect((parsed.models[0] as NonNullable<(typeof parsed.models)[0]>).routing_strategy).toBe(
+      "priority",
+    );
   });
 
   test("the schema really uses that vocabulary", () => {
@@ -137,9 +144,10 @@ describe("StorageProviderKind / PostgresTlsMode are @ferrogate/storage'", () => 
           cloudflare: { account_id: "acct", api_token: "tok" },
         }) ?? "";
       if (providerIsImplemented(kind)) {
-        expect(error, `implemented provider ${kind} must not be refused as unimplemented`).not.toContain(
-          `provider ${kind} is not implemented yet`,
-        );
+        expect(
+          error,
+          `implemented provider ${kind} must not be refused as unimplemented`,
+        ).not.toContain(`provider ${kind} is not implemented yet`);
       } else {
         // turso_libsql / mysql: refused, by their own production-removal rule.
         expect(error, `unimplemented provider ${kind} must be refused`).not.toBe("");

@@ -135,10 +135,7 @@ async function grantRole(
 beforeEach(async () => {
   seedFixture({ tenantId: RBAC_TENANT });
   const db = controlDb();
-  await db.batch([
-    db.prepare("DELETE FROM roles"),
-    db.prepare("DELETE FROM permissions"),
-  ]);
+  await db.batch([db.prepare("DELETE FROM roles"), db.prepare("DELETE FROM permissions")]);
   await resetTenantObjectState([RBAC_TENANT, "tenant-somebody-else"]);
 });
 

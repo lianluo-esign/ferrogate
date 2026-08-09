@@ -8,28 +8,28 @@
  * tenant object.
  */
 import {
-  agentScheduleFireId,
-  decodeTenantScheduleAlarm,
   type StoredAgentSchedule,
   type StoredAgentScheduleFire,
+  agentScheduleFireId,
+  decodeTenantScheduleAlarm,
   planScheduleTick,
   scheduledDispatchId,
 } from "@ferrogate/storage";
-import type { ControlPlaneBindings, ControlPlaneDeps } from "../ports.js";
 import { resolveDeps } from "../adapters.js";
+import type { ControlPlaneBindings, ControlPlaneDeps } from "../ports.js";
+import { openTenantWorkerRepository } from "../store/tenant-worker.js";
 import {
-  dispatchScheduleTarget,
   SELF_HOSTED_DISPATCH_COLLECTION,
   type ScheduleFireResult,
+  dispatchScheduleTarget,
 } from "./engine.js";
-import {
-  openTenantScheduleRepository,
-  recordFromStoredSchedule,
-  rearmTenantScheduleAlarm,
-  type TenantScheduleRepository,
-} from "./tenant-schedule.js";
-import { openTenantWorkerRepository } from "../store/tenant-worker.js";
 import { manualScheduleFireId, scheduleSpecFromRecord } from "./model.js";
+import {
+  type TenantScheduleRepository,
+  openTenantScheduleRepository,
+  rearmTenantScheduleAlarm,
+  recordFromStoredSchedule,
+} from "./tenant-schedule.js";
 
 export const TENANT_SCHEDULE_ALARM_BATCH_SIZE = 200;
 
@@ -78,9 +78,7 @@ async function previousDispatchUnacked(
     scheduledDispatchId(schedule.scheduleId, schedule.lastFireAtUnix),
   );
   if (record === null) return false;
-  return !TERMINAL_DISPATCH_STATUSES.has(
-    typeof record.status === "string" ? record.status : "",
-  );
+  return !TERMINAL_DISPATCH_STATUSES.has(typeof record.status === "string" ? record.status : "");
 }
 
 function provisionalFire(
@@ -315,9 +313,7 @@ export async function consumeTenantScheduleAlarmBatch(
   env: ControlPlaneBindings,
 ): Promise<void> {
   const deps = resolveDeps(env, { requestId: "schedule-alarm-queue" });
-  const supportsPerMessageRetry = batch.messages.every(
-    (message) => message.retry !== undefined,
-  );
+  const supportsPerMessageRetry = batch.messages.every((message) => message.retry !== undefined);
   let retryBatch = false;
   for (const message of batch.messages) {
     let decoded: ReturnType<typeof decodeTenantScheduleAlarm>;

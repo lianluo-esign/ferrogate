@@ -147,9 +147,7 @@ export class MemoryWorkflowBudgetStore {
     const existing = this.budgets.get(id);
     if (existing) {
       if (existing.tenantId !== tenantId) {
-        throw StorageError.conflict(
-          `workflow run budget ${id} already exists for another tenant`,
-        );
+        throw StorageError.conflict(`workflow run budget ${id} already exists for another tenant`);
       }
       return { ...existing };
     }

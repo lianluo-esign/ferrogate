@@ -1,3 +1,19 @@
+import { ResourceTable } from "@/components/resource/resource-table";
+import { useI18n } from "@/i18n";
+import {
+  formatBytes,
+  formatCurrency,
+  formatDate,
+  formatNumber,
+  formatPercent,
+  formatRelativeTime,
+  formatTime,
+  formatTokens,
+} from "@/i18n/format";
+import { en } from "@/i18n/locales/en";
+import { zhCN } from "@/i18n/locales/zh-CN";
+import { type AdminProvider, providersConfig } from "@/resources/providers";
+import { renderWithProviders } from "@/test/test-utils";
 // Test-gate coverage for #348 acceptance boxes 5 and 6, in jsdom.
 //
 // Box 5 ("dates, numbers, token counts, bytes, percentages, relative times, and
@@ -17,22 +33,6 @@
 import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { ResourceTable } from "@/components/resource/resource-table";
-import {
-  formatBytes,
-  formatCurrency,
-  formatDate,
-  formatNumber,
-  formatPercent,
-  formatRelativeTime,
-  formatTime,
-  formatTokens,
-} from "@/i18n/format";
-import { useI18n } from "@/i18n";
-import { en } from "@/i18n/locales/en";
-import { zhCN } from "@/i18n/locales/zh-CN";
-import { providersConfig, type AdminProvider } from "@/resources/providers";
-import { renderWithProviders } from "@/test/test-utils";
 
 const INSTANT = new Date("2026-07-23T15:04:05Z");
 const UTC = { timeZone: "UTC" } as const;
@@ -97,12 +97,8 @@ describe("#348 box 5 — zh-CN value formatting is locale-correct", () => {
   });
 
   it("puts the date in zh-CN order and the clock on 24 hours", () => {
-    expect(formatDate("zh-CN", INSTANT, { dateStyle: "medium", ...UTC })).toBe(
-      "2026年7月23日",
-    );
-    expect(formatDate("en", INSTANT, { dateStyle: "medium", ...UTC })).toBe(
-      "Jul 23, 2026",
-    );
+    expect(formatDate("zh-CN", INSTANT, { dateStyle: "medium", ...UTC })).toBe("2026年7月23日");
+    expect(formatDate("en", INSTANT, { dateStyle: "medium", ...UTC })).toBe("Jul 23, 2026");
     // The classic trap: a 12-hour clock leaking into 简体中文.
     expect(formatTime("zh-CN", INSTANT, { timeStyle: "short", ...UTC })).toBe("15:04");
     expect(formatTime("en", INSTANT, { timeStyle: "short", ...UTC })).toBe("3:04 PM");
@@ -114,12 +110,8 @@ describe("#348 box 5 — zh-CN value formatting is locale-correct", () => {
 
   it("renders relative times in Chinese, not English", () => {
     const now = new Date("2026-07-23T12:00:00Z");
-    expect(formatRelativeTime("zh-CN", new Date("2026-07-23T11:58:30Z"), now)).toBe(
-      "1分钟前",
-    );
-    expect(formatRelativeTime("zh-CN", new Date("2026-07-23T14:00:00Z"), now)).toBe(
-      "2小时后",
-    );
+    expect(formatRelativeTime("zh-CN", new Date("2026-07-23T11:58:30Z"), now)).toBe("1分钟前");
+    expect(formatRelativeTime("zh-CN", new Date("2026-07-23T14:00:00Z"), now)).toBe("2小时后");
     expect(formatRelativeTime("zh-CN", new Date("2026-07-22T12:00:00Z"), now)).toBe("昨天");
     // Nothing English survived the switch.
     expect(formatRelativeTime("zh-CN", new Date("2026-07-22T12:00:00Z"), now)).not.toBe(
@@ -233,16 +225,12 @@ describe("#348 box 6 — identifiers survive a locale switch byte-for-byte", () 
     expect(
       screen.getByRole("columnheader", { name: zhCN["resource.providers.col.baseUrl"] }),
     ).toBeInTheDocument();
-    expect(zhCN["resource.providers.col.baseUrl"]).not.toBe(
-      en["resource.providers.col.baseUrl"],
-    );
+    expect(zhCN["resource.providers.col.baseUrl"]).not.toBe(en["resource.providers.col.baseUrl"]);
 
     // ...and not one byte of the identifier/user-content cells moved.
     for (const { value, text } of before) {
       const after = screen.getByText(value);
-      expect(after.textContent, `identifier "${value}" changed across the switch`).toBe(
-        text,
-      );
+      expect(after.textContent, `identifier "${value}" changed across the switch`).toBe(text);
       expect([...(after.textContent ?? "")]).toEqual([...(text ?? "")]);
     }
   });

@@ -6,17 +6,17 @@
  * pay a fail-fast toll: value-size checked before any API call, and a
  * secret-count budget with a soft warning near the ceiling.
  */
-import { type EnvLike, defaultEnv, nonEmptyEnv } from "./env.js";
+
 import { CF_SECRETS_STORE_BETA_MAX_SECRETS_PER_ACCOUNT } from "./cloudflare-consts.js";
 import { CF_SECRETS_STORE_BETA_MAX_VALUE_BYTES } from "./cloudflare-consts.js";
+import { type EnvLike, defaultEnv, nonEmptyEnv } from "./env.js";
 
 /** Env override for the hard secret-count budget. */
 export const CF_SECRETS_MAX_SECRETS_ENV = "FERROGATE_CF_SECRETS_MAX_SECRETS";
 /** Env override for the soft warning threshold (clamped to the hard budget). */
 export const CF_SECRETS_WARN_AT_ENV = "FERROGATE_CF_SECRETS_WARN_AT";
 /** Env override for the per-value byte cap. */
-export const CF_SECRETS_MAX_VALUE_BYTES_ENV =
-  "FERROGATE_CF_SECRETS_MAX_VALUE_BYTES";
+export const CF_SECRETS_MAX_VALUE_BYTES_ENV = "FERROGATE_CF_SECRETS_MAX_VALUE_BYTES";
 
 /** Default soft warning threshold: 90 of the 100-secret beta budget. */
 export const DEFAULT_CF_SECRETS_WARN_AT = 90;
@@ -42,12 +42,7 @@ export class CfSecretsCapacityWarning {
   }
 
   toString(): string {
-    return (
-      `Cloudflare Secrets Store is approaching its secret-count budget: ` +
-      `${this.usedAfterWrite} of ${this.maxSecrets} secrets used after this write ` +
-      `(soft warning threshold ${this.warnAtSecrets}). Per-tenant credentials must not fan out ` +
-      `into the store — see docs/cloudflare-secrets-tenancy.md`
-    );
+    return `Cloudflare Secrets Store is approaching its secret-count budget: ${this.usedAfterWrite} of ${this.maxSecrets} secrets used after this write (soft warning threshold ${this.warnAtSecrets}). Per-tenant credentials must not fan out into the store — see docs/cloudflare-secrets-tenancy.md`;
   }
 }
 
@@ -66,16 +61,11 @@ export class CfSecretsCapacityPolicy {
     warnAtSecrets?: number;
     maxValueBytes?: number;
   }) {
-    const maxSecrets =
-      init?.maxSecrets ?? CF_SECRETS_STORE_BETA_MAX_SECRETS_PER_ACCOUNT;
+    const maxSecrets = init?.maxSecrets ?? CF_SECRETS_STORE_BETA_MAX_SECRETS_PER_ACCOUNT;
     this.maxSecrets = maxSecrets;
     // Always clamp the warning to the hard budget.
-    this.warnAtSecrets = Math.min(
-      init?.warnAtSecrets ?? DEFAULT_CF_SECRETS_WARN_AT,
-      maxSecrets,
-    );
-    this.maxValueBytes =
-      init?.maxValueBytes ?? CF_SECRETS_STORE_BETA_MAX_VALUE_BYTES;
+    this.warnAtSecrets = Math.min(init?.warnAtSecrets ?? DEFAULT_CF_SECRETS_WARN_AT, maxSecrets);
+    this.maxValueBytes = init?.maxValueBytes ?? CF_SECRETS_STORE_BETA_MAX_VALUE_BYTES;
   }
 
   /** The default beta-cap policy. */
@@ -110,14 +100,9 @@ export class CfSecretsCapacityPolicy {
     const len = byteLength(value);
     if (len > this.maxValueBytes) {
       const label =
-        this.maxValueBytes === CF_SECRETS_STORE_BETA_MAX_VALUE_BYTES
-          ? "beta"
-          : "configured";
+        this.maxValueBytes === CF_SECRETS_STORE_BETA_MAX_VALUE_BYTES ? "beta" : "configured";
       throw new Error(
-        `Cloudflare Secrets Store value for cf://${store}/${name} is ${len} bytes, exceeding the ` +
-          `${label} cap of ${this.maxValueBytes} bytes per secret value; store oversized ` +
-          `credentials (PEM keys, service-account JSON, …) in the readable backends instead — ` +
-          `see docs/cloudflare-secrets-tenancy.md`,
+        `Cloudflare Secrets Store value for cf://${store}/${name} is ${len} bytes, exceeding the ${label} cap of ${this.maxValueBytes} bytes per secret value; store oversized credentials (PEM keys, service-account JSON, …) in the readable backends instead — see docs/cloudflare-secrets-tenancy.md`,
       );
     }
   }
@@ -135,26 +120,14 @@ export class CfSecretsCapacityPolicy {
   ): CfSecretsCapacityWarning | null {
     if (!nameAlreadyExists && existingSecretCount >= this.maxSecrets) {
       const label =
-        this.maxSecrets === CF_SECRETS_STORE_BETA_MAX_SECRETS_PER_ACCOUNT
-          ? "beta"
-          : "configured";
+        this.maxSecrets === CF_SECRETS_STORE_BETA_MAX_SECRETS_PER_ACCOUNT ? "beta" : "configured";
       throw new Error(
-        `cannot create Cloudflare secret cf://${store}/${name}: the store already holds ` +
-          `${existingSecretCount} secrets, meeting the ${label} budget of ${this.maxSecrets} ` +
-          `secrets per account; free a slot or keep this credential in the readable backends — ` +
-          `per-tenant credentials must never fan out into the store (see ` +
-          `docs/cloudflare-secrets-tenancy.md)`,
+        `cannot create Cloudflare secret cf://${store}/${name}: the store already holds ${existingSecretCount} secrets, meeting the ${label} budget of ${this.maxSecrets} secrets per account; free a slot or keep this credential in the readable backends — per-tenant credentials must never fan out into the store (see docs/cloudflare-secrets-tenancy.md)`,
       );
     }
-    const usedAfterWrite = nameAlreadyExists
-      ? existingSecretCount
-      : existingSecretCount + 1;
+    const usedAfterWrite = nameAlreadyExists ? existingSecretCount : existingSecretCount + 1;
     if (usedAfterWrite >= this.warnAtSecrets) {
-      return new CfSecretsCapacityWarning(
-        usedAfterWrite,
-        this.maxSecrets,
-        this.warnAtSecrets,
-      );
+      return new CfSecretsCapacityWarning(usedAfterWrite, this.maxSecrets, this.warnAtSecrets);
     }
     return null;
   }

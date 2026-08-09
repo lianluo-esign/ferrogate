@@ -5,6 +5,10 @@
  * authenticates with an `api-key` header. The `api-version` is read from the
  * `base_url` query string, defaulting to {@link DEFAULT_API_VERSION}.
  */
+
+import { asStr, asU64, getField, isObject, parseJson } from "./json.js";
+import type { Json, JsonObject } from "./json.js";
+import { fallbackErrorMessage, hasAnyUsage, requestOpenaiStreamUsage } from "./openai.js";
 import { AdapterError, BaseProviderAdapter, SecretValue } from "./types.js";
 import type {
   ChatCompletionPlan,
@@ -14,9 +18,6 @@ import type {
   ProviderHttpRequest,
   ProviderUsage,
 } from "./types.js";
-import { asStr, asU64, getField, isObject, parseJson } from "./json.js";
-import type { Json, JsonObject } from "./json.js";
-import { fallbackErrorMessage, hasAnyUsage, requestOpenaiStreamUsage } from "./openai.js";
 
 const DEFAULT_API_VERSION = "2024-10-21";
 
@@ -31,8 +32,9 @@ export class AzureOpenAiAdapter extends BaseProviderAdapter {
   ): ProviderHttpRequest {
     validateKind(provider.kind);
     const body = ensureObjectBody(request.body);
-    delete body["model"];
-    body["stream"] = request.stream;
+    // biome-ignore lint/performance/noDelete: removes the own-property key entirely; assigning undefined would leave an enumerable undefined-valued key and change JSON serialization, the 'in' operator, and Object.keys semantics
+    delete body.model;
+    body.stream = request.stream;
     if (request.stream) requestOpenaiStreamUsage(body);
 
     const headers: ProviderHeader[] = [

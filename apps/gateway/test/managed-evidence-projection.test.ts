@@ -30,11 +30,7 @@ describe("managed isolation evidence projection repair", () => {
       .run();
 
     const bindings = env as unknown as Parameters<typeof resolverForEnv>[0];
-    await sweepManagedIsolationEvidence(
-      bindings,
-      resolverForEnv(bindings).router,
-      [TENANT],
-    );
+    await sweepManagedIsolationEvidence(bindings, resolverForEnv(bindings).router, [TENANT]);
 
     const row = await control
       .prepare(
@@ -64,12 +60,7 @@ describe("managed isolation evidence projection repair", () => {
     );
 
     const bindings = env as unknown as Parameters<typeof resolverForEnv>[0];
-    await sweepManagedIsolationEvidence(
-      bindings,
-      resolverForEnv(bindings).router,
-      [TENANT],
-      2,
-    );
+    await sweepManagedIsolationEvidence(bindings, resolverForEnv(bindings).router, [TENANT], 2);
 
     const control = (env as unknown as { CONTROL_DB: D1Database }).CONTROL_DB;
     const count = await control

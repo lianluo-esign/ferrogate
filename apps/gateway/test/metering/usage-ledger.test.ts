@@ -21,9 +21,8 @@
  * "the loop" goes red.
  */
 import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:test";
-import { controlNamespaceOverD1 } from "../support/control-namespace.js";
-import { beforeEach, describe, expect, test } from "vitest";
 import { periodMonthFromUnix } from "@ferrogate/storage";
+import { beforeEach, describe, expect, test } from "vitest";
 import { InMemoryModelResolver, inferenceRouteModule } from "../../src/inference/index.js";
 import {
   type MeteringAttribution,
@@ -35,15 +34,16 @@ import {
   usageScopesFor,
   usageWriteFor,
 } from "../../src/metering/index.js";
+import { chargeWithTenantAttribution } from "../../src/metering/usage-ledger.js";
 import { d1TokenBudgetSource, rateLimit } from "../../src/ratelimit/index.js";
 import { createGatewayApp } from "../../src/routes/index.js";
 import { tenantDatabase } from "../../src/tenancy/index.js";
 import { OPENAI_ROUTE } from "../inference/fixtures.js";
 import { interceptProviderFetch, providerJson } from "../inference/provider-mock.js";
+import { controlNamespaceOverD1 } from "../support/control-namespace.js";
 import { resetTenantBillingState, tenantObjectDb } from "../tenant-object.js";
 import { RecordingDatabase, RecordingQueue, resetMeteringTables } from "./d1-harness.js";
 import { FIXTURE_COST_USD, chargeFixture, pricedBook, usageFixture } from "./fixtures.js";
-import { chargeWithTenantAttribution } from "../../src/metering/usage-ledger.js";
 
 const db = (env as unknown as { DB: D1Database }).DB;
 const controlDb = (env as unknown as { CONTROL_DB: D1Database }).CONTROL_DB;
@@ -87,9 +87,9 @@ beforeEach(async () => {
   await db.prepare("DELETE FROM usage_monthly_rollups").run();
   await db.prepare("DELETE FROM tenant_contexts").run();
   await db.prepare("DELETE FROM api_keys").run();
-    await controlDb.prepare("DELETE FROM usage_metadata_rollups").run();
-    await controlDb.prepare("DELETE FROM usage_monthly_rollups").run();
-    await controlDb.prepare("DELETE FROM usage_aggregate_rollups").run();
+  await controlDb.prepare("DELETE FROM usage_metadata_rollups").run();
+  await controlDb.prepare("DELETE FROM usage_monthly_rollups").run();
+  await controlDb.prepare("DELETE FROM usage_aggregate_rollups").run();
   await controlDb.prepare("DELETE FROM observed_agent_presence").run();
   const tenantDb = tenantObjectDb("tenant_a");
   await tenantDb.batch([
@@ -454,10 +454,7 @@ describe("the loop: the metering drain accumulates into the tenant database", ()
       .prepare("SELECT total_tokens FROM usage_monthly_rollups")
       .all();
     expect(tenantA.results).toEqual([]);
-    expect(tenantB.results).toEqual([
-      { total_tokens: 15 },
-      { total_tokens: 15 },
-    ]);
+    expect(tenantB.results).toEqual([{ total_tokens: 15 }, { total_tokens: 15 }]);
   });
 
   test("a charge without tenant identity cannot borrow the request database", async () => {
@@ -498,19 +495,16 @@ describe("the loop: the metering drain accumulates into the tenant database", ()
         usageDatabase: tenantDb,
       });
     }
-    expect((await tenantDb.prepare("SELECT source_id FROM usage_projection_retries").all()).results)
-      .toHaveLength(3);
+    expect(
+      (await tenantDb.prepare("SELECT source_id FROM usage_projection_retries").all()).results,
+    ).toHaveLength(3);
 
     failingControl.failure = undefined;
-    await sink.sweepUsageProjections(
-      { env: bindings(queue) },
-      ["tenant_a"],
-      2_000_000_000,
-      2,
-    );
+    await sink.sweepUsageProjections({ env: bindings(queue) }, ["tenant_a"], 2_000_000_000, 2);
 
-    expect((await tenantDb.prepare("SELECT source_id FROM usage_projection_retries").all()).results)
-      .toEqual([]);
+    expect(
+      (await tenantDb.prepare("SELECT source_id FROM usage_projection_retries").all()).results,
+    ).toEqual([]);
     expect(
       (await controlDb.prepare("SELECT tenant, total_tokens FROM usage_monthly_rollups").all())
         .results,
@@ -532,7 +526,9 @@ describe("the loop: the metering drain accumulates into the tenant database", ()
       usageDatabase: tenantDb,
     });
     const sourceId = (
-      await tenantDb.prepare("SELECT source_id FROM usage_projection_retries").first<{ source_id: string }>()
+      await tenantDb
+        .prepare("SELECT source_id FROM usage_projection_retries")
+        .first<{ source_id: string }>()
     )?.source_id;
     if (sourceId === undefined) throw new Error("expected a durable usage projection retry");
     await tenantDb
@@ -546,9 +542,9 @@ describe("the loop: the metering drain accumulates into the tenant database", ()
     expect(
       (await tenantDb.prepare("SELECT source_id FROM usage_projection_retries").all()).results,
     ).toEqual([{ source_id: sourceId }]);
-    expect((await controlDb.prepare("SELECT tenant FROM usage_monthly_rollups").all()).results).toEqual(
-      [],
-    );
+    expect(
+      (await controlDb.prepare("SELECT tenant FROM usage_monthly_rollups").all()).results,
+    ).toEqual([]);
   });
 });
 

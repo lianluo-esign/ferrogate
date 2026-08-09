@@ -313,8 +313,8 @@ function jsonArrayColumn<T>(value: unknown, column: string, id: string): T[] {
 }
 
 function rowToStoredPolicy(row: Record<string, unknown>): StoredQuotaPolicy {
-  const id = String(row["id"] ?? "");
-  const scopeType = String(row["scope_type"] ?? "");
+  const id = String(row.id ?? "");
+  const scopeType = String(row.scope_type ?? "");
   if (
     scopeType !== "tenant" &&
     scopeType !== "project" &&
@@ -328,34 +328,30 @@ function rowToStoredPolicy(row: Record<string, unknown>): StoredQuotaPolicy {
   return {
     id,
     scopeType,
-    scopeId: String(row["scope_id"] ?? ""),
-    modelAllowlist: jsonArrayColumn<string>(
-      row["model_allowlist_json"],
-      "model_allowlist_json",
-      id,
-    ),
-    rpmLimit: optionalNumber(row["rpm_limit"]),
-    tpmLimit: optionalNumber(row["tpm_limit"]),
-    monthlyBudgetUsd: optionalNumber(row["monthly_budget_usd"]),
-    assetStorageQuotaBytes: optionalNumber(row["asset_storage_quota_bytes"]),
-    assetMaxObjectBytes: optionalNumber(row["asset_max_object_bytes"]),
-    agentCostBudgetUsd: optionalNumber(row["agent_cost_budget_usd"]),
+    scopeId: String(row.scope_id ?? ""),
+    modelAllowlist: jsonArrayColumn<string>(row.model_allowlist_json, "model_allowlist_json", id),
+    rpmLimit: optionalNumber(row.rpm_limit),
+    tpmLimit: optionalNumber(row.tpm_limit),
+    monthlyBudgetUsd: optionalNumber(row.monthly_budget_usd),
+    assetStorageQuotaBytes: optionalNumber(row.asset_storage_quota_bytes),
+    assetMaxObjectBytes: optionalNumber(row.asset_max_object_bytes),
+    agentCostBudgetUsd: optionalNumber(row.agent_cost_budget_usd),
     alertThresholdPcts: jsonArrayColumn<number>(
-      row["alert_threshold_pcts_json"],
+      row.alert_threshold_pcts_json,
       "alert_threshold_pcts_json",
       id,
     ),
-    enabled: boolFromSqlite(row["enabled"]),
-    createdAtUnix: Number(row["created_at_unix"] ?? 0),
-    updatedAtUnix: Number(row["updated_at_unix"] ?? 0),
-    monthlyEgressBytesBudget: optionalNumber(row["monthly_egress_bytes_budget"]),
-    downloadRpmLimit: optionalNumber(row["download_rpm_limit"]),
+    enabled: boolFromSqlite(row.enabled),
+    createdAtUnix: Number(row.created_at_unix ?? 0),
+    updatedAtUnix: Number(row.updated_at_unix ?? 0),
+    monthlyEgressBytesBudget: optionalNumber(row.monthly_egress_bytes_budget),
+    downloadRpmLimit: optionalNumber(row.download_rpm_limit),
   };
 }
 
 function rowToStoredPlan(row: Record<string, unknown>): StoredPlan {
-  const id = String(row["id"] ?? "");
-  const allowlist = row["default_model_allowlist_json"];
+  const id = String(row.id ?? "");
+  const allowlist = row.default_model_allowlist_json;
   let defaultModelAllowlist: string[] = [];
   if (allowlist !== null && allowlist !== undefined && allowlist !== "") {
     try {
@@ -370,26 +366,26 @@ function rowToStoredPlan(row: Record<string, unknown>): StoredPlan {
   }
   return {
     id,
-    name: String(row["name"] ?? ""),
-    slug: String(row["slug"] ?? ""),
-    mcpEnabled: boolFromSqlite(row["mcp_enabled"]),
-    selfHostedWorkersEnabled: boolFromSqlite(row["self_hosted_workers_enabled"]),
-    ...(optionalNumber(row["admin_console_seats"]) === undefined
+    name: String(row.name ?? ""),
+    slug: String(row.slug ?? ""),
+    mcpEnabled: boolFromSqlite(row.mcp_enabled),
+    selfHostedWorkersEnabled: boolFromSqlite(row.self_hosted_workers_enabled),
+    ...(optionalNumber(row.admin_console_seats) === undefined
       ? {}
-      : { adminConsoleSeats: optionalNumber(row["admin_console_seats"]) }),
+      : { adminConsoleSeats: optionalNumber(row.admin_console_seats) }),
     defaultModelAllowlist,
-    defaultRpmLimit: optionalNumber(row["default_rpm_limit"]),
-    defaultTpmLimit: optionalNumber(row["default_tpm_limit"]),
-    defaultMonthlyBudgetUsd: optionalNumber(row["default_monthly_budget_usd"]),
-    createdAtUnix: Number(row["created_at_unix"] ?? 0),
-    updatedAtUnix: Number(row["updated_at_unix"] ?? 0),
-    assetHostingEnabled: boolFromSqlite(row["asset_hosting_enabled"]),
-    defaultAssetStorageQuotaBytes: optionalNumber(row["default_asset_storage_quota_bytes"]),
-    defaultAssetMaxObjectBytes: optionalNumber(row["default_asset_max_object_bytes"]),
-    defaultAgentCostBudgetUsd: optionalNumber(row["default_agent_cost_budget_usd"]),
-    defaultMonthlyEgressBytesBudget: optionalNumber(row["default_monthly_egress_bytes_budget"]),
-    defaultDownloadRpmLimit: optionalNumber(row["default_download_rpm_limit"]),
-    extensionToolsEnabled: boolFromSqlite(row["extension_tools_enabled"]),
+    defaultRpmLimit: optionalNumber(row.default_rpm_limit),
+    defaultTpmLimit: optionalNumber(row.default_tpm_limit),
+    defaultMonthlyBudgetUsd: optionalNumber(row.default_monthly_budget_usd),
+    createdAtUnix: Number(row.created_at_unix ?? 0),
+    updatedAtUnix: Number(row.updated_at_unix ?? 0),
+    assetHostingEnabled: boolFromSqlite(row.asset_hosting_enabled),
+    defaultAssetStorageQuotaBytes: optionalNumber(row.default_asset_storage_quota_bytes),
+    defaultAssetMaxObjectBytes: optionalNumber(row.default_asset_max_object_bytes),
+    defaultAgentCostBudgetUsd: optionalNumber(row.default_agent_cost_budget_usd),
+    defaultMonthlyEgressBytesBudget: optionalNumber(row.default_monthly_egress_bytes_budget),
+    defaultDownloadRpmLimit: optionalNumber(row.default_download_rpm_limit),
+    extensionToolsEnabled: boolFromSqlite(row.extension_tools_enabled),
   };
 }
 
@@ -454,9 +450,10 @@ export function d1QuotaPolicySource(
       // this leg is conditional: a hard-coded `results[2]` would read the PLAN
       // row as a throttle for a credential with no tenant, and a mis-indexed
       // read there does not fail — it applies the wrong rpm cap to live traffic.
-      const planIndex = tenantId !== undefined && tables.has(PLAN_TABLE) && tables.has(TENANT_TABLE)
-        ? statements.length
-        : -1;
+      const planIndex =
+        tenantId !== undefined && tables.has(PLAN_TABLE) && tables.has(TENANT_TABLE)
+          ? statements.length
+          : -1;
       if (planIndex >= 0) {
         statements.push(
           db

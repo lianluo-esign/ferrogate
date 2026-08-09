@@ -49,12 +49,13 @@
  *    rejects an empty one and that is the single field the old document shape
  *    never carried.
  */
+
+import { SELF } from "cloudflare:test";
 import {
   type PolicyRevision,
   policyRevisionSchema,
   validatePolicyRevision,
 } from "@ferrogate/guardrails";
-import { SELF } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { applySchema, db, resetD1 } from "./d1.js";
 import { BASE, arm, bearer, jsonRequest, operatorKey } from "./harness.js";
@@ -161,9 +162,7 @@ describe("guardrail policy admission: a revision the data plane could never enfo
   });
 
   it("REFUSES a revision with no checks — Rust's code, and the field path", async () => {
-    const response = await createPolicy(
-      enforceableBody({ policy_id: "gp_nochecks", checks: [] }),
-    );
+    const response = await createPolicy(enforceableBody({ policy_id: "gp_nochecks", checks: [] }));
     expect(response.status).toBe(400);
     const body = await envelope(response);
     // Rust `write_guardrail_error`'s `None =>` arm for a `validate()` failure.
@@ -345,7 +344,7 @@ describe("guardrail policy projection: the revision reaches the tables the gatew
     await createPolicy(enforceableBody({ policy_id: "gp_act" }));
     await createNext("gp_act", enforceableBody({ name: "second" }));
 
-    expect((await projectedBindings())).toHaveLength(0);
+    expect(await projectedBindings()).toHaveLength(0);
 
     expect((await activate("gp_act", 2)).status).toBe(200);
     const bindings = await projectedBindings();
@@ -379,10 +378,10 @@ describe("guardrail policy projection: the revision reaches the tables the gatew
     await activate("gp_arch", 1);
     expect((await projectedBindings())[0]?.active_revision).toBe(1);
 
-    const archived = await SELF.fetch(
-      `${BASE}/admin/v1/guardrail-policies/gp_arch/revisions/1`,
-      { method: "DELETE", headers: bearer(KEY) },
-    );
+    const archived = await SELF.fetch(`${BASE}/admin/v1/guardrail-policies/gp_arch/revisions/1`, {
+      method: "DELETE",
+      headers: bearer(KEY),
+    });
     expect(archived.status).toBe(200);
 
     // The operator has been told the revision is archived. A residual

@@ -30,7 +30,6 @@
  * what `src/index.ts` does.
  */
 import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:test";
-import { controlNamespaceOverD1 } from "../support/control-namespace.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { InMemoryModelResolver, inferenceRouteModule } from "../../src/inference/index.js";
 import type { RequestIdFactory } from "../../src/inference/index.js";
@@ -41,11 +40,11 @@ import {
   MAX_BILLING_OUTBOX_ATTEMPTS,
   type MeteringUsageSink,
   OUTBOX_SWEEP_GRACE_SECONDS,
+  billingEventToWire,
   createMeteringUsageSink,
+  ledgerDocument,
   meteringBindingsFromEnv,
   meteringDrain,
-  billingEventToWire,
-  ledgerDocument,
 } from "../../src/metering/index.js";
 import { createGatewayApp } from "../../src/routes/index.js";
 import { OPENAI_ROUTE } from "../inference/fixtures.js";
@@ -56,6 +55,8 @@ import {
   providerSse,
   readBody,
 } from "../inference/provider-mock.js";
+import { controlNamespaceOverD1 } from "../support/control-namespace.js";
+import { resetTenantBillingState, tenantObjectDb } from "../tenant-object.js";
 import {
   RecordingDatabase,
   RecordingQueue,
@@ -65,7 +66,6 @@ import {
   rowCount,
 } from "./d1-harness.js";
 import { FIXTURE_CREDITS, chargeFixture, pricedBook, usageFixture } from "./fixtures.js";
-import { resetTenantBillingState, tenantObjectDb } from "../tenant-object.js";
 
 const BASE = "https://gw.test";
 const AUTHED = { authorization: "Bearer fg_root", "content-type": "application/json" };
@@ -132,7 +132,9 @@ function durableGateway(
   const bindings: Record<string, unknown> = {
     ...(env as unknown as Record<string, unknown>),
     BILLING: queue,
-    ...(options.database !== undefined ? { CONTROL_DATA: controlNamespaceOverD1(options.database) } : {}),
+    ...(options.database !== undefined
+      ? { CONTROL_DATA: controlNamespaceOverD1(options.database) }
+      : {}),
   };
 
   const sink = createMeteringUsageSink({
@@ -278,7 +280,10 @@ describe("durable metering — the bindings are real", () => {
         .first(),
     ).toEqual({ tenant_id: "tenant_a", organization_id: "tenant_a" });
     expect(
-      await tenantDb.prepare("SELECT balance_credits FROM wallets WHERE id = ?").bind("tenant_a").first(),
+      await tenantDb
+        .prepare("SELECT balance_credits FROM wallets WHERE id = ?")
+        .bind("tenant_a")
+        .first(),
     ).toEqual({ balance_credits: 96 });
     expect(
       await tenantDb
@@ -290,7 +295,9 @@ describe("durable metering — the bindings are real", () => {
     ).toEqual({ tenant_id: "tenant_a", delta_credits: -4, balance_after_credits: 96 });
 
     expect(await store.record(charge)).toEqual({ status: "duplicate" });
-    expect(await tenantDb.prepare("SELECT count(*) AS count FROM wallet_settlements").first()).toEqual({
+    expect(
+      await tenantDb.prepare("SELECT count(*) AS count FROM wallet_settlements").first(),
+    ).toEqual({
       count: 1,
     });
   });
@@ -356,9 +363,14 @@ describe("durable metering — the bindings are real", () => {
 
     expect(outcome.status).toBe("conflict");
     expect(
-      await tenantDb.prepare("SELECT balance_credits FROM wallets WHERE id = ?").bind("tenant_a").first(),
+      await tenantDb
+        .prepare("SELECT balance_credits FROM wallets WHERE id = ?")
+        .bind("tenant_a")
+        .first(),
     ).toEqual({ balance_credits: 100 });
-    expect(await tenantDb.prepare("SELECT count(*) AS count FROM wallet_settlements").first()).toEqual({
+    expect(
+      await tenantDb.prepare("SELECT count(*) AS count FROM wallet_settlements").first(),
+    ).toEqual({
       count: 0,
     });
   });
@@ -382,11 +394,16 @@ describe("durable metering — the bindings are real", () => {
     expect(await tenantRowCount("billing_events")).toBe(0);
     expect(await tenantRowCount("billing_ledger")).toBe(0);
     expect(await tenantRowCount("billing_report_outbox")).toBe(0);
-    expect(await tenantDb.prepare("SELECT count(*) AS count FROM wallet_settlements").first()).toEqual({
+    expect(
+      await tenantDb.prepare("SELECT count(*) AS count FROM wallet_settlements").first(),
+    ).toEqual({
       count: 0,
     });
     expect(
-      await tenantDb.prepare("SELECT balance_credits FROM wallets WHERE id = ?").bind("tenant_a").first(),
+      await tenantDb
+        .prepare("SELECT balance_credits FROM wallets WHERE id = ?")
+        .bind("tenant_a")
+        .first(),
     ).toEqual({ balance_credits: 100 });
 
     failingDb.failBatchIndex = undefined;
@@ -405,15 +422,22 @@ describe("durable metering — the bindings are real", () => {
       .run();
 
     const store = new D1LedgerStore(tenantDb, { tenantId: "tenant_a" });
-    await expect(store.record({ ...charge, credits: (1n << 63n) + 1n })).rejects.toThrow("SQLite int64");
+    await expect(store.record({ ...charge, credits: (1n << 63n) + 1n })).rejects.toThrow(
+      "SQLite int64",
+    );
     expect(await tenantRowCount("billing_events")).toBe(0);
     expect(await tenantRowCount("billing_ledger")).toBe(0);
     expect(await tenantRowCount("billing_report_outbox")).toBe(0);
-    expect(await tenantDb.prepare("SELECT count(*) AS count FROM wallet_settlements").first()).toEqual({
+    expect(
+      await tenantDb.prepare("SELECT count(*) AS count FROM wallet_settlements").first(),
+    ).toEqual({
       count: 0,
     });
     expect(
-      await tenantDb.prepare("SELECT balance_credits FROM wallets WHERE id = ?").bind("tenant_a").first(),
+      await tenantDb
+        .prepare("SELECT balance_credits FROM wallets WHERE id = ?")
+        .bind("tenant_a")
+        .first(),
     ).toEqual({ balance_credits: 100 });
   });
 });

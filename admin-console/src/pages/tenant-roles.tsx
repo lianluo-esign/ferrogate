@@ -1,13 +1,4 @@
-// Tenant role bindings (#321 / #232): assign and remove RBAC roles for a
-// tenant over `/admin/v1/tenant-roles/{tenant_id}` (+ POST body {role_id} and
-// DELETE `.../{role_id}`). Bespoke because the resource path is parameterised
-// by a chosen tenant. Tenant-scoping (#232): the tenant defaults to the signed-in
-// tenant; a tenant-scoped caller who targets another tenant gets a 403 which is
-// surfaced in the error banner rather than hidden.
-import { useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Plus } from "lucide-react";
-import { toast } from "sonner";
+import { EntityReferencePicker } from "@/components/resource/entity-reference-picker";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -18,7 +9,6 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { EntityReferencePicker } from "@/components/resource/entity-reference-picker";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import {
@@ -30,11 +20,21 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { useAuth } from "@/hooks/use-auth";
-import { useI18n } from "@/i18n";
 import { useFormatUnix } from "@/hooks/use-format-unix";
 import { useOperatorError } from "@/hooks/use-operator-error";
-import { adminDelete, adminGet, adminPost, type AdminSchema } from "@/lib/gateway-client";
+import { useI18n } from "@/i18n";
+import { type AdminSchema, adminDelete, adminGet, adminPost } from "@/lib/gateway-client";
 import { DISABLED_WHEN_STATUS_NOT_ACTIVE } from "@/lib/resource-config";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Plus } from "lucide-react";
+// Tenant role bindings (#321 / #232): assign and remove RBAC roles for a
+// tenant over `/admin/v1/tenant-roles/{tenant_id}` (+ POST body {role_id} and
+// DELETE `.../{role_id}`). Bespoke because the resource path is parameterised
+// by a chosen tenant. Tenant-scoping (#232): the tenant defaults to the signed-in
+// tenant; a tenant-scoped caller who targets another tenant gets a 403 which is
+// surfaced in the error banner rather than hidden.
+import { useState } from "react";
+import { toast } from "sonner";
 
 type AdminTenantRoleBinding = AdminSchema<"AdminTenantRoleBinding">;
 
@@ -43,15 +43,19 @@ export default function TenantRolesPage() {
   const { t } = useI18n();
   const formatUnix = useFormatUnix();
   const { toastError } = useOperatorError();
-  const apiKey = session!.gatewayApiKey;
+  const apiKey = (session as NonNullable<typeof session>).gatewayApiKey;
   const queryClient = useQueryClient();
 
-  const [tenantId, setTenantId] = useState(session!.tenant.id);
+  const [tenantId, setTenantId] = useState((session as NonNullable<typeof session>).tenant.id);
   const [roleId, setRoleId] = useState("");
   const [removing, setRemoving] = useState<AdminTenantRoleBinding | null>(null);
 
   const queryKey = ["tenant-roles", tenantId];
-  const { data, isLoading, error: listError } = useQuery({
+  const {
+    data,
+    isLoading,
+    error: listError,
+  } = useQuery({
     queryKey,
     enabled: tenantId.trim() !== "",
     queryFn: () =>
@@ -95,9 +99,7 @@ export default function TenantRolesPage() {
     <div className="flex flex-col gap-4">
       <div>
         <h1 className="text-lg font-semibold">{t("page.tenantRoles.title")}</h1>
-        <p className="text-sm text-muted-foreground">
-          {t("page.tenantRoles.description")}
-        </p>
+        <p className="text-sm text-muted-foreground">{t("page.tenantRoles.description")}</p>
       </div>
 
       <div className="flex flex-wrap items-end gap-3">
@@ -162,7 +164,10 @@ export default function TenantRolesPage() {
       </form>
 
       {listError ? (
-        <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <p
+          role="alert"
+          className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+        >
           {t("page.tenantRoles.loadError", { message: (listError as Error).message })}
         </p>
       ) : null}
@@ -173,9 +178,7 @@ export default function TenantRolesPage() {
             <TableRow>
               <TableHead>{t("page.tenantRoles.col.roleId")}</TableHead>
               <TableHead>{t("page.tenantRoles.col.boundAt")}</TableHead>
-              <TableHead className="w-24 text-right">
-                {t("resource.table.actionsColumn")}
-              </TableHead>
+              <TableHead className="w-24 text-right">{t("resource.table.actionsColumn")}</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -195,9 +198,7 @@ export default function TenantRolesPage() {
               bindings.map((binding) => (
                 <TableRow key={binding.id}>
                   <TableCell className="font-mono text-xs">{binding.role_id}</TableCell>
-                  <TableCell className="text-xs">
-                    {formatUnix(binding.created_at_unix)}
-                  </TableCell>
+                  <TableCell className="text-xs">{formatUnix(binding.created_at_unix)}</TableCell>
                   <TableCell>
                     <div className="flex justify-end">
                       <Button
@@ -217,10 +218,7 @@ export default function TenantRolesPage() {
         </Table>
       </div>
 
-      <AlertDialog
-        open={removing !== null}
-        onOpenChange={(open) => !open && setRemoving(null)}
-      >
+      <AlertDialog open={removing !== null} onOpenChange={(open) => !open && setRemoving(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>{t("page.tenantRoles.remove.title")}</AlertDialogTitle>

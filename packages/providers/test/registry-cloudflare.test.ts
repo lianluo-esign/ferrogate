@@ -9,7 +9,11 @@ import {
   isOpenAiCompatibleProviderKind,
   providerCompatibilityKind,
 } from "../src/index.js";
-import type { CloudflareAiGatewayRouting, ProviderConfig, ProviderHttpRequest } from "../src/index.js";
+import type {
+  CloudflareAiGatewayRouting,
+  ProviderConfig,
+  ProviderHttpRequest,
+} from "../src/index.js";
 
 const provider = (kind: string, extra: Partial<ProviderConfig> = {}): ProviderConfig => ({
   name: "openai",
@@ -120,7 +124,9 @@ describe("ProviderAdapterRegistry", () => {
  * `SELF.fetch` into the deployed Worker.
  */
 describe("Cloudflare AI Gateway routing (issue #406, mounted by #672)", () => {
-  const routing = (overrides: Partial<CloudflareAiGatewayRouting> = {}): CloudflareAiGatewayRouting => ({
+  const routing = (
+    overrides: Partial<CloudflareAiGatewayRouting> = {},
+  ): CloudflareAiGatewayRouting => ({
     accountId: "acct",
     gatewayId: "gw",
     gatewayBaseUrl: "https://gateway.ai.cloudflare.com",
@@ -152,7 +158,9 @@ describe("Cloudflare AI Gateway routing (issue #406, mounted by #672)", () => {
     );
     expect(prepared.headers.some((h) => h.name === "cf-aig-authorization")).toBe(true);
     // BYOK Authorization header is preserved.
-    expect(prepared.headers.some((h) => h.value.exposeSecret() === "Bearer provider-secret")).toBe(true);
+    expect(prepared.headers.some((h) => h.value.exposeSecret() === "Bearer provider-secret")).toBe(
+      true,
+    );
   });
 
   test("anthropic chat routes through the messages passthrough suffix", () => {
@@ -163,7 +171,9 @@ describe("Cloudflare AI Gateway routing (issue #406, mounted by #672)", () => {
       body: { messages: [] },
     });
     applyCloudflareAiGatewayRouting(routing(), "Anthropic", "Messages", prepared);
-    expect(prepared.endpoint).toBe("https://gateway.ai.cloudflare.com/v1/acct/gw/anthropic/v1/messages");
+    expect(prepared.endpoint).toBe(
+      "https://gateway.ai.cloudflare.com/v1/acct/gw/anthropic/v1/messages",
+    );
   });
 
   test("the registry itself no longer routes — that leg is the gateway's now", () => {
@@ -182,8 +192,15 @@ describe("Cloudflare AI Gateway routing (issue #406, mounted by #672)", () => {
       stream: false,
       headers: [],
     };
-    applyCloudflareAiGatewayRouting(routing({ mode: "Unified" }), "OpenAiCompatible", "ChatCompletions", request);
-    expect(request.endpoint).toBe("https://api.cloudflare.com/client/v4/accounts/acct/ai/v1/chat/completions");
+    applyCloudflareAiGatewayRouting(
+      routing({ mode: "Unified" }),
+      "OpenAiCompatible",
+      "ChatCompletions",
+      request,
+    );
+    expect(request.endpoint).toBe(
+      "https://api.cloudflare.com/client/v4/accounts/acct/ai/v1/chat/completions",
+    );
     expect((request.body as any).model).toBe("openai/gpt-4o-mini");
     expect(request.headers.some((h) => h.name === "cf-aig-gateway-id")).toBe(true);
   });

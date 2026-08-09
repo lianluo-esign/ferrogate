@@ -33,8 +33,7 @@ export const ObservabilitySignal = {
   Metric: "Metric",
   Log: "Log",
 } as const;
-export type ObservabilitySignal =
-  (typeof ObservabilitySignal)[keyof typeof ObservabilitySignal];
+export type ObservabilitySignal = (typeof ObservabilitySignal)[keyof typeof ObservabilitySignal];
 
 export const ObservabilityExporterKind = {
   Stdout: "Stdout",
@@ -155,11 +154,7 @@ export class ObservabilityExporterConfig implements ObservabilityPlugin {
   path_?: string;
   enabled: boolean;
 
-  constructor(
-    name: string,
-    kind: ObservabilityExporterKind,
-    signals: ObservabilitySignal[],
-  ) {
+  constructor(name: string, kind: ObservabilityExporterKind, signals: ObservabilitySignal[]) {
     this.name_ = name;
     this.kind_ = kind;
     this.signals_ = signals;
@@ -169,23 +164,17 @@ export class ObservabilityExporterConfig implements ObservabilityPlugin {
   }
 
   static stdoutLogs(): ObservabilityExporterConfig {
-    return new ObservabilityExporterConfig(
-      "stdout-logs",
-      ObservabilityExporterKind.Stdout,
-      [ObservabilitySignal.Log],
-    );
+    return new ObservabilityExporterConfig("stdout-logs", ObservabilityExporterKind.Stdout, [
+      ObservabilitySignal.Log,
+    ]);
   }
 
   static otlp(endpoint: string): ObservabilityExporterConfig {
-    const exporter = new ObservabilityExporterConfig(
-      "otlp",
-      ObservabilityExporterKind.Otlp,
-      [
-        ObservabilitySignal.Trace,
-        ObservabilitySignal.Metric,
-        ObservabilitySignal.Log,
-      ],
-    );
+    const exporter = new ObservabilityExporterConfig("otlp", ObservabilityExporterKind.Otlp, [
+      ObservabilitySignal.Trace,
+      ObservabilitySignal.Metric,
+      ObservabilitySignal.Log,
+    ]);
     exporter.endpoint_ = endpoint;
     return exporter;
   }
@@ -195,11 +184,7 @@ export class ObservabilityExporterConfig implements ObservabilityPlugin {
     const exporter = new ObservabilityExporterConfig(
       "cloudflare",
       ObservabilityExporterKind.Cloudflare,
-      [
-        ObservabilitySignal.Trace,
-        ObservabilitySignal.Metric,
-        ObservabilitySignal.Log,
-      ],
+      [ObservabilitySignal.Trace, ObservabilitySignal.Metric, ObservabilitySignal.Log],
     );
     exporter.endpoint_ = collectorEndpoint;
     return exporter;
@@ -216,11 +201,9 @@ export class ObservabilityExporterConfig implements ObservabilityPlugin {
   }
 
   static fileLogs(path: string): ObservabilityExporterConfig {
-    const exporter = new ObservabilityExporterConfig(
-      "file-logs",
-      ObservabilityExporterKind.File,
-      [ObservabilitySignal.Log],
-    );
+    const exporter = new ObservabilityExporterConfig("file-logs", ObservabilityExporterKind.File, [
+      ObservabilitySignal.Log,
+    ]);
     exporter.path_ = path;
     return exporter;
   }
@@ -246,13 +229,7 @@ export class ObservabilityExporterConfig implements ObservabilityPlugin {
   }
 
   validate(): ObservabilityConfigError | null {
-    return validateExporterParts(
-      this.name_,
-      this.kind_,
-      this.signals_,
-      this.endpoint_,
-      this.path_,
-    );
+    return validateExporterParts(this.name_, this.kind_, this.signals_, this.endpoint_, this.path_);
   }
 }
 
@@ -266,9 +243,7 @@ export class ObservabilityPipelineConfig {
   }
 
   static default(): ObservabilityPipelineConfig {
-    return new ObservabilityPipelineConfig(
-      defaultObservabilityConfig().serviceName,
-    );
+    return new ObservabilityPipelineConfig(defaultObservabilityConfig().serviceName);
   }
 
   withExporter(exporter: ObservabilityExporterConfig): this {
@@ -386,20 +361,12 @@ export const observabilityExporterConfigSchema = z.object({
   enabled: z.boolean().default(true),
 });
 
-export type ObservabilityExporterConfigWire = z.infer<
-  typeof observabilityExporterConfigSchema
->;
+export type ObservabilityExporterConfigWire = z.infer<typeof observabilityExporterConfigSchema>;
 
 /** Parse an untrusted exporter-config object and hydrate the class form. */
-export function parseExporterConfig(
-  input: unknown,
-): ObservabilityExporterConfig {
+export function parseExporterConfig(input: unknown): ObservabilityExporterConfig {
   const wire = observabilityExporterConfigSchema.parse(input);
-  const exporter = new ObservabilityExporterConfig(
-    wire.name,
-    wire.kind,
-    wire.signals,
-  );
+  const exporter = new ObservabilityExporterConfig(wire.name, wire.kind, wire.signals);
   exporter.endpoint_ = wire.endpoint;
   exporter.path_ = wire.path;
   exporter.enabled = wire.enabled;

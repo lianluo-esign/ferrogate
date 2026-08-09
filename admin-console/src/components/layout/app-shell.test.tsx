@@ -1,11 +1,11 @@
-import { render, screen, within } from "@testing-library/react";
-import { QueryClientProvider } from "@tanstack/react-query";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { beforeEach, describe, expect, it } from "vitest";
 import { AppShell } from "@/components/layout/app-shell";
 import { AuthProvider } from "@/hooks/use-auth";
-import { I18nProvider, translate, type Locale } from "@/i18n";
+import { I18nProvider, type Locale, translate } from "@/i18n";
 import { createTestQueryClient, seedSession } from "@/test/test-utils";
+import { QueryClientProvider } from "@tanstack/react-query";
+import { render, screen, within } from "@testing-library/react";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { beforeEach, describe, expect, it } from "vitest";
 
 function renderShell(path: string, locale: Locale = "en") {
   return render(
@@ -46,18 +46,14 @@ describe("AppShell chrome", () => {
         name: translate("en", "shell.breadcrumb.root"),
       }),
     ).toBeInTheDocument();
-    expect(
-      within(breadcrumb).getByRole("link", { current: "page" }),
-    ).toHaveTextContent(translate("en", "nav.item.agentRuns"));
+    expect(within(breadcrumb).getByRole("link", { current: "page" })).toHaveTextContent(
+      translate("en", "nav.item.agentRuns"),
+    );
 
     // Sidebar brand + control-plane label.
     expect(screen.getByText(translate("en", "shell.brand.name"))).toBeInTheDocument();
-    expect(
-      screen.getByText(translate("en", "shell.brand.tagline")),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText(translate("en", "nav.controlPlane")),
-    ).toBeInTheDocument();
+    expect(screen.getByText(translate("en", "shell.brand.tagline"))).toBeInTheDocument();
+    expect(screen.getByText(translate("en", "nav.controlPlane"))).toBeInTheDocument();
   });
 
   it("falls back to the dashboard label for routes outside the nav registry", () => {
@@ -66,9 +62,9 @@ describe("AppShell chrome", () => {
     const breadcrumb = screen.getByRole("navigation", {
       name: translate("en", "common.breadcrumb"),
     });
-    expect(
-      within(breadcrumb).getByRole("link", { current: "page" }),
-    ).toHaveTextContent(translate("en", "nav.dashboard"));
+    expect(within(breadcrumb).getByRole("link", { current: "page" })).toHaveTextContent(
+      translate("en", "nav.dashboard"),
+    );
   });
 
   it("renders the shell chrome in Simplified Chinese", () => {
@@ -86,14 +82,10 @@ describe("AppShell chrome", () => {
         name: translate("zh-CN", "shell.breadcrumb.root"),
       }),
     ).toBeInTheDocument();
-    expect(
-      within(breadcrumb).getByRole("link", { current: "page" }),
-    ).toHaveTextContent(translate("zh-CN", "nav.item.agentRuns"));
-    expect(
-      screen.getByText(translate("zh-CN", "shell.brand.tagline")),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText(translate("zh-CN", "nav.controlPlane")),
-    ).toBeInTheDocument();
+    expect(within(breadcrumb).getByRole("link", { current: "page" })).toHaveTextContent(
+      translate("zh-CN", "nav.item.agentRuns"),
+    );
+    expect(screen.getByText(translate("zh-CN", "shell.brand.tagline"))).toBeInTheDocument();
+    expect(screen.getByText(translate("zh-CN", "nav.controlPlane"))).toBeInTheDocument();
   });
 });

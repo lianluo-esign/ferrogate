@@ -19,14 +19,14 @@ import type { Config, GuardrailRule, SkillPackage } from "../schema/index.js";
 import {
   fail,
   isBlank,
+  isPromptVariableName,
   isSetAndBlank,
   isSetAndEmpty,
-  isPromptVariableName,
+  usesRegexCrateUnsupportedSyntax,
   validatePositiveOptional,
   validatePromptMessageRole,
   validatePromptPlaceholders,
   validateSecretRef,
-  usesRegexCrateUnsupportedSyntax,
 } from "./helpers.js";
 import { pluginRegistrationsForValidation } from "./plugins.js";
 
@@ -248,7 +248,11 @@ function validateSkillPackageResourceCapabilities(packageIndex: number, pkg: Ski
       );
     }
   }
-  for (let resourceIndex = 0; resourceIndex < pkg.resources.mcp_servers.length; resourceIndex += 1) {
+  for (
+    let resourceIndex = 0;
+    resourceIndex < pkg.resources.mcp_servers.length;
+    resourceIndex += 1
+  ) {
     const server = pkg.resources.mcp_servers[resourceIndex]!;
     if (!skillPackageHasCapability(pkg, "mcp_server", server.name)) {
       fail(
@@ -332,7 +336,11 @@ export function validateSkillPackages(
       }
     }
     validateExtensionPermissionNamesForPackage(index, "permissions.tools", pkg.permissions.tools);
-    validateExtensionPermissionNamesForPackage(index, "permissions.network", pkg.permissions.network);
+    validateExtensionPermissionNamesForPackage(
+      index,
+      "permissions.network",
+      pkg.permissions.network,
+    );
     for (
       let runtimeIndex = 0;
       runtimeIndex < pkg.compatibility.agent_runtimes.length;
@@ -349,7 +357,10 @@ export function validateSkillPackages(
       if (isBlank(capability.id)) fail(atCapability, "cannot be empty");
       const known = (label: string, present: boolean) => {
         if (!present) {
-          fail(atCapability, `skill package ${pkg.id} references unknown ${label} ${capability.id}`);
+          fail(
+            atCapability,
+            `skill package ${pkg.id} references unknown ${label} ${capability.id}`,
+          );
         }
       };
       switch (capability.kind) {
@@ -395,10 +406,7 @@ function validateExtensionPermissionNamesForPackage(
     const name = names[nameIndex]!;
     if (isBlank(name)) fail(`skill_packages[${index}].${field}[${nameIndex}]`, "cannot be empty");
     if (seen.has(name)) {
-      fail(
-        `skill_packages[${index}].${field}[${nameIndex}]`,
-        `duplicate permission value ${name}`,
-      );
+      fail(`skill_packages[${index}].${field}[${nameIndex}]`, `duplicate permission value ${name}`);
     }
     seen.add(name);
   }
@@ -434,10 +442,15 @@ function providerRuntimeIsDefault(rule: GuardrailRule): boolean {
  * ceiling the Rust runtime's detector concurrency gate cannot exceed. Kept as the
  * same numeric bound for parity; a Worker has no semaphore to overflow.
  */
+// biome-ignore lint/correctness/noPrecisionLoss: this is a documented parity ceiling used only as an unreachable upper bound in a comparison, so f64 rounding of the exact value is immaterial
 const SEMAPHORE_MAX_PERMITS = 2_305_843_009_213_693_951;
 
 /** `validate_custom_http_endpoint` + `SecretRef` legs shared by every non-`none` provider. */
-function validateDetectorEndpoint(index: number, endpoint: string, allowPrivateNetwork: boolean): void {
+function validateDetectorEndpoint(
+  index: number,
+  endpoint: string,
+  allowPrivateNetwork: boolean,
+): void {
   const field = `guardrails[${index}].provider_endpoint`;
   let url: URL;
   try {
@@ -448,10 +461,7 @@ function validateDetectorEndpoint(index: number, endpoint: string, allowPrivateN
   try {
     validateCustomHttpEndpoint(url, allowPrivateNetwork);
   } catch (error) {
-    fail(
-      field,
-      error instanceof DetectorError ? error.safeMessage() : String(error),
-    );
+    fail(field, error instanceof DetectorError ? error.safeMessage() : String(error));
   }
 }
 
@@ -535,10 +545,7 @@ export function validateGuardrails(
       guardrail.provider !== "presidio" &&
       (guardrail.provider_language !== null || guardrail.provider_entities !== null)
     ) {
-      fail(
-        at("provider_language/provider_entities"),
-        "only valid when provider is presidio",
-      );
+      fail(at("provider_language/provider_entities"), "only valid when provider is presidio");
     }
     if (
       !isSemanticProvider &&

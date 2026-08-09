@@ -1,10 +1,10 @@
 import { describe, expect, test } from "vitest";
 import {
+  type TenantJurisdiction,
+  type TenantObjectNamespaceLike,
   locationHintFromCloudflareSignal,
   tenantJurisdictionForResidencyRegions,
   tenantObjectStubFor,
-  type TenantJurisdiction,
-  type TenantObjectNamespaceLike,
 } from "../src/index.js";
 
 function makeNamespace(): {
@@ -22,19 +22,19 @@ function makeNamespace(): {
   } = { jurisdictions: [], ids: [], gets: [] };
   const make = (prefix: string): TenantObjectNamespaceLike<string> => {
     const value = {
-    idFromName(name: string) {
-      const id = `${prefix}:${name}`;
-      calls.ids.push(id);
-      return id;
-    },
-    get(id: string, options?: { locationHint?: string }) {
-      calls.gets.push({ id, ...(options === undefined ? {} : { options }) });
-      return id;
-    },
-    jurisdiction(value: TenantJurisdiction) {
-      calls.jurisdictions.push(value);
-      return make(value);
-    },
+      idFromName(name: string) {
+        const id = `${prefix}:${name}`;
+        calls.ids.push(id);
+        return id;
+      },
+      get(id: string, options?: { locationHint?: string }) {
+        calls.gets.push({ id, ...(options === undefined ? {} : { options }) });
+        return id;
+      },
+      jurisdiction(value: TenantJurisdiction) {
+        calls.jurisdictions.push(value);
+        return make(value);
+      },
     };
     return value as TenantObjectNamespaceLike<string>;
   };

@@ -1,5 +1,5 @@
-import { describe, expect, test } from "vitest";
 import { fnv1a64, rolloutBucket } from "@ferrogate/routing";
+import { describe, expect, test } from "vitest";
 
 describe("fnv1a64", () => {
   // Canonical FNV-1a64 vectors — guards the constants & wrapping arithmetic so

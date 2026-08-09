@@ -128,7 +128,9 @@ describe("canonical structured-output parsing", () => {
   });
 
   test("a plain-text request carries no requirement at all", () => {
-    expect(structuredOutputFromChatBody({ response_format: { type: "text" } } as never)).toBeUndefined();
+    expect(
+      structuredOutputFromChatBody({ response_format: { type: "text" } } as never),
+    ).toBeUndefined();
     expect(structuredOutputFromChatBody({ messages: [] } as never)).toBeUndefined();
   });
 
@@ -149,7 +151,7 @@ describe("chat completions carry the schema into every family's dialect", () => 
       openaiProvider,
       chatPlan(chatBody()),
     );
-    expect((prepared.body as Record<string, unknown>)["response_format"]).toEqual(RESPONSE_FORMAT);
+    expect((prepared.body as Record<string, unknown>).response_format).toEqual(RESPONSE_FORMAT);
   });
 
   test("anthropic coerces the schema into a forced tool call", () => {
@@ -158,7 +160,7 @@ describe("chat completions carry the schema into every family's dialect", () => 
       chatPlan(chatBody()),
     );
     const body = prepared.body as Record<string, any>;
-    expect(body["tools"]).toEqual([
+    expect(body.tools).toEqual([
       {
         name: "invoice",
         description: "a parsed invoice",
@@ -167,7 +169,7 @@ describe("chat completions carry the schema into every family's dialect", () => 
     ]);
     // Forced, not merely offered: an `auto` choice would let the model answer
     // in prose and break the contract exactly as dropping the field did.
-    expect(body["tool_choice"]).toEqual({ type: "tool", name: "invoice" });
+    expect(body.tool_choice).toEqual({ type: "tool", name: "invoice" });
   });
 
   test("gemini sends responseSchema + a JSON response mime type", () => {
@@ -175,15 +177,15 @@ describe("chat completions carry the schema into every family's dialect", () => 
       geminiProvider,
       chatPlan(chatBody({ temperature: 0.2 })),
     );
-    const config = (prepared.body as Record<string, any>)["generationConfig"];
-    expect(config["responseMimeType"]).toBe("application/json");
-    expect(config["responseSchema"]).toMatchObject({
+    const config = (prepared.body as Record<string, any>).generationConfig;
+    expect(config.responseMimeType).toBe("application/json");
+    expect(config.responseSchema).toMatchObject({
       type: "object",
       required: ["total", "currency"],
     });
     // Sampling params still ride along — the structured requirement is merged
     // into the generationConfig, not substituted for it.
-    expect(config["temperature"]).toBe(0.2);
+    expect(config.temperature).toBe(0.2);
   });
 
   test("vertex (gemini on vertex) carries the same responseSchema", () => {
@@ -191,9 +193,9 @@ describe("chat completions carry the schema into every family's dialect", () => 
       vertexProvider,
       chatPlan(chatBody()),
     );
-    const config = (prepared.body as Record<string, any>)["generationConfig"];
-    expect(config["responseMimeType"]).toBe("application/json");
-    expect(config["responseSchema"]).toMatchObject({ type: "object" });
+    const config = (prepared.body as Record<string, any>).generationConfig;
+    expect(config.responseMimeType).toBe("application/json");
+    expect(config.responseSchema).toMatchObject({ type: "object" });
   });
 
   test("bedrock converse coerces the schema into a forced toolConfig", () => {
@@ -201,8 +203,8 @@ describe("chat completions carry the schema into every family's dialect", () => 
       bedrockProvider,
       chatPlan(chatBody()),
     );
-    const toolConfig = (prepared.body as Record<string, any>)["toolConfig"];
-    expect(toolConfig["tools"]).toEqual([
+    const toolConfig = (prepared.body as Record<string, any>).toolConfig;
+    expect(toolConfig.tools).toEqual([
       {
         toolSpec: {
           name: "invoice",
@@ -211,7 +213,7 @@ describe("chat completions carry the schema into every family's dialect", () => 
         },
       },
     ]);
-    expect(toolConfig["toolChoice"]).toEqual({ tool: { name: "invoice" } });
+    expect(toolConfig.toolChoice).toEqual({ tool: { name: "invoice" } });
   });
 
   test("no family drops the requirement — the failover keeps the contract", () => {
@@ -248,8 +250,8 @@ describe("/v1/responses carries the schema into every family's dialect", () => {
       chatPlan(responsesBody()),
     );
     const body = prepared.body as Record<string, any>;
-    expect(body["tools"]).toEqual([{ name: "invoice", input_schema: INVOICE_SCHEMA }]);
-    expect(body["tool_choice"]).toEqual({ type: "tool", name: "invoice" });
+    expect(body.tools).toEqual([{ name: "invoice", input_schema: INVOICE_SCHEMA }]);
+    expect(body.tool_choice).toEqual({ type: "tool", name: "invoice" });
   });
 
   test("gemini responses carry `text.format` as responseSchema", () => {
@@ -257,10 +259,10 @@ describe("/v1/responses carries the schema into every family's dialect", () => {
       geminiProvider,
       chatPlan(responsesBody({ max_output_tokens: 512 })),
     );
-    const config = (prepared.body as Record<string, any>)["generationConfig"];
-    expect(config["responseMimeType"]).toBe("application/json");
-    expect(config["responseSchema"]).toMatchObject({ type: "object" });
-    expect(config["maxOutputTokens"]).toBe(512);
+    const config = (prepared.body as Record<string, any>).generationConfig;
+    expect(config.responseMimeType).toBe("application/json");
+    expect(config.responseSchema).toMatchObject({ type: "object" });
+    expect(config.maxOutputTokens).toBe(512);
   });
 });
 
@@ -286,9 +288,9 @@ describe("a family that cannot honour the requirement refuses instead of degradi
       geminiProvider,
       chatPlan(chatBody({ response_format: { type: "json_object" } })),
     );
-    const config = (prepared.body as Record<string, any>)["generationConfig"];
-    expect(config["responseMimeType"]).toBe("application/json");
-    expect(config["responseSchema"]).toBeUndefined();
+    const config = (prepared.body as Record<string, any>).generationConfig;
+    expect(config.responseMimeType).toBe("application/json");
+    expect(config.responseSchema).toBeUndefined();
   });
 
   test("gemini refuses schema keywords its responseSchema subset cannot express", () => {
@@ -351,7 +353,7 @@ describe("a family that cannot honour the requirement refuses instead of degradi
         }),
       ),
     );
-    const schema = (prepared.body as Record<string, any>)["generationConfig"]["responseSchema"];
+    const schema = (prepared.body as Record<string, any>).generationConfig.responseSchema;
     // Shape survives intact...
     expect(schema).toEqual({
       type: "object",

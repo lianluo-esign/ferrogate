@@ -1,8 +1,5 @@
-import { useEffect, type ReactNode } from "react";
-import {
-  ThemeProvider as NextThemesProvider,
-  useTheme,
-} from "next-themes";
+import { ThemeProvider as NextThemesProvider, useTheme } from "next-themes";
+import { type ReactNode, useEffect } from "react";
 
 export const THEME_STORAGE_KEY = "ferrogate-admin-theme-v1";
 

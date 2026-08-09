@@ -33,6 +33,7 @@
 import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:test";
 import { beforeEach, describe, expect, test } from "vitest";
 import { InMemoryModelResolver, inferenceRouteModule } from "../../src/inference/index.js";
+import { billingEventFromUsage } from "../../src/metering/event.js";
 import {
   AGENT_RUN_ID_HEADER,
   AGENT_RUN_ID_PATTERN,
@@ -42,7 +43,6 @@ import {
   meteringBindingsFromEnv,
   meteringDrain,
 } from "../../src/metering/index.js";
-import { billingEventFromUsage } from "../../src/metering/event.js";
 import { createGatewayApp } from "../../src/routes/index.js";
 import { OPENAI_ROUTE } from "../inference/fixtures.js";
 import { interceptProviderFetch, providerJson } from "../inference/provider-mock.js";

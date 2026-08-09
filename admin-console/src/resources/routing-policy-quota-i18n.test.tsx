@@ -1,3 +1,14 @@
+import { ResourceForm } from "@/components/resource/resource-form";
+import { ResourcePage } from "@/components/resource/resource-page";
+import { ResourceTable } from "@/components/resource/resource-table";
+import { en } from "@/i18n/locales/en";
+import { zhCN } from "@/i18n/locales/zh-CN";
+import { defaultFieldValues } from "@/lib/resource-config";
+import { pluginsConfig } from "@/resources/plugins";
+import { policiesConfig } from "@/resources/policies";
+import { quotaPoliciesConfig } from "@/resources/quota-policies";
+import { mockAdminList } from "@/test/msw";
+import { renderWithProviders, seedSession } from "@/test/test-utils";
 // Dual-locale coverage for the routing/policy/quota per-resource copy (#348).
 //
 // Slice 3 localized the shared resource-CRUD framework chrome and kept the
@@ -12,17 +23,6 @@
 import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { ResourceForm } from "@/components/resource/resource-form";
-import { ResourcePage } from "@/components/resource/resource-page";
-import { ResourceTable } from "@/components/resource/resource-table";
-import { en } from "@/i18n/locales/en";
-import { zhCN } from "@/i18n/locales/zh-CN";
-import { defaultFieldValues } from "@/lib/resource-config";
-import { pluginsConfig } from "@/resources/plugins";
-import { policiesConfig } from "@/resources/policies";
-import { quotaPoliciesConfig } from "@/resources/quota-policies";
-import { mockAdminList } from "@/test/msw";
-import { renderWithProviders, seedSession } from "@/test/test-utils";
 
 function setDesktopViewport(matches: boolean) {
   Object.defineProperty(window, "matchMedia", {
@@ -164,7 +164,9 @@ describe("plugins form localizes labels and select options per locale", () => {
     await user.click(screen.getByRole("combobox", { name: /类型/ }));
     const listbox = await screen.findByRole("listbox");
     expect(
-      within(listbox).getByRole("option", { name: zhCN["resource.plugins.option.kind.toolProvider"] }),
+      within(listbox).getByRole("option", {
+        name: zhCN["resource.plugins.option.kind.toolProvider"],
+      }),
     ).toBeInTheDocument();
   });
 });

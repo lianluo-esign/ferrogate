@@ -1,9 +1,8 @@
-import { useEffect, useRef, useState } from "react";
 import { EntityReferencePicker } from "@/components/resource/entity-reference-picker";
 import { ReferenceListEditor } from "@/components/resource/reference-list-editor";
 import {
-  serializeWorkflowNodes,
   WorkflowNodeEditor,
+  serializeWorkflowNodes,
 } from "@/components/resource/workflow-node-editor";
 import { AsyncStatus } from "@/components/ui/async-status";
 import { Button } from "@/components/ui/button";
@@ -18,14 +17,15 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
+import { useI18n } from "@/i18n";
 import {
+  type FieldConfig,
   clearDependentReferenceValues,
   resolveActiveReference,
   resolveConfigText,
   resolveOptionalConfigText,
-  type FieldConfig,
 } from "@/lib/resource-config";
-import { useI18n } from "@/i18n";
+import { useEffect, useRef, useState } from "react";
 
 interface ResourceFormProps {
   fields: FieldConfig[];
@@ -59,10 +59,7 @@ function normalizeInitialValues(
 
 function fieldValuesEqual(previous: unknown, next: unknown): boolean {
   if (!Array.isArray(previous) || !Array.isArray(next)) return previous === next;
-  return (
-    previous.length === next.length &&
-    previous.every((value, index) => value === next[index])
-  );
+  return previous.length === next.length && previous.every((value, index) => value === next[index]);
 }
 
 export function ResourceForm({
@@ -130,7 +127,9 @@ export function ResourceForm({
           // non-reference document fields the console does not model round-trip.
           const rows = Array.isArray(raw) ? raw : [];
           payload[field.name] = rows
-            .filter((row): row is Record<string, unknown> => Boolean(row) && typeof row === "object")
+            .filter(
+              (row): row is Record<string, unknown> => Boolean(row) && typeof row === "object",
+            )
             .map((row) => {
               const cleaned: Record<string, unknown> = {};
               for (const [key, entry] of Object.entries(row)) {
@@ -191,124 +190,127 @@ export function ResourceForm({
           field.description,
         );
         return (
-        <div key={field.name} className="grid gap-2">
-          <Label htmlFor={field.name}>
-            {fieldLabel}
-            {field.required ? " *" : ""}
-          </Label>
-          {field.type === "boolean" ? (
-            <Switch
-              id={field.name}
-              name={field.name}
-              checked={Boolean(values[field.name])}
-              onCheckedChange={(checked) => setField(field.name, checked)}
-            />
-          ) : field.type === "select" ? (
-            <Select
-              name={field.name}
-              value={String(values[field.name] ?? "")}
-              onValueChange={(value) => setField(field.name, value)}
-            >
-              <SelectTrigger id={field.name}>
-                <SelectValue placeholder={fieldPlaceholder ?? t("resource.form.selectPlaceholder")} />
-              </SelectTrigger>
-              <SelectContent>
-                {field.options?.map((option) => (
-                  <SelectItem key={option.value} value={option.value}>
-                    {resolveConfigText(t, option.labelKey, option.label)}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          ) : field.type === "entity" || field.type === "entities" ? (
-            (() => {
-              // A scoped reference resolves its target kind from a sibling field
-              // (#341); until that sibling is chosen there is nothing to list, so
-              // the picker is disabled with a "select {scope} first" prompt that
-              // mirrors the picker's own missing-dependency affordance.
-              const activeReference = resolveActiveReference(field, values);
-              if (!activeReference) {
-                const scopeField = fields.find(
-                  (candidate) => candidate.name === field.scopedReference?.field,
-                );
-                const scopeLabel = scopeField
-                  ? resolveConfigText(t, scopeField.labelKey, scopeField.label)
-                  : "";
+          <div key={field.name} className="grid gap-2">
+            <Label htmlFor={field.name}>
+              {fieldLabel}
+              {field.required ? " *" : ""}
+            </Label>
+            {field.type === "boolean" ? (
+              <Switch
+                id={field.name}
+                name={field.name}
+                checked={Boolean(values[field.name])}
+                onCheckedChange={(checked) => setField(field.name, checked)}
+              />
+            ) : field.type === "select" ? (
+              <Select
+                name={field.name}
+                value={String(values[field.name] ?? "")}
+                onValueChange={(value) => setField(field.name, value)}
+              >
+                <SelectTrigger id={field.name}>
+                  <SelectValue
+                    placeholder={fieldPlaceholder ?? t("resource.form.selectPlaceholder")}
+                  />
+                </SelectTrigger>
+                <SelectContent>
+                  {field.options?.map((option) => (
+                    <SelectItem key={option.value} value={option.value}>
+                      {resolveConfigText(t, option.labelKey, option.label)}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            ) : field.type === "entity" || field.type === "entities" ? (
+              (() => {
+                // A scoped reference resolves its target kind from a sibling field
+                // (#341); until that sibling is chosen there is nothing to list, so
+                // the picker is disabled with a "select {scope} first" prompt that
+                // mirrors the picker's own missing-dependency affordance.
+                const activeReference = resolveActiveReference(field, values);
+                if (!activeReference) {
+                  const scopeField = fields.find(
+                    (candidate) => candidate.name === field.scopedReference?.field,
+                  );
+                  const scopeLabel = scopeField
+                    ? resolveConfigText(t, scopeField.labelKey, scopeField.label)
+                    : "";
+                  return (
+                    <Button
+                      id={field.name}
+                      type="button"
+                      variant="outline"
+                      // biome-ignore lint/a11y/useSemanticElements: this button is the trigger of a custom combobox popover; a native <select> cannot host the styled async picker, so the ARIA combobox role is intentional
+                      role="combobox"
+                      aria-expanded={false}
+                      aria-required={field.required}
+                      disabled
+                      className="h-auto min-h-10 w-full justify-start px-3 py-2 font-normal text-muted-foreground"
+                    >
+                      {t("resource.picker.selectDependencyFirst", { name: scopeLabel })}
+                    </Button>
+                  );
+                }
                 return (
-                  <Button
+                  <EntityReferencePicker
                     id={field.name}
-                    type="button"
-                    variant="outline"
-                    role="combobox"
-                    aria-expanded={false}
-                    aria-required={field.required}
-                    disabled
-                    className="h-auto min-h-10 w-full justify-start px-3 py-2 font-normal text-muted-foreground"
-                  >
-                    {t("resource.picker.selectDependencyFirst", { name: scopeLabel })}
-                  </Button>
+                    label={fieldLabel}
+                    reference={activeReference}
+                    value={values[field.name]}
+                    dependencyValues={values}
+                    multiple={field.type === "entities"}
+                    required={field.required}
+                    placeholder={fieldPlaceholder}
+                    onChange={(value) => setField(field.name, value)}
+                  />
                 );
-              }
-              return (
-                <EntityReferencePicker
-                  id={field.name}
-                  label={fieldLabel}
-                  reference={activeReference}
-                  value={values[field.name]}
-                  dependencyValues={values}
-                  multiple={field.type === "entities"}
-                  required={field.required}
-                  placeholder={fieldPlaceholder}
-                  onChange={(value) => setField(field.name, value)}
-                />
-              );
-            })()
-          ) : field.type === "reference-list" ? (
-            <ReferenceListEditor
-              id={field.name}
-              label={fieldLabel}
-              field={field}
-              value={values[field.name]}
-              onChange={(rows) => setField(field.name, rows)}
-            />
-          ) : field.type === "workflow-nodes" ? (
-            <WorkflowNodeEditor
-              id={field.name}
-              label={fieldLabel}
-              value={values[field.name]}
-              onChange={(nodes) => setField(field.name, nodes)}
-            />
-          ) : field.type === "textarea" || field.type === "json" ? (
-            <Textarea
-              id={field.name}
-              name={field.name}
-              autoComplete={field.autoComplete ?? "off"}
-              inputMode={field.inputMode}
-              spellCheck={field.spellCheck ?? field.type === "textarea"}
-              required={field.required}
-              placeholder={fieldPlaceholder}
-              value={String(values[field.name] ?? "")}
-              onChange={(event) => setField(field.name, event.target.value)}
-              rows={field.type === "json" ? 6 : 3}
-            />
-          ) : (
-            <Input
-              id={field.name}
-              name={field.name}
-              type={field.type === "number" ? "number" : "text"}
-              autoComplete={field.autoComplete ?? "off"}
-              inputMode={field.inputMode ?? (field.type === "number" ? "decimal" : "text")}
-              spellCheck={field.spellCheck ?? false}
-              required={field.required}
-              placeholder={fieldPlaceholder}
-              value={String(values[field.name] ?? "")}
-              onChange={(event) => setField(field.name, event.target.value)}
-            />
-          )}
-          {fieldDescription && (
-            <p className="text-xs text-muted-foreground">{fieldDescription}</p>
-          )}
-        </div>
+              })()
+            ) : field.type === "reference-list" ? (
+              <ReferenceListEditor
+                id={field.name}
+                label={fieldLabel}
+                field={field}
+                value={values[field.name]}
+                onChange={(rows) => setField(field.name, rows)}
+              />
+            ) : field.type === "workflow-nodes" ? (
+              <WorkflowNodeEditor
+                id={field.name}
+                label={fieldLabel}
+                value={values[field.name]}
+                onChange={(nodes) => setField(field.name, nodes)}
+              />
+            ) : field.type === "textarea" || field.type === "json" ? (
+              <Textarea
+                id={field.name}
+                name={field.name}
+                autoComplete={field.autoComplete ?? "off"}
+                inputMode={field.inputMode}
+                spellCheck={field.spellCheck ?? field.type === "textarea"}
+                required={field.required}
+                placeholder={fieldPlaceholder}
+                value={String(values[field.name] ?? "")}
+                onChange={(event) => setField(field.name, event.target.value)}
+                rows={field.type === "json" ? 6 : 3}
+              />
+            ) : (
+              <Input
+                id={field.name}
+                name={field.name}
+                type={field.type === "number" ? "number" : "text"}
+                autoComplete={field.autoComplete ?? "off"}
+                inputMode={field.inputMode ?? (field.type === "number" ? "decimal" : "text")}
+                spellCheck={field.spellCheck ?? false}
+                required={field.required}
+                placeholder={fieldPlaceholder}
+                value={String(values[field.name] ?? "")}
+                onChange={(event) => setField(field.name, event.target.value)}
+              />
+            )}
+            {fieldDescription && (
+              <p className="text-xs text-muted-foreground">{fieldDescription}</p>
+            )}
+          </div>
         );
       })}
       {error ? (

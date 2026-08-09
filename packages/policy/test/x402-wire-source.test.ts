@@ -18,17 +18,18 @@
  * These tests fail if `packages/policy/src/x402/wire.ts` ever goes back to
  * declaring its own types.
  */
-import { describe, expect, test } from "vitest";
+
 import {
   PaymentIntent as PaymentsPaymentIntent,
   PaymentIntentError as PaymentsPaymentIntentError,
   RequestBodyHash as PaymentsRequestBodyHash,
+  type SelectedPayment as PaymentsSelectedPayment,
   caip2ForNetwork,
   challengeHashHex as paymentsChallengeHashHex,
   solanaNetworkFromCaip2,
   validateSolanaAddress,
-  type SelectedPayment as PaymentsSelectedPayment,
 } from "@ferrogate/payments";
+import { describe, expect, test } from "vitest";
 import {
   CAIP2_SOLANA_DEVNET,
   CAIP2_SOLANA_MAINNET,
@@ -36,8 +37,10 @@ import {
   PAYMENT_INTENT_HASH_DOMAIN,
   PaymentIntent,
   PaymentIntentError,
+  type PaymentIntentIdentity,
   RequestBodyHash,
   SCHEME_EXACT,
+  type SelectedPayment,
   X402_VERSION,
   challengeHashHex,
   hexLower,
@@ -47,8 +50,6 @@ import {
   requestBodyHashHex,
   sha256,
   timeoutInRange,
-  type PaymentIntentIdentity,
-  type SelectedPayment,
 } from "../src/index.js";
 
 const USDC_DEVNET = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
@@ -91,7 +92,13 @@ describe("x402 wire contract is sourced from @ferrogate/payments", () => {
     expect(PaymentIntent).toBe(PaymentsPaymentIntent);
     expect(PaymentIntentError).toBe(PaymentsPaymentIntentError);
     expect(RequestBodyHash).toBe(PaymentsRequestBodyHash);
-    const intent = PaymentIntent.fromSelected(selected(), "GET", RESOURCE_URL, new Uint8Array(0), IDENTITY);
+    const intent = PaymentIntent.fromSelected(
+      selected(),
+      "GET",
+      RESOURCE_URL,
+      new Uint8Array(0),
+      IDENTITY,
+    );
     expect(intent).toBeInstanceOf(PaymentsPaymentIntent);
   });
 
@@ -112,7 +119,13 @@ describe("x402 wire contract is sourced from @ferrogate/payments", () => {
   });
 
   test("the intent seal is byte-frozen — a drift in either package breaks this", () => {
-    const intent = PaymentIntent.fromSelected(selected(), "get", RESOURCE_URL, new Uint8Array(0), IDENTITY);
+    const intent = PaymentIntent.fromSelected(
+      selected(),
+      "get",
+      RESOURCE_URL,
+      new Uint8Array(0),
+      IDENTITY,
+    );
     // Frozen vector. Domain-tagged, NUL-separated, presence-flagged optional
     // identity components; `get` is normalised to `GET` before hashing.
     expect(intent.intentHashHex()).toBe(
@@ -124,16 +137,28 @@ describe("x402 wire contract is sourced from @ferrogate/payments", () => {
     // Same string, different identity slot. A hash that concatenated only the
     // present values would collide these two into one seal, letting a project
     // id stand in for a workspace id.
-    const asProject = PaymentIntent.fromSelected(selected(), "GET", RESOURCE_URL, new Uint8Array(0), {
-      tenantId: "t",
-      requestId: "r",
-      projectId: "a",
-    });
-    const asWorkspace = PaymentIntent.fromSelected(selected(), "GET", RESOURCE_URL, new Uint8Array(0), {
-      tenantId: "t",
-      requestId: "r",
-      workspaceId: "a",
-    });
+    const asProject = PaymentIntent.fromSelected(
+      selected(),
+      "GET",
+      RESOURCE_URL,
+      new Uint8Array(0),
+      {
+        tenantId: "t",
+        requestId: "r",
+        projectId: "a",
+      },
+    );
+    const asWorkspace = PaymentIntent.fromSelected(
+      selected(),
+      "GET",
+      RESOURCE_URL,
+      new Uint8Array(0),
+      {
+        tenantId: "t",
+        requestId: "r",
+        workspaceId: "a",
+      },
+    );
     const neither = PaymentIntent.fromSelected(selected(), "GET", RESOURCE_URL, new Uint8Array(0), {
       tenantId: "t",
       requestId: "r",
@@ -188,7 +213,13 @@ describe("the payments draft-validation taxonomy now reaches the policy layer", 
 
   test("a zero atomic amount is rejected", () => {
     try {
-      PaymentIntent.fromSelected(selected({ atomicAmount: 0n }), "GET", RESOURCE_URL, new Uint8Array(0), IDENTITY);
+      PaymentIntent.fromSelected(
+        selected({ atomicAmount: 0n }),
+        "GET",
+        RESOURCE_URL,
+        new Uint8Array(0),
+        IDENTITY,
+      );
       throw new Error("expected a PaymentIntentError");
     } catch (err) {
       expect((err as PaymentIntentError).kind).toBe("zero_amount");
@@ -231,7 +262,15 @@ describe("the payments draft-validation taxonomy now reaches the policy layer", 
 
 describe("the two policy-local adapters match the Rust call shape", () => {
   test("isValidSolanaAddress is the boolean form of validate_solana_address", () => {
-    for (const candidate of [USDC_DEVNET, RECIPIENT_A, FEE_PAYER, "USDC", "", "0OIl", "merchant@example.com"]) {
+    for (const candidate of [
+      USDC_DEVNET,
+      RECIPIENT_A,
+      FEE_PAYER,
+      "USDC",
+      "",
+      "0OIl",
+      "merchant@example.com",
+    ]) {
       let ok = true;
       try {
         validateSolanaAddress("probe", candidate);

@@ -1,16 +1,16 @@
 import { describe, expect, test } from "vitest";
 
 import {
+  type PaymentError,
+  SecretBytes,
+  type SelectedPayment,
+  type SvmTransferIntent,
+  type SvmTransferSigner,
   base58Decode,
   buildPaymentSignature,
   decodeBase64Std,
   parsePaymentRequired,
-  type PaymentError,
-  type SelectedPayment,
-  SecretBytes,
   selectRequirement,
-  type SvmTransferIntent,
-  type SvmTransferSigner,
 } from "../src/index.js";
 import {
   FEE_PAYER,
@@ -99,7 +99,7 @@ describe("SecretBytes redaction", () => {
     expect(Object.keys(secret)).toEqual([]);
     expect(Object.values(secret)).toEqual([]);
     expect(JSON.stringify({ ...secret })).toBe("{}");
-    expect((secret as unknown as Record<string, unknown>)["bytes"]).toBeUndefined();
+    expect((secret as unknown as Record<string, unknown>).bytes).toBeUndefined();
     expect(JSON.stringify({ wallet: secret })).toBe('{"wallet":"[REDACTED]"}');
   });
 

@@ -20,7 +20,7 @@
  */
 import { beforeAll, beforeEach, describe, expect, test } from "vitest";
 import {
-  D1TenantProviderCredentialStore,
+  type D1TenantProviderCredentialStore,
   LOOKUP_TENANT_PROVIDER_CREDENTIAL_SQL,
   credentialLast4,
   tenantProviderCredentialStoreFor,

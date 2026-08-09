@@ -34,10 +34,7 @@
  */
 import { SELF, env } from "cloudflare:test";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import {
-  monthBoundsUnix,
-  SPEND_ANOMALY_CLAIM_LEASE_SECS,
-} from "../src/finops/pass.js";
+import { SPEND_ANOMALY_CLAIM_LEASE_SECS, monthBoundsUnix } from "../src/finops/pass.js";
 import type { ControlPlaneBindings } from "../src/ports.js";
 import { runScheduledTick } from "../src/schedule/scheduled.js";
 import { applySchema, db, resetD1, seedBillingEvents, seedRequestLogs } from "./d1.js";
@@ -294,8 +291,8 @@ describe("burn-rate anomaly detection", () => {
     // The webhook is the operator-visible half; an episode row nobody is told
     // about is the defect one layer in.
     expect(delivered).toHaveLength(1);
-    expect(delivered[0]?.body["signal"]).toBe("burn_rate_spike");
-    expect(delivered[0]?.body["scope_id"]).toBe("acme");
+    expect(delivered[0]?.body.signal).toBe("burn_rate_spike");
+    expect(delivered[0]?.body.scope_id).toBe("acme");
   });
 
   it("stays silent for a customer that is merely growing", async () => {
@@ -452,8 +449,8 @@ describe("a persisting anomaly — six hours is 2 notifications, not 72", () => 
 
     expect(notified).toEqual([1, 0, 0, 0, 0, 0, 1]);
     expect(delivered).toHaveLength(2);
-    expect(delivered[0]?.body["reason"]).toBe("opened");
-    expect(delivered[1]?.body["reason"]).toBe("still_firing");
+    expect(delivered[0]?.body.reason).toBe("opened");
+    expect(delivered[1]?.body.reason).toBe("still_firing");
 
     // ONE episode row for the whole incident, carrying how long it has run.
     const open = await episodes();
@@ -476,8 +473,8 @@ describe("a persisting anomaly — six hours is 2 notifications, not 72", () => 
 
     expect(first.spendAnomaly.notified).toBe(1);
     expect(second.spendAnomaly.notified).toBe(1);
-    expect(delivered.map((alert) => alert.body["severity"])).toEqual(["warning", "critical"]);
-    expect(delivered[1]?.body["reason"]).toBe("escalated");
+    expect(delivered.map((alert) => alert.body.severity)).toEqual(["warning", "critical"]);
+    expect(delivered[1]?.body.reason).toBe("escalated");
     const open = await episodes();
     expect(open[0]?.severity).toBe("critical");
     expect(open[0]?.windows_seen).toBe(2);
@@ -574,9 +571,9 @@ describe("forecast overrun — the leg that works from a tenant's first hour", (
     expect(open[0]?.signal).toBe("forecast_overrun");
     expect(open[0]?.severity).toBe("critical");
     expect(delivered).toHaveLength(1);
-    expect(delivered[0]?.body["projected_usd"]).toBeGreaterThan(1000);
-    expect(delivered[0]?.body["budget_usd"]).toBe(1000);
-    expect(String(delivered[0]?.body["means"])).toContain("linear extrapolation");
+    expect(delivered[0]?.body.projected_usd).toBeGreaterThan(1000);
+    expect(delivered[0]?.body.budget_usd).toBe(1000);
+    expect(String(delivered[0]?.body.means)).toContain("linear extrapolation");
   });
 
   it("says nothing about a tenant with no budget configured", async () => {
@@ -634,7 +631,7 @@ describe("auto-throttle", () => {
     // and a throttle with nothing left to lift it is an outage whose cause is
     // invisible from the request path.
     expect(rows[0]?.expires_at_unix).toBe(NOW + 3_600);
-    expect(delivered[0]?.body["auto_throttled_rpm"]).toBe(5);
+    expect(delivered[0]?.body.auto_throttled_rpm).toBe(5);
   });
 
   it("does not throttle on a warning", async () => {
@@ -718,7 +715,7 @@ describe("the forecast is scaled by the window the observation was MEASURED over
     const periodEnd = monthBoundsUnix(row.window_start_unix).endUnix;
     const remainingSecs = periodEnd - (row.window_start_unix + row.window_secs);
     const expected =
-      (detail["period_spend_usd"] as number) + row.observed_usd * (remainingSecs / row.window_secs);
+      (detail.period_spend_usd as number) + row.observed_usd * (remainingSecs / row.window_secs);
 
     expect(row.window_secs).toBe(HOUR);
     expect(row.projected_usd).toBeCloseTo(expected, 6);
@@ -848,19 +845,19 @@ describe("GET /admin/v1/spend-anomalies", () => {
 
   it("publishes the evidence an operator needs to answer 'why did this fire'", async () => {
     const body = await read(operatorKey.secret, "?scope_id=acme");
-    const acme = body.data.find((row) => row["scope_id"] === "acme");
-    expect(acme?.["object"]).toBe("spend_anomaly");
-    expect(acme?.["status"]).toBe("open");
-    expect(acme?.["signal"]).toBe("burn_rate_spike");
-    expect(acme?.["severity"]).toBe("critical");
-    expect(acme?.["baseline_usd"]).toBeCloseTo(2, 6);
-    expect(acme?.["threshold_usd"]).toBeCloseTo(8, 6);
-    expect(acme?.["bound_by"]).toBe("ratio");
-    expect(acme?.["baseline_windows"]).toBe(24);
-    expect(acme?.["active_windows"]).toBe(24);
+    const acme = body.data.find((row) => row.scope_id === "acme");
+    expect(acme?.object).toBe("spend_anomaly");
+    expect(acme?.status).toBe("open");
+    expect(acme?.signal).toBe("burn_rate_spike");
+    expect(acme?.severity).toBe("critical");
+    expect(acme?.baseline_usd).toBeCloseTo(2, 6);
+    expect(acme?.threshold_usd).toBeCloseTo(8, 6);
+    expect(acme?.bound_by).toBe("ratio");
+    expect(acme?.baseline_windows).toBe(24);
+    expect(acme?.active_windows).toBe(24);
     // The two numbers that make the episode model legible side by side.
-    expect(acme?.["windows_seen"]).toBe(1);
-    expect(acme?.["notified_count"]).toBe(1);
+    expect(acme?.windows_seen).toBe(1);
+    expect(acme?.notified_count).toBe(1);
   });
 
   it("fences a tenant to its own episodes, and counts only what it may see", async () => {
@@ -868,15 +865,15 @@ describe("GET /admin/v1/spend-anomalies", () => {
     // competitive-intelligence leak, not merely a privacy one.
     const operator = await read(operatorKey.secret);
     expect(operator.total).toBe(2);
-    expect(operator.data.map((row) => row["scope_id"]).sort()).toEqual(["acme", "other"]);
+    expect(operator.data.map((row) => row.scope_id).sort()).toEqual(["acme", "other"]);
 
     const acme = await read(ACME_KEY);
     expect(acme.total).toBe(1);
-    expect(acme.data.map((row) => row["scope_id"])).toEqual(["acme"]);
+    expect(acme.data.map((row) => row.scope_id)).toEqual(["acme"]);
 
     const other = await read(OTHER_KEY);
     expect(other.total).toBe(1);
-    expect(other.data.map((row) => row["scope_id"])).toEqual(["other"]);
+    expect(other.data.map((row) => row.scope_id)).toEqual(["other"]);
   });
 
   it("cannot be widened by asking for someone else's tenant", async () => {
@@ -890,7 +887,7 @@ describe("GET /admin/v1/spend-anomalies", () => {
     // …and it really is a working filter for the operator, so the empty set
     // above is the fence biting rather than the parameter being ignored.
     const operator = await read(operatorKey.secret, "?scope_id=other");
-    expect(operator.data.map((row) => row["scope_id"])).toEqual(["other"]);
+    expect(operator.data.map((row) => row.scope_id)).toEqual(["other"]);
   });
 
   it("separates the incident view from the history", async () => {

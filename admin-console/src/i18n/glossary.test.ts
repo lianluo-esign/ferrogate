@@ -1,3 +1,7 @@
+import type { TranslationKey } from "@/i18n";
+import { GLOSSARY, MAX_TERM_WORDS, SENSE_EXCEPTIONS } from "@/i18n/glossary";
+import { en } from "@/i18n/locales/en";
+import { zhCN } from "@/i18n/locales/zh-CN";
 // Enforces the Simplified Chinese glossary (#348) against the real catalogs.
 //
 // The acceptance item is "review Chinese terminology for consistent
@@ -6,10 +10,6 @@
 // half: the moment a term GAINS a second Chinese rendering, `npx vitest run`
 // fails and names both keys.
 import { describe, expect, it } from "vitest";
-import { GLOSSARY, MAX_TERM_WORDS, SENSE_EXCEPTIONS } from "@/i18n/glossary";
-import { en } from "@/i18n/locales/en";
-import { zhCN } from "@/i18n/locales/zh-CN";
-import type { TranslationKey } from "@/i18n";
 
 type Entry = { key: TranslationKey; zh: string };
 
@@ -30,8 +30,9 @@ describe("zh-CN glossary", () => {
     for (const term of GLOSSARY) {
       const entries = keysFor(term.en);
       // A term nobody uses is a stale glossary row, not a passing test.
-      expect(entries.length, `glossary term "${term.en}" matches no catalog key`).
-        toBeGreaterThan(0);
+      expect(entries.length, `glossary term "${term.en}" matches no catalog key`).toBeGreaterThan(
+        0,
+      );
       for (const entry of entries) {
         if (isExcepted(entry.key)) continue;
         if (entry.zh !== term.zh) {
@@ -75,9 +76,7 @@ describe("zh-CN glossary", () => {
     for (const [key, reason] of Object.entries(SENSE_EXCEPTIONS)) {
       const typedKey = key as TranslationKey;
       expect(KEYS, `exception for unknown key ${key}`).toContain(typedKey);
-      expect(reason?.trim().length ?? 0, `exception ${key} has no reason`).toBeGreaterThan(
-        10,
-      );
+      expect(reason?.trim().length ?? 0, `exception ${key} has no reason`).toBeGreaterThan(10);
       // If it no longer collides with anything, the exception is stale: delete
       // it rather than let it hide a future divergence on the same key.
       const siblings = keysFor(en[typedKey]).filter((entry) => entry.key !== typedKey);
@@ -95,10 +94,9 @@ describe("zh-CN glossary", () => {
     // description, whose English really is "proxied requests".
     const proxyUses = KEYS.filter((key) => zhCN[key].includes("代理"));
     for (const key of proxyUses) {
-      expect(
-        en[key].toLowerCase(),
-        `${key} renders "agent" as 代理 (proxy); use 智能体`,
-      ).toContain("proxied");
+      expect(en[key].toLowerCase(), `${key} renders "agent" as 代理 (proxy); use 智能体`).toContain(
+        "proxied",
+      );
     }
   });
 });

@@ -1,3 +1,30 @@
+import { BoolBadge, DefinitionRow } from "@/components/ops/ops-primitives";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Textarea } from "@/components/ui/textarea";
+import { useAuth } from "@/hooks/use-auth";
+import { type TranslationKey, useI18n } from "@/i18n";
+import { type AdminSchema, adminPost } from "@/lib/gateway-client";
+import { useMutation } from "@tanstack/react-query";
 // Config validate / reload (issue #322) — the flagship ops flow over
 // POST /admin/v1/config/validate and POST /admin/v1/config/reload.
 //
@@ -9,39 +36,7 @@
 // unvalidated (or since-changed) config. Reload itself sits behind a
 // confirmation dialog because it swaps the running gateway config.
 import { useMemo, useState } from "react";
-import { useMutation } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Badge } from "@/components/ui/badge";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
-import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import { Label } from "@/components/ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import { Textarea } from "@/components/ui/textarea";
-import { BoolBadge, DefinitionRow } from "@/components/ops/ops-primitives";
-import { useAuth } from "@/hooks/use-auth";
-import { useI18n, type TranslationKey } from "@/i18n";
-import { adminPost, type AdminSchema } from "@/lib/gateway-client";
 
 type ValidateRequest = AdminSchema<"AdminConfigValidateRequest">;
 type ValidateResponse = AdminSchema<"AdminConfigValidateResponse">;
@@ -56,11 +51,7 @@ const FORMAT_LABEL_KEYS: Record<ConfigFormat, TranslationKey> = {
   caddyfile: "page.opsConfig.format.caddyfile",
 };
 
-function buildRequest(
-  format: ConfigFormat,
-  configText: string,
-  filename: string,
-): ValidateRequest {
+function buildRequest(format: ConfigFormat, configText: string, filename: string): ValidateRequest {
   switch (format) {
     case "file":
       return { source: "file" };
@@ -79,7 +70,7 @@ function buildRequest(
 export default function OpsConfigPage() {
   const { session } = useAuth();
   const { t } = useI18n();
-  const apiKey = session!.gatewayApiKey;
+  const apiKey = (session as NonNullable<typeof session>).gatewayApiKey;
 
   const [format, setFormat] = useState<ConfigFormat>("file");
   const [configText, setConfigText] = useState("");
@@ -103,8 +94,7 @@ export default function OpsConfigPage() {
   const inlineEmpty = format !== "file" && configText.trim() === "";
 
   const validateMutation = useMutation({
-    mutationFn: () =>
-      adminPost(apiKey, "/admin/v1/config/validate", request),
+    mutationFn: () => adminPost(apiKey, "/admin/v1/config/validate", request),
     onSuccess: (result) => {
       setValidation(result);
       setReloadResult(null);
@@ -141,17 +131,13 @@ export default function OpsConfigPage() {
   });
 
   const canReload =
-    validation?.valid === true &&
-    !validateMutation.isPending &&
-    !reloadMutation.isPending;
+    validation?.valid === true && !validateMutation.isPending && !reloadMutation.isPending;
 
   return (
     <div className="flex flex-col gap-4">
       <div>
         <h1 className="text-lg font-semibold">{t("page.opsConfig.title")}</h1>
-        <p className="text-sm text-muted-foreground">
-          {t("page.opsConfig.description")}
-        </p>
+        <p className="text-sm text-muted-foreground">{t("page.opsConfig.description")}</p>
       </div>
 
       <Card>
@@ -242,9 +228,7 @@ export default function OpsConfigPage() {
       {validation ? (
         <Card
           data-testid="validation-result"
-          className={
-            validation.valid ? "border-primary/40" : "border-destructive/50"
-          }
+          className={validation.valid ? "border-primary/40" : "border-destructive/50"}
         >
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
@@ -299,13 +283,9 @@ export default function OpsConfigPage() {
               ) : null}
             </div>
             {validation.valid ? (
-              <p className="mt-3 text-sm text-muted-foreground">
-                {t("page.opsConfig.unlocked")}
-              </p>
+              <p className="mt-3 text-sm text-muted-foreground">{t("page.opsConfig.unlocked")}</p>
             ) : (
-              <p className="mt-3 text-sm text-destructive">
-                {t("page.opsConfig.locked")}
-              </p>
+              <p className="mt-3 text-sm text-destructive">{t("page.opsConfig.locked")}</p>
             )}
           </CardContent>
         </Card>

@@ -3,8 +3,8 @@
 // `@ts-expect-error` FAILS the build if the line below it stops being a type
 // error — i.e. if key/locale safety silently regresses.
 import { describe, expect, it } from "vitest";
-import { translate } from "./i18n-provider";
 import type { Locale, Messages, TranslationKey } from "./catalog";
+import { translate } from "./i18n-provider";
 
 // Never executed — its ONLY purpose is to be type-checked by `tsc -b`. Each
 // `@ts-expect-error` turns "this line must be a type error" into a build gate.

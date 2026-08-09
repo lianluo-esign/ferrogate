@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  type TenantContext,
   applyWorkspaceScope,
   newWorkspaceScope,
   requestContextSchema,
-  type TenantContext,
   tenantContextSchema,
   workspaceScopeSchema,
 } from "../src/index";
@@ -67,7 +67,8 @@ describe("RequestContext", () => {
       requestContextSchema.safeParse({ request_id: "r", tenant: {}, workflow_version: -1 }).success,
     ).toBe(false);
     expect(
-      requestContextSchema.safeParse({ request_id: "r", tenant: {}, workflow_version: 1.5 }).success,
+      requestContextSchema.safeParse({ request_id: "r", tenant: {}, workflow_version: 1.5 })
+        .success,
     ).toBe(false);
     expect(
       requestContextSchema.safeParse({

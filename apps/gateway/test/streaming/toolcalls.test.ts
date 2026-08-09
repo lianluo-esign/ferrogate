@@ -8,9 +8,7 @@ describe("ToolCallAccumulator", () => {
     accumulator.applyToolCallDeltas([
       { index: 0, id: "call_1", function: { name: "lookup", arguments: '{"q":' } },
     ]);
-    accumulator.applyToolCallDeltas([
-      { index: 0, function: { arguments: '"x"}' } },
-    ]);
+    accumulator.applyToolCallDeltas([{ index: 0, function: { arguments: '"x"}' } }]);
     expect(accumulator.snapshot()).toEqual([
       { index: 0, id: "call_1", name: "lookup", arguments: '{"q":"x"}' },
     ]);
@@ -21,13 +19,11 @@ describe("ToolCallAccumulator", () => {
     const first = accumulator.applyToolCallDeltas([
       { index: 0, id: "call_1", function: { name: "lookup" } },
     ]);
-    expect(first[0]!.argumentsDelta).toBe("");
-    expect(first[0]!.opened).toBe(true);
-    const second = accumulator.applyToolCallDeltas([
-      { index: 0, function: { arguments: "{}" } },
-    ]);
-    expect(second[0]!.argumentsDelta).toBe("{}");
-    expect(second[0]!.opened).toBe(false);
+    expect((first[0] as NonNullable<(typeof first)[0]>).argumentsDelta).toBe("");
+    expect((first[0] as NonNullable<(typeof first)[0]>).opened).toBe(true);
+    const second = accumulator.applyToolCallDeltas([{ index: 0, function: { arguments: "{}" } }]);
+    expect((second[0] as NonNullable<(typeof second)[0]>).argumentsDelta).toBe("{}");
+    expect((second[0] as NonNullable<(typeof second)[0]>).opened).toBe(false);
   });
 
   test("keys by the explicit index, so parallel calls do not merge", () => {
@@ -65,7 +61,7 @@ describe("ToolCallAccumulator", () => {
     const accumulator = new ToolCallAccumulator();
     accumulator.applyFunctionCallDelta({ name: "legacy", arguments: '{"a' }, 0);
     const update = accumulator.applyFunctionCallDelta({ arguments: '":1}' }, 0);
-    expect(update!.argumentsDelta).toBe('":1}');
+    expect((update as NonNullable<typeof update>).argumentsDelta).toBe('":1}');
     expect(accumulator.get(0)).toEqual({
       index: 0,
       id: undefined,

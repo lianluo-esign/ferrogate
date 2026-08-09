@@ -102,8 +102,8 @@
  * scope.
  */
 import { SELF, applyD1Migrations, env } from "cloudflare:test";
-import { controlNamespace } from "./support/control-namespace.js";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { controlNamespace } from "./support/control-namespace.js";
 
 import {
   GUARDRAIL_BINDING_LIST_SQL,
@@ -233,9 +233,10 @@ const BASE_CHECK = {
 let nextRevision = 1;
 
 function revision(policyId: string, overrides: Partial<PolicyRevision> = {}): PolicyRevision {
+  nextRevision += 1;
   return {
     policy_id: policyId,
-    revision: (nextRevision += 1),
+    revision: nextRevision,
     name: "fleet-exfiltration",
     description: null,
     enforced: true,
@@ -730,9 +731,9 @@ describe("FC-3 — the properties that make the shared reader trustworthy", () =
       ["agent-runtime", agentRuntimeGuardrailsSource],
       ["mcp", mcpGuardrailsSource],
     ] as const) {
-      const imports = [
-        ...source.matchAll(/^import\s+(type\s+)?[\s\S]*?from\s+"([^"]+)";?$/gm),
-      ].map((match) => ({ typeOnly: match[1] !== undefined, specifier: match[2] ?? "" }));
+      const imports = [...source.matchAll(/^import\s+(type\s+)?[\s\S]*?from\s+"([^"]+)";?$/gm)].map(
+        (match) => ({ typeOnly: match[1] !== undefined, specifier: match[2] ?? "" }),
+      );
       expect(imports.length, `${label}: the file must import something`).toBeGreaterThan(0);
       for (const { typeOnly, specifier } of imports) {
         // A type-only import is erased at compile time and pulls no runtime

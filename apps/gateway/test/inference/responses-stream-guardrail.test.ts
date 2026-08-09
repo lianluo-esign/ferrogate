@@ -92,7 +92,11 @@ function stubUpstreamSse(sse: string): Upstream {
       headers: { "content-type": "text/event-stream" },
     });
   }) as typeof fetch;
-  return { restore: () => void (globalThis.fetch = original) };
+  return {
+    restore: () => {
+      globalThis.fetch = original;
+    },
+  };
 }
 
 let upstream: Upstream | undefined;
@@ -153,17 +157,15 @@ describe("a streamed /v1/responses tool call is screened (#778)", () => {
             },
           },
         ],
-      })}\n\n` +
-        `data: ${JSON.stringify({
-          choices: [
-            {
-              delta: {
-                tool_calls: [{ index: 0, function: { arguments: `${tail}"}` } }],
-              },
+      })}\n\ndata: ${JSON.stringify({
+        choices: [
+          {
+            delta: {
+              tool_calls: [{ index: 0, function: { arguments: `${tail}"}` } }],
             },
-          ],
-        })}\n\n` +
-        "data: [DONE]\n\n",
+          },
+        ],
+      })}\n\ndata: [DONE]\n\n`,
     );
 
     const res = await streamResponses({
@@ -208,7 +210,7 @@ describe("a streamed /v1/responses tool call is screened (#778)", () => {
             },
           },
         ],
-      })}\n\n` + "data: [DONE]\n\n",
+      })}\n\ndata: [DONE]\n\n`,
     );
 
     const res = await streamResponses({

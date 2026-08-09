@@ -181,7 +181,7 @@ async function awaitRow(budgetMs = 20000): Promise<Awaited<ReturnType<typeof sto
 describe("composition root — a request through SELF lands a row in CONTROL_DB", () => {
   it("records the completion the app the Worker exports actually served", async () => {
     provider = interceptProviderFetch(() => providerJson(COMPLETION));
-    const response = await SELF.fetch(`https://gw.test/v1/chat/completions`, {
+    const response = await SELF.fetch("https://gw.test/v1/chat/completions", {
       method: "POST",
       headers: {
         authorization: "Bearer fg_probe_tenant",

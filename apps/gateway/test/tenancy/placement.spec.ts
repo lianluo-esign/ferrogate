@@ -31,11 +31,10 @@ describe("gateway tenant object addressing", () => {
       },
     };
 
-    const stub = tenantDataObjectFor(
-      { TENANT_DATA: namespace as never },
-      "tenant-eu",
-      { jurisdiction: "eu", locationHint: "weur" },
-    );
+    const stub = tenantDataObjectFor({ TENANT_DATA: namespace as never }, "tenant-eu", {
+      jurisdiction: "eu",
+      locationHint: "weur",
+    });
 
     // `tenantDataObjectFor` now returns a request-safe wrapper that derives
     // the real stub lazily, on first member access — a stub created in one

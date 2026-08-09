@@ -206,15 +206,15 @@ export function jsonRpcError(
  */
 export function renderJsonRpcResponse(response: JsonRpcResponse): Record<string, JsonValue> {
   const rendered: Record<string, JsonValue> = { jsonrpc: response.jsonrpc };
-  if (response.id !== undefined) rendered["id"] = response.id;
-  if (response.result !== undefined) rendered["result"] = response.result;
+  if (response.id !== undefined) rendered.id = response.id;
+  if (response.result !== undefined) rendered.result = response.result;
   if (response.error !== undefined) {
     const error: Record<string, JsonValue> = {
       code: response.error.code,
       message: response.error.message,
     };
-    if (response.error.data !== undefined) error["data"] = response.error.data;
-    rendered["error"] = error;
+    if (response.error.data !== undefined) error.data = response.error.data;
+    rendered.error = error;
   }
   return rendered;
 }
@@ -296,7 +296,7 @@ export function decodeStrictRequest(
 
 function recoverId(value: unknown): JsonRpcId | undefined {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
-  const id = (value as Record<string, unknown>)["id"];
+  const id = (value as Record<string, unknown>).id;
   const parsed = jsonRpcIdSchema.safeParse(id);
   return parsed.success ? parsed.data : undefined;
 }
@@ -374,7 +374,7 @@ export const INPUT_REQUIRED_RESULT_TYPE = "input_required";
  */
 function ensureNotInputRequired(result: unknown, method: string): void {
   if (typeof result !== "object" || result === null || Array.isArray(result)) return;
-  if ((result as Record<string, unknown>)["resultType"] !== INPUT_REQUIRED_RESULT_TYPE) return;
+  if ((result as Record<string, unknown>).resultType !== INPUT_REQUIRED_RESULT_TYPE) return;
   throw new Error(
     `MCP ${method} returned an ${INPUT_REQUIRED_RESULT_TYPE} multi-round-trip result; FerroGate does not implement the client half of MRTR (SEP-2322) and will not present an interim result as output`,
   );
@@ -383,7 +383,7 @@ function ensureNotInputRequired(result: unknown, method: string): void {
 /** Raise on a JSON-RPC error member. Port of `ensure_no_jsonrpc_error`. */
 export function ensureNoJsonRpcError(response: unknown): void {
   if (typeof response === "object" && response !== null && "error" in response) {
-    const error = (response as Record<string, unknown>)["error"];
+    const error = (response as Record<string, unknown>).error;
     if (error !== undefined) {
       throw new Error(`MCP JSON-RPC error: ${JSON.stringify(error)}`);
     }
@@ -395,7 +395,7 @@ export function parseToolsList(response: unknown): ParsedToolDef[] {
   ensureNoJsonRpcError(response);
   const raw =
     typeof response === "object" && response !== null
-      ? (response as Record<string, unknown>)["result"]
+      ? (response as Record<string, unknown>).result
       : undefined;
   if (raw === undefined) throw new Error("MCP tools/list response missing result");
   ensureNotInputRequired(raw, "tools/list");
@@ -417,7 +417,7 @@ export function parseCallResult(response: unknown): McpToolExecutionResult {
   ensureNoJsonRpcError(response);
   const raw =
     typeof response === "object" && response !== null
-      ? ((response as Record<string, unknown>)["result"] ?? null)
+      ? ((response as Record<string, unknown>).result ?? null)
       : null;
   ensureNotInputRequired(raw, "tools/call");
   const parsed = callToolResultSchema.safeParse(raw ?? {});

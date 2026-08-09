@@ -12,8 +12,9 @@
  *  - `DetectorSecret` redacts under `toJSON`/`console`/`String` so a secret can
  *    never leak through logs.
  */
+
+import { type JsonValue, jsonValueSchema } from "@ferrogate/core";
 import { z } from "zod";
-import { jsonValueSchema, type JsonValue } from "@ferrogate/core";
 import type { ContentSegment, ContentSource, GuardrailProtocol } from "./envelope.js";
 
 /** Contract version echoed in the `custom_http` request body. */

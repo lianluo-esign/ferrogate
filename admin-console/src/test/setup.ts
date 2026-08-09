@@ -8,10 +8,10 @@
 //   3. jsdom polyfills required by Radix UI primitives (pointer capture,
 //      scrollIntoView, ResizeObserver, matchMedia).
 import "@testing-library/jest-dom/vitest";
-import { cleanup } from "@testing-library/react";
-import { afterAll, afterEach, beforeAll } from "vitest";
 import { LOCALES, loadCatalog } from "@/i18n";
 import { server } from "@/test/msw";
+import { cleanup } from "@testing-library/react";
+import { afterAll, afterEach, beforeAll } from "vitest";
 
 beforeAll(() => server.listen({ onUnhandledRequest: "error" }));
 

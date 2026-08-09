@@ -110,7 +110,9 @@ describe("PLATFORM LIMIT — Secrets Store reads need a DEPLOY-time binding (4.6
     // fake. Onboarding a new `cf://` secret therefore requires a DEPLOY.
     const empty = CfSecretBindings.new({});
     expect(await empty.resolve(ref)).toBeNull();
-    expect(await empty.resolve(parseSecretRef("cf://provider-keys/any-runtime-chosen-name"))).toBeNull();
+    expect(
+      await empty.resolve(parseSecretRef("cf://provider-keys/any-runtime-chosen-name")),
+    ).toBeNull();
   });
 
   test("the binding context never answers for a reference it does not own", async () => {
@@ -163,9 +165,12 @@ describe("CLOSED — a [[secrets_store_secrets]] binding is read with await get(
   });
 
   test("an exactly-injected binding still wins over the env slot", async () => {
-    const bound = CfSecretBindings.fromMap({ "openai-api-key": "sk-injected" }, {
-      FERROGATE_CF_SECRET_OPENAI_API_KEY: secretsStoreSlot("sk-store"),
-    });
+    const bound = CfSecretBindings.fromMap(
+      { "openai-api-key": "sk-injected" },
+      {
+        FERROGATE_CF_SECRET_OPENAI_API_KEY: secretsStoreSlot("sk-store"),
+      },
+    );
     await expect(bound.resolve(ref)).resolves.toBe("sk-injected");
   });
 
@@ -213,8 +218,9 @@ describe("CLOSED — a [[secrets_store_secrets]] binding is read with await get(
     for (const binding of [kvShaped, r2Shaped, doShaped]) {
       expect(isSecretsStoreBinding(binding)).toBe(false);
     }
-    await expect(readEnvSecret("MCP_OAUTH_KV", { MCP_OAUTH_KV: kvShaped } as never)).resolves
-      .toBeUndefined();
+    await expect(
+      readEnvSecret("MCP_OAUTH_KV", { MCP_OAUTH_KV: kvShaped } as never),
+    ).resolves.toBeUndefined();
   });
 
   test("the SYNCHRONOUS readers refuse loudly instead of stringifying the object", () => {

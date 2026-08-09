@@ -55,7 +55,12 @@
  */
 import { type PolicyRule as ConfigPolicyRule, policyRuleSchema } from "@ferrogate/config";
 import type { RequestContext, TenantContext } from "@ferrogate/core";
-import { BasicPolicyEngine, type PolicyDecision, type PolicyRule, denyRule } from "@ferrogate/policy";
+import {
+  BasicPolicyEngine,
+  type PolicyDecision,
+  type PolicyRule,
+  denyRule,
+} from "@ferrogate/policy";
 import type { Context } from "hono";
 import { modelsFromEnv } from "../inference/catalog.js";
 import type { AuthContext, GatewayEnv } from "../ports.js";
@@ -97,7 +102,9 @@ export interface PolicyRulesUnavailable {
   readonly detail: string;
 }
 
-export type PolicyRulesResolution = { readonly ok: true; readonly rules: PolicyRuleSet } | PolicyRulesUnavailable;
+export type PolicyRulesResolution =
+  | { readonly ok: true; readonly rules: PolicyRuleSet }
+  | PolicyRulesUnavailable;
 
 /**
  * Expand one config rule into the cross-product of its subject lists — the port
@@ -142,9 +149,7 @@ export function expandPolicyRule(rule: ConfigPolicyRule): PolicyRule[] {
  * effect at load, so this is the second of two gates, not the only one.
  */
 export function compilePolicyRules(rules: readonly ConfigPolicyRule[]): PolicyRuleSet {
-  const enabled = rules.filter(
-    (rule) => rule.enabled && rule.effect.toLowerCase() === "deny",
-  );
+  const enabled = rules.filter((rule) => rule.enabled && rule.effect.toLowerCase() === "deny");
   const compiled = enabled.flatMap(expandPolicyRule);
   return {
     engine: new BasicPolicyEngine(compiled),

@@ -29,19 +29,19 @@ function namespace(): {
   };
   const make = (prefix: string): TenantDataNamespaceLike => {
     const value = {
-    idFromName(name: string) {
-      const id = `${prefix}:${name}` as unknown as DurableObjectId;
-      calls.ids.push(String(id));
-      return id;
-    },
-    get(id: DurableObjectId, options?: TenantObjectGetOptions) {
-      calls.gets.push({ id, ...(options === undefined ? {} : { options }) });
-      return stub;
-    },
-    jurisdiction(value: TenantJurisdiction) {
-      calls.jurisdictions.push(value);
-      return make(value);
-    },
+      idFromName(name: string) {
+        const id = `${prefix}:${name}` as unknown as DurableObjectId;
+        calls.ids.push(String(id));
+        return id;
+      },
+      get(id: DurableObjectId, options?: TenantObjectGetOptions) {
+        calls.gets.push({ id, ...(options === undefined ? {} : { options }) });
+        return stub;
+      },
+      jurisdiction(value: TenantJurisdiction) {
+        calls.jurisdictions.push(value);
+        return make(value);
+      },
     };
     return value as TenantDataNamespaceLike;
   };
@@ -62,8 +62,6 @@ describe("DurableObjectTenantDatabaseRouter placement", () => {
     await router.forTenant("tenant-a", { jurisdiction: "eu", locationHint: "weur" });
 
     expect(calls.jurisdictions).toEqual(["eu"]);
-    expect(calls.gets).toEqual([
-      { id: "eu:tenant-a", options: { locationHint: "weur" } },
-    ]);
+    expect(calls.gets).toEqual([{ id: "eu:tenant-a", options: { locationHint: "weur" } }]);
   });
 });

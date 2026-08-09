@@ -1,4 +1,4 @@
-import { booleanColumn, type ResourceConfig } from "@/lib/resource-config";
+import { type ResourceConfig, booleanColumn } from "@/lib/resource-config";
 
 export interface AdminQuotaPolicy extends Record<string, unknown> {
   id: string;
@@ -34,7 +34,10 @@ export const quotaPoliciesConfig: ResourceConfig<AdminQuotaPolicy> = {
     { key: "tpm_limit", headerKey: "resource.quotaPolicies.col.tpmLimit" },
     { key: "monthly_budget_usd", headerKey: "resource.quotaPolicies.col.monthlyBudget" },
     { key: "asset_storage_quota_bytes", headerKey: "resource.quotaPolicies.col.assetQuota" },
-    booleanColumn<AdminQuotaPolicy>({ key: "enabled", headerKey: "resource.quotaPolicies.col.enabled" }),
+    booleanColumn<AdminQuotaPolicy>({
+      key: "enabled",
+      headerKey: "resource.quotaPolicies.col.enabled",
+    }),
   ],
   fields: [
     {

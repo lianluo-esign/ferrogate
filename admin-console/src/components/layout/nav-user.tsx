@@ -1,5 +1,3 @@
-import { LogOut } from "lucide-react";
-import { useNavigate } from "react-router-dom";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import {
   DropdownMenu,
@@ -17,6 +15,8 @@ import {
 } from "@/components/ui/sidebar";
 import { useAuth } from "@/hooks/use-auth";
 import { useI18n } from "@/i18n";
+import { LogOut } from "lucide-react";
+import { useNavigate } from "react-router-dom";
 
 function initialsFor(name: string): string {
   return name
@@ -52,9 +52,7 @@ export function NavUser() {
               className="data-[state=open]:bg-sidebar-accent data-[state=open]:text-sidebar-accent-foreground"
             >
               <Avatar className="h-8 w-8 rounded-lg">
-                <AvatarFallback className="rounded-lg">
-                  {initialsFor(displayName)}
-                </AvatarFallback>
+                <AvatarFallback className="rounded-lg">{initialsFor(displayName)}</AvatarFallback>
               </Avatar>
               <div className="grid flex-1 text-left text-sm leading-tight">
                 <span className="truncate font-medium">{displayName}</span>

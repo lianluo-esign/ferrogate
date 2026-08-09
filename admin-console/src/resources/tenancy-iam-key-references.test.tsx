@@ -1,15 +1,15 @@
-import { HttpResponse, http } from "msw";
-import { screen, waitFor } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
 import { ResourceForm } from "@/components/resource/resource-form";
-import { defaultFieldValues, type FieldConfig } from "@/lib/resource-config";
+import { type FieldConfig, defaultFieldValues } from "@/lib/resource-config";
 import { apiKeysConfig } from "@/resources/api-keys";
 import { plansConfig } from "@/resources/plans";
 import { tenantAccountsConfig } from "@/resources/tenant-accounts";
 import { virtualKeysConfig } from "@/resources/virtual-keys";
 import { gatewayUrl, server } from "@/test/msw";
 import { renderWithProviders, seedSession } from "@/test/test-utils";
+import { screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { http, HttpResponse } from "msw";
+import { describe, expect, it, vi } from "vitest";
 
 // #340: tenancy/IAM/key forms adopt the shared #337 entity-reference pickers
 // for their relationship fields. These tests prove a converted form renders the
@@ -24,14 +24,16 @@ const providers = [
   { name: "openai", kind: "openai", base_url: "https://api.openai.com" },
   { name: "anthropic", kind: "anthropic", base_url: "https://api.anthropic.com" },
 ];
-const tenants = [
-  { id: "tenant-1", name: "Acme", slug: "acme", status: "active" },
-];
-const projects = [
-  { id: "project-1", tenant_id: "tenant-1", name: "Production", slug: "prod" },
-];
+const tenants = [{ id: "tenant-1", name: "Acme", slug: "acme", status: "active" }];
+const projects = [{ id: "project-1", tenant_id: "tenant-1", name: "Production", slug: "prod" }];
 const workspaces = [
-  { id: "workspace-1", project_id: "project-1", tenant_id: "tenant-1", name: "Staging", slug: "staging" },
+  {
+    id: "workspace-1",
+    project_id: "project-1",
+    tenant_id: "tenant-1",
+    name: "Staging",
+    slug: "staging",
+  },
 ];
 const plans = [
   { id: "plan-pro", name: "Pro", slug: "pro" },
@@ -47,7 +49,13 @@ function installCatalogHandlers() {
       HttpResponse.json({ object: "list", data: providers }),
     ),
     http.get(gatewayUrl("/admin/v1/tenant-accounts"), () =>
-      HttpResponse.json({ object: "list", data: tenants, total: tenants.length, offset: 0, limit: 20 }),
+      HttpResponse.json({
+        object: "list",
+        data: tenants,
+        total: tenants.length,
+        offset: 0,
+        limit: 20,
+      }),
     ),
     http.get(gatewayUrl("/admin/v1/tenant-accounts/:id"), ({ params }) => {
       const tenant = tenants.find((item) => item.id === params.id);
@@ -56,10 +64,22 @@ function installCatalogHandlers() {
         : HttpResponse.json({ error: { code: "not_found", message: "x" } }, { status: 404 });
     }),
     http.get(gatewayUrl("/admin/v1/projects"), () =>
-      HttpResponse.json({ object: "list", data: projects, total: projects.length, offset: 0, limit: 20 }),
+      HttpResponse.json({
+        object: "list",
+        data: projects,
+        total: projects.length,
+        offset: 0,
+        limit: 20,
+      }),
     ),
     http.get(gatewayUrl("/admin/v1/workspaces"), () =>
-      HttpResponse.json({ object: "list", data: workspaces, total: workspaces.length, offset: 0, limit: 20 }),
+      HttpResponse.json({
+        object: "list",
+        data: workspaces,
+        total: workspaces.length,
+        offset: 0,
+        limit: 20,
+      }),
     ),
     http.get(gatewayUrl("/admin/v1/plans"), () =>
       HttpResponse.json({ object: "list", data: plans }),
@@ -158,7 +178,7 @@ describe("tenancy/IAM/key entity-reference conversions", () => {
     expect(screen.getByRole("combobox", { name: "Allowed providers" })).toBeInTheDocument();
 
     // Single-select closes on choose.
-    await user.click(workspacePicker!);
+    await user.click(workspacePicker as NonNullable<typeof workspacePicker>);
     await user.click(await screen.findByRole("option", { name: /Staging/ }));
 
     await user.click(screen.getByRole("combobox", { name: "Allowed providers" }));
@@ -280,11 +300,23 @@ describe("tenancy/IAM/key entity-reference conversions", () => {
     let workspaceProjectFilter: string | null = "unset";
     server.use(
       http.get(gatewayUrl("/admin/v1/projects"), () =>
-        HttpResponse.json({ object: "list", data: projects, total: projects.length, offset: 0, limit: 20 }),
+        HttpResponse.json({
+          object: "list",
+          data: projects,
+          total: projects.length,
+          offset: 0,
+          limit: 20,
+        }),
       ),
       http.get(gatewayUrl("/admin/v1/workspaces"), ({ request }) => {
         workspaceProjectFilter = new URL(request.url).searchParams.get("project_id");
-        return HttpResponse.json({ object: "list", data: workspaces, total: workspaces.length, offset: 0, limit: 20 });
+        return HttpResponse.json({
+          object: "list",
+          data: workspaces,
+          total: workspaces.length,
+          offset: 0,
+          limit: 20,
+        });
       }),
     );
 
@@ -300,9 +332,7 @@ describe("tenancy/IAM/key entity-reference conversions", () => {
     await user.click(screen.getByRole("combobox", { name: "Project" }));
     await user.click(await screen.findByRole("option", { name: /Production/ }));
 
-    await waitFor(() =>
-      expect(screen.getByRole("combobox", { name: "Workspace" })).toBeEnabled(),
-    );
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Workspace" })).toBeEnabled());
     await user.click(screen.getByRole("combobox", { name: "Workspace" }));
     await screen.findByRole("option", { name: /Staging/ });
 
@@ -344,7 +374,12 @@ describe("tenancy/IAM/key entity-reference conversions", () => {
           object: "list",
           data: [
             { ...models[0], enabled: true },
-            { name: "gpt-retired", provider: "openai", provider_model: "gpt-retired", enabled: false },
+            {
+              name: "gpt-retired",
+              provider: "openai",
+              provider_model: "gpt-retired",
+              enabled: false,
+            },
           ],
         }),
       ),

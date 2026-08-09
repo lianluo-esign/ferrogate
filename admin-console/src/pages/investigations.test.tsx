@@ -1,21 +1,13 @@
-import { screen, waitFor, within } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
-import { HttpResponse, http } from "msw";
-import { beforeEach, describe, expect, it } from "vitest";
 import InvestigationsPage from "@/pages/investigations";
-import {
-  correlation,
-  FP_ACTION,
-  FP_PARENT,
-  investigation,
-} from "@/test/fixtures/guardrails";
+import { FP_ACTION, FP_PARENT, correlation, investigation } from "@/test/fixtures/guardrails";
 import { gatewayUrl, server } from "@/test/msw";
 import { renderWithProviders, seedSession } from "@/test/test-utils";
+import { screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { http, HttpResponse } from "msw";
+import { beforeEach, describe, expect, it } from "vitest";
 
-function mockInvestigation(
-  body: ReturnType<typeof investigation>,
-  onRequest?: (url: URL) => void,
-) {
+function mockInvestigation(body: ReturnType<typeof investigation>, onRequest?: (url: URL) => void) {
   server.use(
     http.get(gatewayUrl("/admin/v1/investigations"), ({ request }) => {
       onRequest?.(new URL(request.url));

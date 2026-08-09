@@ -19,13 +19,13 @@
  */
 import { SELF, env } from "cloudflare:test";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import type { AuthContext } from "../../src/ports.js";
 import {
   agentSkillListDocument,
   agentSkillPackage,
   parseSkillPackages,
   skillPackageVisibleToAuth,
 } from "../../src/routes/skills.js";
-import type { AuthContext } from "../../src/ports.js";
 
 const BASE = "https://ferrogate.test";
 
@@ -68,12 +68,12 @@ const mutable = env as unknown as Record<string, unknown>;
 let originalVar: unknown;
 
 beforeAll(() => {
-  originalVar = mutable["GATEWAY_SKILL_PACKAGES"];
-  mutable["GATEWAY_SKILL_PACKAGES"] = JSON.stringify(SKILL_PACKAGES);
+  originalVar = mutable.GATEWAY_SKILL_PACKAGES;
+  mutable.GATEWAY_SKILL_PACKAGES = JSON.stringify(SKILL_PACKAGES);
 });
 
 afterAll(() => {
-  mutable["GATEWAY_SKILL_PACKAGES"] = originalVar;
+  mutable.GATEWAY_SKILL_PACKAGES = originalVar;
 });
 
 function auth(subject: string | null): AuthContext {
@@ -153,10 +153,10 @@ describe("agentSkillPackage", () => {
 
   it("never leaks permissions, resources, metadata or the allowlist", () => {
     const projected = agentSkillPackage(pkg) as unknown as Record<string, unknown>;
-    expect(projected["permissions"]).toBeUndefined();
-    expect(projected["resources"]).toBeUndefined();
-    expect(projected["metadata"]).toBeUndefined();
-    expect(projected["api_key_ids"]).toBeUndefined();
+    expect(projected.permissions).toBeUndefined();
+    expect(projected.resources).toBeUndefined();
+    expect(projected.metadata).toBeUndefined();
+    expect(projected.api_key_ids).toBeUndefined();
   });
 
   it("serializes an absent description as an explicit null", () => {
@@ -191,14 +191,14 @@ describe("MOUNT: the deployed Worker serves the skill catalog", () => {
     expect(body.object).toBe("list");
     // Values that exist ONLY in GATEWAY_SKILL_PACKAGES: an empty-list stub or a
     // handler that never read the var cannot produce them.
-    expect(body.data.map((pkg) => pkg["id"])).toEqual(["pkg_public", "pkg_pinned"]);
+    expect(body.data.map((pkg) => pkg.id)).toEqual(["pkg_public", "pkg_pinned"]);
     expect(body.data[0]).toMatchObject({
       name: "Public Package",
       version: "2.3.1",
       description: "visible to every caller",
       compatibility: { min_gateway_version: "1.4.0", agent_runtimes: ["workers"] },
     });
-    expect(body.data[0]?.["capabilities"]).toEqual([
+    expect(body.data[0]?.capabilities).toEqual([
       { kind: "tool", id: "cap_search", description: "search the corpus" },
       { kind: "prompt_template", id: "cap_summarize", description: null },
     ]);
@@ -232,7 +232,7 @@ describe("MOUNT: the deployed Worker serves the skill catalog", () => {
       headers: { authorization: "Bearer fg_tenant_readonly" },
     });
     expect(unknown.status).toBe(404);
-    expect((await unknown.json() as ErrorEnvelope).error.message).toBe(
+    expect(((await unknown.json()) as ErrorEnvelope).error.message).toBe(
       body.error.message.replace("pkg_other_key", "pkg_no_such_thing"),
     );
   });
@@ -249,13 +249,13 @@ describe("MOUNT: the deployed Worker serves the skill catalog", () => {
     // handler: `contractAuth` answers first, so no catalog leaks.
     const anonymous = await SELF.fetch(`${BASE}/v1/skills`);
     expect(anonymous.status).toBe(401);
-    expect((await anonymous.json() as ErrorEnvelope).error.code).toBe("missing_api_key");
+    expect(((await anonymous.json()) as ErrorEnvelope).error.code).toBe("missing_api_key");
 
     const underScoped = await SELF.fetch(`${BASE}/v1/skills`, {
       // fg_tenant_tools holds tools.read/tools.execute, never skills.read.
       headers: { authorization: "Bearer fg_tenant_tools" },
     });
     expect(underScoped.status).toBe(403);
-    expect((await underScoped.json() as ErrorEnvelope).error.code).toBe("scope_denied");
+    expect(((await underScoped.json()) as ErrorEnvelope).error.code).toBe("scope_denied");
   });
 });

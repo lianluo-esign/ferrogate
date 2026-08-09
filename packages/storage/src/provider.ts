@@ -36,10 +36,7 @@ export function providerIsDurable(kind: StorageProviderKind): boolean {
  */
 export function providerIsImplemented(kind: StorageProviderKind): boolean {
   return (
-    kind === "memory" ||
-    kind === "supabase" ||
-    kind === "postgres" ||
-    kind === "cloudflare_d1"
+    kind === "memory" || kind === "supabase" || kind === "postgres" || kind === "cloudflare_d1"
   );
 }
 

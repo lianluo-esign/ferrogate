@@ -26,13 +26,13 @@ describe("the judge request", () => {
       "gpt-4o-mini-2024-07-18",
     );
 
-    expect(body["model"]).toBe("gpt-4o-mini-2024-07-18");
+    expect(body.model).toBe("gpt-4o-mini-2024-07-18");
     // A sampled judge re-scoring the same exchange differently adds variance to
     // a measurement whose whole purpose is detecting a small shift in a mean.
-    expect(body["temperature"]).toBe(0);
-    expect(body["stream"]).toBe(false);
+    expect(body.temperature).toBe(0);
+    expect(body.stream).toBe(false);
 
-    const messages = body["messages"] as { role: string; content: string }[];
+    const messages = body.messages as { role: string; content: string }[];
     expect(messages[0]?.content).toBe(JUDGE_SYSTEM_PROMPT);
     expect(messages[0]?.content).toContain("Never score outside [0, 1]");
     // Both criteria are actually put to the judge — a body that carried only

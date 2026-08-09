@@ -21,7 +21,9 @@ function fakeCtx(): FakeCtx {
   } as unknown as FakeCtx;
 }
 
-async function withCapturedWarn<T>(run: () => T | Promise<T>): Promise<{ result: T; warnings: string[] }> {
+async function withCapturedWarn<T>(
+  run: () => T | Promise<T>,
+): Promise<{ result: T; warnings: string[] }> {
   const warnings: string[] = [];
   const original = console.warn;
   console.warn = (...args: unknown[]) => {
@@ -37,7 +39,10 @@ async function withCapturedWarn<T>(run: () => T | Promise<T>): Promise<{ result:
 describe("controlPlaneErrorHandler logs 5xx causes, stays quiet on 4xx", () => {
   it("logs the cause of an unclassified 500", async () => {
     const { result, warnings } = await withCapturedWarn(() =>
-      controlPlaneErrorHandler(new Error("ensure_wallet failed: no such table: wallets"), fakeCtx()),
+      controlPlaneErrorHandler(
+        new Error("ensure_wallet failed: no such table: wallets"),
+        fakeCtx(),
+      ),
     );
     expect(result.status).toBe(500);
     expect(warnings.some((w) => w.includes("control-plane internal_error (500)"))).toBe(true);

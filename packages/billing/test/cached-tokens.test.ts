@@ -29,12 +29,12 @@
  */
 import { describe, expect, it } from "vitest";
 import {
+  type ModelPrice,
   PriceBook,
+  type TokenUsage,
   estimateCost,
   modelPriceUsd,
   reconcileSplit,
-  type ModelPrice,
-  type TokenUsage,
 } from "../src/index.js";
 
 /** A `TokenUsage` with the three new counters defaulted to zero. */

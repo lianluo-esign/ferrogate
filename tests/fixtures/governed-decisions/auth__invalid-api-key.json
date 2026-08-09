@@ -24,10 +24,7 @@
           "id": "key-1",
           "name": "conformance key",
           "key": "secret-1",
-          "scopes": [
-            "chat.completions",
-            "responses.create"
-          ],
+          "scopes": ["chat.completions", "responses.create"],
           "organization_id": "tenant-1",
           "project_id": "project-1"
         }
@@ -55,9 +52,7 @@
     "outcome": "deny",
     "status": 401,
     "code": "invalid_api_key",
-    "durable_writes": [
-      "request_log"
-    ],
+    "durable_writes": ["request_log"],
     "audit_events": []
   },
   "worker_shell": {

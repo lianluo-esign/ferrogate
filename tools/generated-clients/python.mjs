@@ -13,8 +13,8 @@ function pythonString(value) {
 
 function pythonTuple(values) {
   if (values.length === 0) return "()";
-  if (values.length === 1) return "(" + pythonString(values[0]) + ",)";
-  return "(" + values.map(pythonString).join(", ") + ")";
+  if (values.length === 1) return `(${pythonString(values[0])},)`;
+  return `(${values.map(pythonString).join(", ")})`;
 }
 
 function compareStrings(left, right) {
@@ -25,15 +25,15 @@ function pythonSecurityRequirement(requirement) {
   const entries = requirement;
   if (entries.length === 0) return "()";
   const pairs = entries.map(
-    ([scheme, scopes]) => "(" + pythonString(scheme) + ", " + pythonTuple(scopes) + ")",
+    ([scheme, scopes]) => `(${pythonString(scheme)}, ${pythonTuple(scopes)})`,
   );
-  return "(" + pairs.join(", ") + (pairs.length === 1 ? "," : "") + ")";
+  return `(${pairs.join(", ")}${pairs.length === 1 ? "," : ""})`;
 }
 
 function pythonSecurityRequirements(requirements) {
   if (requirements.length === 0) return "()";
   const alternatives = requirements.map(pythonSecurityRequirement);
-  return "(" + alternatives.join(", ") + (alternatives.length === 1 ? "," : "") + ")";
+  return `(${alternatives.join(", ")}${alternatives.length === 1 ? "," : ""})`;
 }
 
 function operationSecurity(operation, document) {
@@ -94,25 +94,23 @@ export function renderPythonOperationCatalog(specPath) {
     "    security: SecurityRequirements",
     "    tags: tuple[str, ...]",
     "",
-    "OPENAPI_OPERATION_COUNT: Final[int] = " + operations.length,
+    `OPENAPI_OPERATION_COUNT: Final[int] = ${operations.length}`,
     "",
     "OPERATIONS: Final[dict[str, Operation]] = {",
   ];
 
   for (const operation of operations) {
-    lines.push("    " + pythonString(operation.operationId) + ": {");
-    lines.push("        \"method\": " + pythonString(operation.method) + ",");
-    lines.push("        \"path\": " + pythonString(operation.path) + ",");
-    lines.push(
-      "        \"security\": " + pythonSecurityRequirements(operation.security) + ",",
-    );
-    lines.push("        \"tags\": " + pythonTuple(operation.tags) + ",");
+    lines.push(`    ${pythonString(operation.operationId)}: {`);
+    lines.push(`        "method": ${pythonString(operation.method)},`);
+    lines.push(`        "path": ${pythonString(operation.path)},`);
+    lines.push(`        "security": ${pythonSecurityRequirements(operation.security)},`);
+    lines.push(`        "tags": ${pythonTuple(operation.tags)},`);
     lines.push("    },");
   }
 
   lines.push("}", "", "ADMIN_OPERATION_IDS: Final[tuple[str, ...]] = (");
   for (const operationId of adminOperationIds) {
-    lines.push("    " + pythonString(operationId) + ",");
+    lines.push(`    ${pythonString(operationId)},`);
   }
   lines.push(")", "");
   return lines.join("\n");

@@ -1,14 +1,10 @@
-import { screen } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
 import { CatalogScopeToggle } from "@/components/resource/catalog-scope-toggle";
 import { useCatalogApiKey } from "@/hooks/use-catalog-api-key";
 import { useCatalogScope } from "@/hooks/use-catalog-scope";
-import {
-  renderWithProviders,
-  seedSession,
-  TEST_GATEWAY_API_KEY,
-} from "@/test/test-utils";
+import { TEST_GATEWAY_API_KEY, renderWithProviders, seedSession } from "@/test/test-utils";
+import { screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { describe, expect, it } from "vitest";
 
 const OPERATOR_KEY = "fg-platform-operator-key";
 

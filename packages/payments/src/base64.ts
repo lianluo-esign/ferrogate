@@ -27,16 +27,17 @@ export function encodeBase64Std(bytes: Uint8Array): string {
   let out = "";
   let i = 0;
   for (; i + 2 < bytes.length; i += 3) {
-    const n = ((bytes[i] as number) << 16) | ((bytes[i + 1] as number) << 8) | (bytes[i + 2] as number);
+    const n =
+      ((bytes[i] as number) << 16) | ((bytes[i + 1] as number) << 8) | (bytes[i + 2] as number);
     out += C(n >>> 18) + C(n >>> 12) + C(n >>> 6) + C(n);
   }
   const rem = bytes.length - i;
   if (rem === 1) {
     const n = (bytes[i] as number) << 16;
-    out += C(n >>> 18) + C(n >>> 12) + "==";
+    out += `${C(n >>> 18) + C(n >>> 12)}==`;
   } else if (rem === 2) {
     const n = ((bytes[i] as number) << 16) | ((bytes[i + 1] as number) << 8);
-    out += C(n >>> 18) + C(n >>> 12) + C(n >>> 6) + "=";
+    out += `${C(n >>> 18) + C(n >>> 12) + C(n >>> 6)}=`;
   }
   return out;
 }

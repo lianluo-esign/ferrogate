@@ -194,7 +194,9 @@ describe("wave 24 — the S5 entitlement ladder needs no new binding, ASSERTED",
     expect(stanzas("d1_databases").length, "mcp must declare no [[d1_databases]] stanza").toBe(0);
     const objects = stanzas("durable_objects.bindings");
     const control = objects.filter((body) => value(body, "name") === "CONTROL_DATA");
-    expect(control.length, 'no [[durable_objects.bindings]] declares name = "CONTROL_DATA"').toBe(1);
+    expect(control.length, 'no [[durable_objects.bindings]] declares name = "CONTROL_DATA"').toBe(
+      1,
+    );
     expect(value(control[0] as string[], "class_name")).toBe("ControlDataObject");
     expect(value(control[0] as string[], "script_name")).toBe("ferrogate-gateway");
   });

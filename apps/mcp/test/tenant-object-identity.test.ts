@@ -1,12 +1,9 @@
 import { env } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
 
-import type { TenantDataNamespace } from "@ferrogate/storage/durable-objects";
 import { DurableObjectD1Database } from "@ferrogate/storage";
-import {
-  TenantObjectCredentialGrants,
-  loadServerCatalog,
-} from "../src/durable.js";
+import type { TenantDataNamespace } from "@ferrogate/storage/durable-objects";
+import { TenantObjectCredentialGrants, loadServerCatalog } from "../src/durable.js";
 import type {
   McpIdentityActor,
   McpServerConfig,
@@ -143,18 +140,15 @@ describe("MCP identity state in TenantDataObject", () => {
     await grants.put(stored);
 
     const reloaded = await grants.get(ACTOR_A, "search");
-    expect([...((reloaded as StoredMcpOauthCredential).accessTokenCiphertext)]).toEqual([4, 5, 6, 7]);
-    expect([...((reloaded as StoredMcpOauthCredential).refreshTokenCiphertext ?? [])]).toEqual([10, 11, 12]);
+    expect([...(reloaded as StoredMcpOauthCredential).accessTokenCiphertext]).toEqual([4, 5, 6, 7]);
+    expect([...((reloaded as StoredMcpOauthCredential).refreshTokenCiphertext ?? [])]).toEqual([
+      10, 11, 12,
+    ]);
     expect(await grants.get(ACTOR_B, "search")).toBeUndefined();
 
     await grants.bumpGeneration(ACTOR_A, "search");
     expect(await grants.authorizationGeneration(ACTOR_A, "search")).toBe(1);
-    expect(
-      await grants.commit(
-        flow(ACTOR_A, "search"),
-        credential(ACTOR_A),
-      ),
-    ).toBe(false);
+    expect(await grants.commit(flow(ACTOR_A, "search"), credential(ACTOR_A))).toBe(false);
 
     const revoked = await grants.revoke(ACTOR_A, "search", 1_500, "local_revoked");
     expect(revoked?.revokedAtUnix).toBe(1_500);

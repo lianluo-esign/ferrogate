@@ -24,10 +24,9 @@
  * tower is synchronous; on Workers this is a `TransformStream` over the decoded
  * frame stream (`docs/legacy/inventory-request-path.md` §1.5).
  */
-import {
-  type AnthropicMessagesPort,
-  defaultAnthropicMessagesPort,
-} from "./ports.js";
+
+import { chatSseToCompletion } from "./openai.js";
+import { type AnthropicMessagesPort, defaultAnthropicMessagesPort } from "./ports.js";
 import {
   type SseFrame,
   bytesThroughFrames,
@@ -37,23 +36,14 @@ import {
   serializeSseFrames,
 } from "./sse.js";
 import { ToolCallAccumulator } from "./toolcalls.js";
-import { chatSseToCompletion } from "./openai.js";
-import {
-  asArray,
-  asString,
-  get,
-  getString,
-  getUint,
-  nonNull,
-} from "./values.js";
+import { asArray, asString, get, getString, getUint, nonNull } from "./values.js";
 
 /** Fallback message id when the upstream chunk carried none (Rust literal). */
 export const FALLBACK_MESSAGE_ID = "msg_ferrogate";
 /** Fallback error code for a provider stream failure (Rust literal). */
 export const PROVIDER_STREAM_ERROR_CODE = "provider_stream_error";
 /** Fallback error message for a provider stream failure (Rust literal). */
-export const PROVIDER_STREAM_ERROR_MESSAGE =
-  "provider returned a streaming error";
+export const PROVIDER_STREAM_ERROR_MESSAGE = "provider returned a streaming error";
 
 const encoder = new TextEncoder();
 
@@ -252,15 +242,13 @@ export class OpenAiToAnthropicNormalizer {
     const usage = nonNull(get(payload, "usage"));
     if (usage !== undefined) {
       this.#promptTokens = getUint(usage, "prompt_tokens") ?? this.#promptTokens;
-      this.#completionTokens =
-        getUint(usage, "completion_tokens") ?? this.#completionTokens;
+      this.#completionTokens = getUint(usage, "completion_tokens") ?? this.#completionTokens;
       // Both detail spellings, as in `./usage.ts`: Chat Completions nests the
       // count under `prompt_tokens_details` and the Responses API under
       // `input_tokens_details`, and both dialects reach this normalizer.
       const promptDetails =
         nonNull(get(usage, "prompt_tokens_details")) ?? nonNull(get(usage, "input_tokens_details"));
-      this.#cachedInputTokens =
-        getUint(promptDetails, "cached_tokens") ?? this.#cachedInputTokens;
+      this.#cachedInputTokens = getUint(promptDetails, "cached_tokens") ?? this.#cachedInputTokens;
     }
 
     if (frame.event === "error" || get(payload, "error") !== undefined) {
@@ -334,10 +322,7 @@ export class OpenAiToAnthropicNormalizer {
     const out: SseFrame[] = [];
     this.#ensureStarted(out);
     this.#closeOpenBlock(out);
-    const stopReason = this.#port.finishReasonToStopReason(
-      this.#finishReason,
-      this.#sawToolUse,
-    );
+    const stopReason = this.#port.finishReasonToStopReason(this.#finishReason, this.#sawToolUse);
     const usage: Record<string, number> = {
       output_tokens: this.#completionTokens ?? 0,
     };
@@ -349,10 +334,10 @@ export class OpenAiToAnthropicNormalizer {
       // prompt. With nothing cached reported, the frame is byte-identical to
       // what it was before: an absent counter stays absent, never a zero.
       if (this.#cachedInputTokens !== undefined) {
-        usage["input_tokens"] = Math.max(this.#promptTokens - this.#cachedInputTokens, 0);
-        usage["cache_read_input_tokens"] = this.#cachedInputTokens;
+        usage.input_tokens = Math.max(this.#promptTokens - this.#cachedInputTokens, 0);
+        usage.cache_read_input_tokens = this.#cachedInputTokens;
       } else {
-        usage["input_tokens"] = this.#promptTokens;
+        usage.input_tokens = this.#promptTokens;
       }
     }
     out.push(
@@ -369,12 +354,9 @@ export class OpenAiToAnthropicNormalizer {
 
   #emitError(payload: unknown): SseFrame[] {
     const error = get(payload, "error");
-    const message =
-      asString(get(error, "message")) ?? PROVIDER_STREAM_ERROR_MESSAGE;
+    const message = asString(get(error, "message")) ?? PROVIDER_STREAM_ERROR_MESSAGE;
     const code =
-      asString(get(error, "code")) ??
-      asString(get(error, "type")) ??
-      PROVIDER_STREAM_ERROR_CODE;
+      asString(get(error, "code")) ?? asString(get(error, "type")) ?? PROVIDER_STREAM_ERROR_CODE;
     this.#completed = true;
     return [errorSseFrame(code, message)];
   }

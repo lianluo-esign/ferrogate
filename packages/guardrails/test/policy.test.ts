@@ -74,9 +74,15 @@ describe("aggregateCheckOutcomes", () => {
   });
 
   test("Threshold on failures then failures+errors", () => {
-    expect(aggregateCheckOutcomes({ type: "threshold", minimum: 2 }, ["fail", "fail", "pass"])).toBe("fail");
-    expect(aggregateCheckOutcomes({ type: "threshold", minimum: 2 }, ["fail", "error", "pass"])).toBe("error");
-    expect(aggregateCheckOutcomes({ type: "threshold", minimum: 2 }, ["fail", "pass", "pass"])).toBe("pass");
+    expect(
+      aggregateCheckOutcomes({ type: "threshold", minimum: 2 }, ["fail", "fail", "pass"]),
+    ).toBe("fail");
+    expect(
+      aggregateCheckOutcomes({ type: "threshold", minimum: 2 }, ["fail", "error", "pass"]),
+    ).toBe("error");
+    expect(
+      aggregateCheckOutcomes({ type: "threshold", minimum: 2 }, ["fail", "pass", "pass"]),
+    ).toBe("pass");
   });
 
   test("all-disabled aggregates to error", () => {
@@ -101,9 +107,9 @@ describe("scope matching + administrative rank", () => {
   test("model-content policy only matches model content (not managed actions)", () => {
     const scope = emptyScope({ tenant_ids: ["t1"] });
     expect(scopeMatches(scope, { organization_id: "t1" })).toBe(true);
-    expect(
-      scopeMatches(scope, { organization_id: "t1", managed_action: { class: "mcp" } }),
-    ).toBe(false);
+    expect(scopeMatches(scope, { organization_id: "t1", managed_action: { class: "mcp" } })).toBe(
+      false,
+    );
   });
 
   test("managed-action selector matches only its class", () => {
@@ -127,7 +133,10 @@ describe("selectPolicyRevisions ordering", () => {
   test("sorts by (rank, policy_id, revision)", () => {
     const broad = revision({ policy_id: "a", scope: emptyScope({ tenant_ids: ["t"] }) });
     const specific = revision({ policy_id: "b", scope: emptyScope({ api_key_ids: ["k"] }) });
-    const selected = selectPolicyRevisions([specific, broad], { organization_id: "t", api_key_id: "k" });
+    const selected = selectPolicyRevisions([specific, broad], {
+      organization_id: "t",
+      api_key_id: "k",
+    });
     expect(selected.map((r) => r.policy_id)).toEqual(["a", "b"]);
   });
 });
@@ -149,9 +158,9 @@ describe("validatePolicyRevision", () => {
   });
 
   test("enforcing action without code+message is rejected", () => {
-    expect(() =>
-      validatePolicyRevision(revision({ on_fail: [{ kind: "block" }] })),
-    ).toThrow(/code and message/);
+    expect(() => validatePolicyRevision(revision({ on_fail: [{ kind: "block" }] }))).toThrow(
+      /code and message/,
+    );
   });
 
   test("non-local fallback detector is rejected", () => {
@@ -170,6 +179,8 @@ describe("validatePolicyRevision", () => {
         allow_private_network: false,
       },
     };
-    expect(() => validatePolicyRevision(revision({ checks: [check] }))).toThrow(/fallback_detector must be local/);
+    expect(() => validatePolicyRevision(revision({ checks: [check] }))).toThrow(
+      /fallback_detector must be local/,
+    );
   });
 });

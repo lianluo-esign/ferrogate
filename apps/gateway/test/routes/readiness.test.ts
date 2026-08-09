@@ -6,12 +6,8 @@
  */
 import { describe, expect, it } from "vitest";
 
-import {
-  activeRevisionFor,
-  clusterStatus,
-  drainStatus,
-} from "../../src/routes/readiness.js";
 import { createGatewayApp } from "../../src/routes/index.js";
+import { activeRevisionFor, clusterStatus, drainStatus } from "../../src/routes/readiness.js";
 
 interface ReadyBody {
   status: string;
@@ -77,9 +73,8 @@ describe("GET /readyz", () => {
   it("reports a revision that changes with the config and is stable for it", async () => {
     const first = ((await (await readyz({ GATEWAY_MODELS: "[]" })).json()) as ReadyBody).cluster;
     const same = ((await (await readyz({ GATEWAY_MODELS: "[]" })).json()) as ReadyBody).cluster;
-    const other = ((await (
-      await readyz({ GATEWAY_MODELS: '[{"name":"m"}]' })
-    ).json()) as ReadyBody).cluster;
+    const other = ((await (await readyz({ GATEWAY_MODELS: '[{"name":"m"}]' })).json()) as ReadyBody)
+      .cluster;
     expect(first.active_revision).toBe(same.active_revision);
     expect(first.active_revision).not.toBe(other.active_revision);
   });
@@ -95,9 +90,10 @@ describe("ClusterStatus::new decision table", () => {
       ready: false,
       readiness_reason: "operator_drain",
     });
-    expect(
-      clusterStatus({ activeRevision: "abc", draining: false, stale: true }),
-    ).toMatchObject({ ready: true, readiness_reason: "stale_state" });
+    expect(clusterStatus({ activeRevision: "abc", draining: false, stale: true })).toMatchObject({
+      ready: true,
+      readiness_reason: "stale_state",
+    });
     expect(
       clusterStatus({ activeRevision: "", draining: false, lastSyncError: "boom" }),
     ).toMatchObject({ ready: false, readiness_reason: "sync_error" });

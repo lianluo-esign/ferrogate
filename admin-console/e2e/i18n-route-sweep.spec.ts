@@ -1,5 +1,5 @@
 import { installAuthenticatedAdminApi } from "./support/admin-api";
-import { HTML_LANG, seedLocale, type MatrixLocale } from "./support/i18n";
+import { HTML_LANG, type MatrixLocale, seedLocale } from "./support/i18n";
 import { PUBLIC_ROUTE_PATHS, REGISTERED_ROUTES } from "./support/route-matrix";
 import { expect, test } from "./support/ui-contract";
 
@@ -84,16 +84,12 @@ test.describe("@desktop every registered route renders in one locale", () => {
 
         if (route.kind === "protected") {
           // The shell is in the active locale...
-          await expect(
-            page.getByRole("link", { name: SHELL_SKIP_LINK[locale] }),
-          ).toBeVisible();
+          await expect(page.getByRole("link", { name: SHELL_SKIP_LINK[locale] })).toBeVisible();
           // ...and carries no trace of the other one.
           await expect(
             page.getByRole("link", { name: SHELL_SKIP_LINK[other(locale)] }),
           ).toHaveCount(0);
-          await expect(
-            page.getByText(SHELL_BREADCRUMB_ROOT[other(locale)]),
-          ).toHaveCount(0);
+          await expect(page.getByText(SHELL_BREADCRUMB_ROOT[other(locale)])).toHaveCount(0);
         } else {
           // Auth routes render no shell; their own copy is the probe, asserted
           // in depth by the auth block of i18n-route-matrix.spec.ts. Here we

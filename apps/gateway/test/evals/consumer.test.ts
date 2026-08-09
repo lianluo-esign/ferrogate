@@ -22,8 +22,8 @@ import {
   onlineEvalSampleToWire,
 } from "../../src/evals/index.js";
 import type { PhysicalRoute } from "../../src/inference/index.js";
-import { controlDb, resetOnlineEvalTables, storedScores } from "./harness.js";
 import { tenantObjectDb } from "../tenant-object.js";
+import { controlDb, resetOnlineEvalTables, storedScores } from "./harness.js";
 
 const JUDGE_ROUTE: PhysicalRoute = {
   logicalModel: "judge-model",
@@ -171,9 +171,9 @@ describe("a sampled exchange becomes durable scores", () => {
     // shown anything.
     expect(judge.requests).toHaveLength(1);
     const asked = judge.requests[0]?.body as Record<string, unknown>;
-    expect(asked["temperature"]).toBe(0);
-    expect(JSON.stringify(asked["messages"])).toContain("capital of France");
-    expect(JSON.stringify(asked["messages"])).toContain("Paris.");
+    expect(asked.temperature).toBe(0);
+    expect(JSON.stringify(asked.messages)).toContain("capital of France");
+    expect(JSON.stringify(asked.messages)).toContain("Paris.");
   });
 
   it("writes the tenant object first and keeps a retry-safe control projection", async () => {
@@ -197,7 +197,7 @@ describe("a sampled exchange becomes durable scores", () => {
     ).toEqual({ count: 2 });
     const firstProjection = await storedScores();
     expect(firstProjection).toHaveLength(2);
-    expect(firstProjection[0]?.["projection_key"]).toContain("tenant_a");
+    expect(firstProjection[0]?.projection_key).toContain("tenant_a");
 
     const second = await consumeOnlineEvalBatch(batchOf(sample()).batch, {}, dependencies);
     expect(second).toMatchObject({ scored: 2, retried: false });
@@ -239,7 +239,7 @@ describe("a sampled exchange becomes durable scores", () => {
 
     const rows = await storedScores();
     expect(rows).toHaveLength(2);
-    expect(rows.find((row) => row["criterion_id"] === "answer_relevance")).toMatchObject({
+    expect(rows.find((row) => row.criterion_id === "answer_relevance")).toMatchObject({
       score: 0.25,
     });
   });

@@ -9,14 +9,14 @@ import { SELF, env } from "cloudflare:test";
 import { DurableObjectD1Database, type TenantDatabaseRouter } from "@ferrogate/storage";
 import type { TenantDataNamespace } from "@ferrogate/storage/durable-objects";
 import { beforeAll, beforeEach, describe, expect, test } from "vitest";
+import { resolveTenantStorage } from "../src/adapters.js";
 import type { ControlPlaneBindings } from "../src/ports.js";
+import { openTenantScheduleRepository } from "../src/schedule/tenant-schedule.js";
 import {
+  type TenantWorkerIdentity,
   openTenantManagedWorkerRepository,
   openTenantWorkerRepository,
-  type TenantWorkerIdentity,
 } from "../src/store/tenant-worker.js";
-import { openTenantScheduleRepository } from "../src/schedule/tenant-schedule.js";
-import { resolveTenantStorage } from "../src/adapters.js";
 import { applySchema, db, resetD1 } from "./d1.js";
 import { BASE, arm, jsonRequest, operatorKey } from "./harness.js";
 
@@ -134,9 +134,7 @@ describe("tenant worker repository", () => {
           .prepare("SELECT worker_id, event_json FROM self_hosted_worker_telemetry_events")
           .all()
       ).results,
-    ).toEqual([
-      { worker_id: "worker-1", event_json: JSON.stringify({ kind: "started" }) },
-    ]);
+    ).toEqual([{ worker_id: "worker-1", event_json: JSON.stringify({ kind: "started" }) }]);
   });
 
   test("writes managed worker lifecycle state into the tenant object", async () => {
@@ -168,7 +166,9 @@ describe("tenant worker repository", () => {
       await object.prepare("SELECT event_json FROM managed_worker_lifecycle_events").first(),
     ).toEqual({ event_json: JSON.stringify({ kind: "started" }) });
     expect(
-      await object.prepare("SELECT selection_json FROM managed_worker_isolation_selections").first(),
+      await object
+        .prepare("SELECT selection_json FROM managed_worker_isolation_selections")
+        .first(),
     ).toEqual({ selection_json: JSON.stringify({ backend: "gvisor" }) });
     expect(
       await object.prepare("SELECT policy_json FROM managed_worker_isolation_policies").first(),
@@ -300,10 +300,10 @@ describe("tenant worker repository", () => {
     expect(register.status, await register.clone().text()).toBe(201);
 
     for (const [path, body] of [
-      [`heartbeat`, {}],
-      [`artifacts`, { artifact_id: "artifact-http", sha256: "abc" }],
-      [`checkpoints`, { checkpoint_id: "checkpoint-http" }],
-      [`events`, { kind: "started", payload: { source: "test" } }],
+      ["heartbeat", {}],
+      ["artifacts", { artifact_id: "artifact-http", sha256: "abc" }],
+      ["checkpoints", { checkpoint_id: "checkpoint-http" }],
+      ["events", { kind: "started", payload: { source: "test" } }],
     ] as const) {
       const response = await SELF.fetch(
         `${BASE}/admin/v1/self-hosted-workers/${workerId}/${path}`,
@@ -338,7 +338,9 @@ describe("tenant worker repository", () => {
     ).toEqual({ total: 1 });
     expect(
       await object
-        .prepare("SELECT COUNT(*) AS total FROM self_hosted_worker_telemetry_events WHERE worker_id = ?")
+        .prepare(
+          "SELECT COUNT(*) AS total FROM self_hosted_worker_telemetry_events WHERE worker_id = ?",
+        )
         .bind(workerId)
         .first(),
     ).toEqual({ total: 1 });

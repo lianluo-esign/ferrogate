@@ -4,9 +4,12 @@
  * `Option<T>` → `.nullable().default(null)`, so an omitted section/field
  * deserializes to exactly the Rust default.
  */
-import { z } from "zod";
+
 import { approvalPolicySchema } from "@ferrogate/core";
+import { z } from "zod";
+import { capabilityTargetSelectorSchema, classOnlyPolicyModeSchema } from "./capability-target.js";
 import {
+  DEFAULT_DURABLE_PROVIDER_ORDER,
   accessLogModeSchema,
   agentRuntimeProviderSchema,
   analyticsProviderSchema,
@@ -19,9 +22,7 @@ import {
   postgresTlsModeSchema,
   storageMigrationModeSchema,
   storageProviderKindSchema,
-  DEFAULT_DURABLE_PROVIDER_ORDER,
 } from "./enums.js";
-import { capabilityTargetSelectorSchema, classOnlyPolicyModeSchema } from "./capability-target.js";
 import { sectionDefault } from "./util.js";
 
 const optString = z.string().nullable().default(null);
@@ -29,9 +30,7 @@ const optNumber = z.number().int().nullable().default(null);
 const optBool = z.boolean().nullable().default(null);
 
 /** Deployment-wide authentication posture (issue #542). Default: auth required. */
-export const authConfigSchema = z
-  .object({ disabled: z.boolean().default(false) })
-  .strict();
+export const authConfigSchema = z.object({ disabled: z.boolean().default(false) }).strict();
 export type AuthConfig = z.infer<typeof authConfigSchema>;
 
 /** Deployment-wide tenant-identity semantics (issue #515). */
@@ -251,9 +250,18 @@ export const tlsAcmeConfigSchema = z.object({
   dns_hook_set: optString,
   dns_hook_cleanup: optString,
   dns_propagation_delay_secs: z.number().int().default(30),
-  renewal_window_secs: z.number().int().default(30 * 24 * 60 * 60),
-  renewal_check_interval_secs: z.number().int().default(12 * 60 * 60),
-  renewal_retry_interval_secs: z.number().int().default(30 * 60),
+  renewal_window_secs: z
+    .number()
+    .int()
+    .default(30 * 24 * 60 * 60),
+  renewal_check_interval_secs: z
+    .number()
+    .int()
+    .default(12 * 60 * 60),
+  renewal_retry_interval_secs: z
+    .number()
+    .int()
+    .default(30 * 60),
   auto_graceful_reload: z.boolean().default(true),
 });
 export type TlsAcmeConfig = z.infer<typeof tlsAcmeConfigSchema>;
@@ -447,11 +455,15 @@ export type LimitsConfig = z.infer<typeof limitsConfigSchema>;
 export const limits = {
   inference: (c: LimitsConfig) => c.inference_body_max_bytes ?? DEFAULT_INFERENCE_BODY_MAX_BYTES,
   admin: (c: LimitsConfig) => c.admin_body_max_bytes ?? DEFAULT_ADMIN_BODY_MAX_BYTES,
-  adminSmall: (c: LimitsConfig) => c.admin_small_body_max_bytes ?? DEFAULT_ADMIN_SMALL_BODY_MAX_BYTES,
-  adminConfig: (c: LimitsConfig) => c.admin_config_body_max_bytes ?? DEFAULT_ADMIN_CONFIG_BODY_MAX_BYTES,
+  adminSmall: (c: LimitsConfig) =>
+    c.admin_small_body_max_bytes ?? DEFAULT_ADMIN_SMALL_BODY_MAX_BYTES,
+  adminConfig: (c: LimitsConfig) =>
+    c.admin_config_body_max_bytes ?? DEFAULT_ADMIN_CONFIG_BODY_MAX_BYTES,
   tool: (c: LimitsConfig) => c.tool_body_max_bytes ?? DEFAULT_TOOL_BODY_MAX_BYTES,
-  assetControl: (c: LimitsConfig) => c.asset_control_body_max_bytes ?? DEFAULT_ASSET_CONTROL_BODY_MAX_BYTES,
-  agentIngress: (c: LimitsConfig) => c.agent_ingress_body_max_bytes ?? DEFAULT_AGENT_INGRESS_BODY_MAX_BYTES,
+  assetControl: (c: LimitsConfig) =>
+    c.asset_control_body_max_bytes ?? DEFAULT_ASSET_CONTROL_BODY_MAX_BYTES,
+  agentIngress: (c: LimitsConfig) =>
+    c.agent_ingress_body_max_bytes ?? DEFAULT_AGENT_INGRESS_BODY_MAX_BYTES,
   workerTransport: (c: LimitsConfig) =>
     c.worker_transport_body_max_bytes ?? DEFAULT_WORKER_TRANSPORT_BODY_MAX_BYTES,
   guardrailPolicy: (c: LimitsConfig) =>

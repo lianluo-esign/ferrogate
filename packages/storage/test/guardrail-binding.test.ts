@@ -3,8 +3,8 @@ import {
   GUARDRAIL_POLICY_BINDING_CAS_CONFLICT_MESSAGE,
   MemoryGuardrailBindingStore,
   StorageError,
-  isGuardrailPolicyBindingCasConflict,
   type StoredGuardrailPolicyRevision,
+  isGuardrailPolicyBindingCasConflict,
 } from "../src/index.js";
 
 function rev(policyId: string, revision: number): StoredGuardrailPolicyRevision {
@@ -51,7 +51,9 @@ describe("MemoryGuardrailBindingStore — generation-guarded CAS (§1.5.5)", () 
     store.activateGuardrailPolicyRevision("p", 1, "u", 0, false); // 1 active
     store.activateGuardrailPolicyRevision("p", 2, "u", 1, false); // 2 active, 1 archived
     // rollback to the archived 1 is allowed:
-    expect(store.activateGuardrailPolicyRevision("p", 1, "u", 2, true).current.activeRevision).toBe(1);
+    expect(store.activateGuardrailPolicyRevision("p", 1, "u", 2, true).current.activeRevision).toBe(
+      1,
+    );
   });
 
   test("restore fails closed when the generation moved since read (CAS conflict)", () => {
@@ -62,9 +64,7 @@ describe("MemoryGuardrailBindingStore — generation-guarded CAS (§1.5.5)", () 
       throw new Error("expected conflict");
     } catch (err) {
       expect(isGuardrailPolicyBindingCasConflict(err)).toBe(true);
-      expect((err as StorageError).data.detail).toBe(
-        GUARDRAIL_POLICY_BINDING_CAS_CONFLICT_MESSAGE,
-      );
+      expect((err as StorageError).data.detail).toBe(GUARDRAIL_POLICY_BINDING_CAS_CONFLICT_MESSAGE);
     }
   });
 

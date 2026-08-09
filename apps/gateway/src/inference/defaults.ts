@@ -8,27 +8,20 @@
  * sense — they are the real code paths with an in-memory backing store, exactly
  * as `AppState` is an in-memory snapshot of the config in the Rust tree.
  */
+
+import { routingQualityPortFor } from "../evals/quality-source.js";
+import { experimentObserverFor } from "../experiments/index.js";
 import { openAiToAnthropicStream, responsesNormalizeStream } from "../streaming/index.js";
 import type { ResponsesStreamProviderKind } from "../streaming/index.js";
-import { experimentObserverFor } from "../experiments/index.js";
 import { canonicalProviderKind, defaultAdapterRegistry } from "./adapters.js";
 import { defaultAnthropicTranslator } from "./anthropic.js";
 import { audioObjectsFromEnv } from "./audio-objects.js";
-import { resolveRetentionSeconds, responseStoreMode } from "./conversation.js";
-import { conversationStoreFromEnv } from "./conversation-store.js";
 import { byokPortsFromEnv } from "./byok.js";
 import { orderCandidates } from "./candidates.js";
 import { DurableObjectProviderCircuit } from "./circuit-do.js";
 import type { ProviderCircuitNamespace } from "./circuit-do.js";
-import {
-  DEFAULT_RELIABILITY,
-  InMemoryProviderCircuit,
-  NO_PROVIDER_CIRCUIT,
-  circuitEnabled,
-  reliabilityFromVar,
-} from "./reliability.js";
-import type { ProviderCircuit, ReliabilitySettings } from "./reliability.js";
-import { shadowBudgetFor } from "./shadow.js";
+import { conversationStoreFromEnv } from "./conversation-store.js";
+import { resolveRetentionSeconds, responseStoreMode } from "./conversation.js";
 import type {
   Caller,
   InferenceBindings,
@@ -45,12 +38,20 @@ import type {
   Usage,
   UsageSink,
 } from "./ports.js";
+import {
+  DEFAULT_RELIABILITY,
+  InMemoryProviderCircuit,
+  NO_PROVIDER_CIRCUIT,
+  circuitEnabled,
+  reliabilityFromVar,
+} from "./reliability.js";
+import type { ProviderCircuit, ReliabilitySettings } from "./reliability.js";
 import { MAX_AUDIO_REFERENCE_BYTES, MAX_AUDIO_UPLOAD_BYTES } from "./schemas.js";
+import { shadowBudgetFor } from "./shadow.js";
 import { ProviderRoutingMetrics } from "./strategy.js";
 import type { RoutingMetrics, RoutingQualityPort } from "./strategy.js";
-import { routingQualityPortFor } from "../evals/quality-source.js";
-import { workflowCatalogFromEnv, workflowHistoryFromEnv } from "./workflow.js";
 import { workersAiDispatcherFromEnv } from "./workers-ai.js";
+import { workflowCatalogFromEnv, workflowHistoryFromEnv } from "./workflow.js";
 import type { WorkflowGateBindings } from "./workflow.js";
 
 /**
@@ -187,7 +188,7 @@ export function providerCircuitFor(
   if (!circuitEnabled(settings)) {
     return NO_PROVIDER_CIRCUIT;
   }
-  const namespace = env["PROVIDER_CIRCUIT"];
+  const namespace = env.PROVIDER_CIRCUIT;
   if (
     typeof namespace === "object" &&
     namespace !== null &&
@@ -392,7 +393,7 @@ export function resolveDeps(
   // An INJECTED partial always wins over the var, so a test that asks for a
   // threshold of 2 gets 2 whatever the deployment configured.
   const reliability: ReliabilitySettings = {
-    ...reliabilityFromVar(env["GATEWAY_RELIABILITY"]),
+    ...reliabilityFromVar(env.GATEWAY_RELIABILITY),
     ...deps.reliability,
   };
   const circuit =
@@ -498,9 +499,9 @@ export function resolveDeps(
       typeof deps.conversations === "function"
         ? deps.conversations(env)
         : (deps.conversations ?? conversationStoreFromEnv(env)),
-    responseStoreMode: deps.responseStoreMode ?? responseStoreMode(env["GATEWAY_RESPONSES_STORE"]),
+    responseStoreMode: deps.responseStoreMode ?? responseStoreMode(env.GATEWAY_RESPONSES_STORE),
     responseRetentionSeconds:
       deps.responseRetentionSeconds ??
-      ((tenantId: string) => resolveRetentionSeconds(env["GATEWAY_RESPONSES_RETENTION"], tenantId)),
+      ((tenantId: string) => resolveRetentionSeconds(env.GATEWAY_RESPONSES_RETENTION, tenantId)),
   };
 }

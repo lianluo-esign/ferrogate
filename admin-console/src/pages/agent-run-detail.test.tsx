@@ -1,17 +1,16 @@
-import { QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, within } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
-import { HttpResponse, http } from "msw";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { beforeEach, describe, expect, it } from "vitest";
 import { AuthProvider } from "@/hooks/use-auth";
 import { I18nProvider } from "@/i18n";
 import AgentRunDetailPage, { type AgentRunTimeline } from "@/pages/agent-run-detail";
 import { gatewayUrl, server } from "@/test/msw";
 import { createTestQueryClient, seedSession } from "@/test/test-utils";
+import { QueryClientProvider } from "@tanstack/react-query";
+import { render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { http, HttpResponse } from "msw";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { beforeEach, describe, expect, it } from "vitest";
 
-const FULL_FINGERPRINT =
-  "sha256:aaaabbbbccccddddeeeeffff0000111122223333444455556666777788889999";
+const FULL_FINGERPRINT = "sha256:aaaabbbbccccddddeeeeffff0000111122223333444455556666777788889999";
 
 /** Timeline fixture: lifecycle -> capability(allow) -> guardrail(deny) agent
  *  events plus one audit event, deliberately out of order across the two
@@ -144,9 +143,7 @@ function timeline(): AgentRunTimeline {
 
 function mockTimeline(fixture: AgentRunTimeline): void {
   server.use(
-    http.get(gatewayUrl(`/admin/v1/agent-runs/${fixture.id}`), () =>
-      HttpResponse.json(fixture),
-    ),
+    http.get(gatewayUrl(`/admin/v1/agent-runs/${fixture.id}`), () => HttpResponse.json(fixture)),
   );
 }
 
@@ -188,10 +185,18 @@ describe("AgentRunDetailPage", () => {
       "timeline-agent-ev-3",
     ]);
     // family badges distinguish the event kinds
-    expect(within(screen.getByTestId("timeline-agent-ev-2")).getByText("capability")).toBeInTheDocument();
-    expect(within(screen.getByTestId("timeline-agent-ev-3")).getByText("guardrail")).toBeInTheDocument();
-    expect(within(screen.getByTestId("timeline-audit-aud-1")).getByText("audit")).toBeInTheDocument();
-    expect(within(screen.getByTestId("timeline-agent-ev-1")).getByText("lifecycle")).toBeInTheDocument();
+    expect(
+      within(screen.getByTestId("timeline-agent-ev-2")).getByText("capability"),
+    ).toBeInTheDocument();
+    expect(
+      within(screen.getByTestId("timeline-agent-ev-3")).getByText("guardrail"),
+    ).toBeInTheDocument();
+    expect(
+      within(screen.getByTestId("timeline-audit-aud-1")).getByText("audit"),
+    ).toBeInTheDocument();
+    expect(
+      within(screen.getByTestId("timeline-agent-ev-1")).getByText("lifecycle"),
+    ).toBeInTheDocument();
   });
 
   it("renders the #304 structured columns: decision, reason, output disposition", async () => {

@@ -48,17 +48,17 @@ import {
 import { createGatewayApp } from "../../src/routes/index.js";
 import { OPENAI_ROUTE } from "../inference/fixtures.js";
 import { interceptProviderFetch, providerJson } from "../inference/provider-mock.js";
-import { RecordingQueue, resetMeteringTables } from "./d1-harness.js";
-import { pricedBook, usageFixture } from "./fixtures.js";
 import {
   resetTenantBillingState,
   resetTenantObjectState,
   tenantObjectDb,
 } from "../tenant-object.js";
+import { RecordingQueue, resetMeteringTables } from "./d1-harness.js";
+import { pricedBook, usageFixture } from "./fixtures.js";
 
 const db = (env as unknown as { DB: D1Database }).DB;
-const controlDb = (env as unknown as { CONTROL_DB?: D1Database; BILLING_DB: D1Database })
-  .CONTROL_DB ??
+const controlDb =
+  (env as unknown as { CONTROL_DB?: D1Database; BILLING_DB: D1Database }).CONTROL_DB ??
   (env as unknown as { BILLING_DB: D1Database }).BILLING_DB;
 
 const BASE = "https://gw.test";
@@ -209,9 +209,7 @@ function alertSink() {
 /** Every claimed `(scope, period, tier)`, ascending. */
 async function claimedThresholds(): Promise<{ id: string; threshold_pct: number }[]> {
   const result = await tenantObjectDb("tenant_a")
-    .prepare(
-      "SELECT id, threshold_pct FROM budget_alert_notifications ORDER BY threshold_pct ASC",
-    )
+    .prepare("SELECT id, threshold_pct FROM budget_alert_notifications ORDER BY threshold_pct ASC")
     .all<{ id: string; threshold_pct: number }>();
   return result.results;
 }
@@ -275,14 +273,14 @@ describe("A1: crossing a configured budget threshold dispatches a signed webhook
         "budget_usd",
         "fired_at_unix",
       ]);
-      expect(payload["event"]).toBe("budget_threshold_crossed");
-      expect(payload["scope_type"]).toBe("tenant");
-      expect(payload["scope_id"]).toBe("tenant_a");
-      expect(payload["period_month"]).toBe(PERIOD_MONTH);
-      expect(payload["threshold_pct"]).toBe(80);
-      expect(payload["spent_usd"]).toBeCloseTo(SPENT_USD, 12);
-      expect(payload["budget_usd"]).toBeCloseTo(BUDGET_USD, 12);
-      expect(payload["fired_at_unix"]).toBe(NOW_UNIX);
+      expect(payload.event).toBe("budget_threshold_crossed");
+      expect(payload.scope_type).toBe("tenant");
+      expect(payload.scope_id).toBe("tenant_a");
+      expect(payload.period_month).toBe(PERIOD_MONTH);
+      expect(payload.threshold_pct).toBe(80);
+      expect(payload.spent_usd).toBeCloseTo(SPENT_USD, 12);
+      expect(payload.budget_usd).toBeCloseTo(BUDGET_USD, 12);
+      expect(payload.fired_at_unix).toBe(NOW_UNIX);
 
       // `budget_alerts.rs:24-38`: `sha256=<hex>` of HMAC-SHA256 over
       // "<fired_at_unix>.<body>", with the timestamp also carried as a header
@@ -406,7 +404,10 @@ describe("A1: a threshold notifies ONCE per (scope, period, tier)", () => {
       // A SECOND, DIFFERENT request — a new ledger entry, a new accumulate,
       // still past 80%. Rust checks `budget_alert_already_notified` and skips.
       sink.record(usageFixture({ requestId: "fg-000000000000002b" }));
-      await sink.flush({ ...rc, attribution: { ...ATTRIBUTION, requestId: "fg-000000000000002b" } });
+      await sink.flush({
+        ...rc,
+        attribution: { ...ATTRIBUTION, requestId: "fg-000000000000002b" },
+      });
 
       expect(sink.stats.recorded).toBe(2);
       expect(webhook.calls.length).toBe(1);
@@ -510,7 +511,10 @@ describe("A1: a failing webhook endpoint never touches the customer request", ()
       ]);
 
       sink.record(usageFixture({ requestId: "fg-000000000000002c" }));
-      await sink.flush({ ...rc, attribution: { ...ATTRIBUTION, requestId: "fg-000000000000002c" } });
+      await sink.flush({
+        ...rc,
+        attribution: { ...ATTRIBUTION, requestId: "fg-000000000000002c" },
+      });
       expect(webhook.calls.length).toBe(1);
     } finally {
       webhook.restore();
@@ -608,8 +612,8 @@ describe("A1, mounted: a served request fires the alert without delaying the cli
 
     expect(webhookCalls.length).toBe(1);
     const payload = JSON.parse((webhookCalls[0] as WebhookCall).body) as Record<string, unknown>;
-    expect(payload["event"]).toBe("budget_threshold_crossed");
-    expect(payload["threshold_pct"]).toBe(80);
-    expect(payload["scope_id"]).toBe("tenant_a");
+    expect(payload.event).toBe("budget_threshold_crossed");
+    expect(payload.threshold_pct).toBe(80);
+    expect(payload.scope_id).toBe("tenant_a");
   });
 });

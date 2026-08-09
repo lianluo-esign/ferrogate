@@ -158,10 +158,10 @@ export function apiErrorFrom(
     body = text;
   }
 
-  const errorObject = asObject(asObject(body)?.["error"]);
-  const envelopeMessage = errorObject?.["message"];
-  const envelopeCode = errorObject?.["code"];
-  const envelopeRequestId = errorObject?.["request_id"];
+  const errorObject = asObject(asObject(body)?.error);
+  const envelopeMessage = errorObject?.message;
+  const envelopeCode = errorObject?.code;
+  const envelopeRequestId = errorObject?.request_id;
 
   const requestId =
     headers?.get("x-request-id") ??

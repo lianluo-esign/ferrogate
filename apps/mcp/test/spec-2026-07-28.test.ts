@@ -17,27 +17,27 @@ import { beforeEach, describe, expect, it } from "vitest";
 
 import { parseCallResult, parseToolsList } from "../src/jsonrpc.js";
 import {
-  completeModernResult,
+  type OauthProviderPort,
+  type OidcDiscovery,
+  setOauthProvider,
+  setSecretResolver,
+} from "../src/ports.js";
+import {
   MCP_METHOD_HEADER,
   MCP_PROTOCOL_VERSION,
   MCP_PROTOCOL_VERSION_HEADER,
-  modernRequestMeta,
   SERVER_INFO_META,
+  completeModernResult,
+  modernRequestMeta,
 } from "../src/protocol.js";
 import {
-  setOauthProvider,
-  setSecretResolver,
-  type OauthProviderPort,
-  type OidcDiscovery,
-} from "../src/ports.js";
-import {
   EXEC_KEY,
+  type Fixture,
   READ_KEY,
+  USER,
   rpcRequest,
   seedFixture,
   upstreamConfig,
-  USER,
-  type Fixture,
 } from "./fixtures.js";
 
 // ---------------------------------------------------------------------------
@@ -154,10 +154,10 @@ describe("stateless server identity and capabilities", () => {
       _meta: { "ferrogate/ambiguousTools": [{ name: "a-b", servers: ["a", "a-b"] }] },
     };
     completeModernResult(result as never, "tools/list");
-    expect(result["_meta"]).toMatchObject({
+    expect(result._meta).toMatchObject({
       "ferrogate/ambiguousTools": [{ name: "a-b", servers: ["a", "a-b"] }],
     });
-    expect((result["_meta"] as Record<string, unknown>)[SERVER_INFO_META]).toBeDefined();
+    expect((result._meta as Record<string, unknown>)[SERVER_INFO_META]).toBeDefined();
   });
 
   /**
@@ -182,7 +182,7 @@ describe("stateless server identity and capabilities", () => {
     const body = (await res.json()) as {
       result: { capabilities: Record<string, unknown>; supportedVersions: string[] };
     };
-    expect(body.result.capabilities["extensions"]).toEqual({});
+    expect(body.result.capabilities.extensions).toEqual({});
     // The dual-era promise: an older client still sees its revision offered.
     expect(body.result.supportedVersions).toContain("2025-11-25");
     expect(body.result.supportedVersions).toContain("2025-06-18");
@@ -237,12 +237,12 @@ describe("version negotiation across the two eras", () => {
 
   it("serves a client on the OLD protocol: initialize honours 2025-06-18 exactly", async () => {
     const result = await initialize("2025-06-18");
-    expect(result["protocolVersion"]).toBe("2025-06-18");
-    expect(result["serverInfo"]).toMatchObject({ name: expect.any(String) as unknown as string });
+    expect(result.protocolVersion).toBe("2025-06-18");
+    expect(result.serverInfo).toMatchObject({ name: expect.any(String) as unknown as string });
   });
 
   it("serves a client on the direct predecessor: initialize honours 2025-11-25", async () => {
-    expect((await initialize("2025-11-25"))["protocolVersion"]).toBe("2025-11-25");
+    expect((await initialize("2025-11-25")).protocolVersion).toBe("2025-11-25");
   });
 
   it("serves a client on the NEW protocol: a modern tools/call is executed", async () => {
@@ -275,8 +275,8 @@ describe("version negotiation across the two eras", () => {
    * server could have served.
    */
   it("counter-offers 2025-11-25 to a legacy client naming an unknown revision", async () => {
-    expect((await initialize("2024-11-05"))["protocolVersion"]).toBe("2025-11-25");
-    expect((await initialize(undefined))["protocolVersion"]).toBe("2025-11-25");
+    expect((await initialize("2024-11-05")).protocolVersion).toBe("2025-11-25");
+    expect((await initialize(undefined)).protocolVersion).toBe("2025-11-25");
   });
 
   /**
@@ -285,7 +285,7 @@ describe("version negotiation across the two eras", () => {
    * told 2025-11-25 — it has to use the modern stateless path to get 2026-07-28.
    */
   it("never negotiates the modern revision through the removed handshake", async () => {
-    expect((await initialize(MCP_PROTOCOL_VERSION))["protocolVersion"]).toBe("2025-11-25");
+    expect((await initialize(MCP_PROTOCOL_VERSION)).protocolVersion).toBe("2025-11-25");
   });
 
   /**

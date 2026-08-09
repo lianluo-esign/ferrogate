@@ -1,3 +1,4 @@
+import type { en } from "./locales/en";
 // Catalog types + registry — the typed core of the console i18n runtime (#346).
 //
 // DEVIATION from #346's Decision ("use i18next + react-i18next … do not build a
@@ -69,7 +70,6 @@
 // is still `keyof typeof en` — the union of EVERY key across bootstrap + rest —
 // and `_ZhCatalogIsComplete` still fails `tsc` if zh-CN drops or misspells a key.
 import { enBootstrap } from "./locales/en/bootstrap";
-import type { en } from "./locales/en";
 import type { zhCN } from "./locales/zh-CN";
 
 /** Every valid translation key, derived from the (whole) English source catalog. */
@@ -135,8 +135,7 @@ const loadedCatalogs: Partial<Record<Locale, Messages>> = {};
  * COMPILE error until its lazy loader is registered here.
  */
 const catalogLoaders: Record<Locale, () => Promise<Messages>> = {
-  en: () =>
-    import("./locales/en/rest").then((module) => ({ ...enBootstrap, ...module.enRest })),
+  en: () => import("./locales/en/rest").then((module) => ({ ...enBootstrap, ...module.enRest })),
   "zh-CN": () => import("./locales/zh-CN").then((module) => module.zhCN),
 };
 

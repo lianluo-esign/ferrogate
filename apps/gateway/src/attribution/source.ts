@@ -38,8 +38,9 @@
  * fail-closed reading is the one this file already implements: disabling a
  * SPEND limit must not also, invisibly, switch off an ATTRIBUTION requirement.
  */
-import { type AttributionPolicy, parseAttributionPolicy, parseMissingTagAction } from "./policy.js";
+
 import { controlDatabaseFrom } from "../control-data.js";
+import { type AttributionPolicy, parseAttributionPolicy, parseMissingTagAction } from "./policy.js";
 
 /** The `quota_policies` columns this module reads, named once. */
 const ATTRIBUTION_COLUMNS = "required_tags_json, on_missing_tags";
@@ -54,9 +55,7 @@ const ATTRIBUTION_COLUMNS = "required_tags_json, on_missing_tags";
  * what stops tenant A's DEFAULTS from being stamped on tenant B's spend.
  * `(scope_type, scope_id)` is `UNIQUE` and indexed, so this is one index seek.
  */
-const SELECT_TENANT_POLICY =
-  `SELECT ${ATTRIBUTION_COLUMNS} FROM quota_policies ` +
-  "WHERE scope_type = 'tenant' AND scope_id = ?";
+const SELECT_TENANT_POLICY = `SELECT ${ATTRIBUTION_COLUMNS} FROM quota_policies WHERE scope_type = 'tenant' AND scope_id = ?`;
 
 /** Worker vars this slice reads. */
 export interface AttributionBindings {
@@ -152,8 +151,8 @@ export function d1AttributionPolicySource(db: AttributionDatabase): AttributionP
         return {
           ok: true,
           policy: parseAttributionPolicy({
-            requiredTagKeys: jsonArrayColumn(row["required_tags_json"]),
-            onMissing: parseMissingTagAction(row["on_missing_tags"]),
+            requiredTagKeys: jsonArrayColumn(row.required_tags_json),
+            onMissing: parseMissingTagAction(row.on_missing_tags),
           }),
         };
       } catch (error) {

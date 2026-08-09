@@ -1,6 +1,3 @@
-import { useMemo } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { Link } from "react-router-dom";
 import { Badge } from "@/components/ui/badge";
 import {
   Table,
@@ -13,7 +10,10 @@ import {
 import { useAuth } from "@/hooks/use-auth";
 import { useI18n } from "@/i18n";
 import { adminGet } from "@/lib/gateway-client";
-import { formatUnix, type GuardrailPolicyRevisionView } from "@/lib/guardrails";
+import { type GuardrailPolicyRevisionView, formatUnix } from "@/lib/guardrails";
+import { useQuery } from "@tanstack/react-query";
+import { useMemo } from "react";
+import { Link } from "react-router-dom";
 
 interface PolicySummary {
   policyId: string;
@@ -50,7 +50,7 @@ function groupByPolicy(revisions: GuardrailPolicyRevisionView[]): PolicySummary[
 export default function GuardrailPoliciesPage() {
   const { session } = useAuth();
   const { t } = useI18n();
-  const apiKey = session!.gatewayApiKey;
+  const apiKey = (session as NonNullable<typeof session>).gatewayApiKey;
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["guardrail-policies"],
@@ -63,13 +63,14 @@ export default function GuardrailPoliciesPage() {
     <div className="flex flex-col gap-4">
       <div>
         <h1 className="text-lg font-semibold">{t("page.guardrailPolicies.title")}</h1>
-        <p className="text-sm text-muted-foreground">
-          {t("page.guardrailPolicies.description")}
-        </p>
+        <p className="text-sm text-muted-foreground">{t("page.guardrailPolicies.description")}</p>
       </div>
 
       {error && (
-        <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <p
+          role="alert"
+          className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+        >
           {t("page.guardrailPolicies.loadError", { message: error.message })}
         </p>
       )}

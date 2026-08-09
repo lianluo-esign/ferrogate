@@ -13,8 +13,9 @@
  *     the integrate step's line), so the test below is written as the exact
  *     probe the integrator should flip from `todo` to live once the line lands.
  */
-import { normalizeRequest, normalizeResponse } from "@ferrogate/guardrails";
+
 import { SELF, env } from "cloudflare:test";
+import { normalizeRequest, normalizeResponse } from "@ferrogate/guardrails";
 import { beforeAll, describe, expect, test } from "vitest";
 import { operationById } from "../../src/contract.js";
 import { GUARDRAIL_OPERATIONS } from "../../src/guardrails/index.js";

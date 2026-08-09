@@ -82,9 +82,7 @@ export interface ProviderUsage {
 }
 
 function asUint(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
-    ? value
-    : undefined;
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
 }
 
 function member(value: unknown, key: string): unknown {
@@ -259,8 +257,7 @@ export function extractGeminiUsage(payload: unknown): ProviderUsage | undefined 
     withCounters(
       {
         promptTokens: asUint(member(usage, "promptTokenCount")),
-        completionTokens:
-          visible === undefined ? undefined : visible + (reasoningTokens ?? 0),
+        completionTokens: visible === undefined ? undefined : visible + (reasoningTokens ?? 0),
         totalTokens: asUint(member(usage, "totalTokenCount")),
       },
       {

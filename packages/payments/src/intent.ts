@@ -24,17 +24,17 @@
 
 import { z } from "zod";
 
-import { sha256, hexLower, Sha256Builder } from "./hash.js";
+import { Sha256Builder, hexLower, sha256 } from "./hash.js";
 import {
-  challengeHashHex,
-  caip2ForNetwork,
   MAX_TIMEOUT_SECONDS,
   SCHEME_EXACT,
   type SelectedPayment,
   type SolanaNetwork,
+  X402_VERSION,
+  caip2ForNetwork,
+  challengeHashHex,
   solanaNetworkFromCaip2,
   validateSolanaAddress,
-  X402_VERSION,
 } from "./wire.js";
 
 /** Domain-separation tag mixed into {@link PaymentIntent.intentHashHex}. */
@@ -119,9 +119,7 @@ export class PaymentIntentError extends Error {
   static amountUnrepresentable(value: bigint): PaymentIntentError {
     return new PaymentIntentError(
       "amount_unrepresentable",
-      `atomic amount ${value} cannot be written to the wire as a JSON number ` +
-        `without losing precision (> ${Number.MAX_SAFE_INTEGER}); refusing rather ` +
-        `than rounding an on-chain amount`,
+      `atomic amount ${value} cannot be written to the wire as a JSON number without losing precision (> ${Number.MAX_SAFE_INTEGER}); refusing rather than rounding an on-chain amount`,
       "atomic_amount",
     );
   }
@@ -521,7 +519,10 @@ export class PaymentIntent {
   static fromWire(value: unknown): PaymentIntent {
     const parsed = PaymentIntentWireSchema.safeParse(value);
     if (!parsed.success) {
-      throw new PaymentIntentError("invalid_identity", `malformed payment intent: ${parsed.error.message}`);
+      throw new PaymentIntentError(
+        "invalid_identity",
+        `malformed payment intent: ${parsed.error.message}`,
+      );
     }
     const w = parsed.data;
     const identity: PaymentIntentIdentity = {

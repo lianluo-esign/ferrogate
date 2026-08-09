@@ -74,6 +74,7 @@
 import { describe, expect, test } from "vitest";
 
 import { hexHmac, hexSha256, hmacSha256, utf8 } from "../src/crypto.js";
+import type { AwsCredentials, SigningRequest } from "../src/index.js";
 import {
   canonicalQueryString,
   canonicalUri,
@@ -84,7 +85,6 @@ import {
   signWithContentHashHeader,
   signWithContentHashHeaderAndQuery,
 } from "../src/sigv4.js";
-import type { AwsCredentials, SigningRequest } from "../src/index.js";
 
 /** The AWS documentation example credentials — never valid against real AWS. */
 const CREDENTIALS: AwsCredentials = {
@@ -100,11 +100,9 @@ const DATE_STAMP = "20150830";
 const BEDROCK_HOST = "bedrock-runtime.us-east-1.amazonaws.com";
 const BEDROCK_BODY = '{"messages":[]}';
 /** SHA-256 of `BEDROCK_BODY` — the canonical request's final line. */
-const BEDROCK_PAYLOAD_SHA256 =
-  "5e4ce7b36ba37b78a5d5f9fd08e6b7b54ba6879d651aa46ec9e1d6fa24ebe30a";
+const BEDROCK_PAYLOAD_SHA256 = "5e4ce7b36ba37b78a5d5f9fd08e6b7b54ba6879d651aa46ec9e1d6fa24ebe30a";
 /** SHA-256 of the empty payload (RFC/NIST vector), used by the query vector. */
-const EMPTY_PAYLOAD_SHA256 =
-  "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+const EMPTY_PAYLOAD_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
 const bedrockRequest: SigningRequest = {
   method: "POST",
@@ -137,14 +135,17 @@ function specStringToSign(canonicalRequest: string, region: string, service: str
 
 /** The signature AWS itself would compute for `canonicalRequest`. */
 function specSignature(canonicalRequest: string, region: string, service: string): string {
-  return hexHmac(specSigningKey(region, service), utf8(specStringToSign(canonicalRequest, region, service)));
+  return hexHmac(
+    specSigningKey(region, service),
+    utf8(specStringToSign(canonicalRequest, region, service)),
+  );
 }
 
 /** Pulls the `Signature=` field out of an `Authorization` header. */
 function signatureOf(authorization: string): string {
   const signature = authorization.split("Signature=")[1];
   expect(signature).toBeDefined();
-  return signature!;
+  return signature as NonNullable<typeof signature>;
 }
 
 // ---------------------------------------------------------------------------
@@ -159,28 +160,15 @@ describe("GOLDEN VECTOR 1 — sign() over a Bedrock Converse POST", () => {
    * the last canonical header, and the BLANK LINE that separates the header
    * block from the signed-header list.
    */
-  const CANONICAL_REQUEST =
-    "POST\n" +
-    "/model/test-model/converse\n" +
-    "\n" +
-    `host:${BEDROCK_HOST}\n` +
-    `x-amz-date:${AMZ_DATE}\n` +
-    "\n" +
-    "host;x-amz-date\n" +
-    BEDROCK_PAYLOAD_SHA256;
+  const CANONICAL_REQUEST = `POST\n/model/test-model/converse\n\nhost:${BEDROCK_HOST}\nx-amz-date:${AMZ_DATE}\n\nhost;x-amz-date\n${BEDROCK_PAYLOAD_SHA256}`;
 
   const CANONICAL_REQUEST_SHA256 =
     "c653759c4d070cc74876b2e59e03a74ee4b8b74ba2864992db3bb5660b2cfddc";
 
-  const STRING_TO_SIGN =
-    "AWS4-HMAC-SHA256\n" +
-    `${AMZ_DATE}\n` +
-    "20150830/us-east-1/bedrock/aws4_request\n" +
-    CANONICAL_REQUEST_SHA256;
+  const STRING_TO_SIGN = `AWS4-HMAC-SHA256\n${AMZ_DATE}\n20150830/us-east-1/bedrock/aws4_request\n${CANONICAL_REQUEST_SHA256}`;
 
   /** cert3-controlplane-libs.md §7.11, re-derived independently. */
-  const GOLDEN_SIGNATURE =
-    "ee11e0386b7d4282de4b9d27205cb9633a5f30dcde4a5013991445a3093e6803";
+  const GOLDEN_SIGNATURE = "ee11e0386b7d4282de4b9d27205cb9633a5f30dcde4a5013991445a3093e6803";
 
   test("the payload hash is the SHA-256 of the body, not the body", () => {
     expect(hexSha256(utf8(BEDROCK_BODY))).toBe(BEDROCK_PAYLOAD_SHA256);
@@ -204,10 +192,7 @@ describe("GOLDEN VECTOR 1 — sign() over a Bedrock Converse POST", () => {
 
   test("sign() produces the exact Authorization header, field for field", () => {
     expect(sign(bedrockRequest, CREDENTIALS).authorization).toBe(
-      "AWS4-HMAC-SHA256 " +
-        "Credential=AKIDEXAMPLE/20150830/us-east-1/bedrock/aws4_request, " +
-        "SignedHeaders=host;x-amz-date, " +
-        `Signature=${GOLDEN_SIGNATURE}`,
+      `AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/bedrock/aws4_request, SignedHeaders=host;x-amz-date, Signature=${GOLDEN_SIGNATURE}`,
     );
   });
 
@@ -237,29 +222,15 @@ describe("GOLDEN VECTOR 2 — signWithContentHashHeader() over the same request"
    * lowercase name (`host` < `x-amz-content-sha256` < `x-amz-date`) and the
    * signed-header list MUST list them in that same order.
    */
-  const CANONICAL_REQUEST =
-    "POST\n" +
-    "/model/test-model/converse\n" +
-    "\n" +
-    `host:${BEDROCK_HOST}\n` +
-    `x-amz-content-sha256:${BEDROCK_PAYLOAD_SHA256}\n` +
-    `x-amz-date:${AMZ_DATE}\n` +
-    "\n" +
-    "host;x-amz-content-sha256;x-amz-date\n" +
-    BEDROCK_PAYLOAD_SHA256;
+  const CANONICAL_REQUEST = `POST\n/model/test-model/converse\n\nhost:${BEDROCK_HOST}\nx-amz-content-sha256:${BEDROCK_PAYLOAD_SHA256}\nx-amz-date:${AMZ_DATE}\n\nhost;x-amz-content-sha256;x-amz-date\n${BEDROCK_PAYLOAD_SHA256}`;
 
   const CANONICAL_REQUEST_SHA256 =
     "2a698d80a6d646dd730b97071d10702bd97c1ed171aab9187db736457559d67f";
 
-  const STRING_TO_SIGN =
-    "AWS4-HMAC-SHA256\n" +
-    `${AMZ_DATE}\n` +
-    "20150830/us-east-1/bedrock/aws4_request\n" +
-    CANONICAL_REQUEST_SHA256;
+  const STRING_TO_SIGN = `AWS4-HMAC-SHA256\n${AMZ_DATE}\n20150830/us-east-1/bedrock/aws4_request\n${CANONICAL_REQUEST_SHA256}`;
 
   /** cert3-controlplane-libs.md §7.11, re-derived independently. */
-  const GOLDEN_SIGNATURE =
-    "398afec746a079f98e63bf0ead0a2c56e516490f56f0192c848c5a1ae7013c13";
+  const GOLDEN_SIGNATURE = "398afec746a079f98e63bf0ead0a2c56e516490f56f0192c848c5a1ae7013c13";
 
   test("the canonical request hashes to the pinned digest", () => {
     expect(hexSha256(utf8(CANONICAL_REQUEST))).toBe(CANONICAL_REQUEST_SHA256);
@@ -276,10 +247,7 @@ describe("GOLDEN VECTOR 2 — signWithContentHashHeader() over the same request"
   test("signWithContentHashHeader() produces the exact Authorization header", () => {
     const signed = signWithContentHashHeader(bedrockRequest, CREDENTIALS);
     expect(signed.authorization).toBe(
-      "AWS4-HMAC-SHA256 " +
-        "Credential=AKIDEXAMPLE/20150830/us-east-1/bedrock/aws4_request, " +
-        "SignedHeaders=host;x-amz-content-sha256;x-amz-date, " +
-        `Signature=${GOLDEN_SIGNATURE}`,
+      `AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/bedrock/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=${GOLDEN_SIGNATURE}`,
     );
     expect(signed.xAmzContentSha256).toBe(BEDROCK_PAYLOAD_SHA256);
   });
@@ -320,17 +288,9 @@ describe("GOLDEN VECTOR 3 — presignQuery() for an S3-compatible PUT", () => {
     "&X-Amz-SignedHeaders=host";
 
   /** A presigned request signs the literal `UNSIGNED-PAYLOAD`, not a digest. */
-  const CANONICAL_REQUEST =
-    "PUT\n" +
-    "/bucket/key\n" +
-    `${CANONICAL_QUERY}\n` +
-    "host:s3.example.com\n" +
-    "\n" +
-    "host\n" +
-    "UNSIGNED-PAYLOAD";
+  const CANONICAL_REQUEST = `PUT\n/bucket/key\n${CANONICAL_QUERY}\nhost:s3.example.com\n\nhost\nUNSIGNED-PAYLOAD`;
 
-  const GOLDEN_SIGNATURE =
-    "6751d6cb0aa4fb962fdb322beeb16da030ba004d4f92670a65d4bf5108d2c1b9";
+  const GOLDEN_SIGNATURE = "6751d6cb0aa4fb962fdb322beeb16da030ba004d4f92670a65d4bf5108d2c1b9";
 
   const presignRequest = {
     method: "PUT",
@@ -371,19 +331,9 @@ describe("GOLDEN VECTOR 4 — presignQueryBound() binds size and checksum", () =
     "&X-Amz-Expires=900" +
     "&X-Amz-SignedHeaders=content-length%3Bhost%3Bx-amz-content-sha256";
 
-  const CANONICAL_REQUEST =
-    "PUT\n" +
-    "/bucket/key\n" +
-    `${CANONICAL_QUERY}\n` +
-    "content-length:1024\n" +
-    "host:s3.example.com\n" +
-    `x-amz-content-sha256:${BEDROCK_PAYLOAD_SHA256}\n` +
-    "\n" +
-    "content-length;host;x-amz-content-sha256\n" +
-    "UNSIGNED-PAYLOAD";
+  const CANONICAL_REQUEST = `PUT\n/bucket/key\n${CANONICAL_QUERY}\ncontent-length:1024\nhost:s3.example.com\nx-amz-content-sha256:${BEDROCK_PAYLOAD_SHA256}\n\ncontent-length;host;x-amz-content-sha256\nUNSIGNED-PAYLOAD`;
 
-  const GOLDEN_SIGNATURE =
-    "3793b48f921ec59b3c0bbb1d07944db2a1c3e57c497cc6e9004a76af4bc10620";
+  const GOLDEN_SIGNATURE = "3793b48f921ec59b3c0bbb1d07944db2a1c3e57c497cc6e9004a76af4bc10620";
 
   const presignRequest = {
     method: "PUT",
@@ -421,9 +371,14 @@ describe("GOLDEN VECTOR 4 — presignQueryBound() binds size and checksum", () =
    * signing `content-length` fails HERE and not only at the bucket.
    */
   test("a different declared size yields a different signature", () => {
-    const other = presignQueryBound(presignRequest, CREDENTIALS, { ...payload, contentLength: 1025 });
+    const other = presignQueryBound(presignRequest, CREDENTIALS, {
+      ...payload,
+      contentLength: 1025,
+    });
     expect(other.query).not.toContain(GOLDEN_SIGNATURE);
-    expect(other.query).toContain("X-Amz-SignedHeaders=content-length%3Bhost%3Bx-amz-content-sha256");
+    expect(other.query).toContain(
+      "X-Amz-SignedHeaders=content-length%3Bhost%3Bx-amz-content-sha256",
+    );
   });
 });
 
@@ -472,18 +427,8 @@ describe("GOLDEN VECTOR 5 — path and query canonicalisation", () => {
       ["list-type", "2"],
       ["prefix", "a/b"],
     ]);
-    const CANONICAL_REQUEST =
-      "GET\n" +
-      "/bucket/a%20b\n" +
-      `${canonicalQuery}\n` +
-      "host:s3.example.com\n" +
-      `x-amz-content-sha256:${EMPTY_PAYLOAD_SHA256}\n` +
-      `x-amz-date:${AMZ_DATE}\n` +
-      "\n" +
-      "host;x-amz-content-sha256;x-amz-date\n" +
-      EMPTY_PAYLOAD_SHA256;
-    const GOLDEN_SIGNATURE =
-      "292efecef5c54fb96b2d357009c6c5777e9de566fe06769c25243202d9064804";
+    const CANONICAL_REQUEST = `GET\n/bucket/a%20b\n${canonicalQuery}\nhost:s3.example.com\nx-amz-content-sha256:${EMPTY_PAYLOAD_SHA256}\nx-amz-date:${AMZ_DATE}\n\nhost;x-amz-content-sha256;x-amz-date\n${EMPTY_PAYLOAD_SHA256}`;
+    const GOLDEN_SIGNATURE = "292efecef5c54fb96b2d357009c6c5777e9de566fe06769c25243202d9064804";
 
     expect(hexSha256(utf8(CANONICAL_REQUEST))).toBe(
       "ebb7aac9d12b6024ee6985ab07e04bdaeb60ae25ea95cb48c484f2950a0a5c6f",
@@ -533,7 +478,10 @@ describe("temporary credentials — Rust-faithful, and flagged", () => {
     "ee11e0386b7d4282de4b9d27205cb9633a5f30dcde4a5013991445a3093e6803";
 
   test("the session token is returned but NOT folded into the signature", () => {
-    const signed = sign(bedrockRequest, { ...CREDENTIALS, sessionToken: "temporary-session-token" });
+    const signed = sign(bedrockRequest, {
+      ...CREDENTIALS,
+      sessionToken: "temporary-session-token",
+    });
     expect(signed.xAmzSecurityToken).toBe("temporary-session-token");
     expect(signed.authorization).toContain("SignedHeaders=host;x-amz-date,");
     expect(signatureOf(signed.authorization)).toBe(GOLDEN_SIGNATURE_WITHOUT_TOKEN_SIGNED);

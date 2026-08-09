@@ -11,10 +11,7 @@ export function tenantDataNamespace(env: unknown): TenantDataNamespace {
   return namespace;
 }
 
-export function tenantDatabase(
-  namespace: TenantDataNamespace,
-  tenantId: string,
-): D1Database {
+export function tenantDatabase(namespace: TenantDataNamespace, tenantId: string): D1Database {
   return new DurableObjectD1Database(
     tenantId,
     namespace.get(namespace.idFromName(tenantId)),

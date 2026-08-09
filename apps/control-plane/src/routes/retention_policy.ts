@@ -8,8 +8,8 @@
 import {
   D1RetentionPolicyStore,
   RETENTION_RESOURCE_ASSET,
-  retentionPolicyId,
   type StoredRetentionPolicy,
+  retentionPolicyId,
 } from "@ferrogate/storage";
 import { z } from "zod";
 import { HttpError } from "../middleware/errors.js";
@@ -84,11 +84,17 @@ function assetTypeOf(c: Parameters<Handler>[0]): string {
 const getAssetRetentionPolicy: Handler = async (c) => {
   const tenantId = tenantIdOf(c);
   const assetType = assetTypeOf(c);
-  const policy = await (
-    await storeOf(c, tenantId)
-  ).getRetentionPolicy(tenantId, RETENTION_RESOURCE_ASSET, assetType);
+  const policy = await (await storeOf(c, tenantId)).getRetentionPolicy(
+    tenantId,
+    RETENTION_RESOURCE_ASSET,
+    assetType,
+  );
   if (policy === undefined) {
-    throw new HttpError(404, "not_found", `asset retention policy ${tenantId}:${assetType} not found`);
+    throw new HttpError(
+      404,
+      "not_found",
+      `asset retention policy ${tenantId}:${assetType} not found`,
+    );
   }
   return json(c, 200, { object: RETENTION_POLICY_OBJECT, retention_policy: wirePolicy(policy) });
 };
@@ -99,11 +105,7 @@ const putAssetRetentionPolicy: Handler = async (c) => {
   const body = await readJson(c, retentionPolicyMutationSchema);
   const store = await storeOf(c, tenantId);
   const nowUnix = Math.floor(Date.now() / 1000);
-  const existing = await store.getRetentionPolicy(
-    tenantId,
-    RETENTION_RESOURCE_ASSET,
-    assetType,
-  );
+  const existing = await store.getRetentionPolicy(tenantId, RETENTION_RESOURCE_ASSET, assetType);
   const policy: StoredRetentionPolicy = {
     id: retentionPolicyId(tenantId, RETENTION_RESOURCE_ASSET, assetType),
     tenantId,

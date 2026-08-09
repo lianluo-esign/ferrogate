@@ -37,7 +37,16 @@ describe("GET /admin/v1/observed-agent-activity", () => {
             "(id, workspace_id, tenant_id, project_id, name, key_prefix, key_hash, last4) " +
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(API_KEY, "workspace_activity", TENANT, "project_activity", "CLI key", "fg_", "hash", "0000"),
+        .bind(
+          API_KEY,
+          "workspace_activity",
+          TENANT,
+          "project_activity",
+          "CLI key",
+          "fg_",
+          "hash",
+          "0000",
+        ),
       db
         .prepare(
           "INSERT INTO request_logs " +

@@ -20,7 +20,7 @@
  *     effective security bar. One definition, surfaced from both packages, keeps
  *     the wire and the domain in lockstep and cannot drift.
  */
-import { z } from "zod";
+
 import {
   approvalPolicySchema,
   gatewayErrorSchema,
@@ -31,6 +31,7 @@ import {
   toolResultSchema,
   workspaceScopeSchema,
 } from "@ferrogate/core";
+import type { z } from "zod";
 
 import { errorEnvelopeSchema, scopeSchema } from "./wire";
 
@@ -145,9 +146,7 @@ export function registerWireSchema(name: string, schema: z.ZodTypeAny): void {
   const existing = wireSchemas[name];
   if (existing !== undefined && existing !== schema) {
     throw new Error(
-      `wire schema ${JSON.stringify(name)} is already registered with a different schema; ` +
-        "an operationId must map to exactly one body, or a route silently validates " +
-        "against the wrong one",
+      `wire schema ${JSON.stringify(name)} is already registered with a different schema; an operationId must map to exactly one body, or a route silently validates against the wrong one`,
     );
   }
   wireSchemas[name] = schema;

@@ -7,9 +7,9 @@ import {
   quotaPolicyId,
   saturatingAdd,
   sha256Hex,
+  siteDomainVerificationKey,
   storedAssetId,
   storedAssetVariantId,
-  siteDomainVerificationKey,
 } from "../src/index.js";
 
 describe("deterministic ids", () => {

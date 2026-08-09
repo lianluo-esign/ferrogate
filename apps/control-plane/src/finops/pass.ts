@@ -320,205 +320,205 @@ async function evaluateWindow(
       return store;
     };
 
-  // The policies are read FIRST, and the bucket query is then widened to the
-  // LONGEST baseline anyone configured. Reading them in parallel and slicing
-  // from the shipped default is what made `spend_anomaly_baseline_windows`
-  // inert: a scope that asked for 48 windows had only 24 fetched, so the knob
-  // could not have worked however the slice was written. `tuningFromRow` bounds
-  // the value, so this range is bounded too.
-  const policies = await readTenantPolicies(db);
-  const tunings = new Map<string, SpendAnomalyTuning>();
-  let widestBaseline = tuningFromRow(undefined).baselineWindows;
-  for (const [scopeId, row] of policies) {
-    const tuning = tuningFromRow(row);
-    tunings.set(scopeId, tuning);
-    widestBaseline = Math.max(widestBaseline, tuning.baselineWindows);
-  }
-  const baselineFrom = windowStartUnix - widestBaseline * windowSecs;
-
-  const [buckets, periodSpend] = await Promise.all([
-    readSpendBuckets(db, baselineFrom, windowEnd, windowSecs),
-    readPeriodSpend(db, period.startUnix, windowEnd),
-  ]);
-
-  // Index the buckets by tenant. A tenant appears here iff it produced at least
-  // one PRICED request in the lookback — which is also the definition of "has
-  // a baseline at all", so the set of scopes to evaluate falls out of the data
-  // rather than out of a tenant registry that would include tenants with no
-  // traffic and give them an all-zero baseline.
-  const observedBucket = Math.floor(windowStartUnix / windowSecs);
-  const series = new Map<string, Map<number, number>>();
-  for (const row of buckets) {
-    const byBucket = series.get(row.tenant) ?? new Map<number, number>();
-    byBucket.set(row.bucket, row.cost_usd ?? 0);
-    series.set(row.tenant, byBucket);
-  }
-  const periodByTenant = new Map(periodSpend.map((row) => [row.tenant, row.cost_usd ?? 0]));
-
-  const evaluations: ScopeEvaluation[] = [];
-  for (const [scopeId, byBucket] of series) {
-    const policy = policies.get(scopeId);
-    const tuning = tunings.get(scopeId) ?? tuningFromRow(undefined);
-    const budgetUsd = budgetFromRow(policy);
-    const observedUsd = byBucket.get(observedBucket) ?? 0;
-
-    // The baseline, oldest first. A bucket with no row is a window in which the
-    // tenant spent nothing; it is present as ZERO only from the tenant's FIRST
-    // observed bucket onward, because windows before a tenant existed are not
-    // observations of that tenant and counting them would let a two-hour-old
-    // tenant clear a twelve-window baseline gate with ten fabricated zeroes.
-    const firstBucket = Math.min(...byBucket.keys());
-    const baseline: number[] = [];
-    // `tuning.baselineWindows`, which is the scope's OWN configured width — the
-    // audited defect was slicing from the shipped default here, so an operator
-    // who set 4 was compared against 24 and the episode reported `24` back at
-    // them.
-    for (
-      let bucket = observedBucket - tuning.baselineWindows;
-      bucket < observedBucket;
-      bucket += 1
-    ) {
-      if (bucket < firstBucket) continue;
-      baseline.push(byBucket.get(bucket) ?? 0);
+    // The policies are read FIRST, and the bucket query is then widened to the
+    // LONGEST baseline anyone configured. Reading them in parallel and slicing
+    // from the shipped default is what made `spend_anomaly_baseline_windows`
+    // inert: a scope that asked for 48 windows had only 24 fetched, so the knob
+    // could not have worked however the slice was written. `tuningFromRow` bounds
+    // the value, so this range is bounded too.
+    const policies = await readTenantPolicies(db);
+    const tunings = new Map<string, SpendAnomalyTuning>();
+    let widestBaseline = tuningFromRow(undefined).baselineWindows;
+    for (const [scopeId, row] of policies) {
+      const tuning = tuningFromRow(row);
+      tunings.set(scopeId, tuning);
+      widestBaseline = Math.max(widestBaseline, tuning.baselineWindows);
     }
+    const baselineFrom = windowStartUnix - widestBaseline * windowSecs;
 
-    const periodSpendUsd = periodByTenant.get(scopeId) ?? observedUsd;
-    const input = {
-      scopeType: "tenant" as const,
-      scopeId,
-      windowStartUnix,
-      observedUsd,
-      // The width the sum above was taken over — the SAME number written to
-      // `spend_anomaly_episodes.window_secs` a few lines below.
-      observedWindowSecs: windowSecs,
-      baseline,
-      periodSpendUsd,
-      budgetUsd,
-      periodRemainingSecs: Math.max(period.endUnix - windowEnd, 0),
-      tuning,
-    };
-    evaluations.push({
-      scopeId,
-      tuning,
-      burn: evaluateBurnRate(input),
-      forecast: evaluateForecast(input),
-      budgetUsd,
-      periodSpendUsd,
-    });
-  }
+    const [buckets, periodSpend] = await Promise.all([
+      readSpendBuckets(db, baselineFrom, windowEnd, windowSecs),
+      readPeriodSpend(db, period.startUnix, windowEnd),
+    ]);
 
-  const delivery = spendAlertDeliveryFrom(env);
-  let opened = 0;
-  let notified = 0;
-  let deliveryFailed = 0;
-  let throttled = 0;
-  let resolved = 0;
+    // Index the buckets by tenant. A tenant appears here iff it produced at least
+    // one PRICED request in the lookback — which is also the definition of "has
+    // a baseline at all", so the set of scopes to evaluate falls out of the data
+    // rather than out of a tenant registry that would include tenants with no
+    // traffic and give them an all-zero baseline.
+    const observedBucket = Math.floor(windowStartUnix / windowSecs);
+    const series = new Map<string, Map<number, number>>();
+    for (const row of buckets) {
+      const byBucket = series.get(row.tenant) ?? new Map<number, number>();
+      byBucket.set(row.bucket, row.cost_usd ?? 0);
+      series.set(row.tenant, byBucket);
+    }
+    const periodByTenant = new Map(periodSpend.map((row) => [row.tenant, row.cost_usd ?? 0]));
 
-  for (const evaluation of evaluations) {
-    for (const signal of ["burn_rate_spike", "forecast_overrun"] as const) {
-      const detected =
-        signal === "burn_rate_spike"
-          ? evaluation.burn.outcome === "detected"
-          : evaluation.forecast.outcome === "detected";
+    const evaluations: ScopeEvaluation[] = [];
+    for (const [scopeId, byBucket] of series) {
+      const policy = policies.get(scopeId);
+      const tuning = tunings.get(scopeId) ?? tuningFromRow(undefined);
+      const budgetUsd = budgetFromRow(policy);
+      const observedUsd = byBucket.get(observedBucket) ?? 0;
 
-      if (!detected) {
-        // The episode closes on the first window that does NOT detect. Closing
-        // here rather than on a timeout is what makes `windows_seen` mean
-        // "consecutive windows this was true for" instead of "windows since it
-        // was first true", which are different numbers during a flapping
-        // incident and only the first is actionable.
-        const episodeStore = await episodeStoreFor(evaluation.scopeId);
-        const closed = await closeEpisode(
-          episodeStore.authoritative,
-          evaluation.scopeId,
-          signal,
-          now,
-        );
-        if (closed !== null) {
-          await projectEpisode(episodeStore, closed.id);
-          resolved += 1;
-        }
-        continue;
+      // The baseline, oldest first. A bucket with no row is a window in which the
+      // tenant spent nothing; it is present as ZERO only from the tenant's FIRST
+      // observed bucket onward, because windows before a tenant existed are not
+      // observations of that tenant and counting them would let a two-hour-old
+      // tenant clear a twelve-window baseline gate with ten fabricated zeroes.
+      const firstBucket = Math.min(...byBucket.keys());
+      const baseline: number[] = [];
+      // `tuning.baselineWindows`, which is the scope's OWN configured width — the
+      // audited defect was slicing from the shipped default here, so an operator
+      // who set 4 was compared against 24 and the episode reported `24` back at
+      // them.
+      for (
+        let bucket = observedBucket - tuning.baselineWindows;
+        bucket < observedBucket;
+        bucket += 1
+      ) {
+        if (bucket < firstBucket) continue;
+        baseline.push(byBucket.get(bucket) ?? 0);
       }
 
-      const episodeStore = await episodeStoreFor(evaluation.scopeId);
-      const outcome = await upsertEpisode(episodeStore.authoritative, {
-        scopeId: evaluation.scopeId,
-        signal,
+      const periodSpendUsd = periodByTenant.get(scopeId) ?? observedUsd;
+      const input = {
+        scopeType: "tenant" as const,
+        scopeId,
         windowStartUnix,
-        windowSecs,
-        now,
-        periodMonth,
-        evaluation,
+        observedUsd,
+        // The width the sum above was taken over — the SAME number written to
+        // `spend_anomaly_episodes.window_secs` a few lines below.
+        observedWindowSecs: windowSecs,
+        baseline,
+        periodSpendUsd,
+        budgetUsd,
+        periodRemainingSecs: Math.max(period.endUnix - windowEnd, 0),
+        tuning,
+      };
+      evaluations.push({
+        scopeId,
+        tuning,
+        burn: evaluateBurnRate(input),
+        forecast: evaluateForecast(input),
+        budgetUsd,
+        periodSpendUsd,
       });
-      await projectEpisode(episodeStore, outcome.episodeId);
-      if (outcome.opened) opened += 1;
+    }
 
-      // AUTO-THROTTLE, before the notification: an operator reading the alert
-      // should already be able to see that the brake was applied, and the
-      // payload carries `auto_throttled_rpm` to say so. It fires only on a
-      // CRITICAL episode and only when the scope configured an RPM — this is
-      // the one leg that changes what the gateway does to live traffic.
-      let throttledRpm: number | null = null;
-      const rpm = evaluation.tuning.autoThrottleRpm;
-      if (rpm !== undefined && outcome.severity === "critical" && outcome.shouldNotify) {
-        throttledRpm = await applyThrottle(db, {
+    const delivery = spendAlertDeliveryFrom(env);
+    let opened = 0;
+    let notified = 0;
+    let deliveryFailed = 0;
+    let throttled = 0;
+    let resolved = 0;
+
+    for (const evaluation of evaluations) {
+      for (const signal of ["burn_rate_spike", "forecast_overrun"] as const) {
+        const detected =
+          signal === "burn_rate_spike"
+            ? evaluation.burn.outcome === "detected"
+            : evaluation.forecast.outcome === "detected";
+
+        if (!detected) {
+          // The episode closes on the first window that does NOT detect. Closing
+          // here rather than on a timeout is what makes `windows_seen` mean
+          // "consecutive windows this was true for" instead of "windows since it
+          // was first true", which are different numbers during a flapping
+          // incident and only the first is actionable.
+          const episodeStore = await episodeStoreFor(evaluation.scopeId);
+          const closed = await closeEpisode(
+            episodeStore.authoritative,
+            evaluation.scopeId,
+            signal,
+            now,
+          );
+          if (closed !== null) {
+            await projectEpisode(episodeStore, closed.id);
+            resolved += 1;
+          }
+          continue;
+        }
+
+        const episodeStore = await episodeStoreFor(evaluation.scopeId);
+        const outcome = await upsertEpisode(episodeStore.authoritative, {
           scopeId: evaluation.scopeId,
-          rpm,
-          ttlSecs: evaluation.tuning.throttleTtlSecs,
+          signal,
+          windowStartUnix,
+          windowSecs,
+          now,
+          periodMonth,
+          evaluation,
+        });
+        await projectEpisode(episodeStore, outcome.episodeId);
+        if (outcome.opened) opened += 1;
+
+        // AUTO-THROTTLE, before the notification: an operator reading the alert
+        // should already be able to see that the brake was applied, and the
+        // payload carries `auto_throttled_rpm` to say so. It fires only on a
+        // CRITICAL episode and only when the scope configured an RPM — this is
+        // the one leg that changes what the gateway does to live traffic.
+        let throttledRpm: number | null = null;
+        const rpm = evaluation.tuning.autoThrottleRpm;
+        if (rpm !== undefined && outcome.severity === "critical" && outcome.shouldNotify) {
+          throttledRpm = await applyThrottle(db, {
+            scopeId: evaluation.scopeId,
+            rpm,
+            ttlSecs: evaluation.tuning.throttleTtlSecs,
+            episodeId: outcome.episodeId,
+            signal,
+            now,
+          });
+          if (throttledRpm !== null) throttled += 1;
+        }
+
+        if (!outcome.shouldNotify) continue;
+        if (delivery === undefined) continue;
+
+        const payload = payloadFor({
           episodeId: outcome.episodeId,
           signal,
+          severity: outcome.severity,
+          reason: outcome.reason,
+          scopeId: evaluation.scopeId,
+          windowStartUnix,
+          windowSecs,
+          windowsSeen: outcome.windowsSeen,
+          evaluation,
+          periodMonth,
+          throttledRpm,
           now,
         });
-        if (throttledRpm !== null) throttled += 1;
-      }
-
-      if (!outcome.shouldNotify) continue;
-      if (delivery === undefined) continue;
-
-      const payload = payloadFor({
-        episodeId: outcome.episodeId,
-        signal,
-        severity: outcome.severity,
-        reason: outcome.reason,
-        scopeId: evaluation.scopeId,
-        windowStartUnix,
-        windowSecs,
-        windowsSeen: outcome.windowsSeen,
-        evaluation,
-        periodMonth,
-        throttledRpm,
-        now,
-      });
-      try {
-        await dispatchSpendAnomalyAlert({
-          delivery,
-          payload,
-          ...(fetchImpl === undefined ? {} : { fetchImpl }),
-        });
-        await episodeStore.authoritative
-          .prepare(
-            `UPDATE ${SPEND_ANOMALY_EPISODE_TABLE}
+        try {
+          await dispatchSpendAnomalyAlert({
+            delivery,
+            payload,
+            ...(fetchImpl === undefined ? {} : { fetchImpl }),
+          });
+          await episodeStore.authoritative
+            .prepare(
+              `UPDATE ${SPEND_ANOMALY_EPISODE_TABLE}
                 SET notified_count = notified_count + 1, last_notified_unix = ?
               WHERE id = ?`,
-          )
-          .bind(now, outcome.episodeId)
-          .run();
-        await projectEpisode(episodeStore, outcome.episodeId);
-        notified += 1;
-      } catch (error) {
-        // NOT retried and the counter is NOT bumped: an episode whose
-        // `notified_count` stays 0 is exactly how an operator finds the alerts
-        // their receiver dropped. See `./notify.ts` on why the next window is
-        // the retry.
-        deliveryFailed += 1;
-        console.warn(
-          "control-plane: spend anomaly alert delivery failed",
-          error instanceof Error ? error.name : "",
-        );
+            )
+            .bind(now, outcome.episodeId)
+            .run();
+          await projectEpisode(episodeStore, outcome.episodeId);
+          notified += 1;
+        } catch (error) {
+          // NOT retried and the counter is NOT bumped: an episode whose
+          // `notified_count` stays 0 is exactly how an operator finds the alerts
+          // their receiver dropped. See `./notify.ts` on why the next window is
+          // the retry.
+          deliveryFailed += 1;
+          console.warn(
+            "control-plane: spend anomaly alert delivery failed",
+            error instanceof Error ? error.name : "",
+          );
+        }
       }
     }
-  }
 
     const completed = await db
       .prepare(
@@ -571,7 +571,7 @@ async function readTenantPolicies(db: D1Database): Promise<Map<string, Record<st
         WHERE scope_type = 'tenant'`,
     )
     .all<Record<string, unknown>>();
-  return new Map(rows.results.map((row) => [String(row["scope_id"]), row]));
+  return new Map(rows.results.map((row) => [String(row.scope_id), row]));
 }
 
 async function readEpisode(db: D1Database, id: string): Promise<EpisodeProjectionRow | null> {

@@ -131,8 +131,7 @@ export class SseParser {
       if (char === CR && index === this.#buffer.length - 1 && !final) {
         break;
       }
-      const terminatorLength =
-        char === CR && this.#buffer[index + 1] === LF ? 2 : 1;
+      const terminatorLength = char === CR && this.#buffer[index + 1] === LF ? 2 : 1;
       const line = this.#buffer.slice(0, index);
       const terminator = this.#buffer.slice(index, index + terminatorLength);
       this.#buffer = this.#buffer.slice(index + terminatorLength);
@@ -180,7 +179,8 @@ export class SseParser {
         this.#partial.event = value;
         break;
       case "data":
-        (this.#partial.data ??= []).push(value);
+        this.#partial.data ??= [];
+        this.#partial.data.push(value);
         break;
       case "id":
         // Per spec an id containing U+0000 is ignored.
@@ -289,10 +289,7 @@ export function doneSseFrame(): SseFrame {
  * `event:`, then `id:`/`retry:`, then one `data:` line per line of the payload,
  * then the blank line. Multi-line data therefore round-trips exactly.
  */
-export function serializeSseFrame(
-  frame: SseFrame,
-  options: SseSerializeOptions = {},
-): string {
+export function serializeSseFrame(frame: SseFrame, options: SseSerializeOptions = {}): string {
   const preferRaw = options.preferRaw ?? true;
   if (preferRaw && frame.raw.length > 0) {
     return frame.raw;
@@ -386,9 +383,7 @@ export function parseSse(body: Uint8Array | ArrayBuffer | string): SseFrame[] {
   const text =
     typeof body === "string"
       ? body
-      : new TextDecoder("utf-8").decode(
-          body instanceof Uint8Array ? body : new Uint8Array(body),
-        );
+      : new TextDecoder("utf-8").decode(body instanceof Uint8Array ? body : new Uint8Array(body));
   const parser = new SseParser();
   return [...parser.push(text), ...parser.flush()];
 }
@@ -398,9 +393,7 @@ export function parseSse(body: Uint8Array | ArrayBuffer | string): SseFrame[] {
  * caller hand one object to `body.pipeThrough(...)` while the implementation
  * stays a pipeline of small, individually testable transforms.
  */
-export function composeTransforms<A, B>(
-  first: TransformStream<A, B>,
-): TransformStream<A, B>;
+export function composeTransforms<A, B>(first: TransformStream<A, B>): TransformStream<A, B>;
 export function composeTransforms<A, B, C>(
   first: TransformStream<A, B>,
   second: TransformStream<B, C>,
@@ -425,10 +418,7 @@ export function composeTransforms(
     }
     readable = readable.pipeThrough(stage);
   }
-  return { writable: first.writable, readable } as TransformStream<
-    unknown,
-    unknown
-  >;
+  return { writable: first.writable, readable } as TransformStream<unknown, unknown>;
 }
 
 /** Wrap a frame->frame transform as a byte->byte transform. */
@@ -436,11 +426,7 @@ export function bytesThroughFrames(
   frames: TransformStream<SseFrame, SseFrame>,
   options?: SseSerializeOptions,
 ): TransformStream<Uint8Array, Uint8Array> {
-  return composeTransforms(
-    sseParseStream(),
-    frames,
-    sseSerializeStream(options),
-  );
+  return composeTransforms(sseParseStream(), frames, sseSerializeStream(options));
 }
 
 /** Build a `ReadableStream<Uint8Array>` from literal chunks (test fixtures). */
@@ -482,9 +468,7 @@ export async function readAllText(stream: ReadableStream<Uint8Array>): Promise<s
 }
 
 /** Drain a frame stream to an array (test helper). */
-export async function readAllFrames(
-  stream: ReadableStream<SseFrame>,
-): Promise<SseFrame[]> {
+export async function readAllFrames(stream: ReadableStream<SseFrame>): Promise<SseFrame[]> {
   const frames: SseFrame[] = [];
   const reader = stream.getReader();
   try {

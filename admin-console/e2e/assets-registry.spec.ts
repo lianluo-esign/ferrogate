@@ -44,9 +44,7 @@ function isGatewayRequest(request: Request, method: string, pathname: string): b
  * `cell` role that a compact surface would never have).
  */
 function registryRecord(page: Page, name: string) {
-  return page
-    .locator("tr, [data-compact-records] > article")
-    .filter({ hasText: name });
+  return page.locator("tr, [data-compact-records] > article").filter({ hasText: name });
 }
 
 /** The detail dialog, anchored on copy unique to it (never the confirm dialogs). */
@@ -112,9 +110,7 @@ test("upload drives the presigned intent -> direct PUT -> commit flow with progr
   // Scoped to the announced role="status" node: the disabled submit button
   // legitimately mirrors the same phase label as its busy state, so an
   // unscoped text match resolves to two correct nodes.
-  await expect(
-    page.getByRole("status").filter({ hasText: "Uploading to storage" }),
-  ).toBeVisible();
+  await expect(page.getByRole("status").filter({ hasText: "Uploading to storage" })).toBeVisible();
   await expect(page.getByRole("progressbar")).toBeVisible();
 
   // 3) Commit re-declares the intent's upload_id + verified size.
@@ -153,9 +149,7 @@ test("promotion moves a channel pointer to a version and repoints on refetch", a
   await expect(page.getByText("Channel pointer saved")).toBeVisible();
   // The refetched manifest repoints stable 1.5.0 -> 2.0.0 in the channels table.
   const channelsTable = detail.getByRole("table").nth(0);
-  await expect(channelsTable.getByRole("row").filter({ hasText: "stable" })).toContainText(
-    "2.0.0",
-  );
+  await expect(channelsTable.getByRole("row").filter({ hasText: "stable" })).toContainText("2.0.0");
 
   await attachViewportScreenshot(page, testInfo, "assets-promotion");
 });
@@ -189,9 +183,9 @@ test("yank marks a version yanked via the consequence-confirm dialog", async ({
 
   await expect(page.getByText("Version yanked")).toBeVisible();
   // The refetched manifest flips 1.2.0's state badge to Yanked.
-  await expect(
-    versionsTable.getByRole("row").filter({ hasText: "1.2.0" }).first(),
-  ).toContainText("Yanked");
+  await expect(versionsTable.getByRole("row").filter({ hasText: "1.2.0" }).first()).toContainText(
+    "Yanked",
+  );
 
   await attachViewportScreenshot(page, testInfo, "assets-yank");
 });
@@ -209,9 +203,7 @@ test("download issues a presigned GET for the exact version", async ({ page }, t
   // purge on the same path — asserted by method) and selects the variant with
   // the `platform` query parameter the contract documents.
   const [request] = await Promise.all([
-    page.waitForRequest((r) =>
-      isGatewayRequest(r, "GET", "/v1/assets/cli_tool/deploy-cli/2.0.0"),
-    ),
+    page.waitForRequest((r) => isGatewayRequest(r, "GET", "/v1/assets/cli_tool/deploy-cli/2.0.0")),
     arm64Row.getByRole("button", { name: "Download" }).click(),
   ]);
   expect(request.method()).toBe("GET");
@@ -276,58 +268,56 @@ test.describe("channel-blocked delete", () => {
   // tolerate exactly that so the on-screen verdict (not a silent failure) is
   // what is under test.
   test.use({
-    expectedConsoleErrors: [
-      /Failed to load resource: the server responded with a status of 409/,
-    ],
+    expectedConsoleErrors: [/Failed to load resource: the server responded with a status of 409/],
   });
 
   test("permanent delete names the channel blocker and keeps the 409 verdict on screen", async ({
     page,
   }, testInfo) => {
-  // #367: removing the last resolvable variant of a channel-referenced version
-  // is rejected with 409 asset_version_referenced, and the mock now models
-  // that. `stable` points at 1.5.0, whose only variant is the default one.
-  await installGatewayAssets(page);
-  await openDeployCliDetail(page);
-  const detail = detailDialog(page);
-  const versionsTable = detail.getByRole("table").nth(1);
-  const targetRow = versionsTable.getByRole("row").filter({ hasText: "1.5.0" }).first();
+    // #367: removing the last resolvable variant of a channel-referenced version
+    // is rejected with 409 asset_version_referenced, and the mock now models
+    // that. `stable` points at 1.5.0, whose only variant is the default one.
+    await installGatewayAssets(page);
+    await openDeployCliDetail(page);
+    const detail = detailDialog(page);
+    const versionsTable = detail.getByRole("table").nth(1);
+    const targetRow = versionsTable.getByRole("row").filter({ hasText: "1.5.0" }).first();
 
-  await targetRow.getByRole("button", { name: "Delete permanently" }).click();
-  const deleteDialog = page
-    .getByRole("dialog")
-    .filter({ hasText: "Permanently delete deploy-cli@1.5.0?" });
+    await targetRow.getByRole("button", { name: "Delete permanently" }).click();
+    const deleteDialog = page
+      .getByRole("dialog")
+      .filter({ hasText: "Permanently delete deploy-cli@1.5.0?" });
 
-  // The blocker is named BEFORE anything destructive fires.
-  const blocker = deleteDialog.getByRole("alert").first();
-  await expect(blocker).toContainText("stable");
-  await expect(blocker).toContainText("asset_version_referenced");
+    // The blocker is named BEFORE anything destructive fires.
+    const blocker = deleteDialog.getByRole("alert").first();
+    await expect(blocker).toContainText("stable");
+    await expect(blocker).toContainText("asset_version_referenced");
 
-  // Proceeding surfaces the gateway's verdict IN the dialog, verbatim — not as
-  // a toast that fades before the operator can read the remedy.
-  await deleteDialog.locator("#asset-delete-confirm").fill("deploy-cli@1.5.0");
-  await Promise.all([
-    page.waitForRequest((r) =>
-      isGatewayRequest(r, "DELETE", "/v1/assets/cli_tool/deploy-cli/1.5.0"),
-    ),
-    deleteDialog.getByRole("button", { name: "Delete permanently" }).click(),
-  ]);
-  await expect(deleteDialog).toContainText("move or delete the channel first");
-  // Still on screen, and the version was NOT removed from the table. While the
-  // modal confirm is open Radix aria-hides the detail dialog underneath it, so
-  // role-based queries cannot see the versions table even though it is still
-  // rendered on screen — assert through the DOM (CSS) instead.
-  await expect(deleteDialog).toBeVisible();
-  const backgroundVersionsTable = page
-    .locator('[role="dialog"]')
-    .filter({ hasText: "Registry manifest" })
-    .locator("table")
-    .nth(1);
-  await expect(
-    backgroundVersionsTable.locator("tr").filter({ hasText: "1.5.0" }).first(),
-  ).toBeVisible();
+    // Proceeding surfaces the gateway's verdict IN the dialog, verbatim — not as
+    // a toast that fades before the operator can read the remedy.
+    await deleteDialog.locator("#asset-delete-confirm").fill("deploy-cli@1.5.0");
+    await Promise.all([
+      page.waitForRequest((r) =>
+        isGatewayRequest(r, "DELETE", "/v1/assets/cli_tool/deploy-cli/1.5.0"),
+      ),
+      deleteDialog.getByRole("button", { name: "Delete permanently" }).click(),
+    ]);
+    await expect(deleteDialog).toContainText("move or delete the channel first");
+    // Still on screen, and the version was NOT removed from the table. While the
+    // modal confirm is open Radix aria-hides the detail dialog underneath it, so
+    // role-based queries cannot see the versions table even though it is still
+    // rendered on screen — assert through the DOM (CSS) instead.
+    await expect(deleteDialog).toBeVisible();
+    const backgroundVersionsTable = page
+      .locator('[role="dialog"]')
+      .filter({ hasText: "Registry manifest" })
+      .locator("table")
+      .nth(1);
+    await expect(
+      backgroundVersionsTable.locator("tr").filter({ hasText: "1.5.0" }).first(),
+    ).toBeVisible();
 
-  await attachViewportScreenshot(page, testInfo, "assets-delete-blocked");
+    await attachViewportScreenshot(page, testInfo, "assets-delete-blocked");
   });
 });
 
@@ -349,20 +339,12 @@ test("cancelling a large-object upload stops it and never reads as published", a
   });
 
   const abortPromise = page.waitForRequest((request) =>
-    isGatewayRequest(
-      request,
-      "POST",
-      "/v1/assets/presign/abort/cli_tool/cancelled-bundle/4.0.0",
-    ),
+    isGatewayRequest(request, "POST", "/v1/assets/presign/abort/cli_tool/cancelled-bundle/4.0.0"),
   );
   let commitSeen = false;
   page.on("request", (request) => {
     if (
-      isGatewayRequest(
-        request,
-        "POST",
-        "/v1/assets/presign/commit/cli_tool/cancelled-bundle/4.0.0",
-      )
+      isGatewayRequest(request, "POST", "/v1/assets/presign/commit/cli_tool/cancelled-bundle/4.0.0")
     ) {
       commitSeen = true;
     }
@@ -371,9 +353,7 @@ test("cancelling a large-object upload stops it and never reads as published", a
   await dialog.getByRole("button", { name: "Upload large object" }).click();
   // role="status" scope for the same reason as the upload case above: the
   // disabled submit button mirrors the phase label as its busy state.
-  await expect(
-    page.getByRole("status").filter({ hasText: "Uploading to storage" }),
-  ).toBeVisible();
+  await expect(page.getByRole("status").filter({ hasText: "Uploading to storage" })).toBeVisible();
 
   // Cancel is a REAL, enabled action mid-flight, not a greyed-out placeholder.
   const cancel = dialog.getByRole("button", { name: "Cancel upload" });
@@ -444,8 +424,10 @@ test("mobile viewport renders the registry and a lifecycle action without clippi
   const box = await downloadButton.boundingBox();
   const viewport = page.viewportSize();
   expect(box).not.toBeNull();
-  expect(box!.x).toBeGreaterThanOrEqual(0);
-  expect(box!.x + box!.width).toBeLessThanOrEqual((viewport?.width ?? 0) + 1);
+  expect((box as NonNullable<typeof box>).x).toBeGreaterThanOrEqual(0);
+  expect(
+    (box as NonNullable<typeof box>).x + (box as NonNullable<typeof box>).width,
+  ).toBeLessThanOrEqual((viewport?.width ?? 0) + 1);
 
   await attachViewportScreenshot(page, testInfo, "assets-mobile");
 });
@@ -454,9 +436,7 @@ test.describe("partial errors", () => {
   // The forced 503 makes Chromium log a resource-load console error; tolerate it
   // so the partial-failure surface (not a blanked page) is what is under test.
   test.use({
-    expectedConsoleErrors: [
-      /Failed to load resource: the server responded with a status of 503/,
-    ],
+    expectedConsoleErrors: [/Failed to load resource: the server responded with a status of 503/],
   });
 
   test("a failed storage-summary section stays a partial error and never blanks the registry", async ({
@@ -466,7 +446,9 @@ test.describe("partial errors", () => {
     await page.goto("/app/assets");
 
     // The failed section surfaces its own inline alert ...
-    const storageAlert = page.getByRole("alert").filter({ hasText: "Failed to load storage usage" });
+    const storageAlert = page
+      .getByRole("alert")
+      .filter({ hasText: "Failed to load storage usage" });
     await expect(storageAlert).toBeVisible();
 
     // ... while the healthy registry list stays fully populated (page not blanked).

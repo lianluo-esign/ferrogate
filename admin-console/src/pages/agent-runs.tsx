@@ -1,3 +1,34 @@
+import {
+  formatUnix,
+  runStatusBadgeVariant,
+  tenantLabel,
+  tenantMatches,
+} from "@/components/agent-ops/agent-ops-primitives";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { useAuth } from "@/hooks/use-auth";
+import { useI18n } from "@/i18n";
+import type { TranslationKey } from "@/i18n";
+import { type AdminSchema, adminGet } from "@/lib/gateway-client";
+import { useQuery } from "@tanstack/react-query";
 // Agent runs list (issue #317): correlation-first view over
 // GET /admin/v1/agent-runs. The contract only paginates (offset/limit — see
 // listAdminAgentRuns in api-types.generated.ts), so the status and tenant
@@ -25,38 +56,7 @@
 //   * the evidence behind the derived status is inspectable per row, so the
 //     operator can always see WHY a row reads running.
 import { Fragment, useCallback, useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router-dom";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import {
-  formatUnix,
-  runStatusBadgeVariant,
-  tenantLabel,
-  tenantMatches,
-} from "@/components/agent-ops/agent-ops-primitives";
-import { useAuth } from "@/hooks/use-auth";
-import { useI18n } from "@/i18n";
-import type { TranslationKey } from "@/i18n";
-import { adminGet, type AdminSchema } from "@/lib/gateway-client";
 
 export type AgentRunSummary = AdminSchema<"AgentRunSummary">;
 export type ObservedAgentActivity = AdminSchema<"AdminObservedAgentActivity">;
@@ -83,7 +83,7 @@ const STATUS_OPTIONS: { labelKey: TranslationKey; value: string }[] = [
 export default function AgentRunsPage() {
   const { session } = useAuth();
   const { t } = useI18n();
-  const apiKey = session!.gatewayApiKey;
+  const apiKey = (session as NonNullable<typeof session>).gatewayApiKey;
 
   const [offset, setOffset] = useState(0);
   // #342: the operational filters live in the URL query so a filtered view is
@@ -100,8 +100,7 @@ export default function AgentRunsPage() {
   const tenantFilter = searchParams.get("tenant") ?? "";
   // Which tab is open also lives in the URL (?view=unattributed) so a triage
   // view is shareable, with the default (`runs`) encoded as an absent param.
-  const view =
-    searchParams.get("view") === UNATTRIBUTED_VIEW ? UNATTRIBUTED_VIEW : RUNS_VIEW;
+  const view = searchParams.get("view") === UNATTRIBUTED_VIEW ? UNATTRIBUTED_VIEW : RUNS_VIEW;
 
   const setParam = useCallback(
     (key: string, value: string, defaultValue: string) => {
@@ -145,15 +144,10 @@ export default function AgentRunsPage() {
     <div className="flex flex-col gap-4">
       <div>
         <h1 className="text-lg font-semibold">{t("page.agentRuns.title")}</h1>
-        <p className="text-sm text-muted-foreground">
-          {t("page.agentRuns.description")}
-        </p>
+        <p className="text-sm text-muted-foreground">{t("page.agentRuns.description")}</p>
       </div>
 
-      <Tabs
-        value={view}
-        onValueChange={(next) => setParam("view", next, RUNS_VIEW)}
-      >
+      <Tabs value={view} onValueChange={(next) => setParam("view", next, RUNS_VIEW)}>
         <TabsList>
           <TabsTrigger value={RUNS_VIEW}>{t("page.agentRuns.tab.runs")}</TabsTrigger>
           <TabsTrigger value={UNATTRIBUTED_VIEW}>
@@ -194,7 +188,10 @@ export default function AgentRunsPage() {
           </div>
 
           {error && (
-            <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+            <p
+              role="alert"
+              className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+            >
               {t("page.agentRuns.loadError", { message: error.message })}
             </p>
           )}
@@ -209,7 +206,9 @@ export default function AgentRunsPage() {
                   <TableHead className="text-right">{t("page.agentRuns.col.requests")}</TableHead>
                   <TableHead className="text-right">{t("page.agentRuns.col.billing")}</TableHead>
                   <TableHead className="text-right">{t("page.agentRuns.col.audit")}</TableHead>
-                  <TableHead className="text-right">{t("page.agentRuns.col.agentEvents")}</TableHead>
+                  <TableHead className="text-right">
+                    {t("page.agentRuns.col.agentEvents")}
+                  </TableHead>
                   <TableHead>{t("page.agentRuns.col.firstSeen")}</TableHead>
                   <TableHead>{t("page.agentRuns.col.lastSeen")}</TableHead>
                 </TableRow>
@@ -342,13 +341,17 @@ function UnattributedActivityView({ apiKey }: { apiKey: string }) {
       </p>
 
       {error && (
-        <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <p
+          role="alert"
+          className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+        >
           {t("page.agentRuns.unattributed.loadError", { message: error.message })}
         </p>
       )}
 
       {presenceDegraded && (
         <p
+          // biome-ignore lint/a11y/useSemanticElements: ARIA live region for the presence-degraded banner; keeping the block <p> preserves layout that <output>'s inline default would change
           role="status"
           className="rounded-md border border-amber-500/50 bg-amber-500/10 px-3 py-2 text-sm"
         >
@@ -472,9 +475,7 @@ function UnattributedActivityView({ apiKey }: { apiKey: string }) {
                       <TableCell className="text-xs">
                         {formatUnix(row.first_seen_at_unix)}
                       </TableCell>
-                      <TableCell className="text-xs">
-                        {formatUnix(row.last_seen_at_unix)}
-                      </TableCell>
+                      <TableCell className="text-xs">{formatUnix(row.last_seen_at_unix)}</TableCell>
                       <TableCell className="text-right">
                         <Button
                           variant="outline"
@@ -508,9 +509,7 @@ function UnattributedActivityView({ apiKey }: { apiKey: string }) {
                               value={format.number(evidence.request_count)}
                             />
                             <EvidenceItem
-                              label={t(
-                                "page.agentRuns.unattributed.evidence.secondsSinceLastSeen",
-                              )}
+                              label={t("page.agentRuns.unattributed.evidence.secondsSinceLastSeen")}
                               value={format.number(evidence.seconds_since_last_seen)}
                             />
                             <EvidenceItem
@@ -607,7 +606,6 @@ function observedActivityState(row: ObservedAgentActivity): ObservedActivityStat
       return row.evidence.within_running_window === true ? "running" : "unknown";
     case "inactive":
       return row.evidence.within_running_window === false ? "inactive" : "unknown";
-    case "unknown":
     default:
       return "unknown";
   }
@@ -620,10 +618,7 @@ function observedActivityState(row: ObservedAgentActivity): ObservedActivityStat
  * NOT collapse into "No" — that is exactly the confident-negative defect the
  * backend change removed.
  */
-function triState(
-  t: (key: TranslationKey) => string,
-  value: boolean | null | undefined,
-): string {
+function triState(t: (key: TranslationKey) => string, value: boolean | null | undefined): string {
   if (value === null || value === undefined) {
     return t("page.agentRuns.unattributed.evidence.unknownValue");
   }

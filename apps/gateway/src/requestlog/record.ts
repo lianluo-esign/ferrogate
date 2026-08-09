@@ -195,7 +195,7 @@ function num(wire: RequestLogWire, key: string): number | undefined {
 }
 
 function verdictOf(wire: RequestLogWire): GuardrailVerdict {
-  const value = wire["guardrail_verdict"];
+  const value = wire.guardrail_verdict;
   return value === "allowed" || value === "blocked" ? value : "not_screened";
 }
 
@@ -229,7 +229,7 @@ export function requestLogFromWire(body: unknown): RequestLogRecord | undefined 
     completedAtUnix,
     latencyMs: num(wire, "latency_ms") ?? Math.max((completedAtUnix - startedAtUnix) * 1000, 0),
     guardrailVerdict: verdictOf(wire),
-    streamed: wire["streamed"] === true,
+    streamed: wire.streamed === true,
     traceId: str(wire, "trace_id"),
     agentRunId: str(wire, "agent_run_id"),
     delegationChain: str(wire, "delegation_chain"),

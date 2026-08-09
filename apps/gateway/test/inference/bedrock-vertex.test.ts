@@ -52,7 +52,10 @@ const BEDROCK_ALIAS_ROUTE: PhysicalRoute = {
 const BEDROCK_STS_ROUTE: PhysicalRoute = {
   ...BEDROCK_ROUTE,
   logicalModel: "bedrock-sts",
-  awsCredentials: { ...BEDROCK_ROUTE.awsCredentials!, sessionToken: "FQoGZXIvYXdzEXAMPLE" },
+  awsCredentials: {
+    ...(BEDROCK_ROUTE.awsCredentials as NonNullable<typeof BEDROCK_ROUTE.awsCredentials>),
+    sessionToken: "FQoGZXIvYXdzEXAMPLE",
+  },
 };
 
 /**
@@ -165,7 +168,7 @@ describe("bedrock chat completions", () => {
           "anthropic.claude-3-5-sonnet-20241022-v2%3A0/converse",
       );
       // The credential reached the wire as a SIGNATURE, never as a bearer token.
-      expect(sent.headers["authorization"]).toMatch(
+      expect(sent.headers.authorization).toMatch(
         /^AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE\/\d{8}\/us-east-1\/bedrock\/aws4_request, SignedHeaders=[^,]+, Signature=[0-9a-f]{64}$/,
       );
       expect(sent.headers["x-amz-date"]).toMatch(/^\d{8}T\d{6}Z$/);
@@ -195,7 +198,7 @@ describe("bedrock chat completions", () => {
         ...CHAT,
       });
       expect(response.status).toBe(200);
-      expect(intercept.lastRequest().headers["authorization"]).toContain("AWS4-HMAC-SHA256");
+      expect(intercept.lastRequest().headers.authorization).toContain("AWS4-HMAC-SHA256");
     } finally {
       intercept.restore();
     }
@@ -208,9 +211,7 @@ describe("bedrock chat completions", () => {
     try {
       const h = harness({}, ROUTES);
       await h.post("/v1/chat/completions", { model: "bedrock-sts", ...CHAT });
-      expect(intercept.lastRequest().headers["x-amz-security-token"]).toBe(
-        "FQoGZXIvYXdzEXAMPLE",
-      );
+      expect(intercept.lastRequest().headers["x-amz-security-token"]).toBe("FQoGZXIvYXdzEXAMPLE");
     } finally {
       intercept.restore();
     }
@@ -284,7 +285,7 @@ describe("vertex chat completions", () => {
         "https://us-central1-aiplatform.googleapis.com/v1/projects/ferrogate-prod/" +
           "locations/us-central1/publishers/google/models/gemini-1.5-pro:generateContent",
       );
-      expect(sent.headers["authorization"]).toBe("Bearer ya29.EXAMPLE-ACCESS-TOKEN");
+      expect(sent.headers.authorization).toBe("Bearer ya29.EXAMPLE-ACCESS-TOKEN");
       expect(sent.body).toEqual({
         contents: [{ role: "user", parts: [{ text: "hi" }] }],
       });
@@ -330,7 +331,7 @@ describe("vertex chat completions", () => {
         ...CHAT,
       });
       expect(response.status).toBe(200);
-      expect(intercept.lastRequest().headers["authorization"]).toBe(
+      expect(intercept.lastRequest().headers.authorization).toBe(
         "Bearer ya29.EXAMPLE-ACCESS-TOKEN",
       );
     } finally {
@@ -413,11 +414,7 @@ describe("catalog: bedrock credentials", () => {
   ])("refuses the catalog when %s is missing", (field, reason) => {
     const incomplete: Record<string, unknown> = { ...provider };
     delete incomplete[field];
-    const result = buildModelCatalog(
-      [incomplete as unknown as (typeof provider)],
-      [model],
-      secrets,
-    );
+    const result = buildModelCatalog([incomplete as unknown as typeof provider], [model], secrets);
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.reason).toContain(reason);
@@ -487,16 +484,17 @@ describe("catalog: vertex credentials", () => {
 
   it.each([
     ["gcp_project_id", "field providers[0].gcp_project_id: required when kind = vertex"],
-    ["gcp_access_token_var", "field providers[0].gcp_access_token_var: required when kind = vertex"],
+    [
+      "gcp_access_token_var",
+      "field providers[0].gcp_access_token_var: required when kind = vertex",
+    ],
     ["region", "field providers[0].region: required when kind = vertex"],
   ])("refuses the catalog when %s is missing", (field, reason) => {
     const incomplete: Record<string, unknown> = { ...provider };
     delete incomplete[field];
-    const result = buildModelCatalog(
-      [incomplete as unknown as (typeof provider)],
-      [model],
-      { GCP_TOKEN: "ya29.TOKEN" },
-    );
+    const result = buildModelCatalog([incomplete as unknown as typeof provider], [model], {
+      GCP_TOKEN: "ya29.TOKEN",
+    });
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.reason).toContain(reason);

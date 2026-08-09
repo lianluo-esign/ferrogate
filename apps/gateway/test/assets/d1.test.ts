@@ -19,7 +19,6 @@
  *     buy with an in-statement predicate.
  */
 import { env } from "cloudflare:test";
-import { controlNamespace } from "../support/control-namespace.js";
 import { beforeEach, describe, expect, test } from "vitest";
 import {
   ASSET_CREATE_WITHIN_QUOTA_SQL,
@@ -39,6 +38,7 @@ import {
 } from "../../src/assets/ports.js";
 import { evidenceProjectionKey } from "../../src/requestlog/d1.js";
 import { resolverForEnv } from "../../src/tenancy/index.js";
+import { controlNamespace } from "../support/control-namespace.js";
 import { seedTenantRosterRows, tenantObjectDb } from "../tenant-object.js";
 
 const NOW = 1_700_000_000;
@@ -725,7 +725,11 @@ describe("D1AssetAuditSink", () => {
             `asset-request-${index}`,
             TENANT,
             NOW + index,
-            JSON.stringify({ action: "asset.push", target: `asset-${index}`, outcome: "committed" }),
+            JSON.stringify({
+              action: "asset.push",
+              target: `asset-${index}`,
+              outcome: "committed",
+            }),
             TENANT,
             index,
             `prev-${index}`,
@@ -735,12 +739,7 @@ describe("D1AssetAuditSink", () => {
     );
 
     const bindings = env as unknown as Parameters<typeof resolverForEnv>[0];
-    await sweepAssetAuditProjections(
-      bindings,
-      resolverForEnv(bindings).router,
-      [TENANT],
-      2,
-    );
+    await sweepAssetAuditProjections(bindings, resolverForEnv(bindings).router, [TENANT], 2);
 
     const count = await control()
       .prepare("SELECT COUNT(*) AS count FROM audit_events WHERE tenant = ?")

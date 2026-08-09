@@ -64,17 +64,17 @@ import {
   sseFrame,
 } from "./events.js";
 import {
+  type ManagedWorkerEvidenceContext,
+  persistAgentRunEventEvidence,
+  persistAgentRunEvidence,
+} from "./evidence.js";
+import {
   type RunStatus,
   type StoredAgentRun,
   type StoredRunEvent,
   type WorkerReportedRunState,
   isTerminalStatus,
 } from "./model.js";
-import {
-  persistAgentRunEvidence,
-  persistAgentRunEventEvidence,
-  type ManagedWorkerEvidenceContext,
-} from "./evidence.js";
 
 /** Heartbeat cadence for an idle SSE stream. */
 const SSE_HEARTBEAT_MS = 15_000;

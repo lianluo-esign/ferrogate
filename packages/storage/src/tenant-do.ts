@@ -87,16 +87,16 @@ import type {
   TenantMigrationStatusRequest,
 } from "./tenant-data-object.js";
 import {
+  type TenantObjectAddress,
+  type TenantObjectGetOptions,
+  type TenantObjectNamespaceLike,
+  tenantObjectStubFor,
+} from "./tenant-placement.js";
+import {
   ControlDatabaseTenantRegistry,
   type TenantDatabaseHandle,
   type TenantDatabaseRouter,
 } from "./tenant-router.js";
-import {
-  tenantObjectStubFor,
-  type TenantObjectAddress,
-  type TenantObjectGetOptions,
-  type TenantObjectNamespaceLike,
-} from "./tenant-placement.js";
 
 export type {
   TenantDataStatement,
@@ -826,10 +826,7 @@ export class DurableObjectTenantDatabaseRouter
    * that reintroduces a registry lookup here turns it red instead of quietly
    * putting a D1 round trip back on the inference path.
    */
-  async forTenant(
-    tenantId: string,
-    address?: TenantObjectAddress,
-  ): Promise<TenantDatabaseHandle> {
+  async forTenant(tenantId: string, address?: TenantObjectAddress): Promise<TenantDatabaseHandle> {
     return {
       tenantId,
       db: this.databaseFor(tenantId, address),
@@ -982,10 +979,7 @@ export class DurableObjectTenantDatabaseRouter
     await stub.setScheduleAlarm({ tenantId, scheduledAtUnix });
   }
 
-  async clearScheduleAlarm(
-    tenantId: string,
-    address?: TenantObjectAddress,
-  ): Promise<void> {
+  async clearScheduleAlarm(tenantId: string, address?: TenantObjectAddress): Promise<void> {
     const stub = tenantObjectStubFor(
       this.#namespace as TenantObjectNamespaceLike<TenantDataStub, DurableObjectId>,
       tenantId,
@@ -999,10 +993,7 @@ export class DurableObjectTenantDatabaseRouter
     await stub.clearScheduleAlarm({ tenantId });
   }
 
-  async rearmScheduleAlarm(
-    tenantId: string,
-    address?: TenantObjectAddress,
-  ): Promise<void> {
+  async rearmScheduleAlarm(tenantId: string, address?: TenantObjectAddress): Promise<void> {
     const stub = tenantObjectStubFor(
       this.#namespace as TenantObjectNamespaceLike<TenantDataStub, DurableObjectId>,
       tenantId,

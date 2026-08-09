@@ -203,7 +203,7 @@ function parseJson(header: string, bytes: Uint8Array): unknown {
 /** Validate the `x402Version` field: must exist and be the integer 2. */
 function requireVersion(header: string, obj: Record<string, unknown>): void {
   if (!("x402Version" in obj)) throw malformed(header, "missing x402Version");
-  const v = obj["x402Version"];
+  const v = obj.x402Version;
   if (asU64(v) !== X402_VERSION) {
     throw PaymentError.unsupportedVersion(JSON.stringify(v ?? null));
   }
@@ -228,14 +228,14 @@ export function parsePaymentRequired(headerValue: string): PaymentRequired {
   if (rootObj === undefined) throw malformed(H, "top-level value is not a JSON object");
   requireVersion(H, rootObj);
 
-  const resource = asObject(rootObj["resource"]);
+  const resource = asObject(rootObj.resource);
   if (resource === undefined) throw malformed(H, "missing or non-object resource");
-  const url = asString(resource["url"]);
+  const url = asString(resource.url);
   if (url === undefined || url.length === 0 || url.length > 2048) {
     throw malformed(H, "resource.url missing, empty, or oversized");
   }
 
-  const accepts = asArray(rootObj["accepts"]);
+  const accepts = asArray(rootObj.accepts);
   if (accepts === undefined) throw malformed(H, "missing or non-array accepts");
   if (accepts.length === 0) throw malformed(H, "accepts is empty");
   if (accepts.length > MAX_ACCEPTS_ENTRIES) {
@@ -246,7 +246,7 @@ export function parsePaymentRequired(headerValue: string): PaymentRequired {
   }
 
   let extensions: unknown | null;
-  const extRaw = rootObj["extensions"];
+  const extRaw = rootObj.extensions;
   if (isNullish(extRaw)) {
     extensions = null;
   } else if (asObject(extRaw) !== undefined) {
@@ -256,10 +256,10 @@ export function parsePaymentRequired(headerValue: string): PaymentRequired {
   }
 
   return {
-    error: asString(rootObj["error"]) ?? null,
+    error: asString(rootObj.error) ?? null,
     resourceUrl: url,
-    resourceDescription: asString(resource["description"]) ?? null,
-    resourceMimeType: asString(resource["mimeType"]) ?? null,
+    resourceDescription: asString(resource.description) ?? null,
+    resourceMimeType: asString(resource.mimeType) ?? null,
     accepts,
     extensions,
   };
@@ -337,7 +337,7 @@ export function validateSolanaAddress(field: string, value: string): void {
 
 function requireTimeout(entry: Record<string, unknown>): number {
   if (!("maxTimeoutSeconds" in entry)) throw PaymentError.invalidTimeout("missing");
-  const v = entry["maxTimeoutSeconds"];
+  const v = entry.maxTimeoutSeconds;
   const secs = asU64(v);
   if (secs === undefined) {
     throw PaymentError.invalidTimeout(`not a non-negative integer: ${JSON.stringify(v ?? null)}`);
@@ -437,10 +437,10 @@ export function selectRequirement(
   for (const entryRaw of required.accepts) {
     const entry = asObject(entryRaw) ?? {};
     const key = JSON.stringify([
-      asString(entry["scheme"]) ?? "",
-      asString(entry["network"]) ?? "",
-      asString(entry["asset"]) ?? "",
-      asString(entry["payTo"]) ?? "",
+      asString(entry.scheme) ?? "",
+      asString(entry.network) ?? "",
+      asString(entry.asset) ?? "",
+      asString(entry.payTo) ?? "",
     ]);
     if (seen.has(key)) {
       throw malformed(
@@ -484,14 +484,14 @@ export function selectRequirement(
     validateSolanaAddress("payTo", recipient);
     const maxTimeoutSeconds = requireTimeout(entry);
 
-    const extra = asObject(entry["extra"]);
+    const extra = asObject(entry.extra);
     if (extra === undefined) throw malformed(H, "SVM exact requirement missing extra object");
-    const feePayer = asString(extra["feePayer"]);
+    const feePayer = asString(extra.feePayer);
     if (feePayer === undefined) throw malformed(H, "extra.feePayer missing or non-string");
     validateSolanaAddress("extra.feePayer", feePayer);
 
     let memo: string | null;
-    const memoRaw = extra["memo"];
+    const memoRaw = extra.memo;
     if (memoRaw === undefined) {
       memo = null;
     } else if (typeof memoRaw === "string") {
@@ -504,7 +504,7 @@ export function selectRequirement(
     }
 
     let recentBlockhash: string | null;
-    const bhRaw = extra["recentBlockhash"];
+    const bhRaw = extra.recentBlockhash;
     if (isNullish(bhRaw)) {
       recentBlockhash = null;
     } else if (typeof bhRaw === "string") {
@@ -520,7 +520,7 @@ export function selectRequirement(
     // Spec: lastValidBlockHeight is ignored when recentBlockhash is absent.
     let lastValidBlockHeight: bigint | null = null;
     if (recentBlockhash !== null) {
-      const heightRaw = extra["lastValidBlockHeight"];
+      const heightRaw = extra.lastValidBlockHeight;
       if (isNullish(heightRaw)) {
         lastValidBlockHeight = null;
       } else if (typeof heightRaw === "string") {
@@ -603,10 +603,10 @@ export function parsePaymentResponse(
   const obj = asObject(root);
   if (obj === undefined) throw settle("top-level value is not a JSON object");
 
-  const success = asBool(obj["success"]);
+  const success = asBool(obj.success);
   if (success === undefined) throw settle("missing or non-boolean success");
 
-  const networkId = asString(obj["network"]);
+  const networkId = asString(obj.network);
   if (networkId === undefined) throw settle("missing or non-string network");
   const network = solanaNetworkFromCaip2(networkId);
   if (network === undefined) throw PaymentError.unsupportedNetwork(truncateForError(networkId));
@@ -616,21 +616,19 @@ export function parsePaymentResponse(
     );
   }
 
-  const transaction = asString(obj["transaction"]);
+  const transaction = asString(obj.transaction);
   if (transaction === undefined) throw settle("missing or non-string transaction");
   let transactionSignature: string | null = null;
   if (success) {
     const sig = base58Decode(transaction);
     if (sig === undefined || sig.length !== 64) {
-      throw settle(
-        "successful settlement carries an invalid base58 transaction signature",
-      );
+      throw settle("successful settlement carries an invalid base58 transaction signature");
     }
     transactionSignature = transaction;
   }
 
   let settledAmount: bigint | null = null;
-  const amountRaw = obj["amount"];
+  const amountRaw = obj.amount;
   if (isNullish(amountRaw)) {
     settledAmount = null;
   } else if (typeof amountRaw === "string") {
@@ -643,8 +641,8 @@ export function parsePaymentResponse(
     success,
     transactionSignature,
     network,
-    payer: asString(obj["payer"]) ?? null,
-    errorReason: asString(obj["errorReason"]) ?? null,
+    payer: asString(obj.payer) ?? null,
+    errorReason: asString(obj.errorReason) ?? null,
     settledAmount,
   };
 }

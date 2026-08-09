@@ -1,12 +1,4 @@
-// Managed worker sessions (issue #320): the runtime-session ledger for
-// gateway-managed (isolated) agent workers, read from
-// GET /admin/v1/managed-worker-sessions. Unlike the existing read-only
-// /app/managed-workers runtime-contract page, this lists actual persisted
-// sessions with their isolation backend, lifecycle status, and per-session
-// lifecycle event trail (exec/attach → stop → cleanup). Selecting a row opens
-// its lifecycle event detail.
-import { useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { formatUnix, tenantLabel } from "@/components/agent-ops/agent-ops-primitives";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -25,10 +17,18 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { formatUnix, tenantLabel } from "@/components/agent-ops/agent-ops-primitives";
 import { useAuth } from "@/hooks/use-auth";
 import { useI18n } from "@/i18n";
-import { adminGet, type AdminSchema } from "@/lib/gateway-client";
+import { type AdminSchema, adminGet } from "@/lib/gateway-client";
+import { useQuery } from "@tanstack/react-query";
+// Managed worker sessions (issue #320): the runtime-session ledger for
+// gateway-managed (isolated) agent workers, read from
+// GET /admin/v1/managed-worker-sessions. Unlike the existing read-only
+// /app/managed-workers runtime-contract page, this lists actual persisted
+// sessions with their isolation backend, lifecycle status, and per-session
+// lifecycle event trail (exec/attach → stop → cleanup). Selecting a row opens
+// its lifecycle event detail.
+import { useMemo, useState } from "react";
 
 type ManagedWorkerSession = AdminSchema<"AdminManagedWorkerSession">;
 
@@ -54,7 +54,7 @@ function sessionStatusVariant(
 export default function ManagedWorkerSessionsPage() {
   const { session } = useAuth();
   const { t } = useI18n();
-  const apiKey = session!.gatewayApiKey;
+  const apiKey = (session as NonNullable<typeof session>).gatewayApiKey;
 
   const [detail, setDetail] = useState<ManagedWorkerSession | null>(null);
 
@@ -78,7 +78,10 @@ export default function ManagedWorkerSessionsPage() {
       </div>
 
       {error ? (
-        <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <p
+          role="alert"
+          className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+        >
           {t("page.managedWorkerSessions.error", { message: error.message })}
         </p>
       ) : null}
@@ -127,9 +130,7 @@ export default function ManagedWorkerSessionsPage() {
                     <Badge variant={sessionStatusVariant(row.status)}>{row.status}</Badge>
                   </TableCell>
                   <TableCell className="text-xs">{row.isolation_backend_kind}</TableCell>
-                  <TableCell className="text-xs">
-                    {formatUnix(row.started_at_unix)}
-                  </TableCell>
+                  <TableCell className="text-xs">{formatUnix(row.started_at_unix)}</TableCell>
                   <TableCell className="text-xs">{row.lifecycle_events.length}</TableCell>
                   <TableCell>
                     <Button variant="outline" size="sm" onClick={() => setDetail(row)}>
@@ -174,17 +175,14 @@ export default function ManagedWorkerSessionsPage() {
                   <span className="text-xs font-medium text-muted-foreground">
                     {t("page.managedWorkerSessions.field.workerInstance")}
                   </span>
-                  <div className="break-all">
-                    {detail.agent_worker_instance_id ?? "—"}
-                  </div>
+                  <div className="break-all">{detail.agent_worker_instance_id ?? "—"}</div>
                 </div>
                 <div>
                   <span className="text-xs font-medium text-muted-foreground">
                     {t("page.managedWorkerSessions.field.requestedStarted")}
                   </span>
                   <div>
-                    {formatUnix(detail.requested_at_unix)} →{" "}
-                    {formatUnix(detail.started_at_unix)}
+                    {formatUnix(detail.requested_at_unix)} → {formatUnix(detail.started_at_unix)}
                   </div>
                 </div>
                 <div>
@@ -216,10 +214,7 @@ export default function ManagedWorkerSessionsPage() {
                       </TableRow>
                     ) : (
                       detail.lifecycle_events.map((event) => (
-                        <TableRow
-                          key={event.id}
-                          data-testid={`lifecycle-event-${event.id}`}
-                        >
+                        <TableRow key={event.id} data-testid={`lifecycle-event-${event.id}`}>
                           <TableCell className="text-xs">{event.action}</TableCell>
                           <TableCell>
                             <Badge variant={sessionStatusVariant(event.status)}>

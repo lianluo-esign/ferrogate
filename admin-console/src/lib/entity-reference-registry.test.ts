@@ -1,5 +1,3 @@
-import { HttpResponse, http } from "msw";
-import { describe, expect, it } from "vitest";
 import {
   hydrateEntityReference,
   isDisabledEntityRecord,
@@ -12,6 +10,8 @@ import {
   type EntityReferenceConfig,
 } from "@/lib/resource-config";
 import { gatewayUrl, server } from "@/test/msw";
+import { http, HttpResponse } from "msw";
+import { describe, expect, it } from "vitest";
 
 const projectReference: EntityReferenceConfig = {
   target: "projects",
@@ -87,28 +87,20 @@ describe("entity reference registry", () => {
     );
 
     await expect(
-      hydrateEntityReference(
-        "api-key",
-        projectReference,
-        "project-1",
-        { tenant_id: "tenant-1" },
-      ),
+      hydrateEntityReference("api-key", projectReference, "project-1", { tenant_id: "tenant-1" }),
     ).resolves.toMatchObject({ value: "project-1", primaryLabel: "Production" });
     await expect(
-      hydrateEntityReference(
-        "api-key",
-        projectReference,
-        "project-1",
-        { tenant_id: "tenant-2" },
-      ),
+      hydrateEntityReference("api-key", projectReference, "project-1", { tenant_id: "tenant-2" }),
     ).resolves.toEqual({
       value: "project-1",
       primaryLabel: "project-1",
       unresolved: true,
     });
-    await expect(
-      hydrateEntityReference("api-key", projectReference, "missing"),
-    ).resolves.toEqual({ value: "missing", primaryLabel: "missing", unresolved: true });
+    await expect(hydrateEntityReference("api-key", projectReference, "missing")).resolves.toEqual({
+      value: "missing",
+      primaryLabel: "missing",
+      unresolved: true,
+    });
   });
 
   it("rejects records that cannot provide both a value and a human label", () => {

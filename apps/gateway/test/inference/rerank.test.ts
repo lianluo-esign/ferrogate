@@ -32,11 +32,11 @@
 import { SELF, env } from "cloudflare:test";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
-  fetchDispatcher,
-  setInferenceRequestScope,
   type PhysicalRoute,
   type TokenAdmissionHandle,
   type TokenGovernor,
+  fetchDispatcher,
+  setInferenceRequestScope,
 } from "../../src/inference/index.js";
 import { INFERENCE_OPERATION_IDS } from "../../src/routes/index.js";
 import { FINGERPRINT_SECRET_REF, secretScanPolicy } from "../guardrails/fixtures.js";
@@ -142,7 +142,12 @@ function countEgress(): { calls: () => number; restore: () => void } {
     calls += 1;
     return await original(input as RequestInfo, init);
   }) as typeof fetch;
-  return { calls: () => calls, restore: () => void (globalThis.fetch = original) };
+  return {
+    calls: () => calls,
+    restore: () => {
+      globalThis.fetch = original;
+    },
+  };
 }
 
 let egress: ReturnType<typeof countEgress> | undefined;

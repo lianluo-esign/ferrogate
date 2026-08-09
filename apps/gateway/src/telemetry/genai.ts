@@ -57,8 +57,8 @@
  * completion and would drag every downstream average down.
  */
 import {
-  GenAiOperationName,
   type GenAiInvocation,
+  GenAiOperationName,
   genAiProviderName,
 } from "@ferrogate/observability";
 

@@ -130,9 +130,9 @@ import {
   spendSourceFromEnv,
 } from "./quota.js";
 import {
+  NO_TOKEN_BUDGET,
   type TokenBudgetBindings,
   type TokenBudgetSource,
-  NO_TOKEN_BUDGET,
   d1TokenBudgetSource,
   tokenBudgetSourceFromEnv,
 } from "./token-budget.js";
@@ -514,7 +514,7 @@ function defaultSpendSource(c: Context<GatewayEnv>, env: RateLimitBindings): Spe
         return d1SpendSource(handle.db).committedSpendUsd(scopeKind, scopeId, periodMonth);
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
-        return { ok: false, detail: "routed tenant spend unavailable: " + detail };
+        return { ok: false, detail: `routed tenant spend unavailable: ${detail}` };
       }
     },
     walletBalanceCredits: NO_SPEND_SOURCE.walletBalanceCredits,
@@ -561,17 +561,13 @@ function defaultTokenBudget(c: Context<GatewayEnv>, env: RateLimitBindings): Tok
         if (handle.tenantId !== tenantId) {
           return {
             ok: false,
-            detail:
-              "the routed tenant database is " +
-              handle.tenantId +
-              ", but token budget lookup requested " +
-              tenantId,
+            detail: `the routed tenant database is ${handle.tenantId}, but token budget lookup requested ${tenantId}`,
           };
         }
         return d1TokenBudgetSource(handle.db).forApiKey(apiKeyId, tenantId);
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
-        return { ok: false, detail: "routed tenant token budget unavailable: " + detail };
+        return { ok: false, detail: `routed tenant token budget unavailable: ${detail}` };
       }
     },
   };

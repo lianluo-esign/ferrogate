@@ -1,8 +1,3 @@
-// Shared renderer for the plugin-tool listing (#323), used by both the global
-// tools catalog (/admin/v1/tools) and the per-plugin tools view
-// (/admin/v1/plugins/{id}/tools). Both endpoints return AdminToolList with the
-// same AdminTool shape, minus provider secrets and plugin config.
-import { Link } from "react-router-dom";
 import { Badge } from "@/components/ui/badge";
 import {
   Table,
@@ -14,6 +9,11 @@ import {
 } from "@/components/ui/table";
 import { useI18n } from "@/i18n";
 import type { AdminSchema } from "@/lib/gateway-client";
+// Shared renderer for the plugin-tool listing (#323), used by both the global
+// tools catalog (/admin/v1/tools) and the per-plugin tools view
+// (/admin/v1/plugins/{id}/tools). Both endpoints return AdminToolList with the
+// same AdminTool shape, minus provider secrets and plugin config.
+import { Link } from "react-router-dom";
 
 type AdminTool = AdminSchema<"AdminTool">;
 
@@ -85,9 +85,15 @@ export function ToolsTable({
                     {tool.approval_policy}
                   </Badge>
                 </TableCell>
-                <TableCell className="text-xs">{allowlistLabel(tool.tenant_allowlist, anyLabel)}</TableCell>
-                <TableCell className="text-xs">{allowlistLabel(tool.api_key_allowlist, anyLabel)}</TableCell>
-                <TableCell className="text-xs">{allowlistLabel(tool.route_allowlist, anyLabel)}</TableCell>
+                <TableCell className="text-xs">
+                  {allowlistLabel(tool.tenant_allowlist, anyLabel)}
+                </TableCell>
+                <TableCell className="text-xs">
+                  {allowlistLabel(tool.api_key_allowlist, anyLabel)}
+                </TableCell>
+                <TableCell className="text-xs">
+                  {allowlistLabel(tool.route_allowlist, anyLabel)}
+                </TableCell>
               </TableRow>
             ))
           )}

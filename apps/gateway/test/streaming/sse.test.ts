@@ -13,22 +13,13 @@ import {
   sseParseStream,
   sseSerializeStream,
 } from "../../src/streaming/sse.js";
-import {
-  bytes,
-  chunkBytes,
-  drainBytes,
-  drainFrames,
-  splitBytes,
-  streamOf,
-} from "./helpers.js";
+import { bytes, chunkBytes, drainBytes, drainFrames, splitBytes, streamOf } from "./helpers.js";
 
 describe("SSE field grammar", () => {
   test("parses event / data / id / retry and strips exactly one space", () => {
-    const frames = parseSse(
-      "event: message\ndata: hello\nid: 42\nretry: 2500\n\n",
-    );
+    const frames = parseSse("event: message\ndata: hello\nid: 42\nretry: 2500\n\n");
     expect(frames).toHaveLength(1);
-    const frame = frames[0]!;
+    const frame = frames[0] as NonNullable<(typeof frames)[0]>;
     expect(frame.event).toBe("message");
     expect(frame.data).toBe("hello");
     expect(frame.id).toBe("42");
@@ -36,7 +27,7 @@ describe("SSE field grammar", () => {
   });
 
   test("a colon with no space is still a field separator", () => {
-    const frame = parseSse("event:ping\ndata:{\"a\":1}\n\n")[0]!;
+    const frame = parseSse('event:ping\ndata:{"a":1}\n\n')[0]!;
     expect(frame.event).toBe("ping");
     expect(frame.data).toBe('{"a":1}');
   });
@@ -49,10 +40,7 @@ describe("SSE field grammar", () => {
   test("multi-line data joins with \\n and round-trips", () => {
     const frame = parseSse("data: line one\ndata: line two\ndata: \n\n")[0]!;
     expect(frame.data).toBe("line one\nline two\n");
-    const reserialized = serializeSseFrame(
-      sseFrame({ data: frame.data }),
-      { preferRaw: false },
-    );
+    const reserialized = serializeSseFrame(sseFrame({ data: frame.data }), { preferRaw: false });
     expect(reserialized).toBe("data: line one\ndata: line two\ndata: \n\n");
   });
 
@@ -103,7 +91,7 @@ describe("SSE line terminators", () => {
     expect(parser.push("data: a\r")).toEqual([]);
     const frames = [...parser.push("\ndata: b\r\n\r\n"), ...parser.flush()];
     expect(frames).toHaveLength(1);
-    expect(frames[0]!.data).toBe("a\nb");
+    expect((frames[0] as NonNullable<(typeof frames)[0]>).data).toBe("a\nb");
   });
 
   test("a trailing bare CR at true end-of-stream still terminates", () => {
@@ -111,14 +99,12 @@ describe("SSE line terminators", () => {
     parser.push("data: a\r");
     const frames = parser.flush();
     expect(frames).toHaveLength(1);
-    expect(frames[0]!.data).toBe("a");
+    expect((frames[0] as NonNullable<(typeof frames)[0]>).data).toBe("a");
   });
 });
 
 describe("SSE framing across chunk boundaries", () => {
-  const body = bytes(
-    'data: {"n":1}\n\nevent: tick\ndata: {"n":2}\n\ndata: [DONE]\n\n',
-  );
+  const body = bytes('data: {"n":1}\n\nevent: tick\ndata: {"n":2}\n\ndata: [DONE]\n\n');
 
   test("split mid-event yields the same frames as an unsplit body", async () => {
     const expected = parseSse(body).map((frame) => ({
@@ -130,22 +116,14 @@ describe("SSE framing across chunk boundaries", () => {
       const frames = await drainFrames(
         streamOf(splitBytes(body, [cut])).pipeThrough(sseParseStream()),
       );
-      expect(frames.map((f) => ({ event: f.event, data: f.data }))).toEqual(
-        expected,
-      );
+      expect(frames.map((f) => ({ event: f.event, data: f.data }))).toEqual(expected);
     }
   });
 
   test("one byte at a time yields the same frames", async () => {
-    const frames = await drainFrames(
-      streamOf(chunkBytes(body, 1)).pipeThrough(sseParseStream()),
-    );
-    expect(frames.map((f) => f.data)).toEqual([
-      '{"n":1}',
-      '{"n":2}',
-      "[DONE]",
-    ]);
-    expect(frames[1]!.event).toBe("tick");
+    const frames = await drainFrames(streamOf(chunkBytes(body, 1)).pipeThrough(sseParseStream()));
+    expect(frames.map((f) => f.data)).toEqual(['{"n":1}', '{"n":2}', "[DONE]"]);
+    expect((frames[1] as NonNullable<(typeof frames)[1]>).event).toBe("tick");
   });
 
   test("splitting at EVERY byte offset is stable", async () => {
@@ -163,7 +141,7 @@ describe("SSE framing across chunk boundaries", () => {
       streamOf(['data: {"tail":true}']).pipeThrough(sseParseStream()),
     );
     expect(frames).toHaveLength(1);
-    expect(frames[0]!.data).toBe('{"tail":true}');
+    expect((frames[0] as NonNullable<(typeof frames)[0]>).data).toBe('{"tail":true}');
   });
 
   test("blank lines with no fields dispatch nothing", () => {
@@ -180,8 +158,8 @@ describe("SSE UTF-8 safety", () => {
     const frames = await drainFrames(
       streamOf(splitBytes(body, [eAcute + 1])).pipeThrough(sseParseStream()),
     );
-    expect(frames[0]!.data).toBe("café");
-    expect(frames[0]!.data).not.toContain("�");
+    expect((frames[0] as NonNullable<(typeof frames)[0]>).data).toBe("café");
+    expect((frames[0] as NonNullable<(typeof frames)[0]>).data).not.toContain("�");
   });
 
   test("a 4-byte emoji split at every internal offset survives", async () => {
@@ -193,18 +171,18 @@ describe("SSE UTF-8 safety", () => {
         streamOf(splitBytes(body, [cut])).pipeThrough(sseParseStream()),
       );
       expect(frames).toHaveLength(1);
-      expect(frames[0]!.data).toBe('{"t":"\u{1F680}"}');
-      expect(JSON.parse(frames[0]!.data!)).toEqual({ t: "\u{1F680}" });
+      expect((frames[0] as NonNullable<(typeof frames)[0]>).data).toBe('{"t":"\u{1F680}"}');
+      expect(JSON.parse((frames[0] as NonNullable<(typeof frames)[0]>).data!)).toEqual({
+        t: "\u{1F680}",
+      });
     }
   });
 
   test("byte-at-a-time delivery of mixed-width text is exact", async () => {
     const payload = "aé中\u{1F680}z";
     const body = bytes(`data: ${payload}\n\n`);
-    const frames = await drainFrames(
-      streamOf(chunkBytes(body, 1)).pipeThrough(sseParseStream()),
-    );
-    expect(frames[0]!.data).toBe(payload);
+    const frames = await drainFrames(streamOf(chunkBytes(body, 1)).pipeThrough(sseParseStream()));
+    expect((frames[0] as NonNullable<(typeof frames)[0]>).data).toBe(payload);
   });
 });
 
@@ -218,9 +196,9 @@ describe("SSE serialization", () => {
   });
 
   test("a frame with no event name emits only data lines", () => {
-    expect(
-      serializeSseFrame(sseFrame({ data: "[DONE]" }), { preferRaw: false }),
-    ).toBe("data: [DONE]\n\n");
+    expect(serializeSseFrame(sseFrame({ data: "[DONE]" }), { preferRaw: false })).toBe(
+      "data: [DONE]\n\n",
+    );
   });
 
   test("comments, id and retry survive a serialize round-trip", () => {
@@ -266,9 +244,7 @@ describe("byte-for-byte passthrough", () => {
   test("passthroughStream never decodes, so arbitrary bytes survive", async () => {
     // A lone 0xFF is not valid UTF-8; the identity transform must not mangle it.
     const raw = new Uint8Array([0x64, 0x61, 0x74, 0x61, 0x3a, 0xff, 0x0a, 0x0a]);
-    const out = await drainBytes(
-      streamOf([raw]).pipeThrough(passthroughStream()),
-    );
+    const out = await drainBytes(streamOf([raw]).pipeThrough(passthroughStream()));
     expect([...out]).toEqual([...raw]);
   });
 });

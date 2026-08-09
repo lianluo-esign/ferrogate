@@ -100,45 +100,35 @@ export function renderPrometheusText(snapshot: GatewayMetricsSnapshot): string {
     "Total MCP tool execution latency in milliseconds.",
     "counter",
   );
-  out.push(
-    `ferrogate_mcp_tool_latency_ms_total ${snapshot.toolLatencyMsTotal}\n`,
-  );
+  out.push(`ferrogate_mcp_tool_latency_ms_total ${snapshot.toolLatencyMsTotal}\n`);
   pushHelp(
     out,
     "ferrogate_mcp_identity_resolutions_total",
     "Total per-request MCP identity resolution attempts.",
     "counter",
   );
-  out.push(
-    `ferrogate_mcp_identity_resolutions_total ${snapshot.mcpIdentityResolutionTotal}\n`,
-  );
+  out.push(`ferrogate_mcp_identity_resolutions_total ${snapshot.mcpIdentityResolutionTotal}\n`);
   pushHelp(
     out,
     "ferrogate_mcp_identity_failures_total",
     "Total MCP identity resolution attempts rejected before dispatch.",
     "counter",
   );
-  out.push(
-    `ferrogate_mcp_identity_failures_total ${snapshot.mcpIdentityFailureTotal}\n`,
-  );
+  out.push(`ferrogate_mcp_identity_failures_total ${snapshot.mcpIdentityFailureTotal}\n`);
   pushHelp(
     out,
     "ferrogate_mcp_identity_refreshes_total",
     "Total successful MCP OAuth credential refreshes.",
     "counter",
   );
-  out.push(
-    `ferrogate_mcp_identity_refreshes_total ${snapshot.mcpIdentityRefreshTotal}\n`,
-  );
+  out.push(`ferrogate_mcp_identity_refreshes_total ${snapshot.mcpIdentityRefreshTotal}\n`);
   pushHelp(
     out,
     "ferrogate_mcp_identity_revocations_total",
     "Total locally enforced MCP identity revocations.",
     "counter",
   );
-  out.push(
-    `ferrogate_mcp_identity_revocations_total ${snapshot.mcpIdentityRevocationTotal}\n`,
-  );
+  out.push(`ferrogate_mcp_identity_revocations_total ${snapshot.mcpIdentityRevocationTotal}\n`);
   pushHelp(
     out,
     "ferrogate_mcp_refresh_response_deadlines_total",
@@ -190,9 +180,7 @@ export function renderPrometheusText(snapshot: GatewayMetricsSnapshot): string {
     "Total async PostgreSQL pool acquisition attempts.",
     "counter",
   );
-  out.push(
-    `ferrogate_postgres_pool_acquires_total ${snapshot.postgresPoolAcquireTotal}\n`,
-  );
+  out.push(`ferrogate_postgres_pool_acquires_total ${snapshot.postgresPoolAcquireTotal}\n`);
   pushHelp(
     out,
     "ferrogate_postgres_pool_acquire_timeouts_total",
@@ -219,27 +207,21 @@ export function renderPrometheusText(snapshot: GatewayMetricsSnapshot): string {
     "Evidence writes (request logs, audit events, agent-run rows) accepted into the bounded background writer queue.",
     "counter",
   );
-  out.push(
-    `ferrogate_evidence_writer_enqueued_total ${snapshot.evidenceWriterEnqueuedTotal}\n`,
-  );
+  out.push(`ferrogate_evidence_writer_enqueued_total ${snapshot.evidenceWriterEnqueuedTotal}\n`);
   pushHelp(
     out,
     "ferrogate_evidence_writer_written_total",
     "Evidence writes the background writer finished persisting.",
     "counter",
   );
-  out.push(
-    `ferrogate_evidence_writer_written_total ${snapshot.evidenceWriterWrittenTotal}\n`,
-  );
+  out.push(`ferrogate_evidence_writer_written_total ${snapshot.evidenceWriterWrittenTotal}\n`);
   pushHelp(
     out,
     "ferrogate_evidence_writer_dropped_total",
     "Evidence writes dropped after the writer queue stayed full past the bounded enqueue timeout.",
     "counter",
   );
-  out.push(
-    `ferrogate_evidence_writer_dropped_total ${snapshot.evidenceWriterDroppedTotal}\n`,
-  );
+  out.push(`ferrogate_evidence_writer_dropped_total ${snapshot.evidenceWriterDroppedTotal}\n`);
 
   pushHelp(
     out,
@@ -247,12 +229,8 @@ export function renderPrometheusText(snapshot: GatewayMetricsSnapshot): string {
     "AI response cache lookups grouped by cache status.",
     "counter",
   );
-  out.push(
-    `ferrogate_ai_cache_requests_total{status="hit"} ${snapshot.cacheHitsTotal}\n`,
-  );
-  out.push(
-    `ferrogate_ai_cache_requests_total{status="miss"} ${snapshot.cacheMissesTotal}\n`,
-  );
+  out.push(`ferrogate_ai_cache_requests_total{status="hit"} ${snapshot.cacheHitsTotal}\n`);
+  out.push(`ferrogate_ai_cache_requests_total{status="miss"} ${snapshot.cacheMissesTotal}\n`);
   out.push(
     `ferrogate_ai_cache_requests_total{status="semantic_hit"} ${snapshot.semanticCacheHitsTotal}\n`,
   );
@@ -271,9 +249,7 @@ export function renderPrometheusText(snapshot: GatewayMetricsSnapshot): string {
     "Total guardrail matches that blocked a request or response.",
     "counter",
   );
-  out.push(
-    `ferrogate_guardrail_denials_total ${snapshot.guardrailDenialTotal}\n`,
-  );
+  out.push(`ferrogate_guardrail_denials_total ${snapshot.guardrailDenialTotal}\n`);
 
   pushHelp(
     out,
@@ -281,9 +257,7 @@ export function renderPrometheusText(snapshot: GatewayMetricsSnapshot): string {
     "Total guardrail matches that redacted response content.",
     "counter",
   );
-  out.push(
-    `ferrogate_guardrail_redactions_total ${snapshot.guardrailRedactionTotal}\n`,
-  );
+  out.push(`ferrogate_guardrail_redactions_total ${snapshot.guardrailRedactionTotal}\n`);
 
   pushHelp(
     out,
@@ -291,9 +265,7 @@ export function renderPrometheusText(snapshot: GatewayMetricsSnapshot): string {
     "Total external guardrail detector evaluation errors.",
     "counter",
   );
-  out.push(
-    `ferrogate_guardrail_detector_errors_total ${snapshot.guardrailDetectorErrorTotal}\n`,
-  );
+  out.push(`ferrogate_guardrail_detector_errors_total ${snapshot.guardrailDetectorErrorTotal}\n`);
 
   pushHelp(
     out,
@@ -302,10 +274,7 @@ export function renderPrometheusText(snapshot: GatewayMetricsSnapshot): string {
     "counter",
   );
   const passTotal = saturatingSub(
-    saturatingSub(
-      snapshot.guardrailEvaluationTotal,
-      snapshot.guardrailEvaluationFailTotal,
-    ),
+    saturatingSub(snapshot.guardrailEvaluationTotal, snapshot.guardrailEvaluationFailTotal),
     snapshot.guardrailEvaluationErrorTotal,
   );
   const verdicts: Array<[string, number]> = [
@@ -314,9 +283,7 @@ export function renderPrometheusText(snapshot: GatewayMetricsSnapshot): string {
     ["error", snapshot.guardrailEvaluationErrorTotal],
   ];
   for (const [verdict, count] of verdicts) {
-    out.push(
-      `ferrogate_guardrail_evaluations_total{verdict="${verdict}"} ${count}\n`,
-    );
+    out.push(`ferrogate_guardrail_evaluations_total{verdict="${verdict}"} ${count}\n`);
   }
   pushHelp(
     out,
@@ -352,9 +319,7 @@ export function renderPrometheusText(snapshot: GatewayMetricsSnapshot): string {
     "Total requests rejected pre-authentication for not matching the configured IP allowlist.",
     "counter",
   );
-  out.push(
-    `ferrogate_network_access_denied_total ${snapshot.networkAccessDeniedTotal}\n`,
-  );
+  out.push(`ferrogate_network_access_denied_total ${snapshot.networkAccessDeniedTotal}\n`);
 
   pushHelp(
     out,
@@ -373,27 +338,21 @@ export function renderPrometheusText(snapshot: GatewayMetricsSnapshot): string {
     "Total asset versions scanned by the lifecycle retention/GC sweeper.",
     "counter",
   );
-  out.push(
-    `ferrogate_asset_lifecycle_scanned_total ${snapshot.assetLifecycleScannedTotal}\n`,
-  );
+  out.push(`ferrogate_asset_lifecycle_scanned_total ${snapshot.assetLifecycleScannedTotal}\n`);
   pushHelp(
     out,
     "ferrogate_asset_lifecycle_pruned_total",
     "Total asset versions and unreferenced blobs pruned/collected by the lifecycle sweeper.",
     "counter",
   );
-  out.push(
-    `ferrogate_asset_lifecycle_pruned_total ${snapshot.assetLifecyclePrunedTotal}\n`,
-  );
+  out.push(`ferrogate_asset_lifecycle_pruned_total ${snapshot.assetLifecyclePrunedTotal}\n`);
   pushHelp(
     out,
     "ferrogate_asset_lifecycle_failed_total",
     "Total lifecycle prune/GC delete operations that failed.",
     "counter",
   );
-  out.push(
-    `ferrogate_asset_lifecycle_failed_total ${snapshot.assetLifecycleFailedTotal}\n`,
-  );
+  out.push(`ferrogate_asset_lifecycle_failed_total ${snapshot.assetLifecycleFailedTotal}\n`);
 
   // #368: presigned staging upload lifecycle. `stage` separates the three
   // rejection classes; `staging_missing` is deliberately its own stage — see
@@ -437,9 +396,7 @@ export function renderPrometheusText(snapshot: GatewayMetricsSnapshot): string {
     "Total presigned upload intents explicitly released through the abort surface (the release, not the reclamation).",
     "counter",
   );
-  out.push(
-    `ferrogate_asset_presign_aborted_total ${snapshot.assetPresignAbortedTotal}\n`,
-  );
+  out.push(`ferrogate_asset_presign_aborted_total ${snapshot.assetPresignAbortedTotal}\n`);
   pushHelp(
     out,
     "ferrogate_asset_presign_abort_reclaim_failed_total",
@@ -456,15 +413,9 @@ export function renderPrometheusText(snapshot: GatewayMetricsSnapshot): string {
     "Total AI provider token usage recorded by metering events.",
     "counter",
   );
-  out.push(
-    `ferrogate_tokens_total{type="prompt"} ${snapshot.tokenTotals.promptTokens}\n`,
-  );
-  out.push(
-    `ferrogate_tokens_total{type="completion"} ${snapshot.tokenTotals.completionTokens}\n`,
-  );
-  out.push(
-    `ferrogate_tokens_total{type="total"} ${snapshot.tokenTotals.totalTokens}\n`,
-  );
+  out.push(`ferrogate_tokens_total{type="prompt"} ${snapshot.tokenTotals.promptTokens}\n`);
+  out.push(`ferrogate_tokens_total{type="completion"} ${snapshot.tokenTotals.completionTokens}\n`);
+  out.push(`ferrogate_tokens_total{type="total"} ${snapshot.tokenTotals.totalTokens}\n`);
 
   pushHelp(
     out,
@@ -503,9 +454,7 @@ export function renderPrometheusText(snapshot: GatewayMetricsSnapshot): string {
   for (const total of snapshot.mcpMethodTotals) {
     const method = escapeLabelValue(total.method);
     const name = escapeLabelValue(total.name);
-    out.push(
-      `ferrogate_mcp_requests_total{method="${method}",name="${name}"} ${total.requests}\n`,
-    );
+    out.push(`ferrogate_mcp_requests_total{method="${method}",name="${name}"} ${total.requests}\n`);
   }
 
   return out.join("");
@@ -567,9 +516,7 @@ export function renderUnjoinableActionsText(
  * that file. A renderer cannot bound cardinality without dropping data it was
  * handed, and silently dropping a series is worse than a coarse bucket.
  */
-export function renderCacheTenantText(
-  totals: readonly CacheTenantMetricTotal[],
-): string {
+export function renderCacheTenantText(totals: readonly CacheTenantMetricTotal[]): string {
   const out: string[] = [];
   pushHelp(
     out,
@@ -579,9 +526,7 @@ export function renderCacheTenantText(
   );
   for (const total of totals) {
     const tenant = escapeLabelValue(total.tenant);
-    out.push(
-      `ferrogate_ai_cache_requests_total{tenant="${tenant}",status="hit"} ${total.hits}\n`,
-    );
+    out.push(`ferrogate_ai_cache_requests_total{tenant="${tenant}",status="hit"} ${total.hits}\n`);
     out.push(
       `ferrogate_ai_cache_requests_total{tenant="${tenant}",status="miss"} ${total.misses}\n`,
     );
@@ -603,21 +548,13 @@ export function renderCacheTenantText(
   return out.join("");
 }
 
-function pushHelp(
-  out: string[],
-  metric: string,
-  help: string,
-  kind: string,
-): void {
+function pushHelp(out: string[], metric: string, help: string, kind: string): void {
   out.push(`# HELP ${metric} ${help}\n`);
   out.push(`# TYPE ${metric} ${kind}\n`);
 }
 
 function escapeLabelValue(value: string): string {
-  return value
-    .replaceAll("\\", "\\\\")
-    .replaceAll("\n", "\\n")
-    .replaceAll('"', '\\"');
+  return value.replaceAll("\\", "\\\\").replaceAll("\n", "\\n").replaceAll('"', '\\"');
 }
 
 function saturatingSub(a: number, b: number): number {

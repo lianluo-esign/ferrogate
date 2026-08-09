@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { execFileSync } from "node:child_process";
-import { cpSync, mkdtempSync, mkdirSync, readdirSync, rmSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -31,11 +31,10 @@ export function checkTypeScriptPackage() {
   const sourceFiles = [...files].filter((file) => file.startsWith("src/"));
   if (missing.length > 0 || sourceFiles.length > 0) {
     throw new Error(
-      "TypeScript package contents are invalid: " +
-        JSON.stringify({ missing, sourceFiles }),
+      `TypeScript package contents are invalid: ${JSON.stringify({ missing, sourceFiles })}`,
     );
   }
-  return pack.name + "@" + pack.version + ": " + files.size + " packed files";
+  return `${pack.name}@${pack.version}: ${files.size} packed files`;
 }
 
 export function checkPythonPackage() {
@@ -65,10 +64,10 @@ export function checkPythonPackage() {
     const sdists = files.filter((file) => file.endsWith(".tar.gz"));
     if (wheels.length !== 1 || sdists.length !== 1) {
       throw new Error(
-        "Python package did not produce one wheel and one sdist: " + files.join(", "),
+        `Python package did not produce one wheel and one sdist: ${files.join(", ")}`,
       );
     }
-    return "ferrogate-admin: " + wheels[0] + ", " + sdists[0];
+    return `ferrogate-admin: ${wheels[0]}, ${sdists[0]}`;
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
@@ -80,8 +79,8 @@ if (!["all", "typescript", "python"].includes(selected)) {
 }
 
 if (selected === "all" || selected === "typescript") {
-  console.log("ok " + checkTypeScriptPackage());
+  console.log(`ok ${checkTypeScriptPackage()}`);
 }
 if (selected === "all" || selected === "python") {
-  console.log("ok " + checkPythonPackage());
+  console.log(`ok ${checkPythonPackage()}`);
 }

@@ -1,13 +1,4 @@
-// Self-hosted run inspector (issue #320): looks up one customer-reported run
-// timeline (GET /admin/v1/self-hosted-runs/{run_id}) and surfaces the
-// correlation triple (request_id / trace_id / agent_run_id, #305) plus the
-// parent action fingerprint (#307). Because a self-hosted run is
-// customer-reported evidence, those ids are not structured contract columns —
-// they are lifted out of each event's reported `event_json` document and
-// aggregated for the run header. Individual reported lifecycle events are
-// listed below with their per-event correlation.
-import { useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { TruncatedCopyable, formatUnix } from "@/components/agent-ops/agent-ops-primitives";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -21,15 +12,24 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { formatUnix, TruncatedCopyable } from "@/components/agent-ops/agent-ops-primitives";
 import {
+  ReportedTrustBadge,
   aggregateReportedCorrelation,
   parseReportedCorrelation,
-  ReportedTrustBadge,
 } from "@/components/worker-ops/worker-ops-primitives";
 import { useAuth } from "@/hooks/use-auth";
 import { useI18n } from "@/i18n";
 import { adminGet } from "@/lib/gateway-client";
+import { useQuery } from "@tanstack/react-query";
+// Self-hosted run inspector (issue #320): looks up one customer-reported run
+// timeline (GET /admin/v1/self-hosted-runs/{run_id}) and surfaces the
+// correlation triple (request_id / trace_id / agent_run_id, #305) plus the
+// parent action fingerprint (#307). Because a self-hosted run is
+// customer-reported evidence, those ids are not structured contract columns —
+// they are lifted out of each event's reported `event_json` document and
+// aggregated for the run header. Individual reported lifecycle events are
+// listed below with their per-event correlation.
+import { useMemo, useState } from "react";
 
 function CorrelationField({
   label,
@@ -54,7 +54,7 @@ function CorrelationField({
 export default function SelfHostedRunsPage() {
   const { session } = useAuth();
   const { t } = useI18n();
-  const apiKey = session!.gatewayApiKey;
+  const apiKey = (session as NonNullable<typeof session>).gatewayApiKey;
 
   const [runInput, setRunInput] = useState("");
   const [activeRunId, setActiveRunId] = useState("");
@@ -107,15 +107,16 @@ export default function SelfHostedRunsPage() {
       </form>
 
       {error ? (
-        <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <p
+          role="alert"
+          className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+        >
           {t("page.selfHostedRuns.error", { runId: activeRunId, message: error.message })}
         </p>
       ) : null}
 
       {activeRunId === "" ? (
-        <p className="text-sm text-muted-foreground">
-          {t("page.selfHostedRuns.prompt")}
-        </p>
+        <p className="text-sm text-muted-foreground">{t("page.selfHostedRuns.prompt")}</p>
       ) : isLoading || isFetching ? (
         <p className="text-sm text-muted-foreground">
           {t("page.selfHostedRuns.loading", { runId: activeRunId })}

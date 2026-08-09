@@ -4,7 +4,7 @@
 // `navigator.languages`, then English. Language is never inferred from IP.
 // Only a validated locale code is persisted, under a versioned key, so a
 // stale/renamed value can be rejected wholesale on a future format change.
-import { DEFAULT_LOCALE, isLocale, LOCALES, type Locale } from "./catalog";
+import { DEFAULT_LOCALE, LOCALES, type Locale, isLocale } from "./catalog";
 
 /** Versioned so a future catalog reshuffle can invalidate old preferences. */
 export const LOCALE_STORAGE_KEY = "ferrogate-admin-locale-v1";

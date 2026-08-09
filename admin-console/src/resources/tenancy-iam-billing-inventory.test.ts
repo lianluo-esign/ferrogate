@@ -1,4 +1,3 @@
-import { describe, expect, it } from "vitest";
 import { entityReferenceRegistry } from "@/lib/entity-reference-registry";
 import type { FieldConfig, ResourceConfig } from "@/lib/resource-config";
 import { apiKeysConfig } from "@/resources/api-keys";
@@ -9,6 +8,7 @@ import { rolesConfig } from "@/resources/roles";
 import { tenantAccountsConfig } from "@/resources/tenant-accounts";
 import { virtualKeysConfig } from "@/resources/virtual-keys";
 import { workspacesConfig } from "@/resources/workspaces";
+import { describe, expect, it } from "vitest";
 
 /**
  * #340 acceptance box 1 + box 7, as an executable inventory.
@@ -73,7 +73,10 @@ const REFERENCED_ENTITY_KINDS = [
  * the row's own natural key, and the opaque secret material box 1's non-goals
  * explicitly exclude ("Replacing opaque secret values with selectors").
  */
-function isSelfIdentifierOrSecret(config: ResourceConfig<Record<string, unknown>>, field: FieldConfig) {
+function isSelfIdentifierOrSecret(
+  config: ResourceConfig<Record<string, unknown>>,
+  field: FieldConfig,
+) {
   if (field.name === config.idField) return true;
   // permissions.key is the natural key of the permission being created.
   if (config.key === "permissions" && field.name === "key") return true;

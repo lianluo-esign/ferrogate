@@ -23,10 +23,7 @@
 // in the dev-loop, so this is authored here and executed by the gate across the
 // three viewport projects (mobile-390 / tablet-768 / desktop-1440).
 import type { Page, Request } from "@playwright/test";
-import {
-  E2E_PUBLISH_BUNDLE,
-  E2E_REPUBLISH_BUNDLE,
-} from "../src/test/fixtures/zip-bundle";
+import { E2E_PUBLISH_BUNDLE, E2E_REPUBLISH_BUNDLE } from "../src/test/fixtures/zip-bundle";
 import { installAuthenticatedAdminApi } from "./support/admin-api";
 import { installGatewayStaticSites } from "./support/gateway-static-sites";
 import {
@@ -122,10 +119,9 @@ test("publish drives the static_site bundle PUT with x-site-* policy headers, by
   await expect(page.getByText(/Published landing/)).toBeVisible();
   const newRow = siteRow(page, "landing");
   await expect(newRow).toBeVisible();
-  await expect(newRow.getByRole("link", { name: /\/sites\/tenant-e2e\/landing\// })).toHaveAttribute(
-    "href",
-    `${GATEWAY_ORIGIN}/sites/tenant-e2e/landing/`,
-  );
+  await expect(
+    newRow.getByRole("link", { name: /\/sites\/tenant-e2e\/landing\// }),
+  ).toHaveAttribute("href", `${GATEWAY_ORIGIN}/sites/tenant-e2e/landing/`);
 
   await attachViewportScreenshot(page, testInfo, "static-sites-publish");
 });
@@ -186,7 +182,9 @@ test("open/preview exposes the canonical serve URL in the list and the detail dr
   // path as its canonical URL (docs is bound to docs.acme.example): a custom
   // hostname only serves once its #488 DNS ownership proof resolves, so it is
   // never substituted for the canonical link. Its liveness lives in the drawer.
-  await expect(siteRow(page, "docs").getByRole("link", { name: /\/sites\/tenant-e2e\/docs\// })).toBeVisible();
+  await expect(
+    siteRow(page, "docs").getByRole("link", { name: /\/sites\/tenant-e2e\/docs\// }),
+  ).toBeVisible();
 
   // The drawer's outbound "Open serve URL" affordance targets the same canonical
   // URL in a new tab.
@@ -265,8 +263,10 @@ test("mobile viewport renders the site list and a publish/bind action without cl
     await expect(locator).toBeVisible();
     const box = await locator.boundingBox();
     expect(box).not.toBeNull();
-    expect(box!.x).toBeGreaterThanOrEqual(0);
-    expect(box!.x + box!.width).toBeLessThanOrEqual((viewport?.width ?? 0) + 1);
+    expect((box as NonNullable<typeof box>).x).toBeGreaterThanOrEqual(0);
+    expect(
+      (box as NonNullable<typeof box>).x + (box as NonNullable<typeof box>).width,
+    ).toBeLessThanOrEqual((viewport?.width ?? 0) + 1);
   };
 
   // The primary publish action and the marketing row's bind affordance both sit

@@ -56,14 +56,14 @@
  * and it is exactly the collapse that made the fleet view answer an empty page.
  */
 import { StorageError } from "./errors.js";
+import type { TenantDataStatement } from "./tenant-data-object.js";
+import type { TenantObjectAddress } from "./tenant-placement.js";
 import {
   ControlDatabaseTenantRegistry,
   PRE_CUTOVER_TENANT_MIGRATION_STATES,
   type TenantDatabaseHandle,
   type TenantDatabaseRouter,
 } from "./tenant-router.js";
-import type { TenantDataStatement } from "./tenant-data-object.js";
-import type { TenantObjectAddress } from "./tenant-placement.js";
 
 /** The arms {@link BackendDispatchingTenantDatabaseRouter} dispatches between. */
 export interface TenantBackendArms {

@@ -1,6 +1,6 @@
+import { useVisibilityPolling } from "@/hooks/use-visibility-polling";
 import { render } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { useVisibilityPolling } from "@/hooks/use-visibility-polling";
 
 function Harness({
   callback,

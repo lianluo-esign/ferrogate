@@ -2,9 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_CREDITS_PER_USD,
   DEFAULT_EGRESS_PRICE_PER_GB,
+  PriceBook,
   egressCostUsd,
   modelPriceUsd,
-  PriceBook,
   priceEntry,
 } from "../src/index.js";
 

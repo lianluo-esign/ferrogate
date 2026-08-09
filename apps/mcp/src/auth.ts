@@ -90,9 +90,9 @@
  */
 import {
   StorageError,
-  backfillTenantConfigurationPolicy,
   type TenantDatabaseHandle,
   type TenantDatabaseRouter,
+  backfillTenantConfigurationPolicy,
 } from "@ferrogate/storage";
 
 import type { AuthContext, AuthError, AuthPort } from "./ports.js";

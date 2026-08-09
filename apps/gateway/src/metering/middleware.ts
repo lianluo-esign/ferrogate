@@ -54,11 +54,11 @@
 import type { Context, MiddlewareHandler } from "hono";
 import { isEventStream, observeBodyCompletion } from "../middleware/body-completion.js";
 import type { AuthContext, GatewayEnv } from "../ports.js";
+import { tenantDatabaseOf } from "../tenancy/middleware.js";
 import { AGENT_RUN_ID_HEADER, agentRunIdFor } from "./agent-run.js";
 import { executionContextOf } from "./runtime.js";
 import type { MeteringUsageSink } from "./sink.js";
 import type { MeteringAttribution, MeteringDrainContext } from "./usage-ledger.js";
-import { tenantDatabaseOf } from "../tenancy/middleware.js";
 
 /**
  * Who this request's usage is attributed to, from the authenticated credential.

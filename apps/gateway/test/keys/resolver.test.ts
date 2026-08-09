@@ -24,7 +24,10 @@
  * tree. `suspended key is INDISTINGUISHABLE from an unknown key` below pins
  * that by deep-equality against the unknown-key answer, so no field can differ.
  */
+
+import { env } from "cloudflare:test";
 import { beforeEach, describe, expect, test } from "vitest";
+import { depsFromEnv } from "../../src/adapters.js";
 import {
   ApiKeyResolutionCache,
   type ApiKeyStore,
@@ -41,8 +44,6 @@ import {
 import type { ApiKeyAuthenticatorPort, ApiKeyResolution } from "../../src/ports.js";
 import { hasScope } from "../../src/ports.js";
 import { deleteApiKey, resetApiKeysTable, seedApiKey, suspendApiKey, testSecret } from "./seed.js";
-import { env } from "cloudflare:test";
-import { depsFromEnv } from "../../src/adapters.js";
 
 const NOW = 1_800_000_000;
 
@@ -959,7 +960,9 @@ describe("depsFromEnv — the gateway's credential path is wired to D1", () => {
     );
     // The row came from D1, not from an operator var: `source` is the field
     // that says so, and it is the second thing only the real wiring produces.
-    expect(resolution.outcome === "resolved" ? resolution.auth.source : null).toBe("durable_native");
+    expect(resolution.outcome === "resolved" ? resolution.auth.source : null).toBe(
+      "durable_native",
+    );
   });
 
   test("still falls back to the configured tables, so the D1 leg only ADDS a source", async () => {

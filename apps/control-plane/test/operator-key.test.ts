@@ -19,12 +19,12 @@ import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { resolveDeps } from "../src/adapters.js";
 import { callerScope } from "../src/ports.js";
 import type { ControlPlaneBindings } from "../src/ports.js";
-import { hashApiKeySecret } from "../src/store/api_keys.js";
 import {
   platformOperatorApiKeyId,
   provisionPlatformOperatorApiKey,
   revokePlatformOperatorApiKey,
 } from "../src/session/index.js";
+import { hashApiKeySecret } from "../src/store/api_keys.js";
 import { applySchema, db, resetD1 } from "./d1.js";
 import { arm } from "./harness.js";
 

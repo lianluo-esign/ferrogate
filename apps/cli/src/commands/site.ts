@@ -73,8 +73,7 @@ export async function collectSiteFiles(
   for (const entry of [...entries].sort((left, right) => (left.path < right.path ? -1 : 1))) {
     if (entry.kind === "symlink") {
       throw CliError.usage(
-        `site push refuses ${entry.path}: it is a symlink, and following it would upload ` +
-          "whatever it points at under a name that hides where the bytes came from",
+        `site push refuses ${entry.path}: it is a symlink, and following it would upload whatever it points at under a name that hides where the bytes came from`,
       );
     }
     if (entry.kind !== "file") {

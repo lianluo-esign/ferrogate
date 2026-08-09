@@ -42,8 +42,17 @@
  */
 import type { ToolCall, ToolDef, ToolResult } from "@ferrogate/core";
 
+import { assertPromptCacheForAutomaticFamily } from "./caching.js";
+import { CanonicalAiRequest } from "./canonical.js";
+import { embeddingsTextInputs, openaiEmbeddingsResponse } from "./gemini.js";
+import { asStr, asU64, getField, isObject, parseJson } from "./json.js";
+import type { Json, JsonObject } from "./json.js";
+import { fallbackErrorMessage, hasAnyUsage } from "./openai.js";
+import { structuredOutputFromChatBody, structuredOutputFromResponsesBody } from "./structured.js";
+import type { CanonicalStructuredOutput } from "./structured.js";
 import { AdapterError, BaseProviderAdapter, SecretValue } from "./types.js";
 import type {
+  AudioBytes,
   ChatCompletionPlan,
   EmbeddingsPlan,
   ProviderConfig,
@@ -53,18 +62,9 @@ import type {
   ProviderUsage,
   RerankPlan,
   ResponsesPlan,
-  AudioBytes,
   SpeechPlan,
   TranscriptionPlan,
 } from "./types.js";
-import { CanonicalAiRequest } from "./canonical.js";
-import { asStr, asU64, getField, isObject, parseJson } from "./json.js";
-import type { Json, JsonObject } from "./json.js";
-import { embeddingsTextInputs, openaiEmbeddingsResponse } from "./gemini.js";
-import { fallbackErrorMessage, hasAnyUsage } from "./openai.js";
-import { structuredOutputFromChatBody, structuredOutputFromResponsesBody } from "./structured.js";
-import type { CanonicalStructuredOutput } from "./structured.js";
-import { assertPromptCacheForAutomaticFamily } from "./caching.js";
 
 /** The canonical `kind` string for this family. */
 export const WORKERS_AI_KIND = "workers-ai";
@@ -114,10 +114,7 @@ export class WorkersAiAdapter extends BaseProviderAdapter {
    * Workers AI has no top-level `system` key: `instructions` has to arrive as a
    * leading `role: "system"` message or it is silently dropped.
    */
-  override prepareResponses(
-    provider: ProviderConfig,
-    request: ResponsesPlan,
-  ): ProviderHttpRequest {
+  override prepareResponses(provider: ProviderConfig, request: ResponsesPlan): ProviderHttpRequest {
     validateKind(provider.kind);
     assertPromptCacheForAutomaticFamily(request.body, provider.kind, { cachesNothing: true });
     const canonical = CanonicalAiRequest.fromResponsesBody(
@@ -184,7 +181,7 @@ export class WorkersAiAdapter extends BaseProviderAdapter {
     const texts = rerankDocumentTexts(body);
     const input: JsonObject = { query, contexts: texts.map((text) => ({ text })) };
     const topN = asU64(getField(body, "top_n"));
-    if (topN !== undefined) input["top_k"] = topN;
+    if (topN !== undefined) input.top_k = topN;
     return {
       provider: provider.name,
       endpoint: runEndpoint(provider.baseUrl, request.providerModel),
@@ -233,7 +230,7 @@ export class WorkersAiAdapter extends BaseProviderAdapter {
       if (index === undefined || typeof score !== "number") continue;
       if (index >= documents.length) continue;
       const entry: JsonObject = { index, relevance_score: score };
-      if (returnDocuments) entry["document"] = { text: documents[index] as string };
+      if (returnDocuments) entry.document = { text: documents[index] as string };
       results.push(entry);
     }
     return { object: "list", model, results };
@@ -278,9 +275,9 @@ export class WorkersAiAdapter extends BaseProviderAdapter {
       task: request.translate ? "translate" : "transcribe",
     };
     const language = asStr(getField(body, "language"));
-    if (language !== undefined && language.length > 0) input["language"] = language;
+    if (language !== undefined && language.length > 0) input.language = language;
     const prompt = asStr(getField(body, "prompt"));
-    if (prompt !== undefined && prompt.length > 0) input["initial_prompt"] = prompt;
+    if (prompt !== undefined && prompt.length > 0) input.initial_prompt = prompt;
     return {
       provider: provider.name,
       endpoint: runEndpoint(provider.baseUrl, request.providerModel),
@@ -312,7 +309,7 @@ export class WorkersAiAdapter extends BaseProviderAdapter {
     }
     const input: JsonObject = { prompt: text };
     const lang = asStr(getField(body, "language")) ?? asStr(getField(body, "voice"));
-    if (lang !== undefined && lang.length > 0) input["lang"] = lang;
+    if (lang !== undefined && lang.length > 0) input.lang = lang;
     return {
       provider: provider.name,
       endpoint: runEndpoint(provider.baseUrl, request.providerModel),
@@ -355,11 +352,11 @@ export class WorkersAiAdapter extends BaseProviderAdapter {
         const end = getField(segment, "end");
         if (typeof end === "number" && Number.isFinite(end) && end > duration) duration = end;
       }
-      if (duration > 0) out["duration"] = duration;
-      out["segments"] = segments as Json;
+      if (duration > 0) out.duration = duration;
+      out.segments = segments as Json;
     }
     const language = asStr(getField(result, "language"));
-    if (language !== undefined) out["language"] = language;
+    if (language !== undefined) out.language = language;
     return out;
   }
 
@@ -410,9 +407,7 @@ export class WorkersAiAdapter extends BaseProviderAdapter {
     const result = unwrapCloudflareEnvelope(parsed);
     const data = getField(result, "data");
     if (!Array.isArray(data)) {
-      throw AdapterError.invalidRequest(
-        "workers ai embeddings response is missing a data array",
-      );
+      throw AdapterError.invalidRequest("workers ai embeddings response is missing a data array");
     }
     return openaiEmbeddingsResponse(data as Json[], model, undefined);
   }
@@ -489,9 +484,9 @@ export class WorkersAiAdapter extends BaseProviderAdapter {
   override injectTools(body: Json, tools: readonly ToolDef[]): Json {
     const object = ensureObjectBody(body, "chat completion request body");
     if (tools.length === 0) return object;
-    object["tools"] = tools.map((tool) => {
+    object.tools = tools.map((tool) => {
       const fn: JsonObject = { name: tool.name, parameters: tool.input_schema as Json };
-      if (tool.description !== undefined) fn["description"] = tool.description;
+      if (tool.description !== undefined) fn.description = tool.description;
       return { type: "function", function: fn };
     });
     return object;
@@ -529,8 +524,8 @@ export class WorkersAiAdapter extends BaseProviderAdapter {
   override appendToolResults(body: Json, results: readonly ToolResult[]): Json {
     const object = ensureObjectBody(body, "chat completion request body");
     if (results.length === 0) return object;
-    if (!Array.isArray(object["messages"])) object["messages"] = [];
-    const messages = object["messages"] as Json[];
+    if (!Array.isArray(object.messages)) object.messages = [];
+    const messages = object.messages as Json[];
     for (const result of results) {
       messages.push({
         role: "tool",
@@ -588,9 +583,7 @@ function textGenerationInput(body: JsonObject, stream: boolean): JsonObject {
 export function rerankDocumentTexts(body: Json): string[] {
   const documents = getField(body, "documents");
   if (!Array.isArray(documents) || documents.length === 0) {
-    throw AdapterError.invalidRequest(
-      'rerank request must include a non-empty "documents" array',
-    );
+    throw AdapterError.invalidRequest('rerank request must include a non-empty "documents" array');
   }
   const texts: string[] = [];
   for (const document of documents) {
@@ -639,10 +632,10 @@ function applyStructuredOutput(
     );
   }
   if (structured.kind === "json_object") {
-    input["response_format"] = { type: "json_object" };
+    input.response_format = { type: "json_object" };
     return;
   }
-  input["response_format"] = { type: "json_schema", json_schema: structured.schema };
+  input.response_format = { type: "json_schema", json_schema: structured.schema };
 }
 
 /**
@@ -654,7 +647,7 @@ function applyStructuredOutput(
  */
 function unwrapCloudflareEnvelope(value: Json): Json {
   if (isObject(value) && "result" in value && "success" in value) {
-    return (value as JsonObject)["result"] ?? null;
+    return (value as JsonObject).result ?? null;
   }
   return value;
 }

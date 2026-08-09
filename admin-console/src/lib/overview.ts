@@ -242,17 +242,17 @@ function readCountByStatus(value: unknown): OverviewCountByStatus | undefined {
   if (!source) return undefined;
   const total = readNumber(source.total);
   const byStatus = readCountMap(source.by_status);
-  return total !== undefined && byStatus !== undefined
-    ? { total, by_status: byStatus }
-    : undefined;
+  return total !== undefined && byStatus !== undefined ? { total, by_status: byStatus } : undefined;
 }
 
 function readAssets(value: unknown): OverviewAssets | undefined {
   const source = readRecord(value);
-  const counts = readNumbers(
-    source,
-    ["count", "storage_bytes", "referenced", "unreferenced"] as const,
-  );
+  const counts = readNumbers(source, [
+    "count",
+    "storage_bytes",
+    "referenced",
+    "unreferenced",
+  ] as const);
   if (!source || !counts) return undefined;
   // `storage_quota_bytes` is explicitly nullable on the wire: `null` means
   // "no applicable per-scope quota", which is NOT the same as a missing field.

@@ -20,11 +20,7 @@ import { TENANT_A, TENANT_B, setupTenantRouter, tenantDb } from "./harness.js";
 const PERIOD = "2026-07";
 const SCOPE = "org-1";
 
-function claim(
-  thresholdPct: number,
-  notifiedAtUnix = 1_700_000_000,
-  tenantId = TENANT_A,
-) {
+function claim(thresholdPct: number, notifiedAtUnix = 1_700_000_000, tenantId = TENANT_A) {
   return {
     tenantId,
     scopeType: "tenant" as const,
@@ -78,7 +74,9 @@ describe("D1BudgetAlertStore — the once-per-period claim", () => {
 
   it("does not let one tenant suppress another", async () => {
     expect(await store.claimBudgetAlertNotification(claim(80))).toBe(true);
-    expect(await storeB.claimBudgetAlertNotification(claim(80, 1_700_000_000, TENANT_B))).toBe(true);
+    expect(await storeB.claimBudgetAlertNotification(claim(80, 1_700_000_000, TENANT_B))).toBe(
+      true,
+    );
   });
 
   it("gives exactly ONE winner when concurrent callers race the same threshold", async () => {
@@ -98,7 +96,9 @@ describe("D1BudgetAlertStore — the once-per-period claim", () => {
     await store.claimBudgetAlertNotification(claim(100));
     // A brand-new store instance models the next isolate: the in-memory ledger
     // answers `false` here forever, which is the whole reason this class exists.
-    expect(await new D1BudgetAlertStore(tenantDb(TENANT_A)).budgetAlertAlreadyNotified(TENANT_A, id)).toBe(true);
+    expect(
+      await new D1BudgetAlertStore(tenantDb(TENANT_A)).budgetAlertAlreadyNotified(TENANT_A, id),
+    ).toBe(true);
   });
 
   it("lists a period's notifications ascending by threshold, like the memory twin", async () => {

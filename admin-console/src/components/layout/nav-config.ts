@@ -1,3 +1,5 @@
+import type { TranslationKey } from "@/i18n";
+import { APP_ROUTES } from "@/lib/app-routes";
 import type { LucideIcon } from "lucide-react";
 import {
   Bot,
@@ -9,8 +11,6 @@ import {
   ShieldCheck,
   TerminalSquare,
 } from "lucide-react";
-import { APP_ROUTES } from "@/lib/app-routes";
-import type { TranslationKey } from "@/i18n";
 
 export interface NavLeaf {
   /**

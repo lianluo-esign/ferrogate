@@ -30,9 +30,7 @@ describe("CfSecretsCapacityPolicy.checkSecretBudget", () => {
   const policy = CfSecretsCapacityPolicy.default();
 
   it("hard-errors creating a NEW secret at the budget", () => {
-    expect(() => policy.checkSecretBudget("s", "n", 100, false)).toThrow(
-      /100 secrets.*budget/,
-    );
+    expect(() => policy.checkSecretBudget("s", "n", 100, false)).toThrow(/100 secrets.*budget/);
   });
 
   it("allows overwriting an existing name at the budget (no new slot)", () => {
@@ -42,9 +40,9 @@ describe("CfSecretsCapacityPolicy.checkSecretBudget", () => {
   });
 
   it("returns a warning at/above the soft threshold", () => {
-    expect(policy.checkSecretBudget("s", "n", DEFAULT_CF_SECRETS_WARN_AT - 1, false)).toBeInstanceOf(
-      CfSecretsCapacityWarning,
-    );
+    expect(
+      policy.checkSecretBudget("s", "n", DEFAULT_CF_SECRETS_WARN_AT - 1, false),
+    ).toBeInstanceOf(CfSecretsCapacityWarning);
   });
 
   it("returns null comfortably below the soft threshold", () => {
@@ -77,8 +75,6 @@ describe("CfSecretsCapacityPolicy.fromEnv", () => {
     const policy = CfSecretsCapacityPolicy.fromEnv({
       FERROGATE_CF_SECRETS_MAX_VALUE_BYTES: "16",
     });
-    expect(() => policy.checkValueSize("s", "n", "x".repeat(17))).toThrow(
-      /configured cap of 16/,
-    );
+    expect(() => policy.checkValueSize("s", "n", "x".repeat(17))).toThrow(/configured cap of 16/);
   });
 });

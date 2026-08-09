@@ -24,5 +24,4 @@ export const RESOURCE_ROUTE_PATHS = {
   policies: "/app/policies",
 } as const;
 
-export type ResourceRoutePath =
-  (typeof RESOURCE_ROUTE_PATHS)[keyof typeof RESOURCE_ROUTE_PATHS];
+export type ResourceRoutePath = (typeof RESOURCE_ROUTE_PATHS)[keyof typeof RESOURCE_ROUTE_PATHS];

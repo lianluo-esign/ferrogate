@@ -92,7 +92,7 @@
  * taxonomy from a deleted file. `toolExecutionDenial` accepts only the
  * backends this Worker can actually reach.
  */
-import { backfillTenantConfigurationPolicy, type TenantDatabaseRouter } from "@ferrogate/storage";
+import { type TenantDatabaseRouter, backfillTenantConfigurationPolicy } from "@ferrogate/storage";
 import type { AuthContext, EntitlementPort, ToolExecuteBackend } from "./ports.js";
 
 /** Rust permission key for the MCP arm (`local.rs:155`). */

@@ -1,8 +1,5 @@
 import { adminGet } from "@/lib/gateway-client";
-import {
-  DISABLED_WHEN_STATUS_NOT_ACTIVE,
-  type ResourceConfig,
-} from "@/lib/resource-config";
+import { DISABLED_WHEN_STATUS_NOT_ACTIVE, type ResourceConfig } from "@/lib/resource-config";
 
 export interface AdminProject extends Record<string, unknown> {
   id: string;
@@ -25,14 +22,38 @@ export const projectsConfig: ResourceConfig<AdminProject> = {
   basePath: "/admin/v1/projects",
   idField: "id",
   pagination: "offset",
-  fetchList: (apiKey, request) =>
-    adminGet(apiKey, "/admin/v1/projects", { query: request }),
+  fetchList: (apiKey, request) => adminGet(apiKey, "/admin/v1/projects", { query: request }),
   rowLabel: (row) => row.name,
   columns: [
-    { key: "name", headerKey: "resource.projects.col.name", priority: "primary", minWidth: 220, mobileVisibility: "always" },
-    { key: "slug", headerKey: "resource.projects.col.slug", priority: "secondary", minWidth: 180, mobileVisibility: "always" },
-    { key: "tenant_id", headerKey: "resource.projects.col.tenant", priority: "detail", minWidth: 220, copyable: true, mobileVisibility: "details" },
-    { key: "status", headerKey: "resource.projects.col.status", priority: "secondary", minWidth: 100, mobileVisibility: "always" },
+    {
+      key: "name",
+      headerKey: "resource.projects.col.name",
+      priority: "primary",
+      minWidth: 220,
+      mobileVisibility: "always",
+    },
+    {
+      key: "slug",
+      headerKey: "resource.projects.col.slug",
+      priority: "secondary",
+      minWidth: 180,
+      mobileVisibility: "always",
+    },
+    {
+      key: "tenant_id",
+      headerKey: "resource.projects.col.tenant",
+      priority: "detail",
+      minWidth: 220,
+      copyable: true,
+      mobileVisibility: "details",
+    },
+    {
+      key: "status",
+      headerKey: "resource.projects.col.status",
+      priority: "secondary",
+      minWidth: 100,
+      mobileVisibility: "always",
+    },
   ],
   fields: [
     {
@@ -54,6 +75,11 @@ export const projectsConfig: ResourceConfig<AdminProject> = {
     },
     { name: "name", labelKey: "resource.projects.field.name", type: "text", required: true },
     { name: "slug", labelKey: "resource.projects.field.slug", type: "text", required: true },
-    { name: "status", labelKey: "resource.projects.field.status", type: "text", placeholder: "active" },
+    {
+      name: "status",
+      labelKey: "resource.projects.field.status",
+      type: "text",
+      placeholder: "active",
+    },
   ],
 };

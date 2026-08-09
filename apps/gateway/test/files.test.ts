@@ -74,10 +74,7 @@ class RecordingObjectStore extends InMemoryAssetObjectStore {
   }
 }
 
-function gateway(
-  limits: { inlineMaxBytes?: number } = {},
-  objects?: InMemoryAssetObjectStore,
-) {
+function gateway(limits: { inlineMaxBytes?: number } = {}, objects?: InMemoryAssetObjectStore) {
   const h = harness(objects === undefined ? {} : { objects });
   const { app } = createGatewayApp({
     modules: [
@@ -100,7 +97,9 @@ function gateway(
     const { token = "fg_files_rw", headers, ...rest } = init;
     const merged = new Headers(headers);
     if (token !== null) merged.set("authorization", `Bearer ${token}`);
-    return Promise.resolve(app.request(`https://gw.test${path}`, { ...rest, headers: merged }, ENV));
+    return Promise.resolve(
+      app.request(`https://gw.test${path}`, { ...rest, headers: merged }, ENV),
+    );
   };
 
   return { call, presigner: h.presigner, objects: h.objects };
@@ -172,7 +171,7 @@ describe("OpenAI-compatible Files API", () => {
       body: fileForm(),
     });
     expect(missingWriteScope.status).toBe(403);
-    expect((await missingWriteScope.json() as { error: { code: string } }).error.code).toBe(
+    expect(((await missingWriteScope.json()) as { error: { code: string } }).error.code).toBe(
       "scope_denied",
     );
 
@@ -182,7 +181,7 @@ describe("OpenAI-compatible Files API", () => {
       body: fileForm(),
     });
     expect(missingHosting.status).toBe(403);
-    expect((await missingHosting.json() as { error: { code: string } }).error.code).toBe(
+    expect(((await missingHosting.json()) as { error: { code: string } }).error.code).toBe(
       "asset_hosting_disabled",
     );
   });
@@ -229,7 +228,7 @@ describe("OpenAI-compatible Files API", () => {
       body: fileForm("xy", "over-quota.txt"),
     });
     expect(overQuota.status).toBe(403);
-    expect((await overQuota.json() as { error: { code: string } }).error.code).toBe(
+    expect(((await overQuota.json()) as { error: { code: string } }).error.code).toBe(
       "asset_storage_quota_exceeded",
     );
 
@@ -270,7 +269,7 @@ describe("OpenAI-compatible Files API", () => {
 
     const response = await call("/v1/files", { method: "POST", body: form });
     expect(response.status).toBe(400);
-    expect((await response.json() as { error: { code: string } }).error.code).toBe(
+    expect(((await response.json()) as { error: { code: string } }).error.code).toBe(
       "invalid_request",
     );
   });
@@ -298,7 +297,7 @@ describe("OpenAI-compatible Files API", () => {
 
     const content = await call(`/v1/files/${file.id}/content`);
     expect(content.status).toBe(413);
-    expect((await content.json() as { error: { code: string } }).error.code).toBe(
+    expect(((await content.json()) as { error: { code: string } }).error.code).toBe(
       "asset_too_large_for_inline_pull",
     );
   });

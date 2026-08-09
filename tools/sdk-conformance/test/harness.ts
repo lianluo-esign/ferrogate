@@ -94,8 +94,7 @@ export function interceptUpstream(
   const requests: UpstreamRequest[] = [];
 
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
-    const url =
-      typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
     if (!url.includes(".conformance.test")) {
       return await original(input as RequestInfo, init);
     }

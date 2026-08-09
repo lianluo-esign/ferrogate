@@ -281,14 +281,18 @@ describe("wallets on D1", () => {
       jsonRequest(KEY, "POST", { amount_cents: 250, reason: "promo" }),
     );
     expect(credited.status).toBe(200);
-    expect(await rawTenantDocument("tenant_a", "wallets", "tenant_a")).toMatchObject({ balance_cents: 750 });
+    expect(await rawTenantDocument("tenant_a", "wallets", "tenant_a")).toMatchObject({
+      balance_cents: 750,
+    });
 
     const charged = await SELF.fetch(
       `${BASE}/admin/v1/wallets/tenant_a/charge`,
       jsonRequest(KEY, "POST", { amount_cents: 100 }),
     );
     expect(charged.status).toBe(200);
-    expect(await rawTenantDocument("tenant_a", "wallets", "tenant_a")).toMatchObject({ balance_cents: 650 });
+    expect(await rawTenantDocument("tenant_a", "wallets", "tenant_a")).toMatchObject({
+      balance_cents: 650,
+    });
 
     const ledger = await SELF.fetch(`${BASE}/admin/v1/wallets/tenant_a/ledger?limit=10`, {
       headers: bearer(KEY),
@@ -495,7 +499,9 @@ describe("wallets on D1", () => {
       jsonRequest(KEY, "POST", { amount_cents: 500 }),
     );
     expect(overdraft.status).toBe(409);
-    expect(await rawTenantDocument("tenant_a", "wallets", "tenant_a")).toMatchObject({ balance_cents: 50 });
+    expect(await rawTenantDocument("tenant_a", "wallets", "tenant_a")).toMatchObject({
+      balance_cents: 50,
+    });
     // The refusal must not have left a ledger entry behind either.
     const ledger = await SELF.fetch(`${BASE}/admin/v1/wallets/tenant_a/ledger`, {
       headers: bearer(KEY),
@@ -546,11 +552,10 @@ describe("billing on D1", () => {
 // ---------------------------------------------------------------------------
 
 describe("cross-tenant isolation on D1", () => {
-  // The operator fan-out over tenant-attributed rows reads the roster;
-  // production writes these rows at onboarding.
-  beforeEach(() => registerObjectTenants(["tenant_a", "tenant_b"]));
-
   beforeEach(async () => {
+    // The operator fan-out over tenant-attributed rows reads the roster;
+    // production writes these rows at onboarding.
+    registerObjectTenants(["tenant_a", "tenant_b"]);
     // Written by tenant A, through the Worker, so the row's `tenant_id` is the
     // one the store stamped rather than one a fixture asserted.
     const created = await SELF.fetch(
@@ -558,7 +563,9 @@ describe("cross-tenant isolation on D1", () => {
       jsonRequest(TENANT_A_KEY, "POST", { id: "proj_a", name: "a-secret" }),
     );
     expect(created.status).toBe(201);
-    expect(await rawTenantDocument("tenant_a", "projects", "proj_a")).toMatchObject({ tenant_id: "tenant_a" });
+    expect(await rawTenantDocument("tenant_a", "projects", "proj_a")).toMatchObject({
+      tenant_id: "tenant_a",
+    });
   });
 
   it("hides another tenant's row from GET as a 404, not a 403", async () => {
@@ -615,7 +622,9 @@ describe("cross-tenant isolation on D1", () => {
     expect(response.status).toBe(404);
     // And the row on disk is untouched — a 404 that still wrote would be worse
     // than a 200 that did.
-    expect(await rawTenantDocument("tenant_a", "projects", "proj_a")).toMatchObject({ name: "a-secret" });
+    expect(await rawTenantDocument("tenant_a", "projects", "proj_a")).toMatchObject({
+      name: "a-secret",
+    });
     expect(await rawTenantRevision("tenant_a", "projects", "proj_a")).toBe(1);
   });
 
@@ -625,7 +634,9 @@ describe("cross-tenant isolation on D1", () => {
       jsonRequest(TENANT_B_KEY, "PUT", { name: "hijacked" }),
     );
     expect(response.status).toBe(404);
-    expect(await rawTenantDocument("tenant_a", "projects", "proj_a")).toMatchObject({ name: "a-secret" });
+    expect(await rawTenantDocument("tenant_a", "projects", "proj_a")).toMatchObject({
+      name: "a-secret",
+    });
   });
 
   it("refuses to let another tenant DELETE the row", async () => {
@@ -643,7 +654,9 @@ describe("cross-tenant isolation on D1", () => {
       jsonRequest(TENANT_B_KEY, "POST", { id: "proj_forged", tenant_id: "tenant_a" }),
     );
     // B cannot mint a row into A by declaring A's id in the body.
-    expect(await rawTenantDocument("tenant_b", "projects", "proj_forged")).toMatchObject({ tenant_id: "tenant_b" });
+    expect(await rawTenantDocument("tenant_b", "projects", "proj_forged")).toMatchObject({
+      tenant_id: "tenant_b",
+    });
   });
 
   it("keeps `tenant_id` structural: a PATCH cannot move a row between tenants", async () => {
@@ -652,7 +665,9 @@ describe("cross-tenant isolation on D1", () => {
       jsonRequest(TENANT_A_KEY, "PATCH", { tenant_id: "tenant_b" }),
     );
     expect(response.status).toBe(200);
-    expect(await rawTenantDocument("tenant_a", "projects", "proj_a")).toMatchObject({ tenant_id: "tenant_a" });
+    expect(await rawTenantDocument("tenant_a", "projects", "proj_a")).toMatchObject({
+      tenant_id: "tenant_a",
+    });
   });
 
   it("still lets the platform operator see every tenant's rows", async () => {

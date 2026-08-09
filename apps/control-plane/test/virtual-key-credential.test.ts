@@ -126,14 +126,14 @@ describe("MOUNT: a minted virtual key actually authenticates", () => {
 
     const directory = await directoryRows(key.id);
     expect(directory).toHaveLength(1);
-    expect(directory[0]?.["tenant_id"]).toBe(TENANT_A);
-    expect(directory[0]?.["enabled"]).toBe(1);
-    expect(directory[0]?.["revoked_at_unix"]).toBeNull();
+    expect(directory[0]?.tenant_id).toBe(TENANT_A);
+    expect(directory[0]?.enabled).toBe(1);
+    expect(directory[0]?.revoked_at_unix).toBeNull();
 
     const tenantRow = await tenantKeyRow(key.id);
     expect(tenantRow).not.toBeNull();
-    expect(tenantRow?.["key_hash"]).toBe(directory[0]?.["key_hash"]);
-    expect(tenantRow?.["scopes_json"]).toBe(JSON.stringify(["admin.read"]));
+    expect(tenantRow?.key_hash).toBe(directory[0]?.key_hash);
+    expect(tenantRow?.scopes_json).toBe(JSON.stringify(["admin.read"]));
 
     // The authority row is physically isolated: tenant B's database must not
     // have acquired it. A single shared database would pass a row-count
@@ -160,7 +160,7 @@ describe("MOUNT: the lifecycle actions reach the credential, not just the docume
     // The 401-vs-403 invariant: a revoked key is indistinguishable from a typo,
     // because a 403 would confirm the presented secret is a real credential.
     expect(await presentedStatus(key.secret)).toBe(401);
-    expect((await directoryRows(key.id))[0]?.["revoked_at_unix"]).not.toBeNull();
+    expect((await directoryRows(key.id))[0]?.revoked_at_unix).not.toBeNull();
   });
 
   it("DELETE is a revocation and it bites too", async () => {
@@ -182,7 +182,7 @@ describe("MOUNT: the lifecycle actions reach the credential, not just the docume
     });
     expect(disabled.status).toBe(200);
     expect(await presentedStatus(key.secret)).toBe(401);
-    expect((await directoryRows(key.id))[0]?.["enabled"]).toBe(0);
+    expect((await directoryRows(key.id))[0]?.enabled).toBe(0);
 
     const enabled = await SELF.fetch(`${BASE}/admin/v1/virtual-keys/${key.id}/enable`, {
       method: "POST",
@@ -228,6 +228,6 @@ describe("rotation retires the OLD secret", () => {
     // forever. One row, and it is not the old one.
     const after = await directoryRows(key.id);
     expect(after).toHaveLength(1);
-    expect(after[0]?.["key_hash"]).not.toBe(before[0]?.["key_hash"]);
+    expect(after[0]?.key_hash).not.toBe(before[0]?.key_hash);
   });
 });

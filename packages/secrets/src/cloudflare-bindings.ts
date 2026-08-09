@@ -39,13 +39,7 @@
  * supported topology and the
  * `SecretsStoreSecret` read that now succeeds.
  */
-import {
-  type EnvLike,
-  INSPECT,
-  defaultEnv,
-  isSecretsStoreBinding,
-  readEnvSecret,
-} from "./env.js";
+import { type EnvLike, INSPECT, defaultEnv, isSecretsStoreBinding, readEnvSecret } from "./env.js";
 import type { SecretResolver } from "./resolver.js";
 import type { SecretRef } from "./secret-ref.js";
 import { describeSecretRef } from "./secret-ref.js";
@@ -111,8 +105,7 @@ export class CfSecretBindings implements SecretResolver {
     bindings: Record<string, string> | Map<string, string>,
     env: EnvLike = defaultEnv(),
   ): CfSecretBindings {
-    const map =
-      bindings instanceof Map ? new Map(bindings) : new Map(Object.entries(bindings));
+    const map = bindings instanceof Map ? new Map(bindings) : new Map(Object.entries(bindings));
     return new CfSecretBindings(map, env);
   }
 
@@ -146,10 +139,7 @@ export class CfSecretBindings implements SecretResolver {
     const fromEnv = this.env[variable];
     if (isSecretsStoreBinding(fromEnv)) {
       throw new Error(
-        `cf:// secret ${JSON.stringify(secretName)} is bound as a Cloudflare Secrets Store ` +
-          `secret ([[secrets_store_secrets]] ${variable}), whose value can only be read ` +
-          `asynchronously with await ${variable}.get(). Use CfSecretBindings.lookupAsync (or ` +
-          `resolve(), which already awaits) instead of the synchronous lookup().`,
+        `cf:// secret ${JSON.stringify(secretName)} is bound as a Cloudflare Secrets Store secret ([[secrets_store_secrets]] ${variable}), whose value can only be read asynchronously with await ${variable}.get(). Use CfSecretBindings.lookupAsync (or resolve(), which already awaits) instead of the synchronous lookup().`,
       );
     }
     return fromEnv !== undefined && fromEnv.trim() !== "" ? fromEnv : null;
@@ -193,16 +183,7 @@ export class CfSecretBindings implements SecretResolver {
     if (cfBindingNameIsUnambiguous(secretName)) return;
     const variable = cfBindingEnvVar(secretName);
     throw new Error(
-      `cf:// secret name ${JSON.stringify(secretName)} cannot be resolved from the ` +
-        `Worker-binding environment convention: it is not canonical, so the variable it maps ` +
-        `to (${variable}) is shared with other distinct Cloudflare secrets (e.g. ` +
-        `openai-api-key, openai.api.key, openai_api_key and OpenAI-API-Key all map to ` +
-        `FERROGATE_CF_SECRET_OPENAI_API_KEY) and reading it could return a credential you did ` +
-        `not name. Fix by either (1) renaming the Secrets Store secret to the canonical shape ` +
-        `[a-z0-9-]+ (e.g. openai-api-key) so the mapping is collision-free, or (2) injecting ` +
-        `the value under its exact name via CfSecretBindings.fromMap/insert + ` +
-        `SecretResolverRegistry.withCfBindings, which is keyed exactly and never collapses. ` +
-        `See docs/cloudflare-secrets-resolution.md`,
+      `cf:// secret name ${JSON.stringify(secretName)} cannot be resolved from the Worker-binding environment convention: it is not canonical, so the variable it maps to (${variable}) is shared with other distinct Cloudflare secrets (e.g. openai-api-key, openai.api.key, openai_api_key and OpenAI-API-Key all map to FERROGATE_CF_SECRET_OPENAI_API_KEY) and reading it could return a credential you did not name. Fix by either (1) renaming the Secrets Store secret to the canonical shape [a-z0-9-]+ (e.g. openai-api-key) so the mapping is collision-free, or (2) injecting the value under its exact name via CfSecretBindings.fromMap/insert + SecretResolverRegistry.withCfBindings, which is keyed exactly and never collapses. See docs/cloudflare-secrets-resolution.md`,
     );
   }
 

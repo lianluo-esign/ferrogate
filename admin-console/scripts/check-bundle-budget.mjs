@@ -1,7 +1,7 @@
 import { readFile, stat } from "node:fs/promises";
-import { gzipSync } from "node:zlib";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { gzipSync } from "node:zlib";
 
 // Entry-chunk ceiling. The console's i18n runtime is hand-rolled precisely to
 // keep the localized catalogs OUT of a heavyweight i18next dependency (see
@@ -113,9 +113,7 @@ const authEntries = ["src/pages/login.tsx", "src/pages/register.tsx"];
 const protectedPageKeys = entries
   .filter(
     ([key, record]) =>
-      key.startsWith("src/pages/") &&
-      record.isDynamicEntry === true &&
-      !authEntries.includes(key),
+      key.startsWith("src/pages/") && record.isDynamicEntry === true && !authEntries.includes(key),
   )
   .map(([key]) => key);
 

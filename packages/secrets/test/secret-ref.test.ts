@@ -23,21 +23,15 @@ describe("parseSecretRef", () => {
   });
 
   it("rejects a vault:// reference missing the #field", () => {
-    expect(() => parseSecretRef("vault://secret/data/openai")).toThrow(
-      /#field/,
-    );
+    expect(() => parseSecretRef("vault://secret/data/openai")).toThrow(/#field/);
   });
 
   it("rejects a vault:// reference missing the path", () => {
-    expect(() => parseSecretRef("vault://secret#api_key")).toThrow(
-      /<mount>\/<path>/,
-    );
+    expect(() => parseSecretRef("vault://secret#api_key")).toThrow(/<mount>\/<path>/);
   });
 
   it("rejects an empty vault mount or path", () => {
-    expect(() => parseSecretRef("vault:///data#api_key")).toThrow(
-      /non-empty mount and path/,
-    );
+    expect(() => parseSecretRef("vault:///data#api_key")).toThrow(/non-empty mount and path/);
   });
 
   it("parses a cf:// reference", () => {
@@ -58,9 +52,7 @@ describe("parseSecretRef", () => {
   });
 
   it("rejects a cf:// reference missing the name", () => {
-    expect(() => parseSecretRef("cf://provider-keys")).toThrow(
-      /<store>\/<name>/,
-    );
+    expect(() => parseSecretRef("cf://provider-keys")).toThrow(/<store>\/<name>/);
   });
 
   // DELIBERATELY CHANGED by issue #682, which added a FOURTH scheme (`byok://`).

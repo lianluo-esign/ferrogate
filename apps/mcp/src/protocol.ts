@@ -202,24 +202,24 @@ export function modernDiscoverParams(): Record<string, JsonValue> {
 /** True when a `server/discover` result advertises {@link MCP_PROTOCOL_VERSION}. */
 export function discoverSupportsCurrentVersion(response: JsonValue): boolean {
   if (!isJsonObject(response)) return false;
-  if (response["jsonrpc"] !== "2.0") return false;
-  const id = response["id"];
+  if (response.jsonrpc !== "2.0") return false;
+  const id = response.id;
   if (typeof id !== "string" && typeof id !== "number") return false;
-  const result = response["result"];
+  const result = response.result;
   if (!isJsonObject(result)) return false;
-  if (result["resultType"] !== "complete") return false;
-  if (!isJsonObject(result["capabilities"])) return false;
-  const versions = result["supportedVersions"];
+  if (result.resultType !== "complete") return false;
+  if (!isJsonObject(result.capabilities)) return false;
+  const versions = result.supportedVersions;
   return Array.isArray(versions) && versions.some((version) => version === MCP_PROTOCOL_VERSION);
 }
 
 /** The JSON-RPC error code of a well-formed error response, if any. */
 export function jsonRpcErrorCode(response: JsonValue): number | undefined {
-  if (!isJsonObject(response) || response["jsonrpc"] !== "2.0") return undefined;
-  const error = response["error"];
+  if (!isJsonObject(response) || response.jsonrpc !== "2.0") return undefined;
+  const error = response.error;
   if (!isJsonObject(error)) return undefined;
-  if (typeof error["message"] !== "string") return undefined;
-  const code = error["code"];
+  if (typeof error.message !== "string") return undefined;
+  const code = error.code;
   return typeof code === "number" ? code : undefined;
 }
 
@@ -451,7 +451,7 @@ export function validateIngress(headers: Headers, rpc: McpIngressRequest): Ingre
     );
     if (!headerProtocol.ok) return headerProtocol;
 
-    const meta = isJsonObject(rpc.params) ? rpc.params["_meta"] : undefined;
+    const meta = isJsonObject(rpc.params) ? rpc.params._meta : undefined;
     if (!isJsonObject(meta)) {
       return invalidParams("required params._meta object is missing or malformed");
     }
@@ -470,8 +470,8 @@ export function validateIngress(headers: Headers, rpc: McpIngressRequest): Ingre
     if (clientInfo !== undefined) {
       const valid =
         isJsonObject(clientInfo) &&
-        typeof clientInfo["name"] === "string" &&
-        typeof clientInfo["version"] === "string";
+        typeof clientInfo.name === "string" &&
+        typeof clientInfo.version === "string";
       if (!valid) {
         return invalidParams(
           `optional params._meta["${CLIENT_INFO_META}"] must be an Implementation object with string name and version when present`,
@@ -546,7 +546,7 @@ export function isSupportedModernMethod(method: string): boolean {
 }
 
 function bodyUsesModernMetadata(rpc: McpIngressRequest): boolean {
-  const meta = isJsonObject(rpc.params) ? rpc.params["_meta"] : undefined;
+  const meta = isJsonObject(rpc.params) ? rpc.params._meta : undefined;
   if (!isJsonObject(meta)) return false;
   return (
     PROTOCOL_VERSION_META in meta || CLIENT_CAPABILITIES_META in meta || CLIENT_INFO_META in meta
@@ -557,11 +557,11 @@ function bodyUsesModernMetadata(rpc: McpIngressRequest): boolean {
 export function bodyName(rpc: McpIngressRequest): string | undefined {
   const params = isJsonObject(rpc.params) ? rpc.params : undefined;
   if (rpc.method === "tools/call" || rpc.method === "prompts/get") {
-    const value = params?.["name"];
+    const value = params?.name;
     return typeof value === "string" ? value : undefined;
   }
   if (rpc.method === "resources/read") {
-    const value = params?.["uri"];
+    const value = params?.uri;
     return typeof value === "string" ? value : undefined;
   }
   return undefined;
@@ -680,10 +680,10 @@ const CACHEABLE_RESULT_METHODS = new Set(["tools/list", "resources/list", "resou
  * decided its own discriminator owns it.
  */
 export function completeModernResult(result: Record<string, JsonValue>, method: string): void {
-  if (!("resultType" in result)) result["resultType"] = "complete";
+  if (!("resultType" in result)) result.resultType = "complete";
   if (CACHEABLE_RESULT_METHODS.has(method)) {
-    if (!("ttlMs" in result)) result["ttlMs"] = PRIVATE_CACHE_TTL_MS;
-    if (!("cacheScope" in result)) result["cacheScope"] = "private";
+    if (!("ttlMs" in result)) result.ttlMs = PRIVATE_CACHE_TTL_MS;
+    if (!("cacheScope" in result)) result.cacheScope = "private";
   }
   stampServerInfo(result);
 }
@@ -699,10 +699,10 @@ export function completeModernResult(result: Record<string, JsonValue>, method: 
  * existing `serverInfo` is left alone for the same reason `resultType` is.
  */
 function stampServerInfo(result: Record<string, JsonValue>): void {
-  const existing = result["_meta"];
+  const existing = result._meta;
   const meta = isJsonObject(existing) ? existing : {};
   if (SERVER_INFO_META in meta) return;
-  result["_meta"] = { ...meta, [SERVER_INFO_META]: { ...FERROGATE_SERVER_INFO } };
+  result._meta = { ...meta, [SERVER_INFO_META]: { ...FERROGATE_SERVER_INFO } };
 }
 
 /** Narrowing helper: a JSON object (not null, not an array). */

@@ -1,11 +1,11 @@
 import { describe, expect, test } from "vitest";
 import {
-  defaultObservabilityConfig,
   ObservabilityConfigError,
   ObservabilityExporterConfig,
   ObservabilityExporterKind,
   ObservabilityPipelineConfig,
   ObservabilitySignal,
+  defaultObservabilityConfig,
   parseExporterConfig,
 } from "../src/index.js";
 
@@ -22,9 +22,7 @@ describe("ObservabilityConfig", () => {
 describe("exporter config validation", () => {
   test("prometheus exporter is a metrics plugin boundary", () => {
     const exporter = ObservabilityExporterConfig.prometheusMetrics("/metrics");
-    const pipeline = new ObservabilityPipelineConfig("ferrogate").withExporter(
-      exporter,
-    );
+    const pipeline = new ObservabilityPipelineConfig("ferrogate").withExporter(exporter);
 
     expect(exporter.kind()).toBe(ObservabilityExporterKind.Prometheus);
     expect(exporter.signals()).toEqual([ObservabilitySignal.Metric]);
@@ -50,27 +48,22 @@ describe("exporter config validation", () => {
     const pipeline = new ObservabilityPipelineConfig("ferrogate")
       .withExporter(ObservabilityExporterConfig.stdoutLogs())
       .withExporter(ObservabilityExporterConfig.prometheusMetrics("/metrics"))
-      .withExporter(
-        ObservabilityExporterConfig.otlp("http://localhost:4318/v1/traces"),
-      );
+      .withExporter(ObservabilityExporterConfig.otlp("http://localhost:4318/v1/traces"));
 
     expect(pipeline.validate()).toBeNull();
     expect(pipeline.exporters.length).toBe(3);
   });
 
   test("validates exporter required fields", () => {
-    const emptyName = new ObservabilityExporterConfig(
-      " ",
-      ObservabilityExporterKind.Stdout,
-      [ObservabilitySignal.Log],
-    );
+    const emptyName = new ObservabilityExporterConfig(" ", ObservabilityExporterKind.Stdout, [
+      ObservabilitySignal.Log,
+    ]);
     const emptySignals = new ObservabilityExporterConfig(
       "empty",
       ObservabilityExporterKind.Stdout,
       [],
     );
-    const badPrometheusPath =
-      ObservabilityExporterConfig.prometheusMetrics("metrics");
+    const badPrometheusPath = ObservabilityExporterConfig.prometheusMetrics("metrics");
 
     expect(emptyName.validate()?.errorKind).toBe("MissingExporterName");
     const signalsErr = emptySignals.validate();
@@ -88,20 +81,16 @@ describe("exporter config validation", () => {
   });
 
   test("otlp/cloudflare exporters require an endpoint", () => {
-    const otlp = new ObservabilityExporterConfig(
-      "otlp",
-      ObservabilityExporterKind.Otlp,
-      [ObservabilitySignal.Trace],
-    );
+    const otlp = new ObservabilityExporterConfig("otlp", ObservabilityExporterKind.Otlp, [
+      ObservabilitySignal.Trace,
+    ]);
     expect(otlp.validate()?.errorKind).toBe("MissingEndpoint");
   });
 
   test("file exporter requires a path", () => {
-    const file = new ObservabilityExporterConfig(
-      "file",
-      ObservabilityExporterKind.File,
-      [ObservabilitySignal.Log],
-    );
+    const file = new ObservabilityExporterConfig("file", ObservabilityExporterKind.File, [
+      ObservabilitySignal.Log,
+    ]);
     expect(file.validate()?.errorKind).toBe("MissingPath");
     expect(ObservabilityExporterConfig.fileLogs("/var/log/fg.log").validate()).toBeNull();
   });
@@ -131,8 +120,6 @@ describe("exporter config validation", () => {
   });
 
   test("Zod parseExporterConfig rejects an unknown kind", () => {
-    expect(() =>
-      parseExporterConfig({ name: "x", kind: "Bogus", signals: ["Log"] }),
-    ).toThrow();
+    expect(() => parseExporterConfig({ name: "x", kind: "Bogus", signals: ["Log"] })).toThrow();
   });
 });

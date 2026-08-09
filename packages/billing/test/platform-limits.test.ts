@@ -13,18 +13,18 @@ import { describe, expect, it } from "vitest";
 import * as billing from "../src/index.js";
 import {
   BillingError,
-  charge,
-  createBillingService,
-  InMemoryLedgerSink,
-  MAX_REQUEST_BYTES,
-  modelPriceUsd,
-  parseBillingEvent,
-  priceEntry,
-  PriceBook,
   type BillingServiceConfig,
+  InMemoryLedgerSink,
   type LedgerEntry,
   type LedgerListFilter,
   type LedgerSink,
+  MAX_REQUEST_BYTES,
+  PriceBook,
+  charge,
+  createBillingService,
+  modelPriceUsd,
+  parseBillingEvent,
+  priceEntry,
 } from "../src/index.js";
 
 const BOOK = PriceBook.new([priceEntry("openai", "gpt-5.5", modelPriceUsd(5.0, 15.0))]);
@@ -181,7 +181,10 @@ describe("the widening that limit forced — an async (durable) sink is honored"
 
     const list = await svc(new Request("https://billing.test/v1/billing/ledger"));
     expect(list.status).toBe(200);
-    const listed = (await list.json()) as { entries: { id: string }[]; page_totals: { entries: number } };
+    const listed = (await list.json()) as {
+      entries: { id: string }[];
+      page_totals: { entries: number };
+    };
     // An unawaited `list` would serialize a Promise: `{"entries":{}}`.
     expect(listed.entries.map((e) => e.id)).toEqual([
       "ferrogate:provider-attempt:req-a:provider-attempt:0",

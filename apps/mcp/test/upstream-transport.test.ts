@@ -85,7 +85,7 @@ describe("modern Streamable HTTP upstream", () => {
     expect(tools.map((tool) => tool.name)).toEqual(["srv-echo"]);
     expect(seen[0]?.body.method).toBe("server/discover");
     // Modern requests carry `_meta` declaring the protocol revision.
-    expect(seen[0]?.body.params?.["_meta"]).toMatchObject({
+    expect(seen[0]?.body.params?._meta).toMatchObject({
       "io.modelcontextprotocol/protocolVersion": MCP_PROTOCOL_VERSION,
     });
     expect(seen[1]?.headers.get(MCP_METHOD_HEADER)).toBe("tools/list");
@@ -110,7 +110,7 @@ describe("modern Streamable HTTP upstream", () => {
     const tool = resolution.kind === "resolved" ? resolution.tool : undefined;
 
     const result = await upstreams.callTool(
-      tool!,
+      tool as NonNullable<typeof tool>,
       { text: "hi" },
       McpDispatchHeaders.bearer("grant-token"),
       context,
@@ -133,7 +133,12 @@ describe("modern Streamable HTTP upstream", () => {
     const upstreams = new HttpMcpUpstreams([upstreamConfig()], impl);
     const resolved = await upstreams.resolveTool("srv-echo");
     const tool = resolved.kind === "resolved" ? resolved.tool : undefined;
-    const result = await upstreams.callTool(tool!, {}, McpDispatchHeaders.empty(), context);
+    const result = await upstreams.callTool(
+      tool as NonNullable<typeof tool>,
+      {},
+      McpDispatchHeaders.empty(),
+      context,
+    );
     expect(result.isError).toBe(true);
   });
 
@@ -167,7 +172,7 @@ describe("modern Streamable HTTP upstream", () => {
     const resolved = await upstreams.resolveTool("srv-echo");
     const tool = resolved.kind === "resolved" ? resolved.tool : undefined;
     await expect(
-      upstreams.callTool(tool!, {}, McpDispatchHeaders.empty(), context),
+      upstreams.callTool(tool as NonNullable<typeof tool>, {}, McpDispatchHeaders.empty(), context),
     ).rejects.toMatchObject({ code: "mcp_upstream_unauthorized" });
   });
 });

@@ -1,3 +1,4 @@
+import { chooseTheme } from "./support/theme";
 import {
   attachViewportScreenshot,
   expect,
@@ -6,7 +7,6 @@ import {
   expectNoDocumentOverflow,
   test,
 } from "./support/ui-contract";
-import { chooseTheme } from "./support/theme";
 
 test.describe("public auth routes", () => {
   test.use({
@@ -16,7 +16,9 @@ test.describe("public auth routes", () => {
     await page.goto("/login");
 
     await expect(page.getByRole("main")).toHaveCount(1);
-    await expect(page.getByRole("heading", { level: 1, name: "FerroGate Admin Console" })).toBeVisible();
+    await expect(
+      page.getByRole("heading", { level: 1, name: "FerroGate Admin Console" }),
+    ).toBeVisible();
     await expect(page.getByLabel("Email")).toBeVisible();
     await expect(page.getByLabel("Email")).toHaveAttribute("name", "email");
     await expect(page.getByLabel("Email")).toHaveAttribute("autocomplete", "email");
@@ -30,9 +32,7 @@ test.describe("public auth routes", () => {
       testInfo,
     );
     await page.keyboard.press("Tab");
-    await expect(
-      page.getByRole("button", { name: "Theme: System. Change theme" }),
-    ).toBeFocused();
+    await expect(page.getByRole("button", { name: "Theme: System. Change theme" })).toBeFocused();
     await page.keyboard.press("Tab");
     await expect(page.getByLabel("Email")).toBeFocused();
     await expectNoDocumentOverflow(page, testInfo);
@@ -48,10 +48,15 @@ test.describe("public auth routes", () => {
     await page.goto("/register");
 
     await expect(page.getByRole("main")).toHaveCount(1);
-    await expect(page.getByRole("heading", { level: 1, name: "Create your organization" })).toBeVisible();
+    await expect(
+      page.getByRole("heading", { level: 1, name: "Create your organization" }),
+    ).toBeVisible();
     await expect(page.getByLabel("Organization name")).toBeVisible();
     await expect(page.getByLabel("Organization name")).toHaveAttribute("name", "organization_name");
-    await expect(page.getByLabel("Organization name")).toHaveAttribute("autocomplete", "organization");
+    await expect(page.getByLabel("Organization name")).toHaveAttribute(
+      "autocomplete",
+      "organization",
+    );
     await expect(page.getByLabel("Your name (optional)")).toHaveAttribute("autocomplete", "name");
     await expectNoDocumentOverflow(page, testInfo);
     await expectNoAxeViolations(page, testInfo, ["critical", "serious"]);

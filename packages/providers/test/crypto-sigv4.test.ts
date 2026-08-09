@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 
 import { hexSha256, hmacSha256, sha256, utf8 } from "../src/crypto.js";
+import type { AwsCredentials, SigningRequest } from "../src/index.js";
 import {
   canonicalQueryString,
   formatTimestamps,
@@ -9,7 +10,6 @@ import {
   signStreamedWithContentHashHeader,
   signWithContentHashHeader,
 } from "../src/sigv4.js";
-import type { AwsCredentials, SigningRequest } from "../src/index.js";
 
 describe("SHA-256 / HMAC primitives", () => {
   test("SHA-256 of empty string matches the known NIST vector", () => {
@@ -84,8 +84,10 @@ describe("SigV4 signing", () => {
 
   test("changing the body changes the signature", () => {
     const a = sign(request, credentials).authorization;
-    const b = sign({ ...request, body: utf8('{"messages":[{"role":"user"}]}') }, credentials)
-      .authorization;
+    const b = sign(
+      { ...request, body: utf8('{"messages":[{"role":"user"}]}') },
+      credentials,
+    ).authorization;
     expect(a).not.toBe(b);
   });
 
@@ -125,7 +127,9 @@ describe("SigV4 signing", () => {
       credentials,
     );
     expect(query).toContain("X-Amz-Algorithm=AWS4-HMAC-SHA256");
-    expect(query).toContain("X-Amz-Credential=AKIDEXAMPLE%2F20150830%2Fus-east-1%2Fs3%2Faws4_request");
+    expect(query).toContain(
+      "X-Amz-Credential=AKIDEXAMPLE%2F20150830%2Fus-east-1%2Fs3%2Faws4_request",
+    );
     expect(query).toContain("X-Amz-SignedHeaders=host");
     expect(query).toMatch(/&X-Amz-Signature=[0-9a-f]{64}$/);
     // L11: same trap on the presign path — pin the value.
@@ -135,9 +139,12 @@ describe("SigV4 signing", () => {
   });
 
   test("canonicalQueryString sorts and RFC3986-encodes pairs", () => {
-    expect(canonicalQueryString([["list-type", "2"], ["prefix", "a/b"]])).toBe(
-      "list-type=2&prefix=a%2Fb",
-    );
+    expect(
+      canonicalQueryString([
+        ["list-type", "2"],
+        ["prefix", "a/b"],
+      ]),
+    ).toBe("list-type=2&prefix=a%2Fb");
   });
 });
 

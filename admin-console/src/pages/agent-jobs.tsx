@@ -1,3 +1,22 @@
+import { TruncatedCopyable, formatUnix } from "@/components/agent-ops/agent-ops-primitives";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { Textarea } from "@/components/ui/textarea";
+import { useAuth } from "@/hooks/use-auth";
+import { useI18n } from "@/i18n";
+import { type AdminSchema, adminGet, adminPost, gatewayPost } from "@/lib/gateway-client";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 // Async agent-job console (issue #474). The operator counterpart of the
 // caller-facing long-running job protocol: submit a task, get a durable
 // `run_id` back, watch the run advance as the runtime reports it, collect the
@@ -9,25 +28,6 @@
 // collect verb, and the artifacts it returns are the runtime's own work-product
 // evidence.
 import { useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
-import { formatUnix, TruncatedCopyable } from "@/components/agent-ops/agent-ops-primitives";
-import { useAuth } from "@/hooks/use-auth";
-import { useI18n } from "@/i18n";
-import { adminGet, adminPost, gatewayPost, type AdminSchema } from "@/lib/gateway-client";
 
 type AgentJobStatus = AdminSchema<"AgentJobStatus">;
 
@@ -41,7 +41,7 @@ function StatusBadge({ status, terminal }: { status: string; terminal: boolean }
 export default function AgentJobsPage() {
   const { session } = useAuth();
   const { t } = useI18n();
-  const apiKey = session!.gatewayApiKey;
+  const apiKey = (session as NonNullable<typeof session>).gatewayApiKey;
   const queryClient = useQueryClient();
 
   const [input, setInput] = useState("");
@@ -55,8 +55,7 @@ export default function AgentJobsPage() {
     queryKey: ["agent-job", activeRunId],
     enabled: activeRunId !== "",
     refetchInterval: (query) => (query.state.data?.terminal ? false : LIVE_POLL_INTERVAL_MS),
-    queryFn: () =>
-      adminGet(apiKey, "/v1/agent-jobs/{run_id}", { params: { run_id: activeRunId } }),
+    queryFn: () => adminGet(apiKey, "/v1/agent-jobs/{run_id}", { params: { run_id: activeRunId } }),
   });
 
   const events = useQuery({
@@ -341,7 +340,9 @@ export default function AgentJobsPage() {
                       <TableCell className="max-w-md truncate text-xs">
                         {event.message ?? "—"}
                       </TableCell>
-                      <TableCell className="text-xs">{formatUnix(event.occurred_at_unix)}</TableCell>
+                      <TableCell className="text-xs">
+                        {formatUnix(event.occurred_at_unix)}
+                      </TableCell>
                     </TableRow>
                   ))
                 )}

@@ -1,26 +1,7 @@
-// Wallet ops surface (issue #319): overview of every tenant's prepaid-credit
-// wallet (/admin/v1/wallets), its ledger (/admin/v1/wallets/{tenant}/ledger),
-// and the two platform-operator-only balance actions — adjust
-// (/adjust, atomic `balance_credits += delta`) and charge
-// (/charge, capture a payment method and credit the wallet).
-//
-// Operator-scope caveat (#229/#232): adjust/charge are platform-operator-only.
-// The console cannot know the caller's scope for certain, so it always renders
-// the actions (with an explicit operator-required note) and lets a gateway 403
-// surface as a clear inline error + toast rather than pre-hiding the controls.
-import { useMemo, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { toast } from "sonner";
 import { EntityReferencePicker } from "@/components/resource/entity-reference-picker";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Dialog,
   DialogContent,
@@ -40,10 +21,23 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { useAuth } from "@/hooks/use-auth";
-import { useI18n, type BoundFormatters } from "@/i18n";
 import { useFormatUnix } from "@/hooks/use-format-unix";
 import { useOperatorError } from "@/hooks/use-operator-error";
-import { adminGet, adminPost, type AdminSchema } from "@/lib/gateway-client";
+import { type BoundFormatters, useI18n } from "@/i18n";
+import { type AdminSchema, adminGet, adminPost } from "@/lib/gateway-client";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+// Wallet ops surface (issue #319): overview of every tenant's prepaid-credit
+// wallet (/admin/v1/wallets), its ledger (/admin/v1/wallets/{tenant}/ledger),
+// and the two platform-operator-only balance actions — adjust
+// (/adjust, atomic `balance_credits += delta`) and charge
+// (/charge, capture a payment method and credit the wallet).
+//
+// Operator-scope caveat (#229/#232): adjust/charge are platform-operator-only.
+// The console cannot know the caller's scope for certain, so it always renders
+// the actions (with an explicit operator-required note) and lets a gateway 403
+// surface as a clear inline error + toast rather than pre-hiding the controls.
+import { useMemo, useState } from "react";
+import { toast } from "sonner";
 
 type AdminWallet = AdminSchema<"AdminWallet">;
 
@@ -68,10 +62,7 @@ type WalletAction = "adjust" | "charge";
 // Credits are integer counts, not currency: render through the locale number
 // formatter (grouping only). Values are the API's exact representation and are
 // never recomputed or rounded here.
-function formatCredits(
-  format: BoundFormatters,
-  value: number | null | undefined,
-): string {
+function formatCredits(format: BoundFormatters, value: number | null | undefined): string {
   if (value === null || value === undefined) return "—";
   return format.number(value);
 }
@@ -94,7 +85,7 @@ function AdjustDialog({
   const { session } = useAuth();
   const { t, format } = useI18n();
   const { toastError } = useOperatorError();
-  const apiKey = session!.gatewayApiKey;
+  const apiKey = (session as NonNullable<typeof session>).gatewayApiKey;
   const queryClient = useQueryClient();
   const [delta, setDelta] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -111,9 +102,14 @@ function AdjustDialog({
 
   const mutation = useMutation({
     mutationFn: (delta_credits: number) =>
-      adminPost(apiKey, "/admin/v1/wallets/{tenant_id}/adjust", { delta_credits }, {
-        params: { tenant_id: wallet.tenant_id },
-      }),
+      adminPost(
+        apiKey,
+        "/admin/v1/wallets/{tenant_id}/adjust",
+        { delta_credits },
+        {
+          params: { tenant_id: wallet.tenant_id },
+        },
+      ),
     onSuccess: () => {
       toast.success(t("page.billingWallets.adjust.toastSuccess"));
       queryClient.invalidateQueries({ queryKey: ["wallets"] });
@@ -132,8 +128,7 @@ function AdjustDialog({
         <DialogHeader>
           <DialogTitle>{t("page.billingWallets.adjust.title")}</DialogTitle>
           <DialogDescription>
-            {t("page.billingWallets.adjust.descriptionLead")}{" "}
-            <code>balance_credits += delta</code>{" "}
+            {t("page.billingWallets.adjust.descriptionLead")} <code>balance_credits += delta</code>{" "}
             {t("page.billingWallets.adjust.descriptionTail", {
               tenant: wallet.tenant_id,
             })}
@@ -141,9 +136,7 @@ function AdjustDialog({
         </DialogHeader>
         <div className="grid gap-4">
           <div className="grid gap-2">
-            <Label htmlFor="adjust-delta">
-              {t("page.billingWallets.adjust.deltaLabel")}
-            </Label>
+            <Label htmlFor="adjust-delta">{t("page.billingWallets.adjust.deltaLabel")}</Label>
             <Input
               id="adjust-delta"
               inputMode="numeric"
@@ -163,7 +156,10 @@ function AdjustDialog({
             </p>
           </div>
           {error ? (
-            <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+            <p
+              role="alert"
+              className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+            >
               {error}
             </p>
           ) : null}
@@ -197,7 +193,7 @@ function ChargeDialog({
   const { session } = useAuth();
   const { t } = useI18n();
   const { toastError } = useOperatorError();
-  const apiKey = session!.gatewayApiKey;
+  const apiKey = (session as NonNullable<typeof session>).gatewayApiKey;
   const queryClient = useQueryClient();
   const [amount, setAmount] = useState("");
   const [paymentMethodId, setPaymentMethodId] = useState("");
@@ -220,8 +216,7 @@ function ChargeDialog({
         "/admin/v1/wallets/{tenant_id}/charge",
         {
           amount_usd_cents,
-          payment_method_id:
-            paymentMethodId.trim() === "" ? null : paymentMethodId.trim(),
+          payment_method_id: paymentMethodId.trim() === "" ? null : paymentMethodId.trim(),
         },
         { params: { tenant_id: wallet.tenant_id } },
       ),
@@ -236,8 +231,7 @@ function ChargeDialog({
         queryClient.invalidateQueries({ queryKey: ["wallet-ledger", wallet.tenant_id] });
         onClose();
       } else {
-        const reason =
-          result.decline_reason ?? t("page.billingWallets.charge.declineDefault");
+        const reason = result.decline_reason ?? t("page.billingWallets.charge.declineDefault");
         setError(reason);
         toast.error(reason);
       }
@@ -261,9 +255,7 @@ function ChargeDialog({
         </DialogHeader>
         <div className="grid gap-4">
           <div className="grid gap-2">
-            <Label htmlFor="charge-amount">
-              {t("page.billingWallets.charge.amountLabel")}
-            </Label>
+            <Label htmlFor="charge-amount">{t("page.billingWallets.charge.amountLabel")}</Label>
             <Input
               id="charge-amount"
               inputMode="numeric"
@@ -281,9 +273,7 @@ function ChargeDialog({
                 picker is scoped to this wallet's tenant, so only that tenant's
                 methods are selectable; leaving it blank charges the tenant
                 default. The stored method's canonical `id` is submitted. */}
-            <Label htmlFor="charge-pm">
-              {t("page.billingWallets.charge.pmLabel")}
-            </Label>
+            <Label htmlFor="charge-pm">{t("page.billingWallets.charge.pmLabel")}</Label>
             <EntityReferencePicker
               id="charge-pm"
               label={t("page.billingWallets.charge.pmLabel")}
@@ -304,13 +294,14 @@ function ChargeDialog({
               value={paymentMethodId}
               dependencyValues={{ tenant_id: wallet.tenant_id }}
               placeholder={t("page.billingWallets.charge.pmPlaceholder")}
-              onChange={(value) =>
-                setPaymentMethodId(typeof value === "string" ? value : "")
-              }
+              onChange={(value) => setPaymentMethodId(typeof value === "string" ? value : "")}
             />
           </div>
           {error ? (
-            <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+            <p
+              role="alert"
+              className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+            >
               {error}
             </p>
           ) : null}
@@ -338,7 +329,7 @@ function WalletLedger({ tenantId }: { tenantId: string }) {
   const { session } = useAuth();
   const { t, format } = useI18n();
   const formatUnix = useFormatUnix("—");
-  const apiKey = session!.gatewayApiKey;
+  const apiKey = (session as NonNullable<typeof session>).gatewayApiKey;
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["wallet-ledger", tenantId],
@@ -396,18 +387,12 @@ function WalletLedger({ tenantId }: { tenantId: string }) {
           ) : (
             entries.map((entry) => (
               <TableRow key={entry.id}>
-                <TableCell className="text-xs">
-                  {formatUnix(entry.occurred_at_unix)}
-                </TableCell>
-                <TableCell className="text-xs font-medium">
-                  {entry.logical_model}
-                </TableCell>
+                <TableCell className="text-xs">{formatUnix(entry.occurred_at_unix)}</TableCell>
+                <TableCell className="text-xs font-medium">{entry.logical_model}</TableCell>
                 <TableCell className="text-xs">
                   {entry.provider}/{entry.provider_model}
                 </TableCell>
-                <TableCell className="text-right text-xs">
-                  {format.number(entry.credits)}
-                </TableCell>
+                <TableCell className="text-right text-xs">{format.number(entry.credits)}</TableCell>
                 <TableCell className="text-right text-xs">
                   {formatCredits(format, entry.wallet_delta_credits)}
                 </TableCell>
@@ -428,12 +413,10 @@ export default function BillingWalletsPage() {
   const { session } = useAuth();
   const { t, format } = useI18n();
   const formatUnix = useFormatUnix("—");
-  const apiKey = session!.gatewayApiKey;
+  const apiKey = (session as NonNullable<typeof session>).gatewayApiKey;
 
   const [selectedTenant, setSelectedTenant] = useState<string | null>(null);
-  const [action, setAction] = useState<{ wallet: AdminWallet; kind: WalletAction } | null>(
-    null,
-  );
+  const [action, setAction] = useState<{ wallet: AdminWallet; kind: WalletAction } | null>(null);
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["wallets"],
@@ -450,13 +433,14 @@ export default function BillingWalletsPage() {
     <div className="flex flex-col gap-4">
       <div>
         <h1 className="text-lg font-semibold">{t("page.billingWallets.title")}</h1>
-        <p className="text-sm text-muted-foreground">
-          {t("page.billingWallets.description")}
-        </p>
+        <p className="text-sm text-muted-foreground">{t("page.billingWallets.description")}</p>
       </div>
 
       {error ? (
-        <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <p
+          role="alert"
+          className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+        >
           {t("page.billingWallets.loadError", { message: (error as Error).message })}
         </p>
       ) : null}
@@ -466,9 +450,7 @@ export default function BillingWalletsPage() {
           <TableHeader>
             <TableRow>
               <TableHead>{t("common.tenant")}</TableHead>
-              <TableHead className="text-right">
-                {t("page.billingWallets.col.balance")}
-              </TableHead>
+              <TableHead className="text-right">{t("page.billingWallets.col.balance")}</TableHead>
               <TableHead>{t("page.billingWallets.col.autoRecharge")}</TableHead>
               <TableHead>{t("page.billingWallets.col.dunning")}</TableHead>
               <TableHead>{t("page.billingWallets.col.updated")}</TableHead>
@@ -491,9 +473,7 @@ export default function BillingWalletsPage() {
             ) : (
               wallets.map((wallet) => (
                 <TableRow key={wallet.tenant_id}>
-                  <TableCell className="font-mono text-sm">
-                    {wallet.tenant_id}
-                  </TableCell>
+                  <TableCell className="font-mono text-sm">{wallet.tenant_id}</TableCell>
                   <TableCell className="text-right font-medium">
                     {formatCredits(format, wallet.balance_credits)}
                   </TableCell>
@@ -503,26 +483,17 @@ export default function BillingWalletsPage() {
                       ? `≤ ${formatCredits(
                           format,
                           wallet.auto_recharge_threshold_credits,
-                        )} → +${formatCredits(
-                          format,
-                          wallet.auto_recharge_amount_credits,
-                        )}`
+                        )} → +${formatCredits(format, wallet.auto_recharge_amount_credits)}`
                       : t("page.billingWallets.autoRechargeOff")}
                   </TableCell>
                   <TableCell>
                     {wallet.dunning ? (
-                      <Badge variant="destructive">
-                        {t("page.billingWallets.badge.dunning")}
-                      </Badge>
+                      <Badge variant="destructive">{t("page.billingWallets.badge.dunning")}</Badge>
                     ) : (
-                      <Badge variant="secondary">
-                        {t("page.billingWallets.badge.ok")}
-                      </Badge>
+                      <Badge variant="secondary">{t("page.billingWallets.badge.ok")}</Badge>
                     )}
                   </TableCell>
-                  <TableCell className="text-xs">
-                    {formatUnix(wallet.updated_at_unix)}
-                  </TableCell>
+                  <TableCell className="text-xs">{formatUnix(wallet.updated_at_unix)}</TableCell>
                   <TableCell>
                     <div className="flex justify-end gap-2">
                       <Button
@@ -538,10 +509,7 @@ export default function BillingWalletsPage() {
                           ? t("page.billingWallets.action.hideLedger")
                           : t("page.billingWallets.action.ledger")}
                       </Button>
-                      <Button
-                        size="sm"
-                        onClick={() => setAction({ wallet, kind: "adjust" })}
-                      >
+                      <Button size="sm" onClick={() => setAction({ wallet, kind: "adjust" })}>
                         {t("page.billingWallets.action.adjust")}
                       </Button>
                       <Button

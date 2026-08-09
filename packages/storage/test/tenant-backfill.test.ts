@@ -1,10 +1,10 @@
 import { describe, expect, test } from "vitest";
 import {
   TENANT_BACKFILL_TABLES,
+  type TenantTableReceipt,
   assertTenantMigrationTransition,
   checksumRows,
   compareTableReceipts,
-  type TenantTableReceipt,
 } from "../src/tenant-backfill.js";
 
 describe("tenant backfill contract", () => {

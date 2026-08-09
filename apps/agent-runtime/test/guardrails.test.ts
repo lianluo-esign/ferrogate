@@ -163,7 +163,7 @@ describe("a2aReplyText — what the response stage actually scans", () => {
   });
 
   it("sseDataValues ignores non-data lines and the DONE sentinel", () => {
-    const sse = ['event: message', 'data: {"a":1}', "", "data: [DONE]", ""].join("\n");
+    const sse = ["event: message", 'data: {"a":1}', "", "data: [DONE]", ""].join("\n");
     expect(sseDataValues(sse)).toEqual([{ a: 1 }]);
   });
 });

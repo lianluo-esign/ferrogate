@@ -1,13 +1,18 @@
 import { beforeEach, describe, expect, test } from "vitest";
 import {
   MemoryAssetStore,
+  type StoredAsset,
   assetVisibilityFromStored,
   classifyAssetQuotaAdmission,
   promoteAssetVisibility,
-  type StoredAsset,
 } from "../src/index.js";
 
-function asset(id: string, tenantId: string, sizeBytes: number, extra: Partial<StoredAsset> = {}): StoredAsset {
+function asset(
+  id: string,
+  tenantId: string,
+  sizeBytes: number,
+  extra: Partial<StoredAsset> = {},
+): StoredAsset {
   return {
     id,
     tenantId,

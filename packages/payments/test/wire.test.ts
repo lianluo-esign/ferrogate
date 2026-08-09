@@ -1,34 +1,34 @@
 import { describe, expect, test } from "vitest";
 
 import {
-  base58Decode,
   CAIP2_SOLANA_DEVNET,
   CAIP2_SOLANA_MAINNET,
   CHALLENGE_HASH_DOMAIN,
+  type PaymentError,
+  SolanaNetwork,
+  base58Decode,
   challengeHashHex,
   decodeBase64Std,
   encodeBase64Std,
   parseAtomicAmount,
   parsePaymentRequired,
   parsePaymentResponse,
-  type PaymentError,
   selectRequirement,
-  SolanaNetwork,
   solanaNetworkFromCaip2,
 } from "../src/index.js";
 import {
   CAIP2_DEVNET,
-  clone,
   FEE_PAYER,
   PAY_TO,
+  USDC_DEVNET,
+  USDC_MAINNET,
+  clone,
   paymentRequiredDevnet,
   paymentRequiredMainnet,
   paymentRequiredSponsored,
   paymentResponseFailure,
   paymentResponseSuccess,
   toHeader,
-  USDC_DEVNET,
-  USDC_MAINNET,
 } from "./fixtures.js";
 
 function kindOf(fn: () => unknown): string {
@@ -131,7 +131,9 @@ describe("challenge hash", () => {
     expect(hashOf(base)).toBe(hashOf(refreshed));
 
     const noHints = clone(base);
+    // biome-ignore lint/performance/noDelete: removes the own-property key entirely; assigning undefined would leave an enumerable undefined-valued key and change JSON serialization, the 'in' operator, and Object.keys semantics
     delete (noHints.accepts as any[])[0].extra.recentBlockhash;
+    // biome-ignore lint/performance/noDelete: removes the own-property key entirely; assigning undefined would leave an enumerable undefined-valued key and change JSON serialization, the 'in' operator, and Object.keys semantics
     delete (noHints.accepts as any[])[0].extra.lastValidBlockHeight;
     expect(hashOf(base)).toBe(hashOf(noHints));
   });
@@ -153,6 +155,7 @@ describe("blockhash hints", () => {
 
   test("an orphan lastValidBlockHeight is ignored", () => {
     const doc = paymentRequiredSponsored();
+    // biome-ignore lint/performance/noDelete: removes the own-property key entirely; assigning undefined would leave an enumerable undefined-valued key and change JSON serialization, the 'in' operator, and Object.keys semantics
     delete (doc.accepts as any[])[0].extra.recentBlockhash;
     (doc.accepts as any[])[0].extra.lastValidBlockHeight = "not-a-number";
     const s = selectRequirement(parsePaymentRequired(toHeader(doc)));
@@ -220,41 +223,90 @@ describe("negative corpus (typed rejection, never a panic, never coerced)", () =
 
   test("malformed / oversized headers", () => {
     expect(kindOf(() => parsePaymentRequired("!!!not base64!!!"))).toBe("malformed_header");
-    expect(kindOf(() => parsePaymentRequired(encodeBase64Std(new TextEncoder().encode("not json")))),
+    expect(
+      kindOf(() => parsePaymentRequired(encodeBase64Std(new TextEncoder().encode("not json")))),
     ).toBe("malformed_header");
-    expect(kindOf(() => parsePaymentRequired(encodeBase64Std(new TextEncoder().encode("123"))))).toBe(
-      "malformed_header",
-    ); // not an object
+    expect(
+      kindOf(() => parsePaymentRequired(encodeBase64Std(new TextEncoder().encode("123")))),
+    ).toBe("malformed_header"); // not an object
     expect(kindOf(() => parsePaymentRequired("A".repeat(17 * 1024)))).toBe("oversized_header");
   });
 
   test("version, accepts, resource, extensions", () => {
-    expect(kindOf(() => parsePaymentRequired(H(mut((d) => (d.x402Version = 1)))))).toBe(
-      "unsupported_version",
-    );
-    expect(kindOf(() => parsePaymentRequired(H(mut((d) => (d.x402Version = "2")))))).toBe(
-      "unsupported_version",
-    );
+    expect(
+      kindOf(() =>
+        parsePaymentRequired(
+          H(
+            mut((d) => {
+              d.x402Version = 1;
+            }),
+          ),
+        ),
+      ),
+    ).toBe("unsupported_version");
+    expect(
+      kindOf(() =>
+        parsePaymentRequired(
+          H(
+            mut((d) => {
+              d.x402Version = "2";
+            }),
+          ),
+        ),
+      ),
+    ).toBe("unsupported_version");
+    // biome-ignore lint/performance/noDelete: removes the own-property key entirely; assigning undefined would leave an enumerable undefined-valued key and change JSON serialization, the 'in' operator, and Object.keys semantics
     expect(kindOf(() => parsePaymentRequired(H(mut((d) => delete d.x402Version)))).valueOf()).toBe(
-      "malformed_header",
-    );
-    expect(kindOf(() => parsePaymentRequired(H(mut((d) => (d.accepts = [])))))).toBe(
-      "malformed_header",
-    );
-    expect(kindOf(() => parsePaymentRequired(H(mut((d) => (d.accepts = [1, 2])))))).toBe(
       "malformed_header",
     );
     expect(
       kindOf(() =>
-        parsePaymentRequired(H(mut((d) => (d.accepts = new Array(17).fill((d.accepts as any[])[0]))))),
+        parsePaymentRequired(
+          H(
+            mut((d) => {
+              d.accepts = [];
+            }),
+          ),
+        ),
       ),
     ).toBe("malformed_header");
-    expect(kindOf(() => parsePaymentRequired(H(mut((d) => delete (d as any).resource)))).valueOf()).toBe(
-      "malformed_header",
-    );
-    expect(kindOf(() => parsePaymentRequired(H(mut((d) => (d.extensions = 7)))))).toBe(
-      "malformed_header",
-    );
+    expect(
+      kindOf(() =>
+        parsePaymentRequired(
+          H(
+            mut((d) => {
+              d.accepts = [1, 2];
+            }),
+          ),
+        ),
+      ),
+    ).toBe("malformed_header");
+    expect(
+      kindOf(() =>
+        parsePaymentRequired(
+          H(
+            mut((d) => {
+              d.accepts = new Array(17).fill((d.accepts as any[])[0]);
+            }),
+          ),
+        ),
+      ),
+    ).toBe("malformed_header");
+    expect(
+      // biome-ignore lint/performance/noDelete: removes the own-property key entirely; assigning undefined would leave an enumerable undefined-valued key and change JSON serialization, the 'in' operator, and Object.keys semantics
+      kindOf(() => parsePaymentRequired(H(mut((d) => delete (d as any).resource)))).valueOf(),
+    ).toBe("malformed_header");
+    expect(
+      kindOf(() =>
+        parsePaymentRequired(
+          H(
+            mut((d) => {
+              d.extensions = 7;
+            }),
+          ),
+        ),
+      ),
+    ).toBe("malformed_header");
   });
 
   test("duplicate/conflicting accepts entries", () => {
@@ -286,16 +338,57 @@ describe("negative corpus (typed rejection, never a panic, never coerced)", () =
       fn((d.accepts as any[])[0]);
       return () => selectRequirement(parsePaymentRequired(toHeader(d)));
     };
-    expect(kindOf(withEntry((e) => (e.maxTimeoutSeconds = 0)))).toBe("invalid_timeout");
-    expect(kindOf(withEntry((e) => (e.maxTimeoutSeconds = -5)))).toBe("invalid_timeout");
-    expect(kindOf(withEntry((e) => (e.maxTimeoutSeconds = 1.5)))).toBe("invalid_timeout");
-    expect(kindOf(withEntry((e) => (e.maxTimeoutSeconds = 999999)))).toBe("invalid_timeout");
-    expect(kindOf(withEntry((e) => (e.payTo = "not-base58!")))).toBe("invalid_recipient");
-    expect(kindOf(withEntry((e) => (e.asset = "USDC")))).toBe("invalid_recipient");
+    expect(
+      kindOf(
+        withEntry((e) => {
+          e.maxTimeoutSeconds = 0;
+        }),
+      ),
+    ).toBe("invalid_timeout");
+    expect(
+      kindOf(
+        withEntry((e) => {
+          e.maxTimeoutSeconds = -5;
+        }),
+      ),
+    ).toBe("invalid_timeout");
+    expect(
+      kindOf(
+        withEntry((e) => {
+          e.maxTimeoutSeconds = 1.5;
+        }),
+      ),
+    ).toBe("invalid_timeout");
+    expect(
+      kindOf(
+        withEntry((e) => {
+          e.maxTimeoutSeconds = 999999;
+        }),
+      ),
+    ).toBe("invalid_timeout");
+    expect(
+      kindOf(
+        withEntry((e) => {
+          e.payTo = "not-base58!";
+        }),
+      ),
+    ).toBe("invalid_recipient");
+    expect(
+      kindOf(
+        withEntry((e) => {
+          e.asset = "USDC";
+        }),
+      ),
+    ).toBe("invalid_recipient");
+    // biome-ignore lint/performance/noDelete: removes the own-property key entirely; assigning undefined would leave an enumerable undefined-valued key and change JSON serialization, the 'in' operator, and Object.keys semantics
     expect(kindOf(withEntry((e) => delete (e.extra as any).feePayer))).toBe("malformed_header");
-    expect(kindOf(withEntry((e) => ((e.extra as any).memo = "x".repeat(257))))).toBe(
-      "malformed_header",
-    );
+    expect(
+      kindOf(
+        withEntry((e) => {
+          (e.extra as any).memo = "x".repeat(257);
+        }),
+      ),
+    ).toBe("malformed_header");
     expect(
       kindOf(
         withEntry((e) => {
@@ -310,7 +403,20 @@ describe("standalone parsers", () => {
   test("parseAtomicAmount matches the strict reference model", () => {
     expect(parseAtomicAmount("1")).toBe(1n);
     expect(parseAtomicAmount("18446744073709551615")).toBe(18446744073709551615n);
-    for (const bad of ["", "0", "00", "01", "-1", "+1", " 1", "1 ", "1.0", "0x10", "1_000", "1e3"]) {
+    for (const bad of [
+      "",
+      "0",
+      "00",
+      "01",
+      "-1",
+      "+1",
+      " 1",
+      "1 ",
+      "1.0",
+      "0x10",
+      "1_000",
+      "1e3",
+    ]) {
       expect(() => parseAtomicAmount(bad)).toThrow();
     }
   });
@@ -346,9 +452,9 @@ describe("settlement evidence", () => {
   });
 
   test("network must match the expected network", () => {
-    expect(kindOf(() => parsePaymentResponse(toHeader(paymentResponseSuccess()), SolanaNetwork.Devnet))).toBe(
-      "malformed_settlement",
-    );
+    expect(
+      kindOf(() => parsePaymentResponse(toHeader(paymentResponseSuccess()), SolanaNetwork.Devnet)),
+    ).toBe("malformed_settlement");
   });
 
   test("an unrecognised settlement network is the precise unsupported_network variant", () => {

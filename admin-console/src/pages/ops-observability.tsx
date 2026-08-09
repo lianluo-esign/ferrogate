@@ -1,24 +1,8 @@
-// Observability & log exports (issue #322): read-only exporter status over
-// GET /admin/v1/observability, plus a request-log export tool over
-// GET /admin/v1/request-log-exports.
-//
-// The export endpoint streams newline-delimited JSON (application/x-ndjson),
-// not the Admin API's JSON list envelope, so it can't go through the typed
-// `adminGet` (whose success body is JSON). It's fetched directly with the
-// gateway API key here, then previewed and offered as a file download.
-import { useCallback, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { useSearchParams } from "react-router-dom";
-import { toast } from "sonner";
+import { BoolBadge, DefinitionRow, HealthBadge } from "@/components/ops/ops-primitives";
 import { EntityReferencePicker } from "@/components/resource/entity-reference-picker";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -29,18 +13,25 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import {
-  BoolBadge,
-  DefinitionRow,
-  HealthBadge,
-} from "@/components/ops/ops-primitives";
 import { useAuth } from "@/hooks/use-auth";
-import { useI18n } from "@/i18n";
 import { useFormatUnix } from "@/hooks/use-format-unix";
-import { LocalizedError } from "@/lib/localized-error";
 import { useOperatorError } from "@/hooks/use-operator-error";
+import { useI18n } from "@/i18n";
 import { CONTROL_PLANE_BASE_URL } from "@/lib/config";
-import { adminGet, type AdminSchema } from "@/lib/gateway-client";
+import { type AdminSchema, adminGet } from "@/lib/gateway-client";
+import { LocalizedError } from "@/lib/localized-error";
+import { useQuery } from "@tanstack/react-query";
+// Observability & log exports (issue #322): read-only exporter status over
+// GET /admin/v1/observability, plus a request-log export tool over
+// GET /admin/v1/request-log-exports.
+//
+// The export endpoint streams newline-delimited JSON (application/x-ndjson),
+// not the Admin API's JSON list envelope, so it can't go through the typed
+// `adminGet` (whose success body is JSON). It's fetched directly with the
+// gateway API key here, then previewed and offered as a file download.
+import { useCallback, useState } from "react";
+import { useSearchParams } from "react-router-dom";
+import { toast } from "sonner";
 
 type ObservabilityStatus = AdminSchema<"ObservabilityStatus">;
 
@@ -61,8 +52,7 @@ interface ExportPreview {
 function buildExportUrl(filters: ExportFilters): string {
   const url = new URL("/admin/v1/request-log-exports", CONTROL_PLANE_BASE_URL);
   if (filters.model.trim()) url.searchParams.set("model", filters.model.trim());
-  if (filters.provider.trim())
-    url.searchParams.set("provider", filters.provider.trim());
+  if (filters.provider.trim()) url.searchParams.set("provider", filters.provider.trim());
   if (filters.status.trim()) url.searchParams.set("status", filters.status.trim());
   if (filters.limit.trim()) url.searchParams.set("limit", filters.limit.trim());
   return url.toString();
@@ -73,7 +63,7 @@ export default function OpsObservabilityPage() {
   const { t } = useI18n();
   const formatUnix = useFormatUnix();
   const { toastError } = useOperatorError();
-  const apiKey = session!.gatewayApiKey;
+  const apiKey = (session as NonNullable<typeof session>).gatewayApiKey;
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["ops-observability"],
@@ -122,9 +112,7 @@ export default function OpsObservabilityPage() {
         );
       }
       const body = await response.text();
-      const recordCount = body
-        .split("\n")
-        .filter((line) => line.trim().length > 0).length;
+      const recordCount = body.split("\n").filter((line) => line.trim().length > 0).length;
       setPreview({ recordCount, body });
       toast.success(t("page.opsObservability.toast.fetched", { count: recordCount }));
     } catch (err) {
@@ -149,13 +137,14 @@ export default function OpsObservabilityPage() {
     <div className="flex flex-col gap-4">
       <div>
         <h1 className="text-lg font-semibold">{t("page.opsObservability.title")}</h1>
-        <p className="text-sm text-muted-foreground">
-          {t("page.opsObservability.description")}
-        </p>
+        <p className="text-sm text-muted-foreground">{t("page.opsObservability.description")}</p>
       </div>
 
       {error ? (
-        <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <p
+          role="alert"
+          className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+        >
           {t("page.opsObservability.loadError", { message: (error as Error).message })}
         </p>
       ) : null}
@@ -199,9 +188,7 @@ export default function OpsObservabilityPage() {
                           {row.signals.join(", ") || "-"}
                         </div>
                         {row.last_export_error ? (
-                          <div className="text-xs text-destructive">
-                            {row.last_export_error}
-                          </div>
+                          <div className="text-xs text-destructive">{row.last_export_error}</div>
                         ) : null}
                       </TableCell>
                       <TableCell>
@@ -215,9 +202,7 @@ export default function OpsObservabilityPage() {
                         />
                       </TableCell>
                       <TableCell className="text-xs">{row.endpoint ?? "-"}</TableCell>
-                      <TableCell className="tabular-nums">
-                        {row.dropped_events}
-                      </TableCell>
+                      <TableCell className="tabular-nums">{row.dropped_events}</TableCell>
                       <TableCell className="text-xs">
                         {formatUnix(row.last_success_at_unix)}
                       </TableCell>
@@ -302,15 +287,9 @@ export default function OpsObservabilityPage() {
           </div>
           <div className="flex gap-2">
             <Button onClick={runExport} disabled={exporting}>
-              {exporting
-                ? t("page.opsObservability.fetching")
-                : t("page.opsObservability.fetch")}
+              {exporting ? t("page.opsObservability.fetching") : t("page.opsObservability.fetch")}
             </Button>
-            <Button
-              variant="outline"
-              onClick={downloadExport}
-              disabled={preview === null}
-            >
+            <Button variant="outline" onClick={downloadExport} disabled={preview === null}>
               {t("page.opsObservability.download")}
             </Button>
           </div>

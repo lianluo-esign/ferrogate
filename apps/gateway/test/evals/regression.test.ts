@@ -150,8 +150,8 @@ describe("the sweep, against the real schema", () => {
       baseline_count: 40,
       recent_count: 40,
     });
-    expect(Number(rows[0]?.["drop_amount"])).toBeCloseTo(0.3, 6);
-    expect(String(rows[0]?.["claim_key"])).toContain(String(NOW_UNIX - RECENT_WINDOW_SECONDS));
+    expect(Number(rows[0]?.drop_amount)).toBeCloseTo(0.3, 6);
+    expect(String(rows[0]?.claim_key)).toContain(String(NOW_UNIX - RECENT_WINDOW_SECONDS));
 
     // The SECOND sweep sees the same regression — it has not gone away — and
     // must not record it again. Without the claim an operator gets one alert

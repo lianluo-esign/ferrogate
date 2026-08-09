@@ -1,14 +1,6 @@
-import { useState, type FormEvent, type ReactNode } from "react";
-import { useQuery } from "@tanstack/react-query";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -30,11 +22,13 @@ import { useAuth } from "@/hooks/use-auth";
 import { useI18n } from "@/i18n";
 import { adminGet } from "@/lib/gateway-client";
 import {
+  type InvestigationActionCorrelation,
   formatUnix,
   shortFingerprint,
   verdictVariant,
-  type InvestigationActionCorrelation,
 } from "@/lib/guardrails";
+import { useQuery } from "@tanstack/react-query";
+import { type FormEvent, type ReactNode, useState } from "react";
 
 type SelectorKind = "request_id" | "trace_id" | "agent_run_id";
 
@@ -95,19 +89,11 @@ function CorrelationGroup({ group }: { group: InvestigationActionCorrelation }) 
           ids={group.guardrail_evaluation_ids}
         />
         <IdList label={t("page.investigations.label.approvals")} ids={group.approval_ids} />
-        <IdList
-          label={t("page.investigations.label.timelineEvents")}
-          ids={group.agent_event_ids}
-        />
-        <IdList
-          label={t("page.investigations.label.auditEvents")}
-          ids={group.audit_event_ids}
-        />
+        <IdList label={t("page.investigations.label.timelineEvents")} ids={group.agent_event_ids} />
+        <IdList label={t("page.investigations.label.auditEvents")} ids={group.audit_event_ids} />
         {(childRequests.length > 0 || childDispatches.length > 0) && (
           <li>
-            <span className="text-muted-foreground">
-              {t("page.investigations.childActions")}
-            </span>
+            <span className="text-muted-foreground">{t("page.investigations.childActions")}</span>
             <ul className="mt-1 space-y-1 border-l pl-4">
               {childRequests.map((id) => (
                 <li key={id} className="font-mono text-xs">
@@ -130,7 +116,7 @@ function CorrelationGroup({ group }: { group: InvestigationActionCorrelation }) 
 export default function InvestigationsPage() {
   const { session } = useAuth();
   const { t, format } = useI18n();
-  const apiKey = session!.gatewayApiKey;
+  const apiKey = (session as NonNullable<typeof session>).gatewayApiKey;
 
   const selectorLabels: Record<SelectorKind, string> = {
     request_id: t("page.investigations.selector.requestId"),
@@ -147,11 +133,11 @@ export default function InvestigationsPage() {
     enabled: applied !== null,
     queryFn: () => {
       const query =
-        applied!.kind === "request_id"
-          ? { request_id: applied!.value }
-          : applied!.kind === "trace_id"
-            ? { trace_id: applied!.value }
-            : { agent_run_id: applied!.value };
+        (applied as NonNullable<typeof applied>).kind === "request_id"
+          ? { request_id: (applied as NonNullable<typeof applied>).value }
+          : (applied as NonNullable<typeof applied>).kind === "trace_id"
+            ? { trace_id: (applied as NonNullable<typeof applied>).value }
+            : { agent_run_id: (applied as NonNullable<typeof applied>).value };
       return adminGet(apiKey, "/admin/v1/investigations", { query });
     },
   });
@@ -166,12 +152,13 @@ export default function InvestigationsPage() {
     <div className="flex flex-col gap-4">
       <div>
         <h1 className="text-lg font-semibold">{t("page.investigations.title")}</h1>
-        <p className="text-sm text-muted-foreground">
-          {t("page.investigations.description")}
-        </p>
+        <p className="text-sm text-muted-foreground">{t("page.investigations.description")}</p>
       </div>
 
-      <form className="flex flex-wrap items-end gap-4 rounded-md border p-4" onSubmit={handleSubmit}>
+      <form
+        className="flex flex-wrap items-end gap-4 rounded-md border p-4"
+        onSubmit={handleSubmit}
+      >
         <div className="grid gap-2">
           <Label htmlFor="investigation-kind">{t("page.investigations.lookupBy")}</Label>
           <Select value={kind} onValueChange={(next) => setKind(next as SelectorKind)}>
@@ -201,7 +188,10 @@ export default function InvestigationsPage() {
       </form>
 
       {error && (
-        <p role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <p
+          role="alert"
+          className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+        >
           {t("page.investigations.loadError", { message: error.message })}
         </p>
       )}
@@ -219,14 +209,10 @@ export default function InvestigationsPage() {
               <CardTitle className="text-base">{t("page.investigations.outcome")}</CardTitle>
             </CardHeader>
             <CardContent className="flex flex-wrap items-center gap-4 text-sm">
-              <Badge variant={verdictVariant(data.final_outcome)}>
-                {data.final_outcome}
-              </Badge>
+              <Badge variant={verdictVariant(data.final_outcome)}>{data.final_outcome}</Badge>
               <span className="font-mono text-xs">{data.selector}</span>
               <span>
-                <span className="text-muted-foreground">
-                  {t("page.investigations.totalCost")}
-                </span>{" "}
+                <span className="text-muted-foreground">{t("page.investigations.totalCost")}</span>{" "}
                 {format.currency(data.total_cost_usd, "USD", {
                   minimumFractionDigits: 4,
                   maximumFractionDigits: 4,
@@ -336,10 +322,7 @@ export default function InvestigationsPage() {
             </div>
           </Section>
 
-          <Section
-            title={t("page.investigations.label.approvals")}
-            count={data.approvals.length}
-          >
+          <Section title={t("page.investigations.label.approvals")} count={data.approvals.length}>
             <div className="rounded-md border">
               <Table>
                 <TableHeader>

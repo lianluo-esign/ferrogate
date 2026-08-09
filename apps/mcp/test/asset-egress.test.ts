@@ -11,9 +11,9 @@ import type { DispatchContext, StoredAsset } from "../src/ports.js";
 import { readAssetForMcp } from "../src/tools.js";
 import {
   EXEC_KEY,
+  type Fixture,
   READ_KEY,
   TENANT,
-  type Fixture,
   rpcRequest,
   seedFixture,
   tenantAuth,
@@ -49,14 +49,8 @@ function configureEgress(quota: Record<string, unknown> = {}) {
   return { counters, meter };
 }
 
-async function rpc(
-  method: string,
-  params: Record<string, unknown>,
-  key: string,
-): Promise<RpcBody> {
-  const response = await SELF.fetch(
-    rpcRequest({ jsonrpc: "2.0", id: 1, method, params }, { key }),
-  );
+async function rpc(method: string, params: Record<string, unknown>, key: string): Promise<RpcBody> {
+  const response = await SELF.fetch(rpcRequest({ jsonrpc: "2.0", id: 1, method, params }, { key }));
   return (await response.json()) as RpcBody;
 }
 
@@ -72,22 +66,14 @@ afterEach(() => {
 describe("#801 MCP asset egress uses one billing path", () => {
   it("rejects a missing stored asset ID before storage read or billing", async () => {
     const { counters, meter } = configureEgress();
-    vi.spyOn(fixture.ports.assets, "list").mockResolvedValue([
-      { ...asset(), id: "" } as never,
-    ]);
+    vi.spyOn(fixture.ports.assets, "list").mockResolvedValue([{ ...asset(), id: "" } as never]);
     const read = vi.spyOn(fixture.ports.assets, "read");
     const context: DispatchContext = {
       requestId: "req_missing_asset_id",
       auth: tenantAuth(),
     };
 
-    const result = await readAssetForMcp(
-      fixture.ports,
-      context,
-      "cli_tool",
-      "deploy",
-      "1.0.0",
-    );
+    const result = await readAssetForMcp(fixture.ports, context, "cli_tool", "deploy", "1.0.0");
     expect(result).toMatchObject({
       ok: false,
       kind: "read",
@@ -100,21 +86,14 @@ describe("#801 MCP asset egress uses one billing path", () => {
 
   it("refuses an in-memory asset without its durable stored_assets.id", () => {
     expect(() =>
-      fixture.ports.assets.seed(
-        TENANT,
-        { ...asset(), id: undefined } as never,
-        CONTENT,
-      ),
+      fixture.ports.assets.seed(TENANT, { ...asset(), id: undefined } as never, CONTENT),
     ).toThrow("stored_assets.id");
   });
 
   it("fails closed instead of deriving an audit target when stored_assets.id is missing", () => {
-    expect(() =>
-      assetEgressTargetId(
-        { ...asset(), id: undefined } as never,
-        TENANT,
-      ),
-    ).toThrow("stored_assets.id");
+    expect(() => assetEgressTargetId({ ...asset(), id: undefined } as never, TENANT)).toThrow(
+      "stored_assets.id",
+    );
   });
 
   it("meters both resources/read and builtin.fetch_asset and audits stored_assets.id", async () => {
@@ -175,8 +154,8 @@ describe("#801 MCP asset egress uses one billing path", () => {
     expect(read).not.toHaveBeenCalled();
     expect(meter.charges).toHaveLength(0);
     expect(counters.bytesUsed(`egress:tenant:${TENANT}`)).toBe(0);
-    expect(fixture.ports.audit.events().filter((event) => event.action === "asset.pull")).toHaveLength(
-      0,
-    );
+    expect(
+      fixture.ports.audit.events().filter((event) => event.action === "asset.pull"),
+    ).toHaveLength(0);
   });
 });

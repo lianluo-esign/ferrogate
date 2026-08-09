@@ -42,16 +42,17 @@
  *  - `GET  /v1/billing/ledger`         — paginated, tenant-filtered (#136/#149).
  *  - `GET  /v1/billing/ledger/{id}`    — single entry by idempotency id.
  */
+
+import { BillingError, type BillingEvent, parseBillingEvent } from "./event.js";
 import {
-  charge,
-  ledgerEntryToWire,
-  ledgerTotals,
   type LedgerEntry,
   type LedgerListFilter,
   type LedgerSink,
+  charge,
+  ledgerEntryToWire,
+  ledgerTotals,
 } from "./ledger.js";
-import { BillingError, parseBillingEvent, type BillingEvent } from "./event.js";
-import { PriceBook } from "./pricing.js";
+import type { PriceBook } from "./pricing.js";
 
 /** Max accepted request body (1 MiB), mirrors `MAX_REQUEST_BYTES`. */
 export const MAX_REQUEST_BYTES = 1024 * 1024;
@@ -216,16 +217,12 @@ export function createBillingService(
     const method = request.method.toUpperCase();
     const path = url.pathname;
 
-    const isHealth =
-      method === "GET" && (path === "/healthz" || path === "/v1/healthz");
+    const isHealth = method === "GET" && (path === "/healthz" || path === "/v1/healthz");
 
     // Every route except the readiness probe requires the shared secret when
     // one is configured (issue #136).
     if (!isHealth && config.token !== undefined) {
-      const authorized = requestIsAuthorized(
-        request.headers.get("authorization"),
-        config.token,
-      );
+      const authorized = requestIsAuthorized(request.headers.get("authorization"), config.token);
       if (!authorized) {
         return json(401, {
           error: { code: "unauthorized", message: "missing or invalid bearer token" },

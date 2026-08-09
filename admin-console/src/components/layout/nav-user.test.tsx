@@ -1,13 +1,13 @@
-import { render, screen } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
-import { QueryClientProvider } from "@tanstack/react-query";
-import { MemoryRouter } from "react-router-dom";
-import { beforeEach, describe, expect, it } from "vitest";
 import { NavUser } from "@/components/layout/nav-user";
 import { SidebarProvider } from "@/components/ui/sidebar";
 import { AuthProvider } from "@/hooks/use-auth";
-import { I18nProvider, translate, type Locale } from "@/i18n";
+import { I18nProvider, type Locale, translate } from "@/i18n";
 import { createTestQueryClient, seedSession } from "@/test/test-utils";
+import { QueryClientProvider } from "@tanstack/react-query";
+import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { MemoryRouter } from "react-router-dom";
+import { beforeEach, describe, expect, it } from "vitest";
 
 function renderNavUser(locale: Locale = "en") {
   return render(

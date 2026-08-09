@@ -72,8 +72,9 @@
  * describe. A cascade would silently rewrite the operator's intent on their
  * behalf, and would then disagree with the documents the admin surface serves.
  */
-import type { StoreRecord } from "../ports.js";
+
 import type { TenantDatabaseRouter } from "@ferrogate/storage";
+import type { StoreRecord } from "../ports.js";
 
 /** The three typed tables in `sql/d1-ts/control/0001_init_control.sql`. */
 export const ROLES_TABLE = "roles";
@@ -235,8 +236,7 @@ export async function projectTenantRoleBinding(
       ],
     },
     {
-      sql:
-        `INSERT INTO ${TENANT_ROLE_BINDINGS_TABLE} (id, tenant_id, role_id, created_at_unix)
+      sql: `INSERT INTO ${TENANT_ROLE_BINDINGS_TABLE} (id, tenant_id, role_id, created_at_unix)
          VALUES (?, ?, ?, ?)
          ON CONFLICT (tenant_id, role_id) DO NOTHING`,
       params: [`${tenantId}:${roleId}`, tenantId, roleId, nowUnix],

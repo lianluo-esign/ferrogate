@@ -114,7 +114,7 @@ export function classifyTask(
   // cheapest leg is the one most likely to emit a malformed tool call, and a
   // malformed tool call is not a quality regression a judge would ever score —
   // it is a broken response. So this is `hard` regardless of length.
-  if (nonEmptyArray(body["tools"]) || nonEmptyArray(body["functions"])) {
+  if (nonEmptyArray(body.tools) || nonEmptyArray(body.functions)) {
     return { complexity: "hard", reason: TASK_REASON_TOOLS };
   }
 
@@ -123,7 +123,7 @@ export function classifyTask(
   }
 
   const requestedCompletion =
-    finitePositive(body["max_completion_tokens"]) ?? finitePositive(body["max_tokens"]);
+    finitePositive(body.max_completion_tokens) ?? finitePositive(body.max_tokens);
   if (requestedCompletion !== undefined && requestedCompletion > EASY_COMPLETION_TOKEN_CEILING) {
     return { complexity: "hard", reason: TASK_REASON_LONG_COMPLETION };
   }

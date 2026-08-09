@@ -98,6 +98,7 @@ function runtimeAsShipped(): ReturnType<typeof createDefaultRuntime> {
     return createDefaultRuntime();
   } finally {
     if (had) globals.Bun = previous;
+    // biome-ignore lint/performance/noDelete: removes the own-property key entirely; assigning undefined would leave an enumerable undefined-valued key and change JSON serialization, the 'in' operator, and Object.keys semantics
     else delete globals.Bun;
   }
 }

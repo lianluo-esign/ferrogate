@@ -142,7 +142,7 @@ writeFileSync(outFile, render(migrations), "utf8");
  * style from the string's own contents (single quotes when the SQL contains
  * more `"` than `'`, which varies file by file). A generator that guessed would
  * be red on some migrations and green on others, and the obvious "fix" for that
- * is to add the file to `biome.json`'s ignore list — which would also stop
+ * is to add the file to `biome.jsonc`'s ignore list — which would also stop
  * biome noticing a genuinely malformed generated module. Formatting here
  * instead keeps the file inside the same gate as hand-written source.
  */

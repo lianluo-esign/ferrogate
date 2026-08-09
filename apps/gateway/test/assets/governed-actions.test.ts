@@ -53,7 +53,7 @@ function gateway(requireVar?: string) {
     GATEWAY_NATIVE_API_KEYS: KEYS,
     ASSET_ENTITLEMENTS: ENTITLEMENTS,
   };
-  if (requireVar !== undefined) env["FG_REQUIRE_AGENT_RUN_ID"] = requireVar;
+  if (requireVar !== undefined) env.FG_REQUIRE_AGENT_RUN_ID = requireVar;
   return (token: string, version: string, runId?: string): Promise<Response> => {
     const headers = new Headers({
       authorization: `Bearer ${token}`,

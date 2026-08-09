@@ -154,7 +154,7 @@ function gateway(
     ...(options.withQueue === false ? {} : { ONLINE_EVAL: queue.queue }),
     // The pool's real AI binding is irrelevant here but keeps `env` shaped like
     // the deployed one for anything that probes it.
-    AI: (poolEnv as unknown as Record<string, unknown>)["AI"],
+    AI: (poolEnv as unknown as Record<string, unknown>).AI,
   };
 
   const { app } = createGatewayApp({
@@ -260,7 +260,7 @@ describe("an opted-in tenant's traffic is sampled and queued", () => {
 
     expect(h.queue.bodies).toHaveLength(1);
     const wire = h.queue.bodies[0] as Record<string, unknown>;
-    expect(wire["object"]).toBe(ONLINE_EVAL_SAMPLE_OBJECT);
+    expect(wire.object).toBe(ONLINE_EVAL_SAMPLE_OBJECT);
 
     const sample = onlineEvalSampleFromWire(wire);
     if (sample === undefined) throw new Error("the queued body did not decode as a sample");

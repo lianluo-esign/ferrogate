@@ -24,9 +24,7 @@
           "id": "key-1",
           "name": "conformance key",
           "key": "secret-1",
-          "scopes": [
-            "embeddings.create"
-          ],
+          "scopes": ["embeddings.create"],
           "organization_id": "tenant-1",
           "project_id": "project-1"
         }
@@ -54,9 +52,7 @@
     "outcome": "deny",
     "status": 403,
     "code": "scope_denied",
-    "durable_writes": [
-      "request_log"
-    ],
+    "durable_writes": ["request_log"],
     "audit_events": []
   },
   "worker_shell": {

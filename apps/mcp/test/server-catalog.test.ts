@@ -21,7 +21,7 @@
  *     which is exactly why `src/catalog.ts` has to map it by an explicit table
  *     entry. That assertion survives the close and is the reason it must.
  */
-import { SELF, applyD1Migrations, env } from "cloudflare:test";
+import { SELF, type applyD1Migrations, env } from "cloudflare:test";
 import { DurableObjectTenantDatabaseRouter } from "@ferrogate/storage";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
@@ -125,12 +125,13 @@ async function clearAdminDocuments(): Promise<void> {
 
 /** One typed catalog row, the native shape. */
 async function seedTypedServerRow(tenantId: string, name: string): Promise<void> {
-  await tenantDatabase(TENANT_DATA, tenantId).prepare(
-    `INSERT OR REPLACE INTO mcp_servers
+  await tenantDatabase(TENANT_DATA, tenantId)
+    .prepare(
+      `INSERT OR REPLACE INTO mcp_servers
        (tenant_id, name, transport, url, auth_type, tools_to_execute,
         tools_to_auto_execute, headers, oauth, signed_jwt_audience, timeout_ms)
      VALUES (?, ?, 'streamable_http', 'https://upstream.test/mcp', 'none', ?, ?, NULL, NULL, NULL, 5000)`,
-  )
+    )
     .bind(tenantId, name, JSON.stringify(["echo"]), JSON.stringify([]))
     .run();
 }

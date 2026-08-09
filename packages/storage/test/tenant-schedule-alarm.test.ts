@@ -27,16 +27,16 @@ describe("tenant schedule alarm contract", () => {
 
   test("round-trips encoded queue data and rejects unsupported versions", () => {
     const encoded = encodeTenantScheduleAlarm(tenantScheduleAlarmMessage("tenant-a", 42));
-    expect(decodeTenantScheduleAlarm(encoded)).toEqual(
-      tenantScheduleAlarmMessage("tenant-a", 42),
-    );
+    expect(decodeTenantScheduleAlarm(encoded)).toEqual(tenantScheduleAlarmMessage("tenant-a", 42));
 
-    expect(() => decodeTenantScheduleAlarm({
-      kind: TENANT_SCHEDULE_ALARM_KIND,
-      version: 2,
-      tenant_id: "tenant-a",
-      scheduled_at_unix: 42,
-    })).toThrow(/unsupported/);
+    expect(() =>
+      decodeTenantScheduleAlarm({
+        kind: TENANT_SCHEDULE_ALARM_KIND,
+        version: 2,
+        tenant_id: "tenant-a",
+        scheduled_at_unix: 42,
+      }),
+    ).toThrow(/unsupported/);
   });
 
   test("rejects malformed tenant or time values before routing", () => {

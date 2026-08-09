@@ -1,3 +1,4 @@
+import { CONTROL_PLANE_BASE_URL, baseUrlForRequestPath } from "@/lib/config";
 // MSW (v2) foundation for mocking the FerroGate backends in tests.
 //
 // ## The pattern (use this in every UI-slice test)
@@ -25,9 +26,8 @@
 //   ),
 // );
 // ```
-import { HttpResponse, http } from "msw";
+import { http, HttpResponse } from "msw";
 import { setupServer } from "msw/node";
-import { baseUrlForRequestPath, CONTROL_PLANE_BASE_URL } from "@/lib/config";
 
 export const server = setupServer();
 
@@ -47,9 +47,7 @@ export function authUrl(path: string): string {
 
 /** Mocks `GET <path>` with the Admin API `{ object: "list", data }` envelope. */
 export function mockAdminList<T>(path: string, data: T[]): void {
-  server.use(
-    http.get(gatewayUrl(path), () => HttpResponse.json({ object: "list", data })),
-  );
+  server.use(http.get(gatewayUrl(path), () => HttpResponse.json({ object: "list", data })));
 }
 
 /** Mocks any method/path with the Admin API `{ error: { code, message } }` body. */

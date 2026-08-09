@@ -19,20 +19,11 @@
  * result through {@link UsageCapture.completed} — a promise the billing layer
  * awaits AFTER the response stream has been handed to the client.
  */
-import {
-  type SseFrame,
-  frameJson,
-  isDoneFrame,
-  parseSse,
-} from "./sse.js";
+import { type SseFrame, frameJson, isDoneFrame, parseSse } from "./sse.js";
 import { asUint, get, getUint, nonNull } from "./values.js";
 
 /** Which wire dialect the usage frame is written in. */
-export type UsageProviderKind =
-  | "openai_compatible"
-  | "anthropic"
-  | "gemini"
-  | "other";
+export type UsageProviderKind = "openai_compatible" | "anthropic" | "gemini" | "other";
 
 /**
  * Normalized token counts — the TS twin of `ferrogate_providers::ProviderUsage`
@@ -211,8 +202,7 @@ function extractOpenAiUsage(payload: unknown): NormalizedUsage | undefined {
  * correct.
  */
 function extractAnthropicUsage(payload: unknown): NormalizedUsage | undefined {
-  const usage =
-    nonNull(get(payload, "usage")) ?? nonNull(get(get(payload, "message"), "usage"));
+  const usage = nonNull(get(payload, "usage")) ?? nonNull(get(get(payload, "message"), "usage"));
   if (usage === undefined) {
     return undefined;
   }
@@ -414,9 +404,7 @@ export interface UsageCaptureStream {
  * is byte-identical to the upstream's — while the usage frame is scraped on the
  * way past.
  */
-export function usageCaptureStream(
-  options: UsageCaptureOptions = {},
-): UsageCaptureStream {
+export function usageCaptureStream(options: UsageCaptureOptions = {}): UsageCaptureStream {
   const capture = new UsageCapture(options);
   const stream = new TransformStream<SseFrame, SseFrame>({
     transform(frame, controller) {
@@ -441,9 +429,7 @@ export const STREAMING_CAPTURE_PREFIX_MAX_BYTES = 8 * 1024;
 const CAPTURE_SEPARATOR = new TextEncoder().encode("\n\n");
 /** `STREAMING_USAGE_CAPTURE_TAIL_MAX_BYTES`. */
 export const STREAMING_CAPTURE_TAIL_MAX_BYTES =
-  STREAMING_CAPTURE_MAX_BYTES -
-  STREAMING_CAPTURE_PREFIX_MAX_BYTES -
-  CAPTURE_SEPARATOR.length;
+  STREAMING_CAPTURE_MAX_BYTES - STREAMING_CAPTURE_PREFIX_MAX_BYTES - CAPTURE_SEPARATOR.length;
 
 /**
  * Bounded prefix+tail window over a streamed body — the port of
@@ -496,9 +482,7 @@ export class StreamingBodyCapture {
     combined.set(this.#tail, 0);
     combined.set(bytes, this.#tail.length);
     this.#tail =
-      combined.length > bodyLimit
-        ? combined.subarray(combined.length - bodyLimit)
-        : combined;
+      combined.length > bodyLimit ? combined.subarray(combined.length - bodyLimit) : combined;
   }
 
   /** The captured body: verbatim under the cap, prefix + `\n\n` + tail over it. */
@@ -507,9 +491,7 @@ export class StreamingBodyCapture {
       return this.#tail.slice();
     }
     const prefix = this.#prefix.subarray(0, this.#prefixLength);
-    const out = new Uint8Array(
-      prefix.length + CAPTURE_SEPARATOR.length + this.#tail.length,
-    );
+    const out = new Uint8Array(prefix.length + CAPTURE_SEPARATOR.length + this.#tail.length);
     out.set(prefix, 0);
     out.set(CAPTURE_SEPARATOR, prefix.length);
     out.set(this.#tail, prefix.length + CAPTURE_SEPARATOR.length);

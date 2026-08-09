@@ -1,12 +1,9 @@
-import { lazy } from "react";
+import { RouteLoadBoundary, RouteLoadErrorBoundary } from "@/components/route-load-boundary";
+import { I18nProvider } from "@/i18n";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { lazy } from "react";
 import { describe, expect, it, vi } from "vitest";
-import {
-  RouteLoadBoundary,
-  RouteLoadErrorBoundary,
-} from "@/components/route-load-boundary";
-import { I18nProvider } from "@/i18n";
 
 describe("RouteLoadBoundary", () => {
   it("announces a stable loading state while a route module is pending", () => {

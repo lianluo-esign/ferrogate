@@ -40,8 +40,17 @@
  * the time a handler runs; this module only reads the resolved caller and adds
  * the asset-specific entitlement/tenancy checks that live in the service.
  */
+
+import {
+  type AssetEgressQuota,
+  NO_ASSET_EGRESS_METER,
+  assetEgressCountersFromEnv,
+  assetEgressMeterFromEnv,
+  assetEgressPricePerGb,
+} from "@ferrogate/billing";
 import type { Context } from "hono";
 import type { z } from "zod";
+import { D1LedgerStore, meteringDatabaseFrom } from "../metering/index.js";
 import { HttpError } from "../middleware/errors.js";
 import type { AuthContext, GatewayEnv } from "../ports.js";
 import {
@@ -51,6 +60,7 @@ import {
   subjectFor,
 } from "../ratelimit/index.js";
 import type { GatewayRouter, RouteModule } from "../routes/index.js";
+import { TENANT_DATABASE_VAR, type TenantDatabaseAccessor } from "../tenancy/index.js";
 import {
   D1AssetBundleIndexStore,
   D1AssetMetadataStore,
@@ -59,14 +69,6 @@ import {
   assetDatabaseFromTenantResolver,
   assetMetadataStoreFromEnv,
 } from "./d1.js";
-import {
-  type AssetEgressQuota,
-  NO_ASSET_EGRESS_METER,
-  assetEgressCountersFromEnv,
-  assetEgressMeterFromEnv,
-  assetEgressPricePerGb,
-} from "@ferrogate/billing";
-import { D1LedgerStore, meteringDatabaseFrom } from "../metering/index.js";
 import { D1AssetEntitlements } from "./entitlements.js";
 import { withAssetGuardrailScreening } from "./guardrail-screener.js";
 import {
@@ -110,7 +112,6 @@ import {
 import { type SignaturePolicyBindings, withSignatureVerification } from "./signature-screener.js";
 import { type AssetSignatureInput, parseSignatureFormat } from "./signature.js";
 import { SigV4Presigner } from "./sigv4.js";
-import { TENANT_DATABASE_VAR, type TenantDatabaseAccessor } from "../tenancy/index.js";
 
 // ---------------------------------------------------------------------------
 // Caller resolution
@@ -481,9 +482,7 @@ function isMultipartUploadFile(value: unknown): value is MultipartUploadFile {
 }
 
 /** Decode the OpenAI multipart upload into the asset service's narrow input. */
-async function fileUploadBody(
-  c: Context<AssetEnv>,
-): Promise<{
+async function fileUploadBody(c: Context<AssetEnv>): Promise<{
   size_bytes: number;
   stream: () => ReadableStream<Uint8Array>;
   contentType: string;
@@ -756,9 +755,7 @@ export function assetDepsFromEnv(env: Record<string, unknown>): Partial<AssetSer
       ? assetEgressMeterFromEnv(env)
       : assetEgressMeterFromEnv(env, (tenantId) => {
           const database = meteringDatabaseFrom(env, tenantId);
-          return database === undefined
-            ? undefined
-            : new D1LedgerStore(database, { tenantId });
+          return database === undefined ? undefined : new D1LedgerStore(database, { tenantId });
         });
   const egress = {
     counters: assetEgressCountersFromEnv(env),

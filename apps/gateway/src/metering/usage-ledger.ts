@@ -53,18 +53,19 @@
  * only the per-key token attribution that is dropped. Under-attribution, never
  * mis-attribution.
  */
+
+import type { BillingEvent } from "@ferrogate/billing";
 import {
   D1UsageLedger,
   DurableObjectD1Database,
-  periodMonthFromUnix,
   type UsageAggregateWrite,
+  periodMonthFromUnix,
 } from "@ferrogate/storage";
-import type { BillingEvent } from "@ferrogate/billing";
 import type { QuotaScopeKind } from "@ferrogate/storage";
 import type { UsageRecordContext } from "../inference/ports.js";
 import { gatewayTenantHandle } from "../ratelimit/wallet.js";
 import { tenantObjectAddressForEnv } from "../residency/carrier.js";
-import { tenantDataObjectFor, type TenantDataBindings } from "../tenancy/tenant-data.js";
+import { type TenantDataBindings, tenantDataObjectFor } from "../tenancy/tenant-data.js";
 import type { MeteredCharge } from "./ports.js";
 
 /**

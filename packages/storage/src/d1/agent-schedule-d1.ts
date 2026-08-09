@@ -386,7 +386,13 @@ export class D1AgentScheduleStore {
           : "UPDATE agent_schedules SET last_fire_at_unix = ?, next_fire_at_unix = ?, updated_at_unix = ?, revision = revision + 1 WHERE schedule_id = ? AND enabled = 1 AND revision = ? AND next_fire_at_unix = ?";
       const bindings =
         expectedRevision === undefined
-          ? [lastFireAtUnix, bindOptional(nextFireAtUnix), nowUnix, scheduleId, expectedNextFireAtUnix]
+          ? [
+              lastFireAtUnix,
+              bindOptional(nextFireAtUnix),
+              nowUnix,
+              scheduleId,
+              expectedNextFireAtUnix,
+            ]
           : [
               lastFireAtUnix,
               bindOptional(nextFireAtUnix),
@@ -539,12 +545,8 @@ export class D1AgentScheduleStore {
               claimToken,
             ];
       const results = await this.db.batch([
-        this.db
-          .prepare(claimSql)
-          .bind(...claimBindings),
-        this.db
-          .prepare(advanceSql)
-          .bind(...advanceBindings),
+        this.db.prepare(claimSql).bind(...claimBindings),
+        this.db.prepare(advanceSql).bind(...advanceBindings),
       ]);
       const inserted = (results[0] as D1Result<{ fire_id: string }>).results.length > 0;
       const advanced = (results[1] as D1Result<{ schedule_id: string }>).results.length > 0;
@@ -567,13 +569,7 @@ export class D1AgentScheduleStore {
         .prepare(
           "UPDATE agent_schedule_fires SET outcome = ?, dispatch_id = ?, run_id = ?, detail = ? WHERE fire_id = ?",
         )
-        .bind(
-          outcome,
-          bindOptional(dispatchId),
-          bindOptional(runId),
-          bindOptional(detail),
-          fireId,
-        )
+        .bind(outcome, bindOptional(dispatchId), bindOptional(runId), bindOptional(detail), fireId)
         .run();
       return changes(result) > 0;
     } catch (error) {
@@ -584,7 +580,9 @@ export class D1AgentScheduleStore {
   async getScheduleFire(fireId: string): Promise<StoredAgentScheduleFire | undefined> {
     try {
       const row = await this.db
-        .prepare(`SELECT ${AGENT_SCHEDULE_FIRE_COLUMNS} FROM agent_schedule_fires WHERE fire_id = ?`)
+        .prepare(
+          `SELECT ${AGENT_SCHEDULE_FIRE_COLUMNS} FROM agent_schedule_fires WHERE fire_id = ?`,
+        )
         .bind(fireId)
         .first<AgentScheduleFireRow>();
       return row === null ? undefined : intoStoredFire(row);

@@ -1,11 +1,11 @@
-import { screen, waitFor, within } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
-import { HttpResponse, http } from "msw";
-import { beforeEach, describe, expect, it } from "vitest";
 import OpsGatewayConfigsPage from "@/pages/ops-gateway-configs";
 import { gatewayConfigProfile } from "@/test/fixtures/ops";
 import { gatewayUrl, server } from "@/test/msw";
 import { renderWithProviders, seedSession } from "@/test/test-utils";
+import { screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { http, HttpResponse } from "msw";
+import { beforeEach, describe, expect, it } from "vitest";
 
 beforeEach(() => {
   seedSession();
@@ -92,9 +92,7 @@ describe("OpsGatewayConfigsPage", () => {
     await screen.findByText("No-cache agent");
 
     await user.click(screen.getByRole("button", { name: "Delete" }));
-    expect(
-      await screen.findByText("Delete config profile?"),
-    ).toBeInTheDocument();
+    expect(await screen.findByText("Delete config profile?")).toBeInTheDocument();
     expect(deleted).toBe(false);
 
     const alert = await screen.findByRole("alertdialog");

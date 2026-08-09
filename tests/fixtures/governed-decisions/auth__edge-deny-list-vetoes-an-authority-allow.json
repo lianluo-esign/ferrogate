@@ -24,10 +24,7 @@
           "id": "key-1",
           "name": "conformance key",
           "key": "secret-1",
-          "scopes": [
-            "chat.completions",
-            "responses.create"
-          ],
+          "scopes": ["chat.completions", "responses.create"],
           "organization_id": "tenant-1",
           "project_id": "project-1"
         }
@@ -58,9 +55,7 @@
     "audit_events": []
   },
   "worker_shell": {
-    "deny_list": [
-      "f7e7c36e458e80e6b6a2c67d0a9ec09bd718dadd7bfa8d6bf6e7ad526e46c2f7"
-    ],
+    "deny_list": ["f7e7c36e458e80e6b6a2c67d0a9ec09bd718dadd7bfa8d6bf6e7ad526e46c2f7"],
     "expect": {
       "schema": 1,
       "outcome": "deny",

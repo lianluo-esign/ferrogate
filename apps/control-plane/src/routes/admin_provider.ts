@@ -1,6 +1,6 @@
+import { providerCatalogOverrides } from "./admin_model_catalog.js";
 /** Provider channel CRUD and the existing provider read-only projections. */
 import { type GroupModule, crudGroup, readOnlyCollection } from "./resource.js";
-import { providerCatalogOverrides } from "./admin_model_catalog.js";
 
 export const adminProviderRoutes: GroupModule = crudGroup(
   "admin_provider",

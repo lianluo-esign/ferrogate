@@ -115,9 +115,8 @@ async function exactTenantDatabase(tenantId: string): Promise<D1Database> {
     )
     .bind(tenantId)
     .run();
-  return (
-    await resolveTenantDatabases(env as unknown as ControlPlaneBindings).forTenant(tenantId)
-  ).db;
+  return (await resolveTenantDatabases(env as unknown as ControlPlaneBindings).forTenant(tenantId))
+    .db;
 }
 
 async function clearExactTenantRequestLogs(): Promise<void> {
@@ -200,7 +199,7 @@ describe("GET /admin/v1/request-logs returns the evidence the table holds", () =
       { ...FULL_ROW, requestId: "fg-c", startedAtUnix: 300 },
     ]);
     const page = await readLogs(operatorKey.secret);
-    expect(page.data.map((row) => row["request_id"])).toEqual(["fg-c", "fg-a", "fg-b"]);
+    expect(page.data.map((row) => row.request_id)).toEqual(["fg-c", "fg-a", "fg-b"]);
   });
 
   it("reports the pre-window total alongside the page", async () => {
@@ -240,12 +239,12 @@ describe("the tenant fence on request logs", () => {
 
   it("shows a tenant only its own rows", async () => {
     const page = await readLogs("k-tenant");
-    expect(page.data.map((row) => row["request_id"])).toEqual(["fg-t1"]);
+    expect(page.data.map((row) => row.request_id)).toEqual(["fg-t1"]);
   });
 
   it("shows the OTHER tenant only its own rows", async () => {
     const page = await readLogs("k-other");
-    expect(page.data.map((row) => row["request_id"])).toEqual(["fg-t2"]);
+    expect(page.data.map((row) => row.request_id)).toEqual(["fg-t2"]);
   });
 
   /**
@@ -255,13 +254,13 @@ describe("the tenant fence on request logs", () => {
    */
   it("never shows a tenant the un-attributed platform rows", async () => {
     for (const secret of ["k-tenant", "k-other"]) {
-      const ids = (await readLogs(secret)).data.map((row) => row["request_id"]);
+      const ids = (await readLogs(secret)).data.map((row) => row.request_id);
       expect(ids).not.toContain("fg-none");
     }
   });
 
   it("shows a platform operator every row", async () => {
-    const ids = (await readLogs(operatorKey.secret)).data.map((row) => row["request_id"]);
+    const ids = (await readLogs(operatorKey.secret)).data.map((row) => row.request_id);
     expect(ids.sort()).toEqual(["fg-none", "fg-t1", "fg-t2"]);
   });
 
@@ -271,14 +270,14 @@ describe("the tenant fence on request logs", () => {
    */
   it("fences the JSONL export identically", async () => {
     const exported = await exportLogs("k-tenant");
-    expect(exported.lines.map((row) => row["request_id"])).toEqual(["fg-t1"]);
+    expect(exported.lines.map((row) => row.request_id)).toEqual(["fg-t1"]);
   });
 
   /** A pagination window must not be a way around the fence. */
   it("cannot be paged past", async () => {
     const page = await readLogs("k-tenant", "?limit=100&offset=0");
     expect(page.total).toBe(1);
-    expect(page.data.map((row) => row["request_id"])).toEqual(["fg-t1"]);
+    expect(page.data.map((row) => row.request_id)).toEqual(["fg-t1"]);
   });
 });
 
@@ -296,7 +295,7 @@ describe("GET /admin/v1/request-log-exports streams JSONL", () => {
     expect(exported.contentType).toContain("application/x-ndjson");
     expect(exported.source).toBe("derived_control_projection");
     expect(exported.asOfUnix).toBeGreaterThan(1_700_000_000);
-    expect(exported.lines.map((row) => row["request_id"])).toEqual(["fg-2", "fg-1"]);
+    expect(exported.lines.map((row) => row.request_id)).toEqual(["fg-2", "fg-1"]);
     expect(exported.lines[0]).toMatchObject({
       object: "request_log",
       logical_model: "gpt-4o-mini",

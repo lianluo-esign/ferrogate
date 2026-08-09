@@ -1,12 +1,12 @@
 import { describe, expect, test } from "vitest";
 import {
-  planBlobGc,
-  planLogRetention,
-  planVersionRetention,
-  pinnedVersions,
   type RetentionPolicy,
   type StoredAsset,
   type StoredAssetChannel,
+  pinnedVersions,
+  planBlobGc,
+  planLogRetention,
+  planVersionRetention,
 } from "../src/index.js";
 
 function asset(version: string, createdAtUnix: number, sizeBytes = 10): StoredAsset {
@@ -87,8 +87,24 @@ describe("planBlobGc — orphan deletion is fail-safe", () => {
 describe("pinnedVersions", () => {
   test("collects each channel's target version", () => {
     const channels: StoredAssetChannel[] = [
-      { id: "1", tenantId: "t", assetType: "tool", name: "cli", channel: "stable", version: "v1", updatedAtUnix: 0 },
-      { id: "2", tenantId: "t", assetType: "tool", name: "cli", channel: "latest", version: "v2", updatedAtUnix: 0 },
+      {
+        id: "1",
+        tenantId: "t",
+        assetType: "tool",
+        name: "cli",
+        channel: "stable",
+        version: "v1",
+        updatedAtUnix: 0,
+      },
+      {
+        id: "2",
+        tenantId: "t",
+        assetType: "tool",
+        name: "cli",
+        channel: "latest",
+        version: "v2",
+        updatedAtUnix: 0,
+      },
     ];
     expect([...pinnedVersions(channels)].sort()).toEqual(["v1", "v2"]);
   });

@@ -58,7 +58,8 @@ const projects: AdminProject[] = Array.from({ length: 52 }, (_, index) => {
       index === 0
         ? "Production payments routing with long operator-visible context"
         : `Project ${sequence} cross-region inference operations`,
-    slug: index === 0 ? "production-payments-routing" : `project-${sequence}-cross-region-inference`,
+    slug:
+      index === 0 ? "production-payments-routing" : `project-${sequence}-cross-region-inference`,
     status: "active",
     created_at_unix: 1_720_000_000 + index,
     updated_at_unix: 1_720_086_400 + index,
@@ -595,13 +596,8 @@ async function handleAdminRequest(route: Route, options: AdminApiOptions): Promi
     return;
   }
 
-  if (
-    request.method() === "GET" &&
-    url.pathname.startsWith("/admin/v1/tenant-accounts/")
-  ) {
-    const tenantId = decodeURIComponent(
-      url.pathname.slice("/admin/v1/tenant-accounts/".length),
-    );
+  if (request.method() === "GET" && url.pathname.startsWith("/admin/v1/tenant-accounts/")) {
+    const tenantId = decodeURIComponent(url.pathname.slice("/admin/v1/tenant-accounts/".length));
     const tenant = tenantAccounts.find((item) => item.id === tenantId);
     await route.fulfill({
       status: tenant ? 200 : 404,
@@ -685,10 +681,7 @@ async function handleAdminRequest(route: Route, options: AdminApiOptions): Promi
     return;
   }
 
-  if (
-    request.method() === "GET" &&
-    url.pathname === "/admin/v1/self-hosted-worker-records"
-  ) {
+  if (request.method() === "GET" && url.pathname === "/admin/v1/self-hosted-worker-records") {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -720,8 +713,7 @@ async function handleAdminRequest(route: Route, options: AdminApiOptions): Promi
 
   if (
     request.method() === "GET" &&
-    (url.pathname === "/admin/v1/guardrail-policies" ||
-      url.pathname === "/admin/v1/wallets")
+    (url.pathname === "/admin/v1/guardrail-policies" || url.pathname === "/admin/v1/wallets")
   ) {
     await route.fulfill({
       status: 200,
@@ -891,9 +883,9 @@ export async function installAuthenticatedAdminApi(
   page: Page,
   options: AdminApiOptions = {},
 ): Promise<void> {
-  await page.addInitScript(
-    ({ key, value }) => localStorage.setItem(key, JSON.stringify(value)),
-    { key: SESSION_KEY, value: session },
-  );
+  await page.addInitScript(({ key, value }) => localStorage.setItem(key, JSON.stringify(value)), {
+    key: SESSION_KEY,
+    value: session,
+  });
   await page.route(ADMIN_API_PATTERN, (route) => handleAdminRequest(route, options));
 }

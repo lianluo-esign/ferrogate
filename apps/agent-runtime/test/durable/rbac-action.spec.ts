@@ -45,10 +45,7 @@
  */
 import { env } from "cloudflare:test";
 import { DurableObjectTenantDatabaseRouter } from "@ferrogate/storage";
-import type {
-  TenantDataNamespace,
-  TenantDataStatement,
-} from "@ferrogate/storage/durable-objects";
+import type { TenantDataNamespace, TenantDataStatement } from "@ferrogate/storage/durable-objects";
 import { Hono } from "hono";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 

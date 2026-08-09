@@ -22,7 +22,7 @@
  * `crates/ferrogate-mcp`, until an `@ferrogate/mcp` library exists; pinned by
  * `test/sibling-enum-parity.test.ts`.
  */
-import { z } from "zod";
+
 import { contentSourceSchema as guardrailsContentSourceSchema } from "@ferrogate/guardrails";
 import { ALL_CONTENT_SOURCES as GUARDRAILS_ALL_CONTENT_SOURCES } from "@ferrogate/guardrails";
 import {
@@ -34,6 +34,7 @@ import {
   type PostgresTlsMode as StoragePostgresTlsMode,
   type StorageProviderKind as StorageStorageProviderKind,
 } from "@ferrogate/storage/provider";
+import { z } from "zod";
 
 // --- @ferrogate/providers ---------------------------------------------------
 // The enum is the owner's; only the Rust `#[serde(default)]` lives here, since
@@ -122,7 +123,9 @@ export type McpAuthType = z.infer<typeof mcpAuthTypeSchema>;
 export const assetBucketBackendSchema = z.enum(["s3", "workers-static-assets"]).default("s3");
 export type AssetBucketBackend = z.infer<typeof assetBucketBackendSchema>;
 
-export const storageMigrationModeSchema = z.enum(["auto", "validate_only", "disabled"]).default("auto");
+export const storageMigrationModeSchema = z
+  .enum(["auto", "validate_only", "disabled"])
+  .default("auto");
 export type StorageMigrationMode = z.infer<typeof storageMigrationModeSchema>;
 
 export const cacheModeSchema = z.enum(["exact_match", "semantic"]).default("exact_match");
@@ -147,13 +150,19 @@ export const guardrailProviderErrorModeSchema = z
   .default("block");
 export type GuardrailProviderErrorMode = z.infer<typeof guardrailProviderErrorModeSchema>;
 
-export const agentRuntimeProviderSchema = z.enum(["managed_worker", "external"]).default("managed_worker");
+export const agentRuntimeProviderSchema = z
+  .enum(["managed_worker", "external"])
+  .default("managed_worker");
 export type AgentRuntimeProvider = z.infer<typeof agentRuntimeProviderSchema>;
 
-export const providerCloudflareAiGatewayModeSchema = z.enum(["compat", "unified"]).default("compat");
+export const providerCloudflareAiGatewayModeSchema = z
+  .enum(["compat", "unified"])
+  .default("compat");
 export type ProviderCloudflareAiGatewayMode = z.infer<typeof providerCloudflareAiGatewayModeSchema>;
 
-export const observabilityProviderSchema = z.enum(["vector", "otlp", "cloudflare", "none"]).default("vector");
+export const observabilityProviderSchema = z
+  .enum(["vector", "otlp", "cloudflare", "none"])
+  .default("vector");
 export type ObservabilityProvider = z.infer<typeof observabilityProviderSchema>;
 
 export const analyticsProviderSchema = z.enum(["vector", "clickhouse", "none"]).default("vector");
@@ -176,10 +185,14 @@ export type AgentWorkflowNodeKind = z.infer<typeof agentWorkflowNodeKindSchema>;
 export const promptTemplateStatusSchema = z.enum(["draft", "active", "archived"]).default("active");
 export type PromptTemplateStatus = z.infer<typeof promptTemplateStatusSchema>;
 
-export const promptTemplateTargetSchema = z.enum(["chat_completions", "responses"]).default("chat_completions");
+export const promptTemplateTargetSchema = z
+  .enum(["chat_completions", "responses"])
+  .default("chat_completions");
 export type PromptTemplateTarget = z.infer<typeof promptTemplateTargetSchema>;
 
-export const promptTemplateVersionStatusSchema = z.enum(["draft", "active", "archived"]).default("active");
+export const promptTemplateVersionStatusSchema = z
+  .enum(["draft", "active", "archived"])
+  .default("active");
 export type PromptTemplateVersionStatus = z.infer<typeof promptTemplateVersionStatusSchema>;
 
 export const extensionKindSchema = z.enum(["request_hook", "tool_provider", "event_sink"]);

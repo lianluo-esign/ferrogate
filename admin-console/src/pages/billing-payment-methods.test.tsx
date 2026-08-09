@@ -1,14 +1,14 @@
+import type { AdminSchema } from "@/lib/gateway-client";
+import BillingPaymentMethodsPage from "@/pages/billing-payment-methods";
+import { gatewayUrl, server } from "@/test/msw";
+import { renderWithProviders, seedSession } from "@/test/test-utils";
 // Component tests for the payment-methods ops surface (#319): list requires a
 // tenant filter (the gateway needs a tenant_id query), create posts the full
 // body, and delete flows through a confirmation.
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { HttpResponse, http } from "msw";
+import { http, HttpResponse } from "msw";
 import { beforeEach, expect, it } from "vitest";
-import BillingPaymentMethodsPage from "@/pages/billing-payment-methods";
-import type { AdminSchema } from "@/lib/gateway-client";
-import { gatewayUrl, server } from "@/test/msw";
-import { renderWithProviders, seedSession } from "@/test/test-utils";
 
 type AdminPaymentMethod = AdminSchema<"AdminPaymentMethod">;
 
@@ -36,7 +36,10 @@ function mockTenantAccounts() {
       HttpResponse.json({ object: "list", data: [{ id: "org-acme", name: "Acme", slug: "acme" }] }),
     ),
     http.get(gatewayUrl("/admin/v1/tenant-accounts/org-acme"), () =>
-      HttpResponse.json({ object: "tenant", tenant: { id: "org-acme", name: "Acme", slug: "acme" } }),
+      HttpResponse.json({
+        object: "tenant",
+        tenant: { id: "org-acme", name: "Acme", slug: "acme" },
+      }),
     ),
   );
 }
@@ -86,9 +89,7 @@ it("registers a new payment method with the full body", async () => {
   const user = userEvent.setup();
   let createBody: unknown = null;
   server.use(
-    http.get(gatewayUrl(PM_PATH), () =>
-      HttpResponse.json({ object: "list", data: [] }),
-    ),
+    http.get(gatewayUrl(PM_PATH), () => HttpResponse.json({ object: "list", data: [] })),
     http.post(gatewayUrl(PM_PATH), async ({ request }) => {
       createBody = await request.json();
       return HttpResponse.json({ object: "payment_method", payment_method: method() });
@@ -98,16 +99,11 @@ it("registers a new payment method with the full body", async () => {
   renderWithProviders(<BillingPaymentMethodsPage />);
   await selectTenant(user);
 
-  await user.click(
-    await screen.findByRole("button", { name: "Register payment method" }),
-  );
+  await user.click(await screen.findByRole("button", { name: "Register payment method" }));
   const dialog = await screen.findByRole("dialog");
   await user.type(within(dialog).getByLabelText("Provider"), "stripe");
   await user.type(within(dialog).getByLabelText("Provider customer id"), "cus_123");
-  await user.type(
-    within(dialog).getByLabelText("Provider payment method id"),
-    "pm_456",
-  );
+  await user.type(within(dialog).getByLabelText("Provider payment method id"), "pm_456");
   await user.click(within(dialog).getByRole("button", { name: "Register" }));
 
   await waitFor(() =>
@@ -144,8 +140,6 @@ it("deletes a payment method after confirmation", async () => {
 
   await waitFor(() => expect(deleted).toBe(true));
   await waitFor(() =>
-    expect(
-      screen.getByText("No payment methods for this tenant."),
-    ).toBeInTheDocument(),
+    expect(screen.getByText("No payment methods for this tenant.")).toBeInTheDocument(),
   );
 });

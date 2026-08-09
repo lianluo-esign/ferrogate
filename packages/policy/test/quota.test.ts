@@ -1,12 +1,12 @@
 import { describe, expect, test } from "vitest";
 import {
-  allowsModel,
-  isDenied,
-  QuotaScopeSelector,
-  resolveEffectiveQuota,
   type QuotaScopeKind,
+  QuotaScopeSelector,
   type StoredPlan,
   type StoredQuotaPolicy,
+  allowsModel,
+  isDenied,
+  resolveEffectiveQuota,
 } from "../src/index.js";
 
 function policy(

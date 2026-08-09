@@ -14,19 +14,19 @@ import { SELF } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import {
-  setOauthProvider,
-  setSecretResolver,
   type OauthProviderPort,
   type OidcDiscovery,
+  setOauthProvider,
+  setSecretResolver,
 } from "../src/ports.js";
 import {
   EXEC_KEY,
+  type Fixture,
   READ_KEY,
+  USER,
   rpcRequest,
   seedFixture,
   upstreamConfig,
-  USER,
-  type Fixture,
 } from "./fixtures.js";
 
 const DISCOVERY: OidcDiscovery = {

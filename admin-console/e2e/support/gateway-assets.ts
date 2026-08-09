@@ -412,8 +412,7 @@ async function handleAssetsRequest(
       upload_id: uploadId,
       staging_object_removed: staged,
       staging_reclamation: staged ? "removed" : "not_staged",
-      outcome:
-        body.reason === "bucket_rejected" && !staged ? "rejected_bucket" : "aborted",
+      outcome: body.reason === "bucket_rejected" && !staged ? "rejected_bucket" : "aborted",
     });
     return;
   }
@@ -521,10 +520,7 @@ async function handleAssetsRequest(
     // (VersionYankOutcome::ReferencedByChannel -> 409). Modelling that is the
     // point: a mock that yanks anything keeps a console green that would 409
     // against every real gateway. Unyank never coordinates.
-    if (
-      method === "POST" &&
-      manifest.channels.some((entry) => entry.version === version)
-    ) {
+    if (method === "POST" && manifest.channels.some((entry) => entry.version === version)) {
       await fulfillJson(route, 409, {
         error: {
           code: "asset_version_referenced",
@@ -544,11 +540,7 @@ async function handleAssetsRequest(
   }
 
   // /v1/assets/{asset_type}/{name}/{version} — GET download, DELETE purge.
-  if (
-    segments.length === 3 &&
-    segments[2] !== "manifest" &&
-    segments[2] !== "channels"
-  ) {
+  if (segments.length === 3 && segments[2] !== "manifest" && segments[2] !== "channels") {
     const [assetType, name, version] = segments;
 
     // Both verbs are VARIANT-addressed: `platform` selects the row, and an
@@ -563,9 +555,7 @@ async function handleAssetsRequest(
       await route.fulfill({
         status: 200,
         contentType: "application/gzip",
-        body: Buffer.from(
-          `e2e-asset-bytes:${assetType}/${name}/${version}/${platform}`,
-        ),
+        body: Buffer.from(`e2e-asset-bytes:${assetType}/${name}/${version}/${platform}`),
       });
       return;
     }
@@ -590,10 +580,7 @@ async function handleAssetsRequest(
       // ship a purge that neither warned about the blocker nor reported it.
       const isLastResolvable =
         target.variants.filter((entry) => entry.variant !== platform).length === 0;
-      if (
-        isLastResolvable &&
-        manifest.channels.some((entry) => entry.version === version)
-      ) {
+      if (isLastResolvable && manifest.channels.some((entry) => entry.version === version)) {
         await fulfillJson(route, 409, {
           error: {
             code: "asset_version_referenced",
@@ -604,12 +591,9 @@ async function handleAssetsRequest(
       }
       target.variants = target.variants.filter((entry) => entry.variant !== platform);
       if (target.variants.length === 0) {
-        manifest.versions = manifest.versions.filter(
-          (entry) => entry.version !== version,
-        );
+        manifest.versions = manifest.versions.filter((entry) => entry.version !== version);
         state.summaries = state.summaries.filter(
-          (row) =>
-            !(row.asset_type === assetType && row.name === name && row.version === version),
+          (row) => !(row.asset_type === assetType && row.name === name && row.version === version),
         );
       }
       await fulfillJson(route, 200, {

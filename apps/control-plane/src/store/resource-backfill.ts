@@ -8,12 +8,9 @@
  * resumes after the last control row it examined rather than relying on an
  * in-memory cursor that a Worker eviction loses.
  */
+
+import { RESOURCE_TABLE, TENANT_RESOURCE_TABLE, tenantResourceTombstoneMark } from "./d1.js";
 import { TENANT_RESOURCE_KINDS } from "./resource-kinds.js";
-import {
-  RESOURCE_TABLE,
-  TENANT_RESOURCE_TABLE,
-  tenantResourceTombstoneMark,
-} from "./d1.js";
 
 /** The object-local mark that stores the generic resource backfill cursor. */
 export const RESOURCE_BACKFILL_MARK = "control_plane_resource_backfill_v1";
@@ -113,7 +110,8 @@ export async function backfillTenantResourceKinds(
     // the whole scan with a SQLITE error otherwise. The corrupt row is NOT
     // silently lost — it stays on control D1, where the reader's
     // `parseDocument` refuses it loudly by name ("unparseable document_json").
-    const ownerOf = "CASE WHEN json_valid(document_json) THEN json_extract(document_json, '$.tenant_id') END";
+    const ownerOf =
+      "CASE WHEN json_valid(document_json) THEN json_extract(document_json, '$.tenant_id') END";
     const predicate =
       state.cursor === null
         ? `resource_kind = ? AND ${ownerOf} = ?`

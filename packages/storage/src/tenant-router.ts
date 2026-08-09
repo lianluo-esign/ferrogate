@@ -118,10 +118,7 @@ export interface TenantDatabaseRouter {
   /** The account-global CONTROL database. Always a native binding. */
   control(): D1Database;
   /** Resolve one tenant's database, or throw. NEVER falls back. */
-  forTenant(
-    tenantId: string,
-    address?: TenantObjectAddress,
-  ): Promise<TenantDatabaseHandle>;
+  forTenant(tenantId: string, address?: TenantObjectAddress): Promise<TenantDatabaseHandle>;
   /**
    * Optional operator-only batch used for authority projections such as tenant
    * RBAC bindings. Durable Object routers forward this to the private RPC;
@@ -469,15 +466,11 @@ function registrationFromRow(row: TenantDatabaseRow): TenantDatabaseRegistration
     ...(row.location_hint === null
       ? {}
       : { locationHint: row.location_hint as TenantLocationHint }),
-    ...(row.location_hint_source === null
-      ? {}
-      : { locationHintSource: row.location_hint_source }),
+    ...(row.location_hint_source === null ? {} : { locationHintSource: row.location_hint_source }),
     ...(row.location_hint_recorded_at_unix === null
       ? {}
       : { locationHintRecordedAtUnix: row.location_hint_recorded_at_unix }),
-    ...(row.jurisdiction === null
-      ? {}
-      : { jurisdiction: row.jurisdiction as TenantJurisdiction }),
+    ...(row.jurisdiction === null ? {} : { jurisdiction: row.jurisdiction as TenantJurisdiction }),
     ...(MIGRATION_STATES.includes(row.migration_state as TenantMigrationState)
       ? { migrationState: row.migration_state as TenantMigrationState }
       : {}),
@@ -491,9 +484,7 @@ function registrationFromRow(row: TenantDatabaseRow): TenantDatabaseRegistration
     ...(row.migration_retention_until_unix === null
       ? {}
       : { migrationRetentionUntilUnix: row.migration_retention_until_unix }),
-    ...(row.migration_last_error === null
-      ? {}
-      : { migrationLastError: row.migration_last_error }),
+    ...(row.migration_last_error === null ? {} : { migrationLastError: row.migration_last_error }),
     ...(row.migration_receipt_json === null
       ? {}
       : { migrationReceiptJson: row.migration_receipt_json }),
@@ -611,8 +602,7 @@ export class EnvBindingTenantDatabaseRouter implements TenantDatabaseRouter {
       // use the object router, or a native-binding tenant that has not been
       // deployed with its binding yet. Both cases fail closed here.
       throw StorageError.notFound(
-        `tenant ${tenantId} has no native D1 binding_name; this router serves ` +
-          "explicit self-hosted [[d1_databases]] bindings only",
+        `tenant ${tenantId} has no native D1 binding_name; this router serves explicit self-hosted [[d1_databases]] bindings only`,
       );
     }
     const bound = this.env[bindingName];
@@ -641,7 +631,9 @@ export class EnvBindingTenantDatabaseRouter implements TenantDatabaseRouter {
   ): Promise<void> {
     const handle = await this.forTenant(tenantId);
     await handle.db.batch(
-      statements.map((statement) => handle.db.prepare(statement.sql).bind(...(statement.params ?? []))),
+      statements.map((statement) =>
+        handle.db.prepare(statement.sql).bind(...(statement.params ?? [])),
+      ),
     );
   }
 
@@ -731,7 +723,9 @@ export class SharedDatabaseTenantRouter implements TenantDatabaseRouter {
   ): Promise<void> {
     const handle = await this.forTenant(tenantId);
     await handle.db.batch(
-      statements.map((statement) => handle.db.prepare(statement.sql).bind(...(statement.params ?? []))),
+      statements.map((statement) =>
+        handle.db.prepare(statement.sql).bind(...(statement.params ?? [])),
+      ),
     );
   }
 
