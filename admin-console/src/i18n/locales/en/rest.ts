@@ -521,24 +521,54 @@ export const enRest = {
   // cell renders (deferred to #385), and JSON/example code placeholders stay
   // data-driven. Labels keep inline code/config example values (comma-separated
   // capability names, JSON shapes, the `/v1/prompts/{id}/render` API path).
+  // Catalog scope toggle (#912): a superadmin flips a provider/model page
+  // between the tenant catalog and the shared platform default catalog.
+  "catalog.scope.toggle": "Platform scope",
+  "catalog.scope.platform": "Platform catalog",
+  "catalog.scope.tenant": "Tenant catalog",
+  "catalog.scope.hint": "Editing the platform default catalog shared by every tenant.",
+
   "resource.providers.title": "Providers",
   "resource.providers.description":
-    "Upstream model providers configured for this gateway (read-only).",
+    "Upstream model providers configured for this gateway.",
   "resource.providers.col.name": "Name",
   "resource.providers.col.kind": "Kind",
   "resource.providers.col.compatibility": "Compatibility",
   "resource.providers.col.baseUrl": "Base URL",
   "resource.providers.col.hasApiKey": "Has API key",
   "resource.providers.col.enabled": "Enabled",
+  "resource.providers.field.name": "Name",
+  "resource.providers.field.kind": "Kind",
+  "resource.providers.field.baseUrl": "Base URL",
+  "resource.providers.field.apiKeyVar": "API key variable",
+  "resource.providers.field.byokAlias": "BYOK alias",
+  "resource.providers.field.authScheme": "Auth scheme",
+  "resource.providers.option.authScheme.bearer": "Bearer",
+  "resource.providers.option.authScheme.xApiKey": "x-api-key",
+  "resource.providers.field.region": "Region",
+  "resource.providers.field.zeroDataRetention": "Zero data retention",
+  "resource.providers.field.enabled": "Enabled",
 
   "resource.models.title": "Models",
-  "resource.models.description": "Logical model routes exposed by the gateway (read-only).",
+  "resource.models.description": "Logical model routes exposed by the gateway.",
   "resource.models.col.name": "Name",
   "resource.models.col.provider": "Provider",
   "resource.models.col.providerModel": "Provider model",
   "resource.models.col.routingStrategy": "Routing strategy",
   "resource.models.col.contextWindow": "Context window",
   "resource.models.col.enabled": "Enabled",
+  "resource.models.field.name": "Name",
+  "resource.models.field.family": "Family",
+  "resource.models.field.ownedBy": "Owned by",
+  "resource.models.field.capabilities": "Capabilities",
+  "resource.models.field.capabilities.placeholder": "chat, streaming, vision",
+  "resource.models.field.contextWindow": "Context window",
+  "resource.models.field.routingStrategy": "Routing strategy",
+  "resource.models.option.routingStrategy.priority": "Priority",
+  "resource.models.option.routingStrategy.lowestCost": "Lowest cost",
+  "resource.models.option.routingStrategy.lowestLatency": "Lowest latency",
+  "resource.models.option.routingStrategy.balanced": "Balanced",
+  "resource.models.field.enabled": "Enabled",
 
   "resource.agentUpstreams.title": "Agent upstreams",
   "resource.agentUpstreams.description":

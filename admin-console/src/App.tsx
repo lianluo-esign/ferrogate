@@ -8,6 +8,7 @@ import { AppThemeProvider } from "@/components/theme-provider";
 import { Toaster } from "@/components/ui/sonner";
 import { I18nProvider } from "@/i18n";
 import { AuthProvider } from "@/hooks/use-auth";
+import { CatalogScopeProvider } from "@/hooks/use-catalog-scope";
 import { APP_ROUTES } from "@/lib/app-routes";
 import { RESOURCE_ROUTE_PATHS } from "@/resources/route-paths";
 
@@ -74,6 +75,7 @@ function App() {
       <QueryClientProvider client={queryClient}>
         <BrowserRouter>
           <AuthProvider>
+            <CatalogScopeProvider>
             <Routes>
             <Route path="/login" element={routeElement(LoginPage)} />
             <Route path="/register" element={routeElement(RegisterPage)} />
@@ -158,6 +160,7 @@ function App() {
             <Route path="/" element={<Navigate to="/app" replace />} />
             <Route path="*" element={<Navigate to="/app" replace />} />
             </Routes>
+            </CatalogScopeProvider>
           </AuthProvider>
         </BrowserRouter>
         <Toaster />

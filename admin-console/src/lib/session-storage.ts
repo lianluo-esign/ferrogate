@@ -9,6 +9,13 @@ export interface StoredSession {
   user: AdminSessionResponse["user"];
   tenant: AdminSessionResponse["tenant"];
   gatewayApiKey: string;
+  /**
+   * Platform-operator credential for a superadmin session (#912). Null for a
+   * non-superadmin; its presence is what `canUsePlatform` keys off, so the
+   * catalog platform-scope toggle never appears for a non-superadmin. The
+   * `superadmin` flag itself rides along on `user.superadmin`.
+   */
+  platformOperatorApiKey: string | null;
 }
 
 export function sessionFromResponse(response: AdminSessionResponse): StoredSession {
@@ -19,6 +26,7 @@ export function sessionFromResponse(response: AdminSessionResponse): StoredSessi
     user: response.user,
     tenant: response.tenant,
     gatewayApiKey: response.gateway_api_key,
+    platformOperatorApiKey: response.platform_operator_api_key,
   };
 }
 

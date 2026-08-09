@@ -352,6 +352,16 @@ export interface ResourceConfig<T extends Record<string, unknown>> {
   fields: FieldConfig[];
   /** View-only resources (logs, audit events, usage/billing history) hide create/edit/delete. */
   readOnly?: boolean;
+  /**
+   * Model-catalog resources (providers, models) whose scope — tenant vs the
+   * PLATFORM default catalog — is chosen at render time by a superadmin (#912).
+   * When set, ResourcePage picks its API key via `useCatalogApiKey()` (so every
+   * request under `"platform"` scope carries the operator key with NO
+   * `tenant_id`), renders the `<CatalogScopeToggle>`, and keys its list query on
+   * the active scope so toggling refetches. Non-scopable resources are
+   * unaffected.
+   */
+  platformScopable?: boolean;
   /** Resources that support create but no update/delete API. */
   noEditDelete?: boolean;
   /**

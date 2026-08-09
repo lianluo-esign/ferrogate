@@ -14,6 +14,8 @@ export interface AdminUserView {
   id: string;
   email: string;
   display_name: string;
+  /** True for a platform superadmin; gates the catalog platform-scope toggle (#912). */
+  superadmin: boolean;
 }
 
 export interface AdminTenantView {
@@ -29,6 +31,12 @@ export interface AdminSessionResponse {
   user: AdminUserView;
   tenant: AdminTenantView;
   gateway_api_key: string;
+  /**
+   * Platform-operator gateway credential minted for a superadmin login (#912
+   * slice 1). Present (non-null) only for a superadmin; the console swaps to it
+   * to address the PLATFORM catalog scope, never sending a tenant_id.
+   */
+  platform_operator_api_key: string | null;
 }
 
 export interface AdminRefreshResponse {
