@@ -100,7 +100,7 @@ function tenantCatalogGateway() {
       GATEWAY_STATIC_API_KEYS: JSON.stringify([
         { key: "fg_tenant", id: "key_tenant", tenant_id: "tenant_a", scopes: [] },
       ]),
-      GATEWAY_TENANT_DB_ROUTING: "shared_development",
+      GATEWAY_TENANT_DB_ROUTING: "durable_object",
     });
 }
 

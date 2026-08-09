@@ -45,6 +45,7 @@ import { SELF, env } from "cloudflare:test";
 import { PROBE_SECRET } from "@ferrogate/guardrails";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { FINGERPRINT_SECRET_REF, secretScanPolicy } from "../guardrails/fixtures.js";
+import { tenantObjectDb } from "../tenant-object.js";
 
 const BASE = "https://gw.test";
 const PROVIDER_HOST = "api.responses-guardrail-probe.example";
@@ -104,7 +105,10 @@ const OVERRIDES: Record<string, string> = {
 
 const ORIGINAL: Record<string, unknown> = {};
 const mutable = env as unknown as Record<string, unknown>;
-const DB = (env as unknown as { DB: D1Database }).DB;
+// Since #821 PR2-delete the shared `env.DB` tenant database is retired: the
+// single `tenant_a` credential's stored turns are filed in tenant_a's OWN
+// Durable Object, so these fixtures read and clear that object.
+const conversationDb = () => tenantObjectDb("tenant_a");
 
 beforeAll(() => {
   for (const [name, value] of Object.entries(OVERRIDES)) {
@@ -120,7 +124,7 @@ afterAll(() => {
 });
 
 beforeEach(async () => {
-  await DB.prepare("DELETE FROM responses_conversations").run();
+  await conversationDb().prepare("DELETE FROM responses_conversations").run();
 });
 
 /** A `/v1/responses` answer whose single assistant message says `text`. */
@@ -192,14 +196,14 @@ function getResponse(responseId: string): Promise<Response> {
 
 /** Every `response_json` this tenant currently has filed. */
 async function storedBodies(): Promise<string[]> {
-  const rows = await DB.prepare(
+  const rows = await conversationDb().prepare(
     "SELECT response_id, response_json FROM responses_conversations ORDER BY response_id",
   ).all<{ response_id: string; response_json: string }>();
   return (rows.results ?? []).map((row) => row.response_json);
 }
 
 async function storedIds(): Promise<string[]> {
-  const rows = await DB.prepare(
+  const rows = await conversationDb().prepare(
     "SELECT response_id FROM responses_conversations ORDER BY response_id",
   ).all<{ response_id: string }>();
   return (rows.results ?? []).map((row) => row.response_id);

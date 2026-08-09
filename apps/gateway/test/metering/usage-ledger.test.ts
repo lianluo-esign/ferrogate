@@ -171,8 +171,13 @@ describe("usageWriteFor — attribution belongs to ONE request", () => {
     expect(charge.entry.tenant.api_key_id).toBe("key_metered");
   });
 
-  test("usageDatabaseFrom only accepts a real D1 binding", () => {
-    expect(usageDatabaseFrom({ DB: db })).toBe(db);
+  test("usageDatabaseFrom without a tenant has nowhere to accumulate — the shared DB fallback is retired (#821)", () => {
+    // Since #821 PR2-delete the shared `env.DB` usage database is gone: a call
+    // with NO tenant id (the arm that used to hand back `env.DB`) now answers
+    // `undefined`, so a caller that forgot the tenant fails closed rather than
+    // pooling every tenant's usage in one shared database. A non-object env is
+    // still rejected. The tenant-object arm is pinned by the next test.
+    expect(usageDatabaseFrom({ DB: db })).toBeUndefined();
     expect(usageDatabaseFrom({ DB: "a-var-string" })).toBeUndefined();
     expect(usageDatabaseFrom(undefined)).toBeUndefined();
   });

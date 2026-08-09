@@ -114,12 +114,15 @@ function gateway(overrides: Record<string, unknown> = {}) {
     // `tenantModelsForRequest` reads the accessor it publishes.
     middleware: [tenantDatabase()],
   });
-  // Spread the real workerd env so CONTROL_DB / DB / the api-key vars are the
-  // ones the pool bound; `GATEWAY_TENANT_DB_ROUTING = "off"` keeps the tenant
-  // path on its env/platform fallback rather than resolving a tenant database.
+  // Spread the real workerd env so CONTROL_DB / TENANT_DATA / the api-key vars
+  // are the ones the pool bound. Since #821 PR2-delete the `"off"` mode is
+  // retired; under the `durable_object` default a platform operator resolves no
+  // tenant (null tenant id) and a catalog-less fixture tenant reads its OWN
+  // (empty) object catalog and falls back to the platform/env resolver — the
+  // same "no tenant model wins here" posture `"off"` used to give.
   const fullEnv = {
     ...bindings,
-    GATEWAY_TENANT_DB_ROUTING: "off",
+    GATEWAY_TENANT_DB_ROUTING: "durable_object",
     PLATFORM_KEY: "sk-platform",
     ...overrides,
   };

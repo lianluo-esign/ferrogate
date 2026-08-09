@@ -491,9 +491,16 @@ describe("the scheduled asset lifecycle sweeper", () => {
 });
 
 describe("assetDepsFromEnv resolves the registry on its own evidence", () => {
-  test("`DB` bound ⇒ the DURABLE store", () => {
+  test("the shared-`env.DB` metadata store is retired — the routed store is request-scoped (#821)", () => {
+    // Before #821 PR2-delete a bound `DB` made `assetDepsFromEnv` hand back a
+    // shared `D1AssetMetadataStore`. That shared registry is gone: the asset
+    // tables live in each tenant's own Durable Object and the metadata store is
+    // built per request from the tenant accessor (proven by the routed
+    // request-path tests above). So the base factory resolves NO metadata dep,
+    // even with the real `DB`/`TENANT_DATA` bindings present, and
+    // `buildAssetService` keeps the local-dev store until a request scopes one.
     const deps = assetDepsFromEnv(env as unknown as Record<string, unknown>);
-    expect(deps.metadata).toBeInstanceOf(D1AssetMetadataStore);
+    expect(deps.metadata).toBeUndefined();
   });
 
   test("`CONTROL_DB` bound ⇒ the DURABLE audit sink", () => {

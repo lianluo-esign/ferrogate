@@ -61,6 +61,7 @@
 import { SELF, env } from "cloudflare:test";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { FINGERPRINT_SECRET_REF, secretScanPolicy } from "../guardrails/fixtures.js";
+import { tenantObjectDb } from "../tenant-object.js";
 
 const BASE = "https://gw.test";
 const PROVIDER_HOST = "api.responses-crosskey-probe.example";
@@ -161,7 +162,11 @@ const OVERRIDES: Record<string, string> = {
 
 const ORIGINAL: Record<string, unknown> = {};
 const mutable = env as unknown as Record<string, unknown>;
-const DB = (env as unknown as { DB: D1Database }).DB;
+// Since #821 PR2-delete the shared `env.DB` tenant database is retired: both
+// keys authenticate as `tenant_a`, so the routed `D1ConversationStore` files
+// every stored turn in tenant_a's OWN Durable Object. These fixtures read and
+// clear that same object rather than the retired shared `DB`.
+const conversationDb = () => tenantObjectDb("tenant_a");
 
 beforeAll(() => {
   for (const [name, value] of Object.entries(OVERRIDES)) {
@@ -177,7 +182,7 @@ afterAll(() => {
 });
 
 beforeEach(async () => {
-  await DB.prepare("DELETE FROM responses_conversations").run();
+  await conversationDb().prepare("DELETE FROM responses_conversations").run();
 });
 
 /** A `/v1/responses` answer whose single assistant message says `text`. */
@@ -307,7 +312,7 @@ async function storeVerbatimTurnAsKeyA(
   expect(outputText(body)).toBe(`your card ${CARD} was charged`);
   expect(created.headers.get("x-ferrogate-response-stored")).toBe("true");
 
-  const rows = await DB.prepare(
+  const rows = await conversationDb().prepare(
     "SELECT response_json, screening_api_key_id, screening_policy_revision " +
       "FROM responses_conversations WHERE response_id = ?",
   )
@@ -394,7 +399,7 @@ describe("GET /v1/responses/{id} is screened under the READER's policy (#689)", 
     // continuation would silently inherit B's policy, and a shared store would
     // become order-dependent: whichever credential read the turn first would
     // decide what every other credential sees.
-    const rows = await DB.prepare(
+    const rows = await conversationDb().prepare(
       "SELECT response_json FROM responses_conversations WHERE response_id = ?",
     )
       .bind(aId)
