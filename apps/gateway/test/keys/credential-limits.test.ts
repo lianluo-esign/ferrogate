@@ -1,3 +1,4 @@
+import { SELF } from "cloudflare:test";
 /**
  * The three per-credential limits carried on an `api_keys` row, proven END TO
  * END on the app the Worker exports (`SELF`), not on a hand-built resolver.
@@ -27,11 +28,18 @@
  * runs the whole exported middleware chain including the real `RATE_LIMIT`
  * Durable Object.
  */
-import { SELF } from "cloudflare:test";
+import { D1TwoHopApiKeyDirectory } from "@ferrogate/storage";
 import { beforeAll, beforeEach, describe, expect, test } from "vitest";
-import { D1ApiKeyResolver, D1ApiKeyStore, resetSharedApiKeyCache } from "../../src/keys/index.js";
+import { D1ApiKeyResolver, resetSharedApiKeyCache } from "../../src/keys/index.js";
 import { seedTenantRosterRows } from "../tenant-object.js";
-import { resetApiKeysTable, seedApiKey, testDb, testSecret } from "./seed.js";
+import { controlDb, resetApiKeysTable, seedApiKey, tenantRouter, testSecret } from "./seed.js";
+
+/** A resolver over the real two-hop objects, matching the deployed wiring. */
+function directoryResolver(): D1ApiKeyResolver {
+  return new D1ApiKeyResolver({
+    directory: new D1TwoHopApiKeyDirectory(controlDb(), tenantRouter()),
+  });
+}
 
 const BASE = "https://ferrogate.test";
 
@@ -117,9 +125,7 @@ describe("allowed_models / allowed_providers reach AuthContext", () => {
       requestLimitPerMinute: 42,
     });
 
-    const resolution = await new D1ApiKeyResolver({
-      store: new D1ApiKeyStore(testDb()),
-    }).authenticate(secret);
+    const resolution = await directoryResolver().authenticate(secret);
 
     expect(resolution.outcome).toBe("resolved");
     if (resolution.outcome !== "resolved") return;
@@ -138,9 +144,7 @@ describe("allowed_models / allowed_providers reach AuthContext", () => {
       scopes: ["tools.read"],
     });
 
-    const resolution = await new D1ApiKeyResolver({
-      store: new D1ApiKeyStore(testDb()),
-    }).authenticate(secret);
+    const resolution = await directoryResolver().authenticate(secret);
 
     expect(resolution.outcome).toBe("resolved");
     if (resolution.outcome !== "resolved") return;
@@ -158,33 +162,13 @@ describe("allowed_models / allowed_providers reach AuthContext", () => {
   });
 });
 
-describe("finalize_auth: a credential that names no tenant", () => {
-  test("answers 403 tenant_identity_required on the exported app", async () => {
-    // Rust `auth.rs::finalize_auth` (#540). The row authenticated — the hash
-    // comparison passed — so this is NOT the 401 an unknown key gets; it is an
-    // operator configuration error and says so, which is the whole point of the
-    // variant.
-    const secret = await seedApiKey({
-      id: "key_blank_tenant",
-      secret: testSecret("blank-tenant"),
-      tenantId: "",
-      scopes: ["tools.read"],
-    });
-
-    const res = await SELF.fetch(GUARDED_PATH, {
-      headers: { authorization: `Bearer ${secret}` },
-    });
-    expect(res.status).toBe(403);
-    const body = await envelope(res);
-    expect(body.error.code).toBe("tenant_identity_required");
-    // The BLANK-value wording, not the "declares neither" one: an `api_keys`
-    // row always has the column, so the value is what is wrong.
-    expect(body.error.message).toContain("blank");
-  });
-
-  test("is NOT reachable by an unknown key — the 401 taxonomy is unchanged", async () => {
-    // The negative control. Widening the 403 to any refused credential would be
-    // a disclosure: it would tell a prober which secrets exist.
+describe("the 401 taxonomy for an unknown key is unchanged", () => {
+  test("an unknown key is 401 invalid_api_key on the exported app", async () => {
+    // In the TWO-HOP directory model the tenant id IS the routing key, so a
+    // blank-tenant durable key is not representable: the old
+    // `tenant_identity_required` (403) case belonged to the flat single-hop
+    // model and moved to the config/static leg with #821. The unknown-key 401
+    // taxonomy is what this file still pins here.
     const res = await SELF.fetch(GUARDED_PATH, {
       headers: { authorization: "Bearer fg_definitely_not_a_real_key" },
     });

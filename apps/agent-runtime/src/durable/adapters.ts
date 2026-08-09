@@ -33,6 +33,11 @@
  * produce the same `ApiKeyResolution` / `WorkerIdentityResolution` values the
  * in-memory ports produce, and every HTTP decision stays in the middleware.
  */
+import {
+  D1TwoHopApiKeyDirectory,
+  type TenantDatabaseRouter,
+  type TwoHopApiKeyDirectory,
+} from "@ferrogate/storage";
 import { normalizedCapabilities } from "../capabilities.js";
 import { timingSafeEqualStrings } from "../crypto.js";
 // TYPE-ONLY, and it has to stay that way: `../ports.ts` imports the two
@@ -48,7 +53,7 @@ import type {
   WorkerIdentityResolution,
 } from "../ports.js";
 import { type FrameOpenResult, type SealedWorkerFrame, openWorkerFrame } from "../workers/frame.js";
-import { verifyStoredKeyHash, virtualApiKeyPrefix } from "./hash.js";
+import { sha256Hex, verifyStoredKeyHash, virtualApiKeyPrefix } from "./hash.js";
 
 // ---------------------------------------------------------------------------
 // Tenant credentials — `api_keys`, the TENANT database
@@ -226,6 +231,74 @@ export function d1ApiKeyPort(db: D1Database, options: D1ApiKeyPortOptions = {}):
         return { outcome: "resolved", auth: authContextFromRow(row) };
       }
       return { outcome: "unknown" };
+    },
+  };
+}
+
+/**
+ * The durable {@link ApiKeyPort} over the TWO-HOP directory model (#821).
+ *
+ * The single-hop {@link d1ApiKeyPort} read `api_keys` straight off `env.DB` — the
+ * ferrogate-tenant D1. That premise ("a Worker cannot open a tenant database by
+ * uuid at runtime, so credentials must live in one flat table") was wrong: a
+ * Worker selects a database by BINDING NAME, and the credential→tenant map lives
+ * in `api_key_directory` in the CONTROL database. So resolution is now the same
+ * two hops the control plane and the gateway take, factored into the ONE shared
+ * `@ferrogate/storage` implementation `D1TwoHopApiKeyDirectory`:
+ *
+ *  1. `api_key_directory` (CONTROL) maps the hash to its tenant;
+ *  2. the routed tenant `TenantDataObject` supplies the authoritative `api_keys`
+ *     row this Worker reads `scopes_json` / the RPM cap off.
+ *
+ * The refusal taxonomy `src/middleware/auth.ts::resolveOrThrow` renders is
+ * UNCHANGED — the point of the migration was to move the SOURCE, not a status
+ * code:
+ *
+ * | two-hop fact                              | outcome         | HTTP |
+ * |-------------------------------------------|-----------------|------|
+ * | no directory row / unprovisioned tenant   | `unknown`       | 401  |
+ * | directory OR tenant row retired / gone    | `key_suspended` | 401  |
+ * | live                                      | `resolved`      | —    |
+ * | control object / tenant DB unreachable    | `unavailable`   | 503  |
+ *
+ * As with the gateway, only `sha256:`-tagged hashes resolve via the directory —
+ * the documented, KEPT divergence from the `blake2b:` verify path (`./hash.ts`).
+ * `platformOperator` is the literal `false` in {@link authContextFromRow}, so no
+ * row value can promote a durable/virtual key to platform root (#515).
+ */
+export function twoHopApiKeyPort(
+  controlDb: D1Database,
+  router: TenantDatabaseRouter,
+  options: D1ApiKeyPortOptions = {},
+): ApiKeyPort {
+  const directory: TwoHopApiKeyDirectory = new D1TwoHopApiKeyDirectory(controlDb, router, {
+    now: options.nowUnixSeconds,
+  });
+
+  return {
+    async resolve(presentedKey: string): Promise<ApiKeyResolution> {
+      const trimmed = presentedKey.trim();
+      if (trimmed === "") return { outcome: "unknown" };
+
+      const twoHop = await directory.resolve(`sha256:${await sha256Hex(trimmed)}`);
+      switch (twoHop.kind) {
+        // No durable key here, or its tenant is not provisioned: 401, and NEVER a
+        // silent fallback — inventing a scope for an unroutable tenant is the one
+        // thing that must not happen.
+        case "no_directory_row":
+        case "unroutable":
+          return { outcome: "unknown" };
+        // Disabled/revoked/expired on either half, or a directory whose tenant
+        // row is gone. All 401, indistinguishable from an unknown key.
+        case "suspended":
+          return { outcome: "key_suspended" };
+        // FAIL CLOSED, and say so: a credential authority that could not be
+        // consulted has admitted nobody.
+        case "unavailable":
+          return { outcome: "unavailable", detail: twoHop.detail };
+        case "resolved":
+          return { outcome: "resolved", auth: authContextFromRow(twoHop.row) };
+      }
     },
   };
 }

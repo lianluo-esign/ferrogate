@@ -67,21 +67,22 @@ describe("D1 api_keys: key state is never disclosed", () => {
   });
 
   it("a stored blake2b: hash is REFUSED here (the documented, KEPT divergence)", async () => {
-    // `apps/gateway/src/keys/hash.ts` accepts `sha256:` and `blake2b:`;
-    // `src/durable/hash.ts` implements only `sha256:` and fails closed on any
-    // other tag. That divergence is named in that module's PORT-TODO and it is
-    // pinned HERE so it cannot change — in either direction — unnoticed.
+    // The two-hop directory is probed with the `sha256:`-tagged hash only, so a
+    // row (directory or tenant) stored under a `blake2b:` tag is never matched —
+    // an unknown key. `apps/gateway` accepts `blake2b:` on its verify path; this
+    // Worker refuses it, the divergence named in `src/durable/hash.ts`, pinned
+    // HERE so it cannot change unnoticed in either direction.
     const response = await submitJob(KEY_BLAKE2B);
     expect(response.status).toBe(401);
     expect(await errorCode(response)).toBe("invalid_api_key");
   });
 
-  it("a live key with the wrong SECRET but a seeded prefix is refused", async () => {
-    // Same 16-char prefix as `KEY_LIVE`, different tail: the prefix index
-    // finds the row and the hash comparison must reject it. If authentication
-    // ever regressed to the prefix, this is what would catch it.
+  it("a live key with the wrong SECRET is refused", async () => {
+    // The wrong secret hashes to a DIFFERENT directory key, so no row matches.
+    // (Under the old flat prefix index this was "prefix hits, hash rejects"; the
+    // hash-keyed directory lookup makes it a plain miss.) If authentication ever
+    // regressed to a non-hash factor, this is what would catch it.
     const forged = `${KEY_LIVE.slice(0, 16)}_forged`;
-    expect(forged.slice(0, 16)).toBe(KEY_LIVE.slice(0, 16));
     const response = await submitJob(forged);
     expect(response.status).toBe(401);
     expect(await errorCode(response)).toBe("invalid_api_key");

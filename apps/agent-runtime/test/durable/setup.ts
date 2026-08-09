@@ -158,6 +158,16 @@ const INSERT_KEY_SQL =
   "key_prefix, key_hash, last4, enabled, scopes_json, expires_at_unix, revoked_at_unix) " +
   "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
+/**
+ * The CONTROL-database directory row — hop 1 of the two-hop model (#821). Keyed
+ * by the SAME `key_hash` the tenant `api_keys` row holds; a `sha256:` probe that
+ * misses it (a blake2b row, a forged secret) is an unknown key.
+ */
+const INSERT_DIRECTORY_SQL =
+  "INSERT OR REPLACE INTO api_key_directory (key_hash, id, tenant_id, project_id, " +
+  "workspace_id, key_prefix, last4, enabled, expires_at_unix, revoked_at_unix) " +
+  "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+
 // ---------------------------------------------------------------------------
 // Worker-plane identities — seeded into `self_hosted_worker_registrations`
 // ---------------------------------------------------------------------------
@@ -241,19 +251,49 @@ export async function setupDurablePorts(): Promise<void> {
   // The CONTROL schema self-applies inside the ControlDataObject; nothing to
   // migrate here. `env.CONTROL_DB` is the facade aliased above (#881).
 
+  // #821 — every key is provisioned as the deployed dual write puts it: the
+  // CONTROL `api_key_directory` row (hop 1) plus the AUTHORITATIVE `api_keys`
+  // row in that tenant's OWN `TenantDataObject` (hop 2). A key that names no
+  // tenant on its ROW still ROUTES through a real tenant object (the id is the
+  // routing key) — its blank `api_keys.tenant_id` is what the middleware refuses.
   for (const row of SEED_KEYS) {
     const secret = row.secret;
-    await env.DB.prepare(INSERT_KEY_SQL)
+    const keyHash = row.keyHashOverride ?? (await hashVirtualApiKeySecret(secret));
+    const keyPrefix = virtualApiKeyPrefix(secret);
+    const last4 = virtualApiKeyLast4(secret);
+    const enabled = (row.enabled ?? true) ? 1 : 0;
+    const rowTenant = row.tenantId ?? TENANT_A;
+    // The directory MUST route somewhere; a blank-tenant fixture keys its ROW to
+    // "" but is discoverable under TENANT_A's object.
+    const routingTenant = rowTenant === "" ? TENANT_A : rowTenant;
+
+    await env.CONTROL_DB.prepare(INSERT_DIRECTORY_SQL)
+      .bind(
+        keyHash,
+        row.id,
+        routingTenant,
+        "proj-a",
+        "ws-a",
+        keyPrefix,
+        last4,
+        enabled,
+        row.expiresAtUnix ?? null,
+        row.revokedAtUnix ?? null,
+      )
+      .run();
+
+    await (await tenantResourceDb(routingTenant))
+      .prepare(INSERT_KEY_SQL)
       .bind(
         row.id,
         "ws-a",
-        row.tenantId ?? TENANT_A,
+        rowTenant,
         "proj-a",
         row.id,
-        virtualApiKeyPrefix(secret),
-        row.keyHashOverride ?? (await hashVirtualApiKeySecret(secret)),
-        virtualApiKeyLast4(secret),
-        (row.enabled ?? true) ? 1 : 0,
+        keyPrefix,
+        keyHash,
+        last4,
+        enabled,
         JSON.stringify(row.scopes ?? []),
         row.expiresAtUnix ?? null,
         row.revokedAtUnix ?? null,

@@ -35,7 +35,7 @@ import {
   virtualApiKeyLast4,
   virtualApiKeyPrefix,
 } from "../../src/durable/hash.js";
-import { bearer, errorCode, get, post, setupDurablePorts } from "./setup.js";
+import { bearer, errorCode, get, post, setupDurablePorts, tenantResourceDb } from "./setup.js";
 
 const AGENT_SCOPES = ["agents.invoke", "agent.runs.create", "agent.runs.read"];
 
@@ -78,6 +78,11 @@ const INSERT_ADMISSION_KEY_SQL =
   "key_prefix, key_hash, last4, enabled, scopes_json, request_limit_per_minute) " +
   "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)";
 
+/** #821 — hop 1 of the two-hop credential model: the CONTROL directory row. */
+const INSERT_ADMISSION_DIRECTORY_SQL =
+  "INSERT OR REPLACE INTO api_key_directory (key_hash, id, tenant_id, project_id, " +
+  "workspace_id, key_prefix, last4, enabled) VALUES (?, ?, ?, 'proj-adm', 'ws-adm', ?, ?, 1)";
+
 const INSERT_POLICY_SQL =
   "INSERT OR REPLACE INTO quota_policies (id, scope_type, scope_id, rpm_limit, " +
   "monthly_budget_usd, enabled) VALUES (?, 'tenant', ?, ?, ?, ?)";
@@ -109,16 +114,25 @@ async function seedAdmissionFixtures(): Promise<void> {
   await setupDurablePorts();
 
   for (const row of ADMISSION_KEYS) {
-    await env.DB.prepare(INSERT_ADMISSION_KEY_SQL)
+    const keyHash = await hashVirtualApiKeySecret(row.secret);
+    const keyPrefix = virtualApiKeyPrefix(row.secret);
+    const last4 = virtualApiKeyLast4(row.secret);
+    // Hop 1: the CONTROL directory routes the hash to its tenant.
+    await env.CONTROL_DB.prepare(INSERT_ADMISSION_DIRECTORY_SQL)
+      .bind(keyHash, row.id, row.tenantId, keyPrefix, last4)
+      .run();
+    // Hop 2: the AUTHORITATIVE `api_keys` row in that tenant's OWN object.
+    await (await tenantResourceDb(row.tenantId))
+      .prepare(INSERT_ADMISSION_KEY_SQL)
       .bind(
         row.id,
         "ws-adm",
         row.tenantId,
         "proj-adm",
         row.id,
-        virtualApiKeyPrefix(row.secret),
-        await hashVirtualApiKeySecret(row.secret),
-        virtualApiKeyLast4(row.secret),
+        keyPrefix,
+        keyHash,
+        last4,
         JSON.stringify(AGENT_SCOPES),
         row.requestLimitPerMinute ?? null,
       )
