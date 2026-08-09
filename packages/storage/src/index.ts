@@ -184,6 +184,15 @@ export * from "./tenant-router.js";
  */
 export * from "./api-key-directory.js";
 /**
+ * Zero-D1 S6 (#882): the per-colo KV PROJECTION of `api_key_directory`, so the
+ * gateway auth hot path can serve HOP 1 (`credential → tenant`) from a KV read on
+ * a cold-isolate / cross-region miss instead of an RPC to the singleton control
+ * object. A cache of the ROUTING hop only — a KV hit still runs HOP 2 and every
+ * lifecycle check, so it can make auth faster, never looser. Node-importable: it
+ * touches only the `ApiKeyDirectoryRow` type and a narrow KV surface.
+ */
+export * from "./key-directory-projection.js";
+/**
  * The DURABLE-OBJECT leg of the tenant router (strategy `durable_object`): a
  * `D1Database`-shaped facade over one tenant's `TenantDataObject`, with
  * `batch()` forwarded into the object's `transactionSync()` in ONE round trip

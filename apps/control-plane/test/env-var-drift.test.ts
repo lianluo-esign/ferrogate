@@ -435,6 +435,10 @@ describe("the env-var drift gate itself", () => {
       // control reads resolve the CONTROL_DATA object. #821 PR2d then deleted the
       // last d1 stanza, `LEGACY_TENANT_DB`.
       "PROMPT_LABELS",
+      // `KEY_DIRECTORY` (#882) is the SECOND KV namespace: the api_key_directory
+      // projection this Worker WRITES and `apps/gateway` reads on the auth hot
+      // path. Declared right after PROMPT_LABELS, so kv order is preserved.
+      "KEY_DIRECTORY",
       "AUDIT_ANCHORS",
       "SIEM_EXPORTS",
       "ASSETS",

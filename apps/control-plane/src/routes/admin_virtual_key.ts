@@ -135,7 +135,14 @@ async function projectCredential(
   if (!virtualKeyProjectable(record)) return;
   const handle = await tenantDatabaseFor(deps.tenantDatabases, tenantOf(record));
   if (handle === null) return;
-  await projectVirtualKey(controlDb, handle, record, Math.floor(Date.now() / 1000), direction);
+  await projectVirtualKey(
+    controlDb,
+    handle,
+    record,
+    Math.floor(Date.now() / 1000),
+    direction,
+    deps.keyDirectory,
+  );
 }
 
 export const adminVirtualKeyRoutes: GroupModule = crudGroup(

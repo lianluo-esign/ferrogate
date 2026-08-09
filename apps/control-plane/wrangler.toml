@@ -271,6 +271,30 @@ binding = "PROMPT_LABELS"
 id = "PLACEHOLDER_SET_AT_DEPLOY_TIME"
 
 # ---------------------------------------------------------------------------
+# KV: the api_key_directory PROJECTION — the auth hot-path WRITE side (#882)
+# ---------------------------------------------------------------------------
+#
+# Zero-D1 S6. This Worker is the ONLY writer of the `api_key_directory` KV
+# projection the gateway reads AHEAD of the control-object RPC in HOP 1 of auth.
+# `src/store/virtual_keys.ts::projectVirtualKey` upserts a positive routing row on
+# create/enable and DELETEs it on revoke/disable/rotate, IN LOCKSTEP with the
+# control-object directory leg: the KV upsert goes AFTER the directory write
+# (never advertise a credential the control object lacks), and the KV delete goes
+# BEFORE it (a revoked key stops resolving from KV promptly). The KV op is
+# best-effort with respect to the authoritative D1 dual write — HOP 2 and the
+# `expirationTtl` backstop keep a stale routing row from authenticating anything.
+#
+# `apps/gateway/wrangler.toml` binds the SAME namespace under the same name and is
+# the READER. Both derive the key with `keyDirectoryProjectionKey` from
+# `@ferrogate/storage`; they must point at one namespace id at deploy time or the
+# gateway reads an empty key space and every cold miss simply takes the RPC path.
+#
+# `id` is a DOCUMENTED PLACEHOLDER — substitute the SAME namespace the gateway reads.
+[[kv_namespaces]]
+binding = "KEY_DIRECTORY"
+id = "PLACEHOLDER_SET_AT_DEPLOY_TIME"
+
+# ---------------------------------------------------------------------------
 # R2: the tamper-evidence ANCHOR bucket (#684)
 # ---------------------------------------------------------------------------
 #

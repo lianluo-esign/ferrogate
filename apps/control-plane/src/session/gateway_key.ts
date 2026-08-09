@@ -165,7 +165,14 @@ async function project(
   const tenantId = typeof record.tenant_id === "string" ? record.tenant_id : null;
   const handle = await tenantDatabaseFor(deps.tenantDatabases, tenantId);
   if (handle === null) return;
-  await projectVirtualKey(controlDb, handle, record, Math.floor(Date.now() / 1000), direction);
+  await projectVirtualKey(
+    controlDb,
+    handle,
+    record,
+    Math.floor(Date.now() / 1000),
+    direction,
+    deps.keyDirectory,
+  );
 }
 
 /**

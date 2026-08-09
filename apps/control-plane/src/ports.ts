@@ -15,7 +15,11 @@
  * handler family in `crates/ferrogate-gateway/src/server/*.rs`.
  */
 import type { PromptLabelKv } from "@ferrogate/config";
-import type { TenantDatabaseRouter, TenantObjectOperator } from "@ferrogate/storage";
+import type {
+  ApiKeyDirectoryProjection,
+  TenantDatabaseRouter,
+  TenantObjectOperator,
+} from "@ferrogate/storage";
 // TYPE-ONLY, and it must stay that way: `@ferrogate/storage/durable-objects`
 // imports `DurableObject` from `cloudflare:workers`, which resolves in workerd
 // and nowhere else. A value import here would break `apps/cli` and every plain
@@ -490,6 +494,21 @@ export interface ControlPlaneDeps {
    */
   readonly promptLabels: PromptLabelKv | null;
   /**
+   * The KV projection of `api_key_directory` (#882), or `null` when this
+   * deployment binds no `KEY_DIRECTORY` namespace.
+   *
+   * This is the WRITE side of the gateway's HOP-1 read-ahead cache: the
+   * virtual-key write path upserts a positive routing row on create/enable and
+   * DELETEs it on revoke/disable/rotate, in lockstep with the control-object
+   * directory leg (`store/virtual_keys.ts::projectVirtualKey`).
+   *
+   * `null` is NOT a downgrade and never refuses: with no binding the directory
+   * dual write proceeds exactly as before, and the gateway simply takes the RPC
+   * path on every cold miss. The projection can make the auth hot path faster,
+   * never looser — a stale or absent KV row still resolves through HOP 2.
+   */
+  readonly keyDirectory: ApiKeyDirectoryProjection | null;
+  /**
    * The delete-only handle on the asset bucket (`ASSETS`), or `null` when this
    * deployment binds none — see {@link AssetObjectReclaimer} for why it is
    * narrowed and why `null` is a refusal rather than a degradation.
@@ -686,6 +705,16 @@ export interface ControlPlaneBindings {
    * why both `wrangler.toml`s say so where an operator will read it.
    */
   readonly PROMPT_LABELS?: KVNamespace;
+  /**
+   * The KV namespace the `api_key_directory` projection is written into (#882).
+   *
+   * The SAME namespace `apps/gateway` reads on the auth hot path. Both sides
+   * derive the key with `keyDirectoryProjectionKey` from `@ferrogate/storage`, so
+   * the only way to break the link is to bind two different namespace ids at
+   * deploy time — which is why both `wrangler.toml`s say so where an operator will
+   * read it. This Worker is the WRITER; the gateway is the reader.
+   */
+  readonly KEY_DIRECTORY?: KVNamespace;
   /**
    * The audit-anchor bucket (`[[r2_buckets]] binding = "AUDIT_ANCHORS"`) — the
    * tamper-evidence half that does not live in the database (#684).
