@@ -80,6 +80,10 @@ import {
   parseMembershipRole,
 } from "./membership_role.js";
 import {
+  provisionPlatformOperatorApiKey,
+  revokePlatformOperatorApiKey,
+} from "./operator_key.js";
+import {
   type AdminConsoleSessionStore,
   type AdminMembershipRow,
   type AdminUserRow,
@@ -260,7 +264,16 @@ async function hashRefreshToken(secret: string): Promise<string> {
 }
 
 function userView(user: AdminUserRow): Record<string, unknown> {
-  return { id: user.id, email: user.email, display_name: user.displayName };
+  // `superadmin` is advertised so the console can gate the platform-operator
+  // surface (#912 slice 2) on the same field login and `/me` report — a
+  // non-superadmin never sees a `platform_operator_api_key`, and the flag is how
+  // the client knows not to look for one.
+  return {
+    id: user.id,
+    email: user.email,
+    display_name: user.displayName,
+    superadmin: user.superadmin,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -507,6 +520,15 @@ async function handleLogin(c: Ctx): Promise<Response> {
 
   await console_.store.upsertUser({ ...user, lastLoginAtUnix: Math.floor(Date.now() / 1000) });
 
+  // #912: a SUPERADMIN also receives a DISTINCT platform-operator credential —
+  // a `static_api_keys` row with `platform_operator = 1`, the only credential
+  // that resolves to `platformOperator:true`. It is returned as a SEPARATE
+  // field, never folded into `gateway_api_key`, so the tenant path above (an
+  // `{kind:"tenant"}` virtual key) is untouched. A non-superadmin gets `null`.
+  const platformOperatorApiKey = user.superadmin
+    ? await provisionPlatformOperatorApiKey(console_.deps, user.id)
+    : null;
+
   const session = await issueSession(console_, user, membership.tenantId, sessionRole);
   return c.json(
     {
@@ -523,6 +545,7 @@ async function handleLogin(c: Ctx): Promise<Response> {
         role: sessionRole,
       },
       gateway_api_key: gatewayApiKey,
+      platform_operator_api_key: platformOperatorApiKey,
     },
     200,
   );
@@ -639,6 +662,11 @@ async function handleLogout(c: Ctx): Promise<Response> {
       revokedAtUnix: Math.floor(Date.now() / 1000),
     });
   }
+  // #912: logout revokes the superadmin's platform-operator credential too. The
+  // call is unconditional and addressed by the user's deterministic id — a
+  // non-superadmin never held one, so this is a harmless no-op for them, and a
+  // superadmin's operator key must not outlive the session that minted it.
+  await revokePlatformOperatorApiKey(console_.deps, stored.userId);
   return c.json({ object: "logout", revoked: true }, 200);
 }
 

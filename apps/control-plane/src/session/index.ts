@@ -94,6 +94,11 @@ export {
   revokeAdminConsoleSessionKeys,
 } from "./gateway_key.js";
 export {
+  platformOperatorApiKeyId,
+  provisionPlatformOperatorApiKey,
+  revokePlatformOperatorApiKey,
+} from "./operator_key.js";
+export {
   type AdminConsoleSessionStore,
   type AdminMembershipRow,
   type AdminRefreshTokenRow,
