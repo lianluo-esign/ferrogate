@@ -1,18 +1,21 @@
 /**
- * D1-backed API-key resolution — the `ApiKeyAuthenticatorPort` implementation.
+ * TWO-HOP API-key resolution — the `ApiKeyAuthenticatorPort` implementation.
  *
  * Clean-room port of the Rust key-source chain:
  *
  *   `crates/ferrogate-gateway/src/auth.rs::authenticate`
  *     ├─ `authenticate_durable`  → `ferrogate_auth_service::StorageApiKeyAuthenticator`
- *     │                            (Supabase `api_keys`; **D1 here**)
+ *     │                            (the DURABLE/virtual key, now two hops)
  *     └─ `config.api_keys` loop  → the operator-authored static table
  *
- * — in that exact order, and with the exact same refusal taxonomy. Today
- * `apps/gateway` only has the second leg (`src/adapters.ts`,
- * `ConfiguredApiKeyAuthenticator`, fed from Worker vars). This module supplies
- * the first, primary leg and keeps the second as its fallback, so wiring it in
- * ADDS the durable store without removing the config/dev-auth path.
+ * — in that exact order, and with the exact same refusal taxonomy. The durable
+ * leg used to be a SINGLE-hop flat lookup of `api_keys` by `key_prefix` over the
+ * ferrogate-tenant D1 binding (`env.DB`). It is now the TWO-HOP directory model
+ * (#821): `@ferrogate/storage`'s {@link TwoHopApiKeyDirectory} hashes the
+ * presented secret, reads `api_key_directory` in CONTROL to find the owning
+ * tenant, then reads THAT tenant's own `api_keys` row through the gateway's
+ * existing tenant router. The config/dev-auth table remains the fallback, so the
+ * change moves the CREDENTIAL SOURCE without touching the middleware taxonomy.
  *
  * ## The 401-vs-403 taxonomy — the invariant this file exists to hold
  *
@@ -21,21 +24,21 @@
  *
  * | presented credential                       | outcome                 | HTTP |
  * |--------------------------------------------|-------------------------|------|
- * | unknown / absent from `api_keys`           | `unknown`               | 401  |
+ * | unknown / absent from `api_key_directory`  | `unknown`               | 401  |
+ * | directory names an UNPROVISIONED tenant    | `unknown`               | 401  |
  * | **SUSPENDED** (`enabled = 0`)              | `key_suspended`         | 401  |
  * | **REVOKED** (`revoked_at_unix` set)        | `key_suspended`         | 401  |
  * | **EXPIRED** (`expires_at_unix <= now`)     | `key_suspended`         | 401  |
+ * | directory row whose tenant row is GONE     | `key_suspended`         | 401  |
  * | valid, but lacks the operation's scope     | *resolved* → `hasScope` | 403  |
  * | valid, `monthly_token_budget = 0`          | `token_budget_exhausted`| 429  |
- * | D1 unreachable                             | `unavailable`           | 503  |
+ * | control object / tenant DB unreachable     | `unavailable`           | 503  |
  *
- * **A suspended key is 401, NOT 403.** In Rust that falls out of
- * `api_key_record_is_active` returning `false` inside a `find_map`: the record
- * is skipped, `authenticate` never sees it, and the request lands on the very
- * same `401 invalid_api_key` an unknown key gets. Key *state is not disclosed*
- * — an attacker cannot use the status code to learn that a guessed key exists.
- * `src/middleware/auth.ts::resolveOrThrow` collapses `unknown` and
- * `key_suspended` onto one identical 401 response for exactly that reason.
+ * **A suspended key is 401, NOT 403.** Every retirement state collapses onto the
+ * very same `401 invalid_api_key` an unknown key gets — key *state is not
+ * disclosed*, so an attacker cannot use the status code to learn that a guessed
+ * key exists. `src/middleware/auth.ts::resolveOrThrow` collapses `unknown` and
+ * `key_suspended` onto one identical 401 for exactly that reason.
  *
  * 403 is reserved for a caller who IS authenticated: insufficient scope
  * (`scope_denied`), a suspended *tenant* (`tenancy_suspended`), a denied RBAC
@@ -43,17 +46,27 @@
  *
  * ## Cross-tenant isolation
  *
- * A durable/virtual key can never be platform root. Rust:
- * `resolve_platform_operator(implicit, None, Some(tenant_id))` → `false`,
- * because the key declares a tenant and the `api_keys` table has no
- * `platform_operator` column to declare anything else with (auth.rs invariant
- * `durable_virtual_key_is_never_platform_root`). This port keeps that
- * structural: {@link toAuthContext} writes the literal `false` and reads no row
- * field to get there, so no D1 value — hostile, corrupted, or otherwise — can
- * turn a tenant key into an operator key. The resolved `tenancy.tenantId` is
- * the row's own `tenant_id`, which is what every downstream isolation check,
- * per-tenant DB route and metering attribution keys off.
+ * A durable/virtual key can never be platform root. `resolve_platform_operator`
+ * → `false`, because the key declares a tenant and neither `api_key_directory`
+ * nor `api_keys` has a `platform_operator` column to declare anything else with
+ * (auth.rs invariant `durable_virtual_key_is_never_platform_root`). This port
+ * keeps that structural: {@link toAuthContext} writes the literal `false` and
+ * reads no row field to get there, so no value — hostile, corrupted, or
+ * otherwise — can turn a tenant key into an operator key. The resolved
+ * `tenancy.tenantId` is the DIRECTORY's `tenant_id` (the routing authority), and
+ * the two hops guarantee the `api_keys` row was read from THAT tenant's own,
+ * physically isolated database and no other.
  */
+import {
+  type ApiKeyDirectoryRow,
+  D1TwoHopApiKeyDirectory,
+  DurableObjectTenantDatabaseRouter,
+  type TenantApiKeyRow,
+  type TwoHopApiKeyDirectory,
+  type TwoHopApiKeyResolution,
+} from "@ferrogate/storage";
+import type { TenantDataNamespace } from "@ferrogate/storage/durable-objects";
+import { controlDatabaseFrom } from "../control-data.js";
 import type {
   ApiKeyAuthenticatorPort,
   ApiKeyResolution,
@@ -61,19 +74,15 @@ import type {
   GatewayBindings,
 } from "../ports.js";
 import { ApiKeyResolutionCache, type Clock, DEFAULT_API_KEY_CACHE_TTL_SECONDS } from "./cache.js";
-import { sha256Hex, verifyStoredKeyHash, virtualApiKeyPrefix } from "./hash.js";
-import {
-  type ApiKeyStore,
-  ApiKeyStoreUnavailable,
-  D1ApiKeyStore,
-  type StoredApiKey,
-} from "./store.js";
+import { sha256Hex } from "./hash.js";
+import { type StoredApiKey, storedApiKeyFromRow } from "./store.js";
 
 /** Worker bindings this module reads, on top of {@link GatewayBindings}. */
 export interface ApiKeyBindings {
   /**
-   * The D1 binding holding `api_keys`. Absent ⇒ the durable leg is OFF and
-   * resolution falls back to the config table, i.e. today's behavior exactly.
+   * The ferrogate-tenant D1 binding. Still declared for wallet/quota/metering
+   * reads; the credential resolver NO LONGER reads it — the durable leg is the
+   * two-hop directory model over `CONTROL_DATA` + the tenant router (#821).
    */
   readonly DB?: D1Database;
   /**
@@ -86,10 +95,14 @@ export interface ApiKeyBindings {
 
 /** Construction options for {@link D1ApiKeyResolver}. */
 export interface ApiKeyResolverOptions {
-  /** Where rows come from. A real D1 binding in production. */
-  readonly store: ApiKeyStore;
   /**
-   * The SECOND key source, consulted only when the durable store produced no
+   * The two-hop directory seam — `api_key_directory` (CONTROL) → the routed
+   * tenant's `api_keys` row. A real {@link D1TwoHopApiKeyDirectory} in
+   * production; injectable for tests.
+   */
+  readonly directory: TwoHopApiKeyDirectory;
+  /**
+   * The SECOND key source, consulted only when the durable directory produced no
    * usable match — Rust's `config.api_keys` compatibility loop. Pass
    * `ConfiguredApiKeyAuthenticator.fromEnv(env)` to keep the static/dev-auth
    * table working. Omit it and a non-durable credential is simply `unknown`.
@@ -97,69 +110,23 @@ export interface ApiKeyResolverOptions {
   readonly fallback?: ApiKeyAuthenticatorPort;
   /** Shared TTL cache. Omit for the uncached (Rust-parity) behavior. */
   readonly cache?: ApiKeyResolutionCache;
-  /** Unix-SECONDS clock, injected for deterministic expiry tests. */
-  readonly nowUnixSeconds?: () => number;
-}
-
-/** Rust `api_key_record_is_active`. */
-function isActive(row: StoredApiKey, nowUnixSeconds: number): boolean {
-  if (!row.enabled) return false;
-  if (row.revokedAtUnix !== null) return false;
-  // Rust: `expires_at.is_none_or(|expires_at| expires_at > now)` — an
-  // expiry exactly equal to now is EXPIRED.
-  if (row.expiresAtUnix !== null && row.expiresAtUnix <= nowUnixSeconds) return false;
-  return true;
-}
-
-/**
- * Why an inactive row is inactive. Ordered as `isActive` tests them, so the
- * reason always names the FIRST failing condition.
- *
- * This is observability only — every reason renders as the same
- * `401 invalid_api_key`, which is the point: the caller learns nothing.
- */
-function suspensionReason(row: StoredApiKey): "disabled" | "revoked" | "expired" {
-  if (!row.enabled) return "disabled";
-  if (row.revokedAtUnix !== null) return "revoked";
-  return "expired";
-}
-
-/** Rust `api_key_record_last4_matches`: a blank `last4` column matches anything. */
-function last4Matches(row: StoredApiKey, presentedKey: string): boolean {
-  return row.last4 === "" || presentedKey.endsWith(row.last4);
 }
 
 /**
  * Rust `api_key_tenant_context` + `authenticate_durable`'s `AuthContext`
  * construction, narrowed to what `../ports.ts::AuthContext` carries.
  *
- * ## The three per-credential limits (marker CLOSED — the transport now lands)
+ * The tenant row is the AUTHORITY for the credential's columns
+ * (`scopes`, the allow-lists, the RPM cap, the attribution tags), but the
+ * `tenantId` is the DIRECTORY's — the value the request was ROUTED by. The two
+ * agree in a healthy dual write; taking the directory's keeps a key that was
+ * moved between workspaces from being gated by a stale mirror, and is what every
+ * downstream isolation check, per-tenant DB route and metering attribution keys
+ * off.
  *
- * `StoredApiKey` also carries `allowed_models`, `allowed_providers` and
- * `request_limit_per_minute`, which Rust threads into `AuthContext` for the
- * routing/quota gates. They were loaded here and DROPPED, because `AuthContext`
- * had no fields for them; it now does (`src/ports.ts`), and all three are
- * copied below.
- *
- * What each one reaching `AuthContext` turns on:
- *
- *  - `requestLimitPerMinute` → `subjectFor` (`src/ratelimit/middleware.ts`)
- *    reads it directly, so the TOK-12 per-credential RPM cap is enforced in the
- *    DEPLOYED Worker and not only where a test injects the
- *    `perKeyRequestLimit` hook. That hook is now an OVERRIDE, not the only
- *    source.
- *  - `allowedModels` / `allowedProviders` → consumed by `callerFromAuth`
- *    (`src/inference/identity.ts`), which builds the inference `Caller` fed to
- *    the already-implemented `callerCanUseModel` gate. `src/inference/` is a
- *    different owner, so that consumer carries its own marker
- *    (`identity.ts`); what is closed HERE is the transport — the values now
- *    arrive on `AuthContext` instead of being discarded at this function.
- *
- * An EMPTY list means "no allowlist", never "deny everything": that is the Rust
- * reading (`callerCanUseModel` treats an empty `allowedModels` as unrestricted)
- * and it is why the fields are copied verbatim rather than normalized here.
- * `request_limit_per_minute` is `null` for a row with no cap, and `null` must
- * NOT become `0` — `0` is a real Rust value meaning "refuse every request".
+ * `requestLimitPerMinute` is `null` for a row with no cap, and `null` must NOT
+ * become `0` — `0` is a real value meaning "refuse every request". An EMPTY
+ * allow-list means "no allowlist", never "deny everything".
  */
 function toAuthContext(row: StoredApiKey): AuthContext {
   return {
@@ -178,15 +145,9 @@ function toAuthContext(row: StoredApiKey): AuthContext {
     source: "durable_native",
     allowedModels: row.allowedModels,
     allowedProviders: row.allowedProviders,
-    // `null` (no cap) must stay ABSENT, not become 0 — see the header.
     ...(row.requestLimitPerMinute === null
       ? {}
       : { requestLimitPerMinute: row.requestLimitPerMinute }),
-    // #678 — forwarded only when non-empty, so "this key declares nothing" and
-    // "this credential source has no such column" are the same value
-    // (`undefined`) at the one place that reads it. Read by
-    // `attribution/middleware.ts`; an empty map would be indistinguishable from
-    // a declared-but-blank one and mean the same thing anyway.
     ...(Object.keys(row.attributionTags).length === 0
       ? {}
       : { attributionTags: row.attributionTags }),
@@ -196,34 +157,31 @@ function toAuthContext(row: StoredApiKey): AuthContext {
 /** What the durable leg concluded about a presented secret. */
 type DurableOutcome =
   | { readonly kind: "resolution"; readonly resolution: ApiKeyResolution }
-  /** No row in `api_keys` authenticated this secret — fall through to the config table. */
+  /** No directory row authenticated this secret — fall through to the config table. */
   | { readonly kind: "no_match" }
   /**
-   * A row authenticated it but the row is not usable. Rust SKIPS such a record
-   * inside `find_map`, so the config table is still consulted; if that also
-   * misses, this is the answer.
+   * A directory row matched but is not usable (suspended/revoked/expired). Rust
+   * SKIPS such a record inside `find_map`, so the config table is still
+   * consulted; if that also misses, this is the answer.
    */
   | { readonly kind: "matched_unusable"; readonly resolution: ApiKeyResolution };
 
 /**
  * The `ApiKeyAuthenticatorPort` the gateway middleware already codes against,
- * implemented over D1.
+ * implemented over the two-hop directory.
  *
  * Drop-in for `ConfiguredApiKeyAuthenticator`: same interface, same
- * `ApiKeyResolution` variants, same middleware. See `./index.ts` for the exact
- * one-line wiring.
+ * `ApiKeyResolution` variants, same middleware.
  */
 export class D1ApiKeyResolver implements ApiKeyAuthenticatorPort {
-  readonly #store: ApiKeyStore;
+  readonly #directory: TwoHopApiKeyDirectory;
   readonly #fallback: ApiKeyAuthenticatorPort | undefined;
   readonly #cache: ApiKeyResolutionCache;
-  readonly #nowUnixSeconds: () => number;
 
   constructor(options: ApiKeyResolverOptions) {
-    this.#store = options.store;
+    this.#directory = options.directory;
     this.#fallback = options.fallback;
     this.#cache = options.cache ?? new ApiKeyResolutionCache();
-    this.#nowUnixSeconds = options.nowUnixSeconds ?? (() => Math.floor(Date.now() / 1000));
   }
 
   /**
@@ -241,11 +199,11 @@ export class D1ApiKeyResolver implements ApiKeyAuthenticatorPort {
     if (fallbackResolution !== undefined && fallbackResolution.outcome !== "unknown") {
       return fallbackResolution;
     }
-    // Rust order preserved: a durable row that matched but is suspended/revoked/
-    // expired still lets the static config table answer first (it is skipped
-    // inside `find_map`, not returned). Only when that misses too does the
-    // suspension become the answer — and `middleware/auth.ts` renders it as the
-    // same `401 invalid_api_key` an unknown key gets.
+    // Rust order preserved: a directory row that matched but is suspended/
+    // revoked/expired still lets the static config table answer first (it is
+    // skipped inside `find_map`, not returned). Only when that misses too does
+    // the suspension become the answer — and `middleware/auth.ts` renders it as
+    // the same `401 invalid_api_key` an unknown key gets.
     if (durable.kind === "matched_unusable") return durable.resolution;
     return { outcome: "unknown" };
   }
@@ -260,22 +218,19 @@ export class D1ApiKeyResolver implements ApiKeyAuthenticatorPort {
    */
   async resolveStoredKey(presentedKey: string): Promise<StoredApiKey | null> {
     const trimmed = presentedKey.trim();
-    const keyPrefix = virtualApiKeyPrefix(trimmed);
-    if (keyPrefix === null) return null;
-    const matched = await this.#findMatchingRow(keyPrefix, trimmed);
-    if (matched === null) return null;
-    return isActive(matched, this.#nowUnixSeconds()) ? matched : null;
+    if (trimmed === "") return null;
+    const twoHop = await this.#directory.resolve(`sha256:${await sha256Hex(trimmed)}`);
+    if (twoHop.kind !== "resolved") return null;
+    return this.#toStored(twoHop.directory, twoHop.row);
   }
 
   async #authenticateDurable(presentedKey: string): Promise<DurableOutcome> {
-    // Rust trims first; `virtual_api_key_prefix` returns `None` for a blank
-    // secret, which makes the whole durable leg a no-op.
+    // Rust trims first; a blank secret makes the whole durable leg a no-op.
     const trimmed = presentedKey.trim();
-    const keyPrefix = virtualApiKeyPrefix(trimmed);
-    if (keyPrefix === null) return { kind: "no_match" };
+    if (trimmed === "") return { kind: "no_match" };
 
-    // Digest doubles as the cache key: the plaintext secret never enters the
-    // cache. See `./cache.ts`.
+    // The digest doubles as the cache key: the plaintext secret never enters the
+    // cache, and the `sha256:`-tagged hash is what the directory is keyed by.
     const digest = await sha256Hex(trimmed);
     const cached = this.#cache.get(digest);
     if (cached !== undefined) {
@@ -284,76 +239,60 @@ export class D1ApiKeyResolver implements ApiKeyAuthenticatorPort {
         : { kind: "matched_unusable", resolution: cached };
     }
 
-    let matched: StoredApiKey | null;
-    try {
-      matched = await this.#findMatchingRow(keyPrefix, trimmed);
-    } catch (error) {
-      if (error instanceof ApiKeyStoreUnavailable) {
-        // 503, never 401: an outage must not be indistinguishable from a
-        // revocation, and it must not be cached.
-        return { kind: "resolution", resolution: { outcome: "unavailable", detail: error.detail } };
-      }
-      throw error;
+    const twoHop = await this.#directory.resolve(`sha256:${digest}`);
+    const outcome = this.#classify(twoHop);
+    if (outcome.kind !== "no_match") {
+      // `set` itself refuses to store `unknown`/`unavailable`, so an outage or a
+      // miss is never pinned in front of a recovered database or a minted key.
+      this.#cache.set(digest, outcome.resolution);
     }
-    if (matched === null) return { kind: "no_match" };
-
-    const resolution = this.#classify(matched);
-    this.#cache.set(digest, resolution);
-    return resolution.outcome === "key_suspended"
-      ? { kind: "matched_unusable", resolution }
-      : { kind: "resolution", resolution };
+    return outcome;
   }
 
-  /** Everything after the row is in hand. Split out so the cache stores its result. */
-  #classify(row: StoredApiKey): ApiKeyResolution {
-    const now = this.#nowUnixSeconds();
-    if (!isActive(row, now)) {
-      return { outcome: "key_suspended", reason: suspensionReason(row) };
+  /** Map a NEUTRAL two-hop fact onto the gateway's outcome + fallback policy. */
+  #classify(twoHop: TwoHopApiKeyResolution): DurableOutcome {
+    switch (twoHop.kind) {
+      case "no_directory_row":
+        return { kind: "no_match" };
+      case "unavailable":
+        // 503, never 401: an outage must not be indistinguishable from a
+        // revocation, and it must not be cached.
+        return {
+          kind: "resolution",
+          resolution: { outcome: "unavailable", detail: twoHop.detail },
+        };
+      case "unroutable":
+        // The directory names a durable key whose tenant is not provisioned:
+        // resolve NOTHING and do NOT fall through — a config var must not speak
+        // for a durable key the database owns. Renders as the unknown-key 401.
+        return { kind: "resolution", resolution: { outcome: "unknown" } };
+      case "suspended":
+        // Skipped inside Rust's `find_map`, so the config table still answers
+        // first; if it misses, this suspension is the answer (also 401).
+        return {
+          kind: "matched_unusable",
+          resolution: { outcome: "key_suspended", reason: twoHop.reason },
+        };
+      case "resolved": {
+        const stored = this.#toStored(twoHop.directory, twoHop.row);
+        if (stored.monthlyTokenBudget === 0) {
+          // Rust `authenticate_durable`: `Some(0)` is 429; `null` is unlimited.
+          return { kind: "resolution", resolution: { outcome: "token_budget_exhausted" } };
+        }
+        return {
+          kind: "resolution",
+          resolution: { outcome: "resolved", auth: toAuthContext(stored) },
+        };
+      }
     }
-    if (row.tenantId.trim() === "") {
-      // Rust `finalize_auth` refuses a credential that names no tenant with
-      // `403 tenant_identity_required` — a key whose blast radius is unknown
-      // must not serve traffic, because `organization_id` is also the
-      // attribution key for quota, metering and lifecycle.
-      //
-      // This used to collapse onto `key_suspended` (→ 401 `invalid_api_key`)
-      // because `ApiKeyResolution` had no variant for the 403. It now does, so
-      // the OBSERVABLE half matches Rust too: an operator whose key row carries
-      // a blank tenant sees the configuration error it is, not a bad secret.
-      //
-      // `declaredButBlank` is true here by construction — this branch is only
-      // reached from a `api_keys` ROW, which always has an `organization_id`
-      // column, so the value was declared and is blank. The other Rust shape
-      // (no `organization_id` at all) belongs to the external-auth source.
-      return { outcome: "tenant_identity_required", declaredButBlank: true };
-    }
-    if (row.monthlyTokenBudget === 0) {
-      // Rust `authenticate_durable`: `Some(0)` is 429 `token_budget_exceeded`.
-      // `null` (no budget column) is unlimited and must NOT hit this branch.
-      return { outcome: "token_budget_exhausted" };
-    }
-    return { outcome: "resolved", auth: toAuthContext(row) };
   }
 
   /**
-   * Rust's `find_map` over the prefix candidates, with the same three gates —
-   * except that liveness is evaluated by the caller so a matched-but-suspended
-   * row can be reported rather than silently skipped (both answer 401).
-   *
-   * The loop does NOT early-exit on the first hash match: every candidate is
-   * verified so the work done is a function of how many rows share a prefix,
-   * not of which slot matched. Prefix collisions are the only way to get more
-   * than one candidate, and `key_prefix` is 16 chars of a CSPRNG hex secret.
+   * The tenant `api_keys` row → `StoredApiKey`, with the `tenantId` taken from
+   * the DIRECTORY (the routing authority) rather than the row's own mirror.
    */
-  async #findMatchingRow(keyPrefix: string, presentedKey: string): Promise<StoredApiKey | null> {
-    const candidates = await this.#store.findByPrefix(keyPrefix);
-    let matched: StoredApiKey | null = null;
-    for (const row of candidates) {
-      if (!last4Matches(row, presentedKey)) continue;
-      const verified = await verifyStoredKeyHash(presentedKey, row.keyHash);
-      if (verified && matched === null) matched = row;
-    }
-    return matched;
+  #toStored(directory: ApiKeyDirectoryRow, row: TenantApiKeyRow): StoredApiKey {
+    return { ...storedApiKeyFromRow(row), tenantId: directory.tenant_id };
   }
 }
 
@@ -393,26 +332,44 @@ export function apiKeyCacheTtlSeconds(
 }
 
 /**
- * Build the durable resolver from Worker bindings, or `null` when no `DB`
- * binding is present.
+ * Build the durable two-hop resolver from Worker bindings, or `null` when the
+ * durable leg cannot run.
  *
  * `null` — rather than a resolver that always misses — is deliberate: it lets
- * the composition root keep the exact object it uses today when D1 is not yet
- * bound, so introducing this module cannot change behavior until the binding
- * exists.
+ * the composition root keep the exact config-only object it uses today, so the
+ * credential path stays inert on a deployment that binds no `CONTROL_DATA` or no
+ * `TENANT_DATA`. `null` is returned when:
+ *
+ *  - no `CONTROL_DATA` is bound (`controlDatabaseFrom` → `undefined`): there is
+ *    no directory to read, so there are no durable keys; or
+ *  - no `TENANT_DATA` namespace is bound: the second hop cannot route, so the
+ *    durable leg is off.
+ *
+ * The second hop routes through the SAME pure-`durable_object` router the rest
+ * of the Worker's default tenant topology uses (`src/tenancy/resolver.ts` line
+ * ~233): one `TenantDataObject` per tenant, addressed by `idFromName(tenantId)`,
+ * with NO `tenant_databases` registry read on the credential hot path. When both
+ * bindings are present the durable directory becomes the PRIMARY source and the
+ * config/dev-auth table its fallback — the Rust order (`authenticate_durable`
+ * first, `config.api_keys` second).
  */
 export function d1ApiKeyResolverFromEnv(
   env: GatewayBindings & ApiKeyBindings,
   options: { readonly fallback?: ApiKeyAuthenticatorPort; readonly now?: Clock } = {},
 ): D1ApiKeyResolver | null {
-  const db = env.DB;
-  if (db === undefined) return null;
+  const controlDb = controlDatabaseFrom(env);
+  if (controlDb === undefined) return null;
+  const tenantData = (env as { TENANT_DATA?: TenantDataNamespace }).TENANT_DATA;
+  if (tenantData === undefined) return null;
   sharedCache ??= new ApiKeyResolutionCache({
     ttlSeconds: apiKeyCacheTtlSeconds(env),
     now: options.now,
   });
   return new D1ApiKeyResolver({
-    store: new D1ApiKeyStore(db),
+    directory: new D1TwoHopApiKeyDirectory(
+      controlDb,
+      new DurableObjectTenantDatabaseRouter(tenantData, controlDb),
+    ),
     fallback: options.fallback,
     cache: sharedCache,
   });

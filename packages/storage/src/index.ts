@@ -178,6 +178,12 @@ export * from "./audit-chain.js";
  */
 export * from "./tenant-router.js";
 /**
+ * The TWO-HOP virtual/native API-key resolution seam (`api_key_directory` in
+ * CONTROL → the routed tenant's `api_keys` row). Shared by the gateway and the
+ * agent-runtime so the 401/403/429/503 auth taxonomy cannot drift between them.
+ */
+export * from "./api-key-directory.js";
+/**
  * The DURABLE-OBJECT leg of the tenant router (strategy `durable_object`): a
  * `D1Database`-shaped facade over one tenant's `TenantDataObject`, with
  * `batch()` forwarded into the object's `transactionSync()` in ONE round trip

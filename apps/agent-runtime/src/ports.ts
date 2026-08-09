@@ -24,6 +24,7 @@ import {
   flattenedText,
 } from "@ferrogate/guardrails";
 import {
+  DurableObjectTenantDatabaseRouter,
   type LifecycleStatus,
   lifecycleStatusAllowsRequests,
   parseLifecycleStatus,
@@ -39,7 +40,7 @@ import { agentUpstreamPortFromEnv } from "./agents/registry.js";
 import { normalizedCapabilities } from "./capabilities.js";
 import { controlDatabaseFrom } from "./control-data.js";
 import { timingSafeEqualStrings } from "./crypto.js";
-import { d1ApiKeyPort, d1WorkerIdentityPort } from "./durable/adapters.js";
+import { d1WorkerIdentityPort, twoHopApiKeyPort } from "./durable/adapters.js";
 import { durableA2aGuardrailPort } from "./guardrails.js";
 // `./rbac.js` imports the `AuthContext` TYPE back out of this module. The cycle
 // is type-only, so nothing is evaluated in either direction at module load —
@@ -1492,9 +1493,22 @@ export function configFromEnv(env: AgentRuntimeBindings): AgentRuntimeConfig {
 export function resolveDeps(env: AgentRuntimeBindings): AgentRuntimeDeps | undefined {
   const dev = env.FG_DEV_IN_MEMORY_PORTS === "1";
 
+  // #880 — resolve the CONTROL database through the S4 seam (the CONTROL_DATA
+  // object facade). env.DB is the TENANT database and is NO LONGER read for
+  // credentials — the two-hop directory model routes to the tenant's OWN
+  // `TenantDataObject` — but it stays bound for the lifecycle gate below.
+  const controlDb = controlDatabaseFrom(env);
+
+  // #821 — the DURABLE credential leg is now the TWO-HOP directory model:
+  // `api_key_directory` in CONTROL → the routed tenant's `api_keys` row, sharing
+  // `@ferrogate/storage`'s one implementation with the gateway and the control
+  // plane. It needs BOTH the control object and the `TENANT_DATA` namespace to
+  // route the second hop (the pure-`durable_object` topology, no registry read);
+  // absent either, the dev table is the only thing left.
+  const tenantData = env.TENANT_DATA;
   const resolvedApiKeys: ApiKeyPort | undefined =
-    env.DB !== undefined
-      ? d1ApiKeyPort(env.DB)
+    controlDb !== undefined && tenantData !== undefined
+      ? twoHopApiKeyPort(controlDb, new DurableObjectTenantDatabaseRouter(tenantData, controlDb))
       : dev
         ? inMemoryApiKeyPort(parseJsonVar<DevApiKey[]>(env.FG_DEV_API_KEYS, []))
         : undefined;
@@ -1516,9 +1530,6 @@ export function resolveDeps(env: AgentRuntimeBindings): AgentRuntimeDeps | undef
    * Deleting this wrap turns `test/durable/lifecycle.spec.ts` and
    * `apps/mcp/test/fleet-tenancy-suspension.test.ts` red.
    */
-  // #880 — resolve the CONTROL database through the S4 seam (CONTROL_DATA facade
-  // first, legacy CONTROL_DB fallback). env.DB is the TENANT database and stays as-is.
-  const controlDb = controlDatabaseFrom(env);
   const apiKeys: ApiKeyPort | undefined =
     resolvedApiKeys === undefined || (env.DB === undefined && controlDb === undefined)
       ? resolvedApiKeys
