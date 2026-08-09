@@ -61,6 +61,7 @@ import {
   type ApiKeyDirectoryRow,
   D1TwoHopApiKeyDirectory,
   DurableObjectTenantDatabaseRouter,
+  KvApiKeyDirectoryProjection,
   type TenantApiKeyRow,
   type TwoHopApiKeyDirectory,
   type TwoHopApiKeyResolution,
@@ -91,6 +92,13 @@ export interface ApiKeyBindings {
    * revocation-lag trade this buys.
    */
   readonly GATEWAY_API_KEY_CACHE_TTL_SECONDS?: string;
+  /**
+   * The per-colo KV projection of `api_key_directory` (#882), read AHEAD of the
+   * control-object RPC in HOP 1. Absent ⇒ HOP 1 always takes the RPC path, the
+   * pre-#882 behaviour. Bound, it is the SAME namespace `apps/control-plane`
+   * writes; both derive the key with `keyDirectoryProjectionKey`.
+   */
+  readonly KEY_DIRECTORY?: KVNamespace;
 }
 
 /** Construction options for {@link D1ApiKeyResolver}. */
@@ -365,10 +373,17 @@ export function d1ApiKeyResolverFromEnv(
     ttlSeconds: apiKeyCacheTtlSeconds(env),
     now: options.now,
   });
+  // #882 — the per-colo KV read-ahead in HOP 1. OPTIONAL: with no `KEY_DIRECTORY`
+  // bound the directory takes the control-object RPC on every cold miss, exactly
+  // as before. A hit still runs HOP 2 and every lifecycle check.
+  const keyDirectoryKv = (env as { KEY_DIRECTORY?: KVNamespace }).KEY_DIRECTORY;
+  const projection =
+    keyDirectoryKv === undefined ? undefined : new KvApiKeyDirectoryProjection(keyDirectoryKv);
   return new D1ApiKeyResolver({
     directory: new D1TwoHopApiKeyDirectory(
       controlDb,
       new DurableObjectTenantDatabaseRouter(tenantData, controlDb),
+      { projection },
     ),
     fallback: options.fallback,
     cache: sharedCache,

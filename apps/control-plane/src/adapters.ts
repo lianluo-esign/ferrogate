@@ -42,10 +42,12 @@
 import { controlDatabaseFrom } from "./control-data.js";
 
 import {
+  type ApiKeyDirectoryProjection,
   BackendDispatchingTenantDatabaseRouter,
   type BindingEnvironment,
   DurableObjectTenantDatabaseRouter,
   EnvBindingTenantDatabaseRouter,
+  KvApiKeyDirectoryProjection,
   type TenantDatabaseRouter,
   type TenantObjectOperator,
   backfillTenantConfigurationPolicy,
@@ -1466,6 +1468,22 @@ export function resolvePromptLabels(env: ControlPlaneBindings): KVNamespace | nu
 }
 
 /**
+ * The `api_key_directory` KV projection (#882), or `null` when unbound.
+ *
+ * No fallback and no in-memory stand-in, for the same reason
+ * {@link resolvePromptLabels} has none: the projection's only READER is a
+ * different Worker (`apps/gateway`), so an isolate-local map would let the write
+ * path believe it published a routing row the gateway never sees. `null` is not a
+ * downgrade — the virtual-key write path then simply skips the KV leg and the
+ * gateway takes the RPC path on every cold miss, exactly as before #882.
+ */
+export function resolveKeyDirectory(env: ControlPlaneBindings): ApiKeyDirectoryProjection | null {
+  return env.KEY_DIRECTORY === undefined
+    ? null
+    : new KvApiKeyDirectoryProjection(env.KEY_DIRECTORY);
+}
+
+/**
  * The audit-anchor bucket (#684), or `null` when the deployment binds none.
  *
  * Deliberately NOT gated on `CONTROL_PLANE_STORE`, unlike its siblings above:
@@ -1546,6 +1564,7 @@ export function resolveDeps(
     tenantObjectOperator: resolveTenantObjectOperator(env, controlDatabase),
     controlDatabase: controlDatabase ?? null,
     promptLabels: resolvePromptLabels(env),
+    keyDirectory: resolveKeyDirectory(env),
     // Delete-only by construction — see `resolveAssetObjects`.
     assetObjects: resolveAssetObjects(env),
     runtime: new StoreRuntimeStatus(store, "0.0.0", tenantDatabases, controlDatabase ?? null),

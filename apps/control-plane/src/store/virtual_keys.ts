@@ -62,8 +62,42 @@
  * `401`, which is the same outcome with an extra misleading row in it.
  * `tenantDatabaseFor` still distinguishes "not provisioned" (skip) from
  * "provisioned but unroutable" (503) — see `store/tenancy.ts`.
+ *
+ * ## The KV projection rides IN LOCKSTEP with the directory leg (#882)
+ *
+ * Zero-D1 S6 adds a per-colo KV projection of `api_key_directory` that the gateway
+ * reads AHEAD of the control-object RPC in HOP 1. This write is the projection's
+ * only writer, and — because KV holds only LIVE POSITIVE routing rows — the KV op
+ * follows the projected row's LIFECYCLE, not the `direction` flag (which orders the
+ * two D1 legs). It rides around the authoritative write so the two never disagree
+ * for longer than the TTL backstop:
+ *
+ *  - a row that is now RETIRED (disable, revoke, expiry) DELETEs the KV entry
+ *    BEFORE the directory write, so a retired key stops resolving from KV promptly
+ *    rather than waiting out the TTL; and
+ *  - a row that is LIVE (create, enable, and the NEW secret of a rotate) UPSERTs
+ *    the KV entry AFTER the directory write, so the cache never advertises a
+ *    credential the control object does not yet hold.
+ *
+ * A rotate is a `tighten` for the D1 legs (its new directory row is written first
+ * so the OLD `key_hash` is retired promptly), yet its row is LIVE, so KV is
+ * upserted for the NEW hash. The OLD hash's KV entry is not addressable here (this
+ * writer holds only the new hash), so it self-expires under `expirationTtl` — and
+ * the gateway's HOP 2 denies the old secret meanwhile, since its tenant row now
+ * carries the rotated hash. A stale ROUTING row authenticates nothing on its own.
+ *
+ * The KV op is BEST-EFFORT with respect to the authoritative D1 dual write: a KV
+ * outage must never abort the revoke that D1 is the authority for, and it does not
+ * have to — HOP 2 re-reads the tenant row and denies even if a stale KV routing
+ * row survives, and the `expirationTtl` bounds how long one can. So the projection
+ * can make auth faster, never looser, on this side too.
  */
-import type { TenantDatabaseHandle } from "@ferrogate/storage";
+import {
+  type ApiKeyDirectoryProjection,
+  type ApiKeyDirectoryRow,
+  type TenantDatabaseHandle,
+  apiKeyLifecycleReason,
+} from "@ferrogate/storage";
 import type { StoreRecord } from "../ports.js";
 import { API_KEY_DIRECTORY_TABLE, TENANT_API_KEY_TABLE } from "./api_keys.js";
 
@@ -155,6 +189,7 @@ export async function projectVirtualKey(
   record: StoreRecord,
   nowUnix: number,
   direction: VirtualKeyWriteDirection,
+  projection?: ApiKeyDirectoryProjection | null,
 ): Promise<void> {
   const id = String(record.id);
   const keyHash = text(record.key_hash, "");
@@ -166,6 +201,36 @@ export async function projectVirtualKey(
   const enabled = bit(record.enabled !== false);
   const expiresAt = finite(record.expires_at) ?? finite(record.expires_at_unix);
   const revoked = revokedAt(record, nowUnix);
+
+  // #882 — the KV projection row, exactly the `api_key_directory` columns the
+  // gateway's HOP-1 read-ahead consumes (never `key_hash`, which is the KV key).
+  const projectionRow: ApiKeyDirectoryRow = {
+    id,
+    tenant_id: tenantId,
+    project_id: projectId,
+    workspace_id: workspaceId,
+    enabled,
+    expires_at_unix: expiresAt,
+    revoked_at_unix: revoked,
+  };
+  // BEST-EFFORT: a KV failure must not abort the authoritative D1 dual write —
+  // HOP 2 + the TTL backstop keep a stale routing row from authenticating.
+  const upsertProjection = async (): Promise<void> => {
+    if (projection === undefined || projection === null || keyHash === "") return;
+    try {
+      await projection.write(keyHash, projectionRow);
+    } catch {
+      /* cold cache; the gateway falls back to the RPC and repopulates */
+    }
+  };
+  const deleteProjection = async (): Promise<void> => {
+    if (projection === undefined || projection === null || keyHash === "") return;
+    try {
+      await projection.delete(keyHash);
+    } catch {
+      /* HOP 2 still denies a revoked key; the TTL bounds any surviving row */
+    }
+  };
 
   const tenantLeg = async (): Promise<void> => {
     await handle.db
@@ -271,11 +336,26 @@ export async function projectVirtualKey(
     ]);
   };
 
+  // KV holds only LIVE positive routing rows, so the KV op follows the row's own
+  // lifecycle (the same rule the gateway resolver applies), not `direction`.
+  const live =
+    apiKeyLifecycleReason(
+      { enabled, expires_at_unix: expiresAt, revoked_at_unix: revoked },
+      nowUnix,
+    ) === null;
+
+  // A RETIRED row stops resolving from KV BEFORE the authority is rewritten.
+  if (!live) await deleteProjection();
+
   if (direction === "tighten") {
     await directoryLeg();
     await tenantLeg();
-    return;
+  } else {
+    await tenantLeg();
+    await directoryLeg();
   }
-  await tenantLeg();
-  await directoryLeg();
+
+  // A LIVE row (create, enable, rotate's new secret) is published only AFTER the
+  // authority holds it, so the cache never leads the control object.
+  if (live) await upsertProjection();
 }

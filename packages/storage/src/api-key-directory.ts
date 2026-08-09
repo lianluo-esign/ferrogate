@@ -63,6 +63,7 @@
  *    through to a var that may still list a key the database revoked.
  */
 import { StorageError } from "./errors.js";
+import type { ApiKeyDirectoryProjection } from "./key-directory-projection.js";
 import type { TenantDatabaseRouter } from "./tenant-router.js";
 
 /** The narrow credential→tenant routing index in the CONTROL database. */
@@ -191,6 +192,18 @@ export function apiKeyLifecycleReason(
 export interface TwoHopApiKeyDirectoryOptions {
   /** Injected unix-SECONDS clock, so expiry is deterministic in tests. */
   readonly now?: () => number;
+  /**
+   * Zero-D1 S6 (#882): the per-colo KV projection of `api_key_directory`, read
+   * AHEAD of the control-object RPC in HOP 1. OPTIONAL — absent means the pure
+   * two-hop RPC behaviour, so this class stays inject-free by default.
+   *
+   * It changes ONLY where HOP 1's routing row comes from, never HOP 2 and never
+   * the taxonomy: a KV hit still runs the directory-lifecycle check and the full
+   * tenant read below. See the read-ahead in {@link D1TwoHopApiKeyDirectory.resolve}
+   * for the three fail-closed properties (KV never masks an outage; a corrupt
+   * entry is a miss; only a POSITIVE row is populated).
+   */
+  readonly projection?: ApiKeyDirectoryProjection;
 }
 
 /**
@@ -207,6 +220,7 @@ export class D1TwoHopApiKeyDirectory implements TwoHopApiKeyDirectory {
   readonly #controlDb: D1Database;
   readonly #router: TenantDatabaseRouter;
   readonly #now: () => number;
+  readonly #projection: ApiKeyDirectoryProjection | undefined;
 
   constructor(
     controlDb: D1Database,
@@ -216,24 +230,62 @@ export class D1TwoHopApiKeyDirectory implements TwoHopApiKeyDirectory {
     this.#controlDb = controlDb;
     this.#router = router;
     this.#now = options.now ?? (() => Math.floor(Date.now() / 1000));
+    this.#projection = options.projection;
   }
 
   async resolve(keyHash: string): Promise<TwoHopApiKeyResolution> {
     // Hop 1 — the CONTROL directory. This is what makes the whole thing
     // possible: the lookup that PRODUCES the tenant id cannot itself be routed.
-    let directory: ApiKeyDirectoryRow | null;
-    try {
-      directory = await this.#controlDb
-        .prepare(DIRECTORY_SQL)
-        .bind(keyHash)
-        .first<ApiKeyDirectoryRow>();
-    } catch (error) {
-      return {
-        kind: "unavailable",
-        detail: `api key directory lookup failed: ${messageOf(error)}`,
-      };
+    //
+    // #882: read the per-colo KV projection AHEAD of the RPC. A hit supplies the
+    // routing row and skips the round trip to the singleton control object; a
+    // miss (or no projection, or a KV error) falls through to the authoritative
+    // RPC. This can only ever move where the ROUTING row comes from — the
+    // directory-lifecycle check and HOP 2 below run identically either way.
+    let directory: ApiKeyDirectoryRow | null = null;
+    if (this.#projection !== undefined) {
+      try {
+        directory = await this.#projection.read(keyHash);
+      } catch {
+        // A KV read failure must NOT mask the authoritative source: fall through
+        // to the RPC, so an outage is still detected there rather than swallowed.
+        directory = null;
+      }
     }
-    if (directory === null) return { kind: "no_directory_row" };
+
+    if (directory === null) {
+      try {
+        directory = await this.#controlDb
+          .prepare(DIRECTORY_SQL)
+          .bind(keyHash)
+          .first<ApiKeyDirectoryRow>();
+      } catch (error) {
+        // A control-object OUTAGE is `unavailable` → 503, NEVER masked by KV: a
+        // KV miss always reaches this RPC, and its failure is surfaced, not
+        // rewritten into a silent miss or a stale allow.
+        return {
+          kind: "unavailable",
+          detail: `api key directory lookup failed: ${messageOf(error)}`,
+        };
+      }
+      if (directory === null) return { kind: "no_directory_row" };
+
+      // POSITIVE ONLY, and LIVE only: populate KV for a row the control object
+      // actually holds AND that is live — never the unknown-key (null) case above
+      // (so a miss can never be seeded as a hit and a key-spray cannot fill the
+      // namespace), and never a RETIRED row (a revoke that only landed its
+      // directory leg, or a disabled/expired row). The lifecycle check below
+      // would reject such a row anyway, and delete-on-revoke removes its KV
+      // entry, so caching it would only widen the stale-positive window.
+      // Best-effort: a failed populate just leaves the next request on the RPC.
+      if (this.#projection !== undefined && apiKeyLifecycleReason(directory, this.#now()) === null) {
+        try {
+          await this.#projection.write(keyHash, directory);
+        } catch {
+          // Caching is an optimization; a write failure must not deny a live key.
+        }
+      }
+    }
 
     // The directory's own lifecycle bits are checked BEFORE routing, so a
     // revoke that only landed its first (directory) leg denies here without

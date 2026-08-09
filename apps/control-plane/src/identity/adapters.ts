@@ -577,7 +577,14 @@ export class ControlPlaneIdentityRepository implements IdentityRepository {
     if (controlDb === null || !virtualKeyProjectable(stored)) return;
     const handle = await tenantDatabaseFor(this.#deps.tenantDatabases, key.tenantId);
     if (handle === null) return;
-    await projectVirtualKey(controlDb, handle, stored, key.createdAtUnix, "loosen");
+    await projectVirtualKey(
+      controlDb,
+      handle,
+      stored,
+      key.createdAtUnix,
+      "loosen",
+      this.#deps.keyDirectory,
+    );
   }
 
   /** Throws when the lifecycle chain refuses. Never returns a decision to ignore. */

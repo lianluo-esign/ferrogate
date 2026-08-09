@@ -1097,6 +1097,34 @@ binding = "PROMPT_LABELS"
 id = "PLACEHOLDER_SET_AT_DEPLOY_TIME"
 
 # ---------------------------------------------------------------------------
+# KV: the api_key_directory PROJECTION — the auth hot-path READ side (#882)
+# ---------------------------------------------------------------------------
+#
+# Zero-D1 S6. `src/keys/resolver.ts` reads this namespace AHEAD of the
+# control-object RPC in HOP 1 (`credential -> tenant`), so a cold-isolate or
+# cross-region cache miss is served from a per-colo KV read instead of an RPC to
+# the single-threaded CONTROL_DATA object. It is a cache of the ROUTING hop only:
+# a KV hit STILL runs HOP 2 (the tenant object's `api_keys` row) and every
+# lifecycle check, so this binding can make authentication faster, NEVER looser.
+#
+# `apps/control-plane` binds the SAME namespace and is its only WRITER: it upserts
+# a positive routing row on create/enable and DELETEs it on revoke/disable/rotate,
+# in lockstep with the directory dual write. Both sides key the entry with
+# `keyDirectoryProjectionKey` from `@ferrogate/storage`, so the ONLY way to break
+# the link is to bind two different namespace ids at deploy time — hence this note.
+#
+# ABSENT IS SUPPORTED and fail-closed: with no namespace bound HOP 1 takes the RPC
+# on every miss (the pre-#882 behaviour). A stale or corrupt KV row can never
+# authenticate on its own — HOP 2 owns authorization, and each positive write
+# carries an `expirationTtl` backstop.
+#
+# `id` is a DOCUMENTED PLACEHOLDER; substitute the SAME namespace
+# `apps/control-plane` writes to.
+[[kv_namespaces]]
+binding = "KEY_DIRECTORY"
+id = "PLACEHOLDER_SET_AT_DEPLOY_TIME"
+
+# ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 # Zero-D1 #821 PR2-delete: the tenant `[[d1_databases]] DB` stanza is DELETED
 #
