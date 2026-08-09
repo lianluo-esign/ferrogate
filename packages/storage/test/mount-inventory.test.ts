@@ -110,8 +110,6 @@ const MOUNTED: [symbol: string, app: string][] = [
   ["D1WorkflowBudgetStore", "gateway"],
   ["D1UsageLedger", "gateway"],
   ["D1ReferenceGuardedDeletes", "control-plane"],
-  // The development-only router remains an explicit gateway mount.
-  ["SharedDatabaseTenantRouter", "gateway"],
   // WAVE 20 — moved up from `DEAD`, which is this gate working in its "good
   // news" direction: `apps/gateway/src/metering/budget-alerts.ts` imports the
   // class and constructs one as the `claims` port, so the once-per-period
@@ -173,7 +171,17 @@ const MOUNTED: [symbol: string, app: string][] = [
 ];
 
 /** Exports the `src/index.ts` header claims are DEAD: no app names them at all. */
-const DEAD = ["D1BillingEventLedger", "TenantMonotonicUpserts", "ControlMonotonicUpserts"];
+const DEAD = [
+  "D1BillingEventLedger",
+  "TenantMonotonicUpserts",
+  "ControlMonotonicUpserts",
+  // #821 Zero-D1: the shared-tenant-D1 router is RETIRED. Every app now routes
+  // tenant data through per-tenant Durable Objects only — the shared `env.DB`
+  // / `LEGACY_TENANT_DB` and their `off`/`binding`/`shared_development` arms are
+  // gone (PRs #924/#925/#926) — so no app mounts this class. It remains an
+  // (unmounted) library capability with its own `test/d1/router.test.ts` tests.
+  "SharedDatabaseTenantRouter",
+];
 
 describe("mount inventory (src/index.ts §1.7 marker)", () => {
   test("the app scan is not empty (a vacuous scan would pass everything)", () => {
