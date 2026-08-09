@@ -28,7 +28,7 @@
  * table and the quota-policy table.
  */
 import { GATEWAY_ROUTE_MODULES } from "../../../src/index.js";
-import { rateLimitRouteModule } from "../../../src/ratelimit/index.js";
+import { quotaPolicySourceFromVars, rateLimitRouteModule } from "../../../src/ratelimit/index.js";
 import { createGatewayApp } from "../../../src/routes/index.js";
 import { tenantDatabase } from "../../../src/tenancy/index.js";
 
@@ -61,6 +61,13 @@ const { app } = createGatewayApp({
       // Settlement is opt-in and absent in Rust; the harness turns it on so the
       // reservation/settlement split is actually exercised.
       settleTokens: true,
+      // This harness carries its quota policies + plans in `[vars]`
+      // (`GATEWAY_QUOTA_POLICIES` / `GATEWAY_PLANS`), the posture the specs
+      // assert against. The default `quotaPolicySourceFromEnv` would read the
+      // CONTROL object's `quota_policies` table instead now that `CONTROL_DATA`
+      // is bound (for tenancy resolution) — and that object is empty, which
+      // would silence every window. Pin the var-based source explicitly.
+      quotas: quotaPolicySourceFromVars,
     }),
     ...GATEWAY_ROUTE_MODULES,
   ],
@@ -72,3 +79,13 @@ export default app;
 // `class_name` against the ENTRY module, so without this the harness Worker
 // fails to start with "Durable Object class RateLimiterDurableObject not found".
 export { RateLimiterDurableObject } from "../../../src/ratelimit/index.js";
+
+// Since #821 PR2-delete the storage-free `"off"` posture is retired: the ONLY
+// tenant-data path is the per-tenant Durable Object, and `durable_object`
+// (the default) NAMES a 503 when `TENANT_DATA` is absent. So the harness binds
+// the same tenant + control objects the deployed Worker does — the model
+// catalog and admission ladder resolve an (empty) tenant object and answer 200,
+// leaving the RATE_LIMIT object the sole admission gate these specs drive.
+// workerd resolves each `class_name` against this ENTRY module, so both are
+// re-exported here exactly as `src/worker.ts` does.
+export { ControlDataObject, TenantDataObject } from "@ferrogate/storage/durable-objects";

@@ -61,6 +61,8 @@ import { guardrailDepsFromEnv } from "../../src/guardrails/config.js";
 import { GuardrailEngine } from "../../src/guardrails/engine.js";
 import type { GuardrailEvidenceSink } from "../../src/guardrails/ports.js";
 import { createGatewayApp } from "../../src/routes/index.js";
+import { tenantDatabase } from "../../src/tenancy/index.js";
+import { tenantObjectDb } from "../tenant-object.js";
 import { buildTar, gzip } from "./archives.js";
 
 /** The keyword the shipped deterministic detector matches on, verbatim. */
@@ -167,7 +169,12 @@ const ENV: Record<string, unknown> = {
 // truncate for the same reason — `test/assets/d1.test.ts`, `r2.test.ts`), and
 // several tests reuse names like `poisoned` and `settings/1.0.0` on purpose.
 beforeEach(async () => {
-  const db = STORAGE.DB as D1Database;
+  // Since #821 PR2-delete the shared `env.DB` asset registry is retired: every
+  // asset table (`stored_assets`/`asset_channels`/`asset_bundle_files`) lives in
+  // the authenticated tenant's OWN Durable Object, which the routed asset
+  // service reaches through the `tenantDatabase()` mount below. `tenant_a` is
+  // the only publisher here, so clear that object.
+  const db = tenantObjectDb("tenant_a");
   await db.batch([
     db.prepare("DELETE FROM asset_bundle_files"),
     db.prepare("DELETE FROM asset_channels"),
@@ -189,6 +196,10 @@ function gateway(
   // and the pull two different in-memory registries.
   const { app } = createGatewayApp({
     modules: [assetRouteModule({ depsFromEnv: assetDepsFromEnv })],
+    // The deployed data plane mounts `tenantDatabase()` (GATEWAY_MIDDLEWARE);
+    // the routed asset service reads the accessor it publishes to file every
+    // statement in the authenticated tenant's own Durable Object.
+    middleware: [tenantDatabase()],
   });
   const env = { ...ENV, ...overrides };
   return async (path, init = {}) =>

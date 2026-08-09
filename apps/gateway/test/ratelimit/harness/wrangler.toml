@@ -19,9 +19,22 @@ compatibility_flags = ["nodejs_compat"]
 name = "RATE_LIMIT"
 class_name = "RateLimiterDurableObject"
 
+# Since #821 PR2-delete the per-tenant Durable Object is the ONLY tenant-data
+# path, and `durable_object` mode NAMES a 503 without `TENANT_DATA` bound. Bind
+# the same tenant + control objects the deployed Worker declares so the model
+# catalog and admission ladder resolve an (empty) object and answer 200 — see
+# `harness/worker.ts`, which re-exports both classes.
+[[durable_objects.bindings]]
+name = "TENANT_DATA"
+class_name = "TenantDataObject"
+
+[[durable_objects.bindings]]
+name = "CONTROL_DATA"
+class_name = "ControlDataObject"
+
 [[migrations]]
 tag = "v1"
-new_sqlite_classes = ["RateLimiterDurableObject"]
+new_sqlite_classes = ["RateLimiterDurableObject", "TenantDataObject", "ControlDataObject"]
 # ===========================================================================
 
 [vars]
@@ -51,12 +64,15 @@ GATEWAY_NATIVE_API_KEYS = '''
 GATEWAY_STATIC_API_KEYS = "[]"
 # This harness binds no TENANT_DATA namespace and no D1: it exists to drive the
 # RATE_LIMIT Durable Object end to end, and tenant storage is orthogonal to
-# every spec in it. Since #819 the ABSENT var means "durable_object", whose
-# wallet/quota callers ask for the tenancy middleware and 500 on this worker —
-# so the no-tenant-storage posture must now be NAMED, which is exactly what
-# `src/tenancy/resolver.ts` says "off" is for (wallet admission then degrades
-# to the pre-#819 no-wallet-configured path and the limiter is what answers).
-GATEWAY_TENANT_DB_ROUTING = "off"
+# every spec in it. Since #821 PR2-delete the shared-DB `"off"`/`"shared_development"`
+# postures are RETIRED (they read `env.DB`, which no longer exists). The
+# no-tenant-storage posture is now the `"durable_object"` default WITH no
+# `TENANT_DATA` bound: `src/ratelimit/middleware.ts` reads that pairing
+# (`mode === "durable_object" && env.TENANT_DATA === undefined`) as
+# NO_WALLET_ADMISSION / NO_SPEND_SOURCE / NO_TOKEN_BUDGET — wallet admission
+# degrades to the no-wallet-configured path and the limiter is what answers,
+# exactly as `"off"` used to arrange.
+GATEWAY_TENANT_DB_ROUTING = "durable_object"
 SELF_HOSTED_WORKER_REGISTRY = "[]"
 TENANCY_LIFECYCLE = "{}"
 TENANT_RBAC_ACTIONS = "{}"

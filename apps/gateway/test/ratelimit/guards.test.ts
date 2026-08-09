@@ -44,9 +44,6 @@ import { InMemoryModelResolver, inferenceRouteModule } from "../../src/inference
 import type { GatewayEnv } from "../../src/ports.js";
 import {
   DEFAULT_WALLET_HOLD_CREDITS,
-  NO_TOKEN_BUDGET,
-  NO_WALLET_ADMISSION,
-  NO_WORKFLOW_BUDGETS,
   WORKFLOW_ID_HEADER,
   WORKFLOW_RUN_ID_HEADER,
   WORKFLOW_VERSION_HEADER,
@@ -57,10 +54,7 @@ import {
   expandPolicyRule,
   policyRulesFromEnv,
   rateLimit,
-  tokenBudgetSourceFromEnv,
-  walletAdmissionFromEnv,
   walletHoldCreditsFromEnv,
-  workflowBudgetSourceFromEnv,
   workflowDeclarationFrom,
 } from "../../src/ratelimit/index.js";
 import { createGatewayApp } from "../../src/routes/index.js";
@@ -243,13 +237,15 @@ describe("wallet no-oversell: the guard object", () => {
    * The storage guard puts the predicate inside the INSERT, so SQLite evaluates
    * it against one committed snapshot per writer.
    *
-   * The guard under test is built by `walletAdmissionFromEnv` — the exact
-   * function `rateLimit()` calls with no arguments — not by the test.
+   * The guard under test is `d1WalletAdmission` over a real D1 handle — the
+   * exact `@ferrogate/storage` guard `rateLimit()`'s `routedWalletAdmission`
+   * builds over the tenant object's handle — with the hold size read the way the
+   * composition root reads it.
    */
   test("12 concurrent reserves against a balance affording 3 admit EXACTLY 3", async () => {
     await seedWallet("tenant_a", 30);
     vars.GATEWAY_WALLET_HOLD_CREDITS = "10";
-    const guard = walletAdmissionFromEnv(env as never);
+    const guard = d1WalletAdmission(db, { holdCredits: walletHoldCreditsFromEnv(env as never) });
 
     const outcomes = await Promise.all(
       Array.from({ length: 12 }, (_, index) => guard.reserve("tenant_a", `burst_${index}`, NOW)),
@@ -277,13 +273,6 @@ describe("wallet no-oversell: the guard object", () => {
     } as unknown as D1Database;
     const outcome = await d1WalletAdmission(broken).reserve("tenant_a", "hold_x", NOW);
     expect(outcome.kind).toBe("unavailable");
-  });
-
-  test("no `DB` binding ⇒ the never-denying guard", () => {
-    expect(walletAdmissionFromEnv({})).toBe(NO_WALLET_ADMISSION);
-    expect(walletAdmissionFromEnv({ DB: "a-var-string" as unknown as D1Database })).toBe(
-      NO_WALLET_ADMISSION,
-    );
   });
 
   test("a hold size that is not a positive integer is ignored, not applied", () => {
@@ -772,10 +761,6 @@ describe("workflow budget: the source", () => {
     // else's run id.
     expect(lookup.kind).toBe("unavailable");
   });
-
-  test("no `DB` binding ⇒ the never-denying source", () => {
-    expect(workflowBudgetSourceFromEnv({})).toBe(NO_WORKFLOW_BUDGETS);
-  });
 });
 
 /**
@@ -925,10 +910,6 @@ describe("monthly token budget: the source", () => {
       },
     } as unknown as D1Database;
     expect((await d1TokenBudgetSource(broken).forApiKey("k", "t")).ok).toBe(false);
-  });
-
-  test("no `DB` binding ⇒ the no-budget source", () => {
-    expect(tokenBudgetSourceFromEnv({})).toBe(NO_TOKEN_BUDGET);
   });
 });
 

@@ -112,9 +112,13 @@ describe("durable_object is the default topology, and it is the library's router
   test("an absent GATEWAY_TENANT_DB_ROUTING resolves to durable_object", () => {
     expect(parseTenantDatabaseRoutingMode(undefined)).toBe("durable_object");
     expect(parseTenantDatabaseRoutingMode("   ")).toBe("durable_object");
-    // `"off"` is still reachable, but only by NAME. That is the half that keeps
-    // a self-hosted deploy with no TENANT_DATA binding able to say so.
-    expect(parseTenantDatabaseRoutingMode("off")).toBe("off");
+    // Since #821 PR2 retired the shared-`env.DB` topologies (`off`, `binding`,
+    // `binding_strict`, `shared_development`), durable_object is the ONLY tenant
+    // routing mode. A legacy mode name is no longer recognized — it parses to
+    // `undefined`, which `createTenantDatabaseResolver` rejects as a LOUD
+    // misconfiguration (it refuses to guess a posture), never a silent default.
+    // Only an ABSENT/blank var defaults to durable_object (asserted above).
+    expect(parseTenantDatabaseRoutingMode("off")).toBeUndefined();
   });
 
   test("the resolver mounts DurableObjectTenantDatabaseRouter, lazily", async () => {

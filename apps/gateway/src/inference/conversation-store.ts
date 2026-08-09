@@ -10,7 +10,7 @@
  * alone.
  */
 import type { TenancyBindings } from "../tenancy/ports.js";
-import { parseTenantDatabaseRoutingMode, resolverForEnv } from "../tenancy/resolver.js";
+import { resolverForEnv } from "../tenancy/resolver.js";
 import { type ConversationOwner, MAX_CONVERSATION_TURNS, outputItemsOf } from "./conversation.js";
 
 /** One persisted turn. */
@@ -406,16 +406,6 @@ export class D1ConversationStore implements ConversationStore {
   }
 }
 
-/** `env.DB` when it is really a D1 binding (a `[vars]` `DB` is a string). */
-function tenantDatabaseOf(env: unknown): D1Database | undefined {
-  const candidate = (env as { DB?: unknown } | undefined)?.DB;
-  return typeof candidate === "object" &&
-    candidate !== null &&
-    typeof (candidate as D1Database).prepare === "function"
-    ? (candidate as D1Database)
-    : undefined;
-}
-
 /**
  * The routed store (#821 PR2a): each read/write resolves the OWNER tenant's own
  * database through the same router `tenantDatabaseOf(c)` uses, so multi-turn
@@ -469,30 +459,22 @@ class RoutedConversationStore implements ConversationStore {
 
 /**
  * The production resolver: the caller tenant's OWN database under the routed
- * default, the shared `env.DB` under `"off"`, and {@link NO_CONVERSATION_STORE}
- * when no tenant storage is bound at all.
+ * default (the `durable_object` default and the `binding*` modes), and
+ * {@link NO_CONVERSATION_STORE} when no tenant storage is bound at all.
  *
  * Fail-closed by construction — a deployment that binds nothing REFUSES
  * `store: true` and `previous_response_id` (503 `response_store_disabled`)
  * rather than accepting them and forgetting, and serves every other
  * `/v1/responses` request exactly as it did before this slice.
+ *
+ * Since #821 PR2-delete the shared `env.DB` tenant database is retired, so the
+ * former `"off"` arm that read it directly is gone: with no `TENANT_DATA`
+ * namespace bound there is nowhere any tenant's rows could live, and it fails
+ * closed. Otherwise route per owner tenant.
  */
 export function conversationStoreFromEnv(env: unknown): ConversationStore {
-  const routing = (env as { GATEWAY_TENANT_DB_ROUTING?: unknown } | undefined)
-    ?.GATEWAY_TENANT_DB_ROUTING;
-  const mode = parseTenantDatabaseRoutingMode(typeof routing === "string" ? routing : undefined);
-  // Explicit `"off"`: the shared `env.DB` IS the tenant database, so read it
-  // directly. This is the legacy arm the later stanza-removal PR deletes.
-  if (mode === "off") {
-    const db = tenantDatabaseOf(env);
-    return db === undefined ? NO_CONVERSATION_STORE : new D1ConversationStore(db);
-  }
-  // Routed (the `durable_object` default and the `binding*` modes). With NO
-  // tenant storage bound at all — no `TENANT_DATA` namespace AND no shared
-  // `env.DB` — there is nowhere any tenant's rows could live, so it fails closed
-  // exactly as the unbound `env.DB` case did. Otherwise route per owner tenant.
   const hasTenantData = (env as { TENANT_DATA?: unknown } | undefined)?.TENANT_DATA !== undefined;
-  if (!hasTenantData && tenantDatabaseOf(env) === undefined) return NO_CONVERSATION_STORE;
+  if (!hasTenantData) return NO_CONVERSATION_STORE;
   return new RoutedConversationStore(env);
 }
 
@@ -512,21 +494,15 @@ export function conversationStoreFromEnv(env: unknown): ConversationStore {
  * with it — the same contract `sweepRequestLogs` has, and `gatewayScheduled`
  * calls the two in sequence.
  */
-export async function sweepResponseConversations(env: unknown, nowUnix: number): Promise<number> {
-  const db = tenantDatabaseOf(env);
-  if (db === undefined) return 0;
-  try {
-    const result = await db
-      .prepare("DELETE FROM responses_conversations WHERE expires_at_unix <= ?")
-      .bind(nowUnix)
-      .run();
-    return Number(result.meta?.changes ?? 0);
-  } catch (error) {
-    console.warn(
-      `[ferrogate] responses: conversation retention sweep failed: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
-    );
-    return 0;
-  }
+export async function sweepResponseConversations(_env: unknown, _nowUnix: number): Promise<number> {
+  // Since #821 PR2-delete the shared `env.DB` tenant database — the ONE table
+  // this cross-tenant single-statement reaper could sweep — is retired. Each
+  // tenant's `responses_conversations` rows now live in that tenant's own
+  // Durable Object, and `chain`/`get` already fence on `expires_at_unix`, so an
+  // expired row is invisible the moment it lapses. There is no account-global
+  // handle that could enumerate every tenant object to physically reap them
+  // here, so this Cron leg is a no-op rather than a read of a database that no
+  // longer exists. Physical per-object retention is the tenant object's own
+  // concern and is tracked separately.
+  return 0;
 }

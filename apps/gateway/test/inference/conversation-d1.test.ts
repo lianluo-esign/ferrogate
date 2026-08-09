@@ -152,17 +152,25 @@ describe("D1ConversationStore", () => {
     expect(await store.chain(ACME, "resp_2", 0)).toEqual({ ok: false, reason: "broken" });
   });
 
-  it("sweeps expired rows and only expired rows", async () => {
+  it("no longer physically sweeps — the cross-tenant reaper is retired; expiry is enforced on read (#821)", async () => {
     await store.append(ACME, turn("resp_live", null, 0, "live", FOREVER));
     await store.append(ACME, turn("resp_dead", null, 0, "dead", 1_500));
     await store.append(GLOBEX, turn("resp_dead_other", null, 0, "dead", 1_500));
 
-    // The sweep is tenant-AGNOSTIC by design: it is the Cron reaper, and it
-    // reclaims every tenant's expired state in one statement.
+    // Since #821 PR2-delete there is no shared `env.DB` — the ONE table this
+    // single-statement, tenant-agnostic reaper could sweep. Each tenant's rows
+    // live in that tenant's own Durable Object, and a DO namespace cannot be
+    // enumerated, so the Cron leg is a documented no-op.
     const removed = await sweepResponseConversations(env, 2_000);
-    expect(removed).toBe(2);
+    expect(removed).toBe(0);
+
+    // The safety property the sweep also carried — an expired chain is never
+    // served — is preserved by the read-time expiry fence WITHOUT waiting for a
+    // sweep: the live row stays readable, and every expired row is invisible the
+    // moment it lapses, across both tenants.
     expect(await store.get(ACME, "resp_live", 2_000)).not.toBeNull();
-    expect(await store.get(ACME, "resp_dead", 1_000)).toBeNull();
+    expect(await store.get(ACME, "resp_dead", 2_000)).toBeNull();
+    expect(await store.get(GLOBEX, "resp_dead_other", 2_000)).toBeNull();
   });
 });
 

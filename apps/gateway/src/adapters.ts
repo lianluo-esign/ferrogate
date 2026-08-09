@@ -635,9 +635,6 @@ export class ConfiguredTenancyLifecycleGate implements TenancyLifecycleGatePort 
   }
 }
 
-/** Binding name of the TENANT D1 holding `projects` / `workspaces`. */
-export const TENANT_DATABASE_BINDING = "DB";
-
 /** The three statements the durable gate issues. Exported so a test can pin them. */
 export const LIFECYCLE_TENANT_SQL = "SELECT id, status FROM tenants WHERE id = ?1";
 export const LIFECYCLE_PROJECT_SQL = "SELECT id, status, tenant_id FROM projects WHERE id = ?1";
@@ -784,20 +781,21 @@ export class D1TenancyLifecycleGate implements TenancyLifecycleGatePort {
 }
 
 /**
- * The shared `env.DB` row source — `tenants` in CONTROL, `projects`/`workspaces`
- * in the shared `DB`. `null` when neither is bound.
+ * The CONTROL-only lifecycle row source — `tenants` in CONTROL, and nothing for
+ * `projects`/`workspaces` here. `null` when CONTROL is not bound.
  *
- * This is the `"off"`/`"shared_development"` arm the later stanza-removal PR
- * deletes; the routed default reaches for the caller's object instead — see
- * {@link lifecycleRowSourceFactoryFromEnv}.
+ * Since #821 PR2-delete the shared `env.DB` tenant database is retired, so this
+ * no longer reads a shared `projects`/`workspaces` source: the routed default
+ * reaches for the caller's own object for those tiers — see
+ * {@link lifecycleRowSourceFactoryFromEnv} — and this control-only source is the
+ * fallback an as-yet-unroutable tenant sees, where `tenants` (a CONTROL row) is
+ * the only lifecycle authority that still applies.
  */
 export function lifecycleRowSourceFromEnv(env: Record<string, unknown>): LifecycleRowSource | null {
   const control = controlDatabaseFrom(env);
-  const tenant = env[TENANT_DATABASE_BINDING];
   const controlDb = isLifecycleDatabase(control) ? control : undefined;
-  const tenantDb = isLifecycleDatabase(tenant) ? tenant : undefined;
-  if (controlDb === undefined && tenantDb === undefined) return null;
-  return new D1LifecycleRowSource(controlDb, tenantDb);
+  if (controlDb === undefined) return null;
+  return new D1LifecycleRowSource(controlDb, undefined);
 }
 
 /**
@@ -842,8 +840,9 @@ export function lifecycleRowSourceFactoryFromEnv(
     typeof routingRaw === "string" ? routingRaw : undefined,
   );
   const tenantDataBound = env.TENANT_DATA !== undefined;
-  const routed =
-    mode !== undefined && mode !== "off" && mode !== "shared_development" && tenantDataBound;
+  // Since #821 PR2-delete every valid mode is a routed one (`durable_object` /
+  // `binding*`); the shared-DB `"off"`/`"shared_development"` postures are gone.
+  const routed = mode !== undefined && tenantDataBound;
 
   if (legacy === null && !routed) return null;
   if (!routed) return () => legacy as LifecycleRowSource;

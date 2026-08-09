@@ -82,7 +82,6 @@
  * ===========================================================================
  */
 export {
-  TENANT_DATABASE_ROUTING_DISABLED,
   TENANT_DATABASE_ROUTING_MISCONFIGURED,
   TENANT_DATABASE_ROUTING_MODES,
   TENANT_DATABASE_UNAVAILABLE,

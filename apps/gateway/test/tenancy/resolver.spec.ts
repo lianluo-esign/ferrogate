@@ -20,14 +20,12 @@ import {
   ControlDatabaseTenantRegistry,
   D1WalletStore,
   EnvBindingTenantDatabaseRouter,
-  SharedDatabaseTenantRouter,
   requireAtomicBatch,
 } from "@ferrogate/storage";
 import { beforeAll, describe, expect, test } from "vitest";
 import { controlDatabaseFrom } from "../../src/control-data.js";
 import { HttpError } from "../../src/middleware/errors.js";
 import {
-  TENANT_DATABASE_ROUTING_DISABLED,
   TENANT_DATABASE_ROUTING_MISCONFIGURED,
   TENANT_DATABASE_UNAVAILABLE,
   type TenancyBindings,
@@ -98,15 +96,6 @@ describe("the resolver is @ferrogate/storage's router, not a second implementati
     expect(resolver.router).toBeInstanceOf(EnvBindingTenantDatabaseRouter);
     expect(resolver.mode).toBe("binding_strict");
     expect(resolver.eager).toBe(true);
-  });
-
-  test('"shared_development" mode mounts the shared router', () => {
-    const shared = createTenantDatabaseResolver({
-      ...bindings(),
-      GATEWAY_TENANT_DB_ROUTING: "shared_development",
-      DB: env.TENANT_DB_ACME,
-    });
-    expect(shared.router).toBeInstanceOf(SharedDatabaseTenantRouter);
   });
 
   test("the registry the router reads is the control database's tenant_databases", async () => {
@@ -240,18 +229,19 @@ describe("fail closed — an unresolvable tenant NEVER falls back", () => {
     await refusal(resolver().forTenant(""), TENANT_DATABASE_UNAVAILABLE);
   });
 
-  test('mode "off" refuses by name instead of handing back the shared database', async () => {
-    const off = createTenantDatabaseResolver({
-      ...bindings(),
-      GATEWAY_TENANT_DB_ROUTING: "off",
-      DB: env.TENANT_DB_ACME,
-    });
-    expect(off.mode).toBe("off");
-    const error = await refusal(off.forTenant(TENANT_ACME), TENANT_DATABASE_ROUTING_DISABLED);
-    expect(error.message).toContain("refused rather than served from the shared database");
-    // Even `control()` refuses: with no routing configured there is no
-    // account-global handle this seam is entitled to hand out either.
-    expect(() => off.control()).toThrow(HttpError);
+  test('the retired "off" mode no longer parses, so no shared-DB fallback exists', async () => {
+    // #821 PR2-delete: `"off"` and `"shared_development"` — the only modes that
+    // read the shared `env.DB` — are gone. Naming `"off"` is now an unknown
+    // mode, so the resolver refuses to build at all rather than handing back a
+    // shared database. There is nowhere left for a `catch → env.DB` to reach.
+    expect(parseTenantDatabaseRoutingMode("off")).toBeUndefined();
+    expect(() =>
+      createTenantDatabaseResolver({
+        ...bindings(),
+        GATEWAY_TENANT_DB_ROUTING: "off",
+        DB: env.TENANT_DB_ACME,
+      }),
+    ).toThrow(expect.objectContaining({ code: TENANT_DATABASE_ROUTING_MISCONFIGURED, status: 503 }));
   });
 
   test("EVERY refusal above is an error — none of them is a database", async () => {
@@ -284,20 +274,17 @@ describe("GATEWAY_TENANT_DB_ROUTING parsing", () => {
     // owns the rest of that claim; this case pins the parse.
     expect(parseTenantDatabaseRoutingMode(undefined)).toBe("durable_object");
     expect(parseTenantDatabaseRoutingMode("   ")).toBe("durable_object");
-    // `"off"` is still reachable, but only by NAME — which is what keeps a
-    // deployment that binds no TENANT_DATA able to say so.
-    for (const mode of [
-      "durable_object",
-      "off",
-      "binding",
-      "binding_strict",
-      "shared_development",
-    ]) {
+    // Since #821 PR2-delete only the routed modes survive; every one round-trips.
+    for (const mode of ["durable_object", "binding", "binding_strict"]) {
       expect(parseTenantDatabaseRoutingMode(mode)).toBe(mode);
     }
+    // The retired shared-`env.DB` modes now parse to `undefined` (an unknown
+    // mode) rather than a posture, so a config still naming one is a loud 503.
+    expect(parseTenantDatabaseRoutingMode("off")).toBeUndefined();
+    expect(parseTenantDatabaseRoutingMode("shared_development")).toBeUndefined();
   });
 
-  test("a typo does NOT silently degrade to off", () => {
+  test("a typo does NOT silently degrade to a mode", () => {
     expect(parseTenantDatabaseRoutingMode("bindng")).toBeUndefined();
     expect(() =>
       createTenantDatabaseResolver({ ...bindings(), GATEWAY_TENANT_DB_ROUTING: "bindng" }),
@@ -318,12 +305,11 @@ describe("GATEWAY_TENANT_DB_ROUTING parsing", () => {
       } as TenancyBindings),
     ).toThrow(expect.objectContaining({ code: TENANT_DATABASE_ROUTING_MISCONFIGURED }));
 
-    // "shared_development" without DB refuses too — the escape hatch cannot be
-    // reached by accident either.
-    const { DB: _db, ...withoutDb } = bindings() as Record<string, unknown>;
+    // The retired "shared_development" mode is now an unknown value, so it too
+    // is misconfigured rather than a reachable escape hatch to a shared `DB`.
     expect(() =>
       createTenantDatabaseResolver({
-        ...withoutDb,
+        ...bindings(),
         GATEWAY_TENANT_DB_ROUTING: "shared_development",
       } as TenancyBindings),
     ).toThrow(expect.objectContaining({ code: TENANT_DATABASE_ROUTING_MISCONFIGURED }));
