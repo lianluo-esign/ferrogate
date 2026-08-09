@@ -148,8 +148,24 @@ interface Session {
   readonly refresh_token: string;
   readonly expires_in: number;
   readonly gateway_api_key: string;
-  readonly user: { id: string; email: string; display_name: string };
+  readonly platform_operator_api_key: string | null;
+  readonly user: { id: string; email: string; display_name: string; superadmin?: boolean };
   readonly tenant: { id: string; name: string; role: string };
+}
+
+/**
+ * Promote an existing admin user to `superadmin` straight in SQL.
+ *
+ * There is no creation API for a superadmin — it is a deployment fact, seeded
+ * out of band — so a test states it by flipping the column the register flow set
+ * to 0. `admin_users.superadmin` is what `handleLogin` gates the operator-key
+ * mint on.
+ */
+async function makeSuperadmin(email: string): Promise<void> {
+  await db()
+    .prepare("UPDATE admin_users SET superadmin = 1 WHERE email = ?")
+    .bind(email)
+    .run();
 }
 
 async function register(
@@ -276,6 +292,9 @@ beforeEach(async () => {
     db().prepare("DELETE FROM admin_user_tenant_memberships"),
     db().prepare("DELETE FROM admin_user_refresh_tokens"),
     db().prepare("DELETE FROM api_key_directory"),
+    // #912: the superadmin's platform-operator credential lives here; clear it
+    // so a prior test's key cannot survive into the next.
+    db().prepare("DELETE FROM static_api_keys"),
   ]);
 });
 
@@ -563,6 +582,109 @@ describe("POST /v1/admin/login", () => {
       body: { email: "owner@acme.test", password: "correct horse b" },
     });
     expect(login.response.headers.get("set-cookie")).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The platform-operator console credential  (#912)
+// ---------------------------------------------------------------------------
+
+describe("the superadmin platform-operator credential (#912)", () => {
+  /** A platform WRITE with no `tenant_id` — 201 `scope:"platform"` only for a real operator. */
+  async function createProvider(secret: string, id: string): Promise<Response> {
+    return SELF.fetch(`${BASE}/admin/v1/providers`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${secret}`, "content-type": "application/json" },
+      body: JSON.stringify({
+        id,
+        name: id,
+        kind: "openai-compatible",
+        base_url: `https://${id}.example.test/v1`,
+        enabled: true,
+      }),
+    });
+  }
+
+  async function loginSuperadmin(): Promise<Session> {
+    const registered = await register("root@acme.test");
+    await makeSuperadmin("root@acme.test");
+    await provisionTenantDatabase(registered.tenant.id);
+    const { status, body } = await call("POST", "/v1/admin/login", {
+      body: { email: "root@acme.test", password: "correct horse battery" },
+    });
+    expect(status, JSON.stringify(body)).toBe(200);
+    return body as unknown as Session;
+  }
+
+  it("mints a DISTINCT operator key for a superadmin and advertises the flag", async () => {
+    const session = await loginSuperadmin();
+    expect(session.user.superadmin).toBe(true);
+    expect(session.platform_operator_api_key).not.toBeNull();
+    expect(String(session.platform_operator_api_key).startsWith("fg_")).toBe(true);
+    // It is a SEPARATE credential — never the tenant gateway key.
+    expect(session.platform_operator_api_key).not.toBe(session.gateway_api_key);
+  });
+
+  it("gives an ordinary user NO operator key and superadmin:false", async () => {
+    await register("plain@acme.test");
+    // No `makeSuperadmin`, so login mints the tenant gateway key only. The
+    // login itself does not need the tenant database provisioned to succeed.
+    const { status, body } = await call("POST", "/v1/admin/login", {
+      body: { email: "plain@acme.test", password: "correct horse battery" },
+    });
+    expect(status).toBe(200);
+    const session = body as unknown as Session;
+    expect(session.user.superadmin).toBe(false);
+    // Null or absent — either way the client learns "no operator credential".
+    expect(session.platform_operator_api_key ?? null).toBeNull();
+  });
+
+  it("NEGATIVE: the superadmin's ORDINARY gateway key is still tenant-scoped, never platform", async () => {
+    const session = await loginSuperadmin();
+    // The tenant virtual key must NOT be a platform credential just because its
+    // holder is a superadmin — `provisionGatewayApiKey` stays `{kind:"tenant"}`.
+    const response = await createProvider(session.gateway_api_key, "tenant_scoped_probe");
+    expect(response.status, await response.clone().text()).toBe(201);
+    const body = (await response.json()) as { scope?: string };
+    expect(body.scope).toBe("tenant");
+    expect(body.scope).not.toBe("platform");
+  });
+
+  it("POSITIVE: the operator key writes the PLATFORM catalog with no tenant_id", async () => {
+    const session = await loginSuperadmin();
+    const operator = String(session.platform_operator_api_key);
+
+    const created = await createProvider(operator, "operator_platform_probe");
+    expect(created.status, await created.clone().text()).toBe(201);
+    expect(((await created.json()) as { scope?: string }).scope).toBe("platform");
+
+    const list = await SELF.fetch(`${BASE}/admin/v1/providers`, {
+      headers: { authorization: `Bearer ${operator}` },
+    });
+    expect(list.status).toBe(200);
+    expect(((await list.json()) as { scope?: string }).scope).toBe("platform");
+  });
+
+  it("logout REVOKES the operator key — it 401s afterwards", async () => {
+    const session = await loginSuperadmin();
+    const operator = String(session.platform_operator_api_key);
+
+    // Live before logout.
+    const before = await SELF.fetch(`${BASE}/admin/v1/status`, {
+      headers: { authorization: `Bearer ${operator}` },
+    });
+    expect(before.status).toBe(200);
+
+    const logout = await call("POST", "/v1/admin/logout", {
+      body: { refresh_token: session.refresh_token },
+    });
+    expect(logout.status).toBe(200);
+    expect(logout.body).toEqual({ object: "logout", revoked: true });
+
+    const after = await SELF.fetch(`${BASE}/admin/v1/status`, {
+      headers: { authorization: `Bearer ${operator}` },
+    });
+    expect(after.status).toBe(401);
   });
 });
 
