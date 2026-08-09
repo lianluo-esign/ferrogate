@@ -7,7 +7,7 @@
 -->
 
 <p align="center">
-  <img src="docs/assets/ferrogate-logo.svg" alt="FerroGate" width="440" />
+  <img src="docs/assets/ferrogate-logo.png" alt="FerroGate" width="520" />
 </p>
 
 # FerroGate
