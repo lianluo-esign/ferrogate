@@ -26,6 +26,7 @@ import {
 import {
   DurableObjectTenantDatabaseRouter,
   type LifecycleStatus,
+  type TenantDatabaseRouter,
   lifecycleStatusAllowsRequests,
   parseLifecycleStatus,
 } from "@ferrogate/storage";
@@ -809,6 +810,53 @@ export function d1LifecycleRowSource(
   };
 }
 
+/**
+ * Build the lifecycle row source for ONE resolved credential (#821 PR2a).
+ *
+ * `tenants` stays in the CONTROL database; `projects` / `workspaces` are TENANT
+ * data and, under the routed default, live in the CALLER tenant's own Durable
+ * Object — the SAME object the credential resolved through and the metering sink
+ * writes. Until this existed the gate read `env.DB`, a database a routed
+ * deployment never writes, so a suspended project/workspace was invisible and
+ * only a `tenants.status` suspension could ever refuse.
+ *
+ * `routingTenantId` is the resolved credential's own tenant; every project and
+ * workspace it names belongs to that tenant, so the object is addressed by it.
+ * A blank tenant (or no router) falls back to the shared `tenant` binding —
+ * which is the `"off"`/no-`TENANT_DATA` posture and what keeps `env.DB`
+ * declared-and-read.
+ *
+ * A router failure surfaces from `projectRow`/`workspaceRow` and is caught by
+ * {@link resolveLifecycleChain}'s caller as `unavailable` (503) — an unreadable
+ * tier has NOT proven the tenancy is suspended.
+ */
+export function lifecycleRowSourceFor(
+  control: D1Database | undefined,
+  tenant: D1Database | undefined,
+  router: TenantDatabaseRouter | undefined,
+): (routingTenantId: string | null) => LifecycleRowSource {
+  return (routingTenantId: string | null): LifecycleRowSource => {
+    if (router === undefined || routingTenantId === null || routingTenantId === "") {
+      return d1LifecycleRowSource(control, tenant);
+    }
+    const tenantDb = async (): Promise<D1Database> => (await router.forTenant(routingTenantId)).db;
+    return {
+      async tenantRow(id: string): Promise<LifecycleRow | null> {
+        if (control === undefined) return null;
+        return asLifecycleRow(await control.prepare(LIFECYCLE_TENANT_SQL).bind(id).first());
+      },
+      async projectRow(id: string): Promise<LifecycleRow | null> {
+        return asLifecycleRow(await (await tenantDb()).prepare(LIFECYCLE_PROJECT_SQL).bind(id).first());
+      },
+      async workspaceRow(id: string): Promise<LifecycleRow | null> {
+        return asLifecycleRow(
+          await (await tenantDb()).prepare(LIFECYCLE_WORKSPACE_SQL).bind(id).first(),
+        );
+      },
+    };
+  };
+}
+
 /** Rust `present`: trim, and treat blank as absent. */
 function presentTenancyId(value: string | null | undefined): string | undefined {
   const trimmed = (value ?? "").trim();
@@ -917,7 +965,17 @@ export function firstInactiveTenancy(chain: readonly LifecycleRef[]): LifecycleR
  * exists. That asymmetry is the 401-vs-403 invariant, and it is preserved by
  * construction here rather than by a check that could be forgotten.
  */
-export function tenancyGatedApiKeyPort(inner: ApiKeyPort, source: LifecycleRowSource): ApiKeyPort {
+export function tenancyGatedApiKeyPort(
+  inner: ApiKeyPort,
+  /**
+   * The row source for ONE resolved credential. A FACTORY rather than a fixed
+   * source because the tenant leg is routed to the caller's own object (#821):
+   * the routing tenant is not known until the credential resolves. A deployment
+   * with no router passes a factory that ignores the argument (the shared
+   * `env.DB` source), so the legacy posture is a special case of the same shape.
+   */
+  sourceFor: (routingTenantId: string | null) => LifecycleRowSource,
+): ApiKeyPort {
   return {
     async resolve(presentedKey: string): Promise<ApiKeyResolution> {
       const resolution = await inner.resolve(presentedKey);
@@ -925,6 +983,7 @@ export function tenancyGatedApiKeyPort(inner: ApiKeyPort, source: LifecycleRowSo
       // A platform operator carries no tenancy chain; Rust never gates it.
       if (resolution.auth.platformOperator) return resolution;
 
+      const source = sourceFor(resolution.auth.tenancy.tenantId ?? null);
       let chain: readonly LifecycleRef[];
       try {
         chain = await resolveLifecycleChain(source, resolution.auth.tenancy);
@@ -1506,9 +1565,17 @@ export function resolveDeps(env: AgentRuntimeBindings): AgentRuntimeDeps | undef
   // route the second hop (the pure-`durable_object` topology, no registry read);
   // absent either, the dev table is the only thing left.
   const tenantData = env.TENANT_DATA;
-  const resolvedApiKeys: ApiKeyPort | undefined =
+  // ONE router for BOTH the two-hop credential leg and the admission money legs
+  // (#821 PR2a): the wallet no-oversell reserve and the monthly-budget/prepaid
+  // reads route through the SAME per-tenant object the credential resolves in,
+  // so a request admits and spends against one balance rather than two.
+  const tenantRouter =
     controlDb !== undefined && tenantData !== undefined
-      ? twoHopApiKeyPort(controlDb, new DurableObjectTenantDatabaseRouter(tenantData, controlDb))
+      ? new DurableObjectTenantDatabaseRouter(tenantData, controlDb)
+      : undefined;
+  const resolvedApiKeys: ApiKeyPort | undefined =
+    controlDb !== undefined && tenantRouter !== undefined
+      ? twoHopApiKeyPort(controlDb, tenantRouter)
       : dev
         ? inMemoryApiKeyPort(parseJsonVar<DevApiKey[]>(env.FG_DEV_API_KEYS, []))
         : undefined;
@@ -1531,9 +1598,16 @@ export function resolveDeps(env: AgentRuntimeBindings): AgentRuntimeDeps | undef
    * `apps/mcp/test/fleet-tenancy-suspension.test.ts` red.
    */
   const apiKeys: ApiKeyPort | undefined =
-    resolvedApiKeys === undefined || (env.DB === undefined && controlDb === undefined)
+    resolvedApiKeys === undefined ||
+    (env.DB === undefined && controlDb === undefined && tenantRouter === undefined)
       ? resolvedApiKeys
-      : tenancyGatedApiKeyPort(resolvedApiKeys, d1LifecycleRowSource(controlDb, env.DB));
+      : tenancyGatedApiKeyPort(
+          resolvedApiKeys,
+          // #821 PR2a — `projects`/`workspaces` route to the caller tenant's own
+          // object via `tenantRouter`; `tenants` stays in CONTROL and `env.DB` is
+          // the fallback for the `"off"`/no-`TENANT_DATA` posture.
+          lifecycleRowSourceFor(controlDb, env.DB, tenantRouter),
+        );
 
   const workerIdentities: WorkerIdentityPort | undefined =
     controlDb !== undefined
@@ -1550,11 +1624,16 @@ export function resolveDeps(env: AgentRuntimeBindings): AgentRuntimeDeps | undef
 
   return {
     apiKeys,
-    // The admission ladder reads `CONTROL_DB` (quota policies), `DB` (monthly
-    // spend + prepaid wallet) and `RATE_LIMIT` (the shared RPM counter). All
-    // three are OPTIONAL and each degrades in the tightening direction only —
-    // see `src/admission/index.ts`.
-    admission: admissionFromEnv(env as AdmissionBindings),
+    // The admission ladder reads `CONTROL_DB` (quota policies), `RATE_LIMIT`
+    // (the shared RPM counter) and — for the money legs — the CALLER tenant's
+    // own Durable Object via `tenantRouter` (#821 PR2a: monthly-budget rollups
+    // and the prepaid wallet). Absent a router it falls back to the shared `DB`.
+    // Every source is OPTIONAL and each degrades in the tightening direction
+    // only — see `src/admission/admit.ts`.
+    admission: admissionFromEnv(
+      env as AdmissionBindings,
+      tenantRouter !== undefined ? { router: tenantRouter } : {},
+    ),
     // FC-7. THE MOUNT of the RBAC gate. Deleting this line returns the Worker
     // to the state FLEET-CONSISTENCY records: `rbac_action` parsed off the
     // contract (`src/contract.ts`) and never read, so a role an operator uses

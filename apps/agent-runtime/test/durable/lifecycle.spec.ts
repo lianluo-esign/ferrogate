@@ -36,6 +36,7 @@ import {
   bearer,
   errorCode,
   setupDurablePorts,
+  tenantResourceDb,
 } from "./setup.js";
 
 /** `POST /v1/agents/{name}` — bearer `agents.invoke`, and it spends nothing. */
@@ -61,20 +62,26 @@ const PROJECT = "proj-a";
 const WORKSPACE = "ws-a";
 
 async function seedHierarchy(): Promise<void> {
+  // `tenants` is CONTROL state; `projects`/`workspaces` are TENANT data and,
+  // since #821 PR2a, are READ from the caller tenant's own object — so they are
+  // SEEDED there too (`env.DB` is what a routed deployment never writes).
   await env.CONTROL_DB.prepare(
     "INSERT OR REPLACE INTO tenants (id, name, slug, status) VALUES (?, 'A', 'a', 'active')",
   )
     .bind(TENANT_A)
     .run();
-  await env.DB.prepare(
-    "INSERT OR REPLACE INTO projects (id, tenant_id, name, slug, status) VALUES (?, ?, 'p', 'p', 'active')",
-  )
+  const tenantDb = await tenantResourceDb(TENANT_A);
+  await tenantDb
+    .prepare(
+      "INSERT OR REPLACE INTO projects (id, tenant_id, name, slug, status) VALUES (?, ?, 'p', 'p', 'active')",
+    )
     .bind(PROJECT, TENANT_A)
     .run();
-  await env.DB.prepare(
-    "INSERT OR REPLACE INTO workspaces (id, project_id, tenant_id, name, slug, status) " +
-      "VALUES (?, ?, ?, 'w', 'w', 'active')",
-  )
+  await tenantDb
+    .prepare(
+      "INSERT OR REPLACE INTO workspaces (id, project_id, tenant_id, name, slug, status) " +
+        "VALUES (?, ?, ?, 'w', 'w', 'active')",
+    )
     .bind(WORKSPACE, PROJECT, TENANT_A)
     .run();
 }
@@ -87,7 +94,8 @@ async function setTenantStatus(status: string): Promise<void> {
 }
 
 async function setProjectStatus(status: string): Promise<void> {
-  const result = await env.DB.prepare("UPDATE projects SET status = ?1 WHERE id = ?2")
+  const result = await (await tenantResourceDb(TENANT_A))
+    .prepare("UPDATE projects SET status = ?1 WHERE id = ?2")
     .bind(status, PROJECT)
     .run();
   expect(result.meta.changes, "the lifecycle update touched no project row").toBe(1);

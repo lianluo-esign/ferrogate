@@ -45,6 +45,8 @@ import type { TenantDataNamespace } from "@ferrogate/storage/durable-objects";
 import type { ApiOperation } from "./contract.js";
 import { controlDatabaseFrom } from "./control-data.js";
 import { d1ApiKeyResolverFromEnv } from "./keys/index.js";
+import type { TenancyBindings } from "./tenancy/ports.js";
+import { parseTenantDatabaseRoutingMode, resolverForEnv } from "./tenancy/resolver.js";
 import type {
   ApiKeyAuthenticatorPort,
   ApiKeyResolution,
@@ -730,26 +732,43 @@ export class D1LifecycleRowSource implements LifecycleRowSource {
  *    what `docs/design/tenant-data-classification-2026-08.md` classifies them
  *    for. See {@link lifecycleRowSourceFromEnv} for the one line that changes.
  */
-export class D1TenancyLifecycleGate implements TenancyLifecycleGatePort {
-  readonly #source: LifecycleRowSource;
+/**
+ * A row source for ONE resolved credential. A FACTORY rather than a fixed source
+ * because the `projects` / `workspaces` tier is routed to the caller's OWN
+ * tenant object (#821), and the routing tenant is not known until the request's
+ * `AuthContext` exists. A deployment on the `"off"` posture passes a factory
+ * that ignores the argument (the shared `env.DB` source), so the legacy posture
+ * is a special case of the same shape.
+ */
+export type LifecycleRowSourceFactory = (routingTenantId: string | null) => LifecycleRowSource;
 
-  constructor(source: LifecycleRowSource) {
-    this.#source = source;
+export class D1TenancyLifecycleGate implements TenancyLifecycleGatePort {
+  readonly #sourceFor: LifecycleRowSourceFactory;
+
+  constructor(source: LifecycleRowSource | LifecycleRowSourceFactory) {
+    // A plain source is wrapped into a constant factory, so the unit tests that
+    // hand in a fixed `rowSource(...)` and the routed `fromEnv` path share one
+    // `admit` body.
+    this.#sourceFor = typeof source === "function" ? source : () => source;
   }
 
-  /** `null` when NEITHER database is bound, so the caller keeps its config path. */
+  /** `null` when NO lifecycle authority is bound, so the caller keeps its config path. */
   static fromEnv(env: Record<string, unknown>): D1TenancyLifecycleGate | null {
-    const source = lifecycleRowSourceFromEnv(env);
-    return source === null ? null : new D1TenancyLifecycleGate(source);
+    const factory = lifecycleRowSourceFactoryFromEnv(env);
+    return factory === null ? null : new D1TenancyLifecycleGate(factory);
   }
 
   async admit(auth: AuthContext, operation?: ApiOperation): Promise<LifecycleDecision> {
     const scope = callerScope(auth);
     if (scope.kind === "platform_operator") return { admitted: true };
 
+    // The tenant `projects`/`workspaces` reads route to THIS caller's object.
+    // A credential pinned to the empty-string tenant routes nowhere and the
+    // factory hands back the shared source — the pre-routing behaviour.
+    const source = this.#sourceFor(scope.tenantId);
     let chain: readonly LifecycleRef[];
     try {
-      chain = await resolveLifecycleChain(this.#source, {
+      chain = await resolveLifecycleChain(source, {
         tenantId: auth.tenancy.tenantId,
         projectId: auth.tenancy.projectId,
         workspaceId: auth.tenancy.workspaceId,
@@ -764,7 +783,14 @@ export class D1TenancyLifecycleGate implements TenancyLifecycleGatePort {
   }
 }
 
-/** `null` when neither `CONTROL_DB` nor `DB` is bound. */
+/**
+ * The shared `env.DB` row source — `tenants` in CONTROL, `projects`/`workspaces`
+ * in the shared `DB`. `null` when neither is bound.
+ *
+ * This is the `"off"`/`"shared_development"` arm the later stanza-removal PR
+ * deletes; the routed default reaches for the caller's object instead — see
+ * {@link lifecycleRowSourceFactoryFromEnv}.
+ */
 export function lifecycleRowSourceFromEnv(env: Record<string, unknown>): LifecycleRowSource | null {
   const control = controlDatabaseFrom(env);
   const tenant = env[TENANT_DATABASE_BINDING];
@@ -772,6 +798,88 @@ export function lifecycleRowSourceFromEnv(env: Record<string, unknown>): Lifecyc
   const tenantDb = isLifecycleDatabase(tenant) ? tenant : undefined;
   if (controlDb === undefined && tenantDb === undefined) return null;
   return new D1LifecycleRowSource(controlDb, tenantDb);
+}
+
+/**
+ * The per-credential row-source factory (#821 PR2a).
+ *
+ * Under the routed default (`durable_object`/`binding*` WITH a `TENANT_DATA`
+ * namespace) the `projects`/`workspaces` reads resolve the caller tenant's own
+ * database through the SAME `resolverForEnv` router `tenantDatabaseOf(c)` uses —
+ * so a suspended project/workspace is seen in the object the control plane
+ * actually writes, not the shared `env.DB` a routed deployment never touches.
+ * `tenants` stays a CONTROL read on every arm.
+ *
+ * ## Why an UNROUTABLE tenant falls back to `env.DB` rather than 503ing
+ *
+ * This gate runs INSIDE `contractAuth`, BEFORE `src/tenancy/` resolves — so a
+ * tenant the router cannot place (no `tenant_databases` roster row, i.e. one not
+ * yet cut over to a durable object) must not become a lifecycle 503 on every
+ * request, which is the exact hazard `D1TenancyLifecycleGate`'s own docblock
+ * names ("running the router inside the auth guard would turn an unresolvable
+ * tenant into an authentication failure"). A ROUTING failure therefore falls
+ * back to the shared `env.DB` source — the pre-cutover behaviour, unchanged for
+ * those tenants — while a provisioned durable tenant reads its object and a REAL
+ * object outage (the handle resolved, the statement threw) still propagates as a
+ * 503. Money paths do NOT take this fallback; a lifecycle READ against the
+ * pre-cutover shared row is not the cross-tenant money hazard the wallet is.
+ *
+ * The `"off"`/`"shared_development"` postures, and any deployment that binds no
+ * `TENANT_DATA`, keep reading `env.DB` — the arm the later stanza-removal PR
+ * deletes, and what keeps `env.DB` declared-and-read here.
+ *
+ * `null` — no authority at all — is preserved exactly: neither a control
+ * database nor a shared `env.DB` nor a `TENANT_DATA` namespace bound.
+ */
+export function lifecycleRowSourceFactoryFromEnv(
+  env: Record<string, unknown>,
+): LifecycleRowSourceFactory | null {
+  const control = controlDatabaseFrom(env);
+  const controlDb = isLifecycleDatabase(control) ? control : undefined;
+  const legacy = lifecycleRowSourceFromEnv(env);
+  const routingRaw = env.GATEWAY_TENANT_DB_ROUTING;
+  const mode = parseTenantDatabaseRoutingMode(
+    typeof routingRaw === "string" ? routingRaw : undefined,
+  );
+  const tenantDataBound = env.TENANT_DATA !== undefined;
+  const routed =
+    mode !== undefined && mode !== "off" && mode !== "shared_development" && tenantDataBound;
+
+  if (legacy === null && !routed) return null;
+  if (!routed) return () => legacy as LifecycleRowSource;
+
+  const sharedFallback = legacy ?? new D1LifecycleRowSource(controlDb, undefined);
+  return (routingTenantId: string | null): LifecycleRowSource => {
+    if (routingTenantId === null || routingTenantId === "") return sharedFallback;
+    // Resolve the tenant's own object, or `null` when it is not routable yet
+    // (no roster row) — in which case the shared source below answers instead.
+    // Only the ROUTING is guarded; a statement that throws after the handle
+    // resolved is a real outage and propagates.
+    const routedDb = async (): Promise<D1Database | null> => {
+      try {
+        return (await resolverForEnv(env as unknown as TenancyBindings).forTenant(routingTenantId))
+          .db;
+      } catch {
+        return null;
+      }
+    };
+    return {
+      async tenantRow(id: string): Promise<LifecycleRow | null> {
+        if (controlDb === undefined) return null;
+        return asLifecycleRow(await controlDb.prepare(LIFECYCLE_TENANT_SQL).bind(id).first());
+      },
+      async projectRow(id: string): Promise<LifecycleRow | null> {
+        const db = await routedDb();
+        if (db === null) return sharedFallback.projectRow(id);
+        return asLifecycleRow(await db.prepare(LIFECYCLE_PROJECT_SQL).bind(id).first());
+      },
+      async workspaceRow(id: string): Promise<LifecycleRow | null> {
+        const db = await routedDb();
+        if (db === null) return sharedFallback.workspaceRow(id);
+        return asLifecycleRow(await db.prepare(LIFECYCLE_WORKSPACE_SQL).bind(id).first());
+      },
+    };
+  };
 }
 
 /**

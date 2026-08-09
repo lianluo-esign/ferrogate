@@ -14,10 +14,13 @@
  *  - `d1QuotaPolicySource` — `quota_policies` + `plans` in `CONTROL_DB`,
  *    the source that WINS over `FG_DEV_QUOTA_POLICIES` whenever the control
  *    database is bound;
- *  - `d1SpendSource` — `usage_monthly_rollups.cost_usd` and
- *    `wallets.balance_credits` minus live holds, in `DB`;
- *  - `d1WalletAdmission` — `@ferrogate/storage`'s `D1WalletStore`, the atomic
- *    no-oversell reservation;
+ *  - `routedSpendSource` — `usage_monthly_rollups.cost_usd` and
+ *    `wallets.balance_credits` minus live holds, in the CALLER tenant's OWN
+ *    Durable Object (#821 PR2a): the money legs route to the same object the
+ *    credential resolves through, never the shared `env.DB` a routed deployment
+ *    does not write. That is why the rollups and wallets below are seeded there;
+ *  - `routedWalletAdmission` — `@ferrogate/storage`'s `D1WalletStore`, the atomic
+ *    no-oversell reservation, over that routed object handle;
  *  - `api_keys.request_limit_per_minute` — the TOK-12 column the D1 resolver
  *    used to read and DROP.
  *
@@ -151,22 +154,29 @@ async function seedAdmissionFixtures(): Promise<void> {
     .bind("qp_scope_disabled", "tenant-scope-disabled", null, null, 0)
     .run();
 
-  // DB: the spend rollups. `>=` refuses AT the cap, so 10 of a $10 budget is a
-  // refusal and 1 is not.
+  // The tenant OBJECT (#821 PR2a): the spend rollups. `>=` refuses AT the cap,
+  // so 10 of a $10 budget is a refusal and 1 is not. Seeded in the caller's own
+  // object because that is where the routed admission ladder now reads them —
+  // seeding `env.DB` would make every budget read `0` and admit an over-cap
+  // tenant, which is the very regression this slice closes.
   const period = currentPeriodMonth();
-  await env.DB.prepare(INSERT_ROLLUP_SQL)
+  await (await tenantResourceDb("tenant-budget-over"))
+    .prepare(INSERT_ROLLUP_SQL)
     .bind(`${period}:tenant:tenant-budget-over`, period, "tenant-budget-over", 10)
     .run();
-  await env.DB.prepare(INSERT_ROLLUP_SQL)
+  await (await tenantResourceDb("tenant-budget-under"))
+    .prepare(INSERT_ROLLUP_SQL)
     .bind(`${period}:tenant:tenant-budget-under`, period, "tenant-budget-under", 1)
     .run();
 
-  // DB: the prepaid wallets. A tenant with NO row is never denied, which is
-  // what every other tenant in this harness relies on.
-  await env.DB.prepare(INSERT_WALLET_SQL)
+  // The tenant OBJECT: the prepaid wallets. A tenant with NO row is never
+  // denied, which is what every other tenant in this harness relies on.
+  await (await tenantResourceDb("tenant-wallet-empty"))
+    .prepare(INSERT_WALLET_SQL)
     .bind("tenant-wallet-empty", "tenant-wallet-empty", 0)
     .run();
-  await env.DB.prepare(INSERT_WALLET_SQL)
+  await (await tenantResourceDb("tenant-wallet-funded"))
+    .prepare(INSERT_WALLET_SQL)
     .bind("tenant-wallet-funded", "tenant-wallet-funded", 1_000_000)
     .run();
 
@@ -184,8 +194,8 @@ async function submit(key: string): Promise<Response> {
   });
 }
 
-describe("the monthly USD budget, off usage_monthly_rollups", () => {
-  it("REFUSES a tenant whose committed spend has reached its cap", async () => {
+describe("the monthly USD budget, off usage_monthly_rollups in the tenant OBJECT", () => {
+  it("REFUSES a tenant whose committed spend has reached its cap — read from the DO", async () => {
     const response = await submit(KEY_OVER_BUDGET);
     expect(response.status).toBe(429);
     expect(await errorCode(response)).toBe("monthly_budget_exceeded");
@@ -197,36 +207,107 @@ describe("the monthly USD budget, off usage_monthly_rollups", () => {
     const response = await submit(KEY_UNDER_BUDGET);
     expect(response.status).toBe(202);
   });
+
+  it("reads the budget from the OBJECT, not the shared env.DB — routing is the point", async () => {
+    // The rollup lives in the tenant's own object; the shared `env.DB` holds NO
+    // row for it. If the ladder still read `env.DB` the over-cap tenant would be
+    // admitted, so this is the assertion that would fail on an un-routed gate.
+    const period = currentPeriodMonth();
+    const inObject = await (await tenantResourceDb("tenant-budget-over"))
+      .prepare("SELECT cost_usd FROM usage_monthly_rollups WHERE period_month = ? AND scope_id = ?")
+      .bind(period, "tenant-budget-over")
+      .first<{ cost_usd: number }>();
+    expect(Number(inObject?.cost_usd ?? -1)).toBe(10);
+    const inShared = await env.DB.prepare(
+      "SELECT COUNT(*) AS n FROM usage_monthly_rollups WHERE scope_id = ?",
+    )
+      .bind("tenant-budget-over")
+      .first<{ n: number }>();
+    expect(Number(inShared?.n ?? -1)).toBe(0);
+  });
 });
 
-describe("the prepaid wallet, off wallets + wallet_reservations", () => {
-  it("REFUSES a tenant whose wallet is funded to zero", async () => {
+describe("the prepaid wallet, off wallets + wallet_reservations in the tenant OBJECT", () => {
+  it("REFUSES a tenant whose wallet is funded to zero — read from the DO", async () => {
     const response = await submit(KEY_EMPTY_WALLET);
     expect(response.status).toBe(429);
     expect(await errorCode(response)).toBe("wallet_balance_exhausted");
   });
 
-  it("ADMITS a funded tenant, and releases the hold it took", async () => {
+  it("ADMITS a funded tenant, and releases the hold it took — all in the DO", async () => {
     const response = await submit(KEY_FUNDED_WALLET);
     expect(response.status).toBe(202);
 
+    const fundedDb = await tenantResourceDb("tenant-wallet-funded");
     // The hold is a HOLD, not a debit: `contractAuth`'s `finally` releases it,
-    // so no `active` reservation may survive the request. A leak here would
-    // silently drain the tenant's available balance one request at a time until
-    // the TTL swept it — the failure mode `WALLET_HOLD_TTL_SECONDS` exists to
-    // bound, and which this assertion refuses to rely on.
-    const held = await env.DB.prepare(
-      "SELECT COUNT(*) AS n FROM wallet_reservations WHERE tenant_id = ? AND status = 'active'",
-    )
+    // so no `active` reservation may survive the request — and it must have been
+    // taken in the tenant OBJECT (the no-oversell reserve routed there), so this
+    // is where a leak would show. A leak would silently drain the tenant's
+    // available balance one request at a time until the TTL swept it.
+    const held = await fundedDb
+      .prepare(
+        "SELECT COUNT(*) AS n FROM wallet_reservations WHERE tenant_id = ? AND status = 'active'",
+      )
       .bind("tenant-wallet-funded")
       .first<{ n: number }>();
     expect(Number(held?.n ?? -1)).toBe(0);
 
     // …and the balance is untouched, because a hold never debits.
-    const wallet = await env.DB.prepare("SELECT balance_credits FROM wallets WHERE tenant_id = ?")
+    const wallet = await fundedDb
+      .prepare("SELECT balance_credits FROM wallets WHERE tenant_id = ?")
       .bind("tenant-wallet-funded")
       .first<{ balance_credits: number }>();
     expect(Number(wallet?.balance_credits ?? -1)).toBe(1_000_000);
+  });
+
+  it("the no-oversell guard rejects an overspend against the DO balance", async () => {
+    // A wallet funded to exactly ONE credit affords exactly one concurrent
+    // admission (`DEFAULT_WALLET_HOLD_CREDITS = 1`). Two live holds would be an
+    // oversell; the storage guard's in-statement predicate — run over the tenant
+    // OBJECT — refuses the second. Driven by leaving the first request's hold
+    // OUTSTANDING (a stranded `active` reservation) and then admitting again.
+    const tenantId = "tenant-wallet-oversell";
+    const secret = "fg_durable_oversell_wal";
+    const keyHash = await hashVirtualApiKeySecret(secret);
+    const keyPrefix = virtualApiKeyPrefix(secret);
+    const last4 = virtualApiKeyLast4(secret);
+    await env.CONTROL_DB.prepare(INSERT_ADMISSION_DIRECTORY_SQL)
+      .bind(keyHash, "key_oversell", tenantId, keyPrefix, last4)
+      .run();
+    const objectDb = await tenantResourceDb(tenantId);
+    await objectDb
+      .prepare(INSERT_ADMISSION_KEY_SQL)
+      .bind(
+        "key_oversell",
+        "ws-adm",
+        tenantId,
+        "proj-adm",
+        "key_oversell",
+        keyPrefix,
+        keyHash,
+        last4,
+        JSON.stringify(AGENT_SCOPES),
+        null,
+      )
+      .run();
+    // One credit funded, and a live hold that already commits it (far-future
+    // expiry, so it is not swept before the second admission reads it).
+    await objectDb
+      .prepare(INSERT_WALLET_SQL)
+      .bind(tenantId, tenantId, 1)
+      .run();
+    await objectDb
+      .prepare(
+        "INSERT OR REPLACE INTO wallet_reservations (id, tenant_id, amount_credits, status, " +
+          "created_at_unix, updated_at_unix, expires_at_unix) " +
+          "VALUES ('res_outstanding', ?, 1, 'active', 0, 0, ?)",
+      )
+      .bind(tenantId, 4_000_000_000)
+      .run();
+
+    const refused = await submit(secret);
+    expect(refused.status).toBe(429);
+    expect(await errorCode(refused)).toBe("wallet_balance_exhausted");
   });
 });
 

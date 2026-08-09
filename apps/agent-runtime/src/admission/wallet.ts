@@ -47,6 +47,7 @@
 import {
   D1WalletStore,
   type TenantDatabaseHandle,
+  type TenantDatabaseRouter,
   type WalletReservationResult,
 } from "@ferrogate/storage";
 
@@ -166,9 +167,62 @@ function walletDatabase(env: WalletAdmissionBindings): D1Database | undefined {
  * The store is constructed per call because the handle carries the tenant
  * identity `assertTenant` checks. It holds no state of its own, so this costs
  * an object allocation, not a round trip.
+ *
+ * `source: "shared_development"` — the `GATEWAY_TENANT_DB_ROUTING = "off"`
+ * posture, i.e. the shared `env.DB`. Under the routed default this is not on the
+ * path: {@link routedWalletAdmission} takes the tenant's OWN Durable Object.
  */
 export function d1WalletAdmission(
   db: D1Database,
+  options: WalletAdmissionOptions = {},
+): WalletAdmission {
+  return walletAdmissionOverHandle(async (tenantId) => agentRuntimeTenantHandle(db, tenantId), options);
+}
+
+/**
+ * The guard over the handle the TENANT ROUTER produced — i.e. over that tenant's
+ * own Durable Object under the routed default (#821).
+ *
+ * The exact mirror of `apps/gateway`'s `routedWalletAdmission`: this Worker
+ * reaches the same `wallets`/`wallet_reservations` rows the gateway reserves in
+ * (the tenant's `TenantDataObject`), so admission on either surface debits ONE
+ * balance rather than two divergent shared databases. Until this existed, the
+ * agent-runtime admission ladder labelled its handle `shared_development` and
+ * reserved in `env.DB` — a database a routed deployment never writes — so the
+ * no-oversell guard here guarded a balance nobody funded.
+ *
+ * The `tenantId` cross-check is the same one the gateway makes: the router is
+ * asked for the SUBJECT's tenant, and a handle that came back for a different
+ * tenant is refused (503 `unavailable`, never a 429) rather than holding credits
+ * against the wrong balance — the tripwire that sits in front of
+ * `D1WalletStore.assertTenant`.
+ */
+export function routedWalletAdmission(
+  router: TenantDatabaseRouter,
+  options: WalletAdmissionOptions = {},
+): WalletAdmission {
+  return walletAdmissionOverHandle(async (tenantId) => {
+    const handle = await router.forTenant(tenantId);
+    if (handle.tenantId !== tenantId) {
+      throw new Error(
+        `the routed tenant database is tenant ${handle.tenantId}'s but this admission is for ` +
+          `tenant ${tenantId}; refusing rather than holding credits against the wrong balance`,
+      );
+    }
+    return handle;
+  }, options);
+}
+
+/**
+ * The shared body of both admissions: resolve a handle, drive the storage
+ * guard, wrap the hold.
+ *
+ * Extracted so the two factories differ ONLY in which handle they hand over, and
+ * a fix to the `unavailable`/`insufficient` split cannot land on one topology
+ * and miss the other — the same reason `apps/gateway`'s wallet module factors it.
+ */
+function walletAdmissionOverHandle(
+  resolveHandle: (tenantId: string) => Promise<TenantDatabaseHandle>,
   options: WalletAdmissionOptions = {},
 ): WalletAdmission {
   const amountCredits = options.holdCredits ?? DEFAULT_WALLET_HOLD_CREDITS;
@@ -180,7 +234,17 @@ export function d1WalletAdmission(
       holdId: string,
       nowUnixSeconds: number,
     ): Promise<WalletAdmissionOutcome> {
-      const store = new D1WalletStore(agentRuntimeTenantHandle(db, tenantId));
+      let store: D1WalletStore;
+      try {
+        store = new D1WalletStore(await resolveHandle(tenantId));
+      } catch (error) {
+        // Resolution failed — an unbound namespace, a blank tenant id, a
+        // cross-tenant handle. NOT a proof of overdraft, so 503 not 429.
+        return {
+          kind: "unavailable",
+          detail: error instanceof Error ? error.message : String(error),
+        };
+      }
       let result: WalletReservationResult;
       try {
         result = await store.reserveWalletCredits(

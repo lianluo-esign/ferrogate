@@ -14,10 +14,13 @@ import { env } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
   D1ConversationStore,
+  conversationStoreFromEnv,
+  isDurableConversationStore,
   sweepResponseConversations,
 } from "../../src/inference/conversation-store.js";
 import type { StoredResponseTurn } from "../../src/inference/conversation-store.js";
 import type { ConversationOwner } from "../../src/inference/conversation.js";
+import { seedTenantRosterRows, tenantObjectDb } from "../tenant-object.js";
 
 const DB = (env as unknown as { DB: D1Database }).DB;
 
@@ -160,5 +163,62 @@ describe("D1ConversationStore", () => {
     expect(removed).toBe(2);
     expect(await store.get(ACME, "resp_live", 2_000)).not.toBeNull();
     expect(await store.get(ACME, "resp_dead", 1_000)).toBeNull();
+  });
+});
+
+/**
+ * #821 PR2a — `conversationStoreFromEnv` routes multi-turn chaining onto the
+ * caller tenant's OWN Durable Object rather than the shared `env.DB` a routed
+ * deployment never writes. The store's docblock called this its own deferred
+ * slice; this suite is the evidence it landed.
+ */
+describe("conversationStoreFromEnv routes to the caller tenant's own object (#821)", () => {
+  const ROUTED: ConversationOwner = { tenantId: "conv_routed_tenant", projectId: "" };
+
+  beforeEach(async () => {
+    // Register the tenant as `durable_object` so the backend-dispatching router
+    // places it in its own object rather than the legacy shared `DB`.
+    await seedTenantRosterRows([ROUTED.tenantId]);
+    await tenantObjectDb(ROUTED.tenantId)
+      .prepare("DELETE FROM responses_conversations")
+      .run();
+    // The shared `env.DB` starts empty, so any row found there afterwards would
+    // prove the store failed to route.
+    await DB.prepare("DELETE FROM responses_conversations").run();
+  });
+
+  it("appends and chains a conversation through the DO, and NOT through env.DB", async () => {
+    const store = conversationStoreFromEnv(env);
+    expect(isDurableConversationStore(store)).toBe(true);
+
+    await store.append(ROUTED, turn("resp_do_1", null, 0, "first"));
+    await store.append(ROUTED, turn("resp_do_2", "resp_do_1", 1, "second"));
+
+    const chain = await store.chain(ROUTED, "resp_do_2", 1_000);
+    expect(chain.ok).toBe(true);
+    if (chain.ok) {
+      expect(chain.turns.map((each) => each.responseId)).toEqual(["resp_do_1", "resp_do_2"]);
+    }
+
+    // The rows landed in the tenant's OWN object...
+    const inObject = await tenantObjectDb(ROUTED.tenantId)
+      .prepare("SELECT COUNT(*) AS n FROM responses_conversations WHERE tenant_id = ?")
+      .bind(ROUTED.tenantId)
+      .first<{ n: number }>();
+    expect(inObject?.n).toBe(2);
+
+    // ...and NOT in the shared `env.DB`, which a routed deployment never writes.
+    const inShared = await DB.prepare(
+      "SELECT COUNT(*) AS n FROM responses_conversations",
+    ).first<{ n: number }>();
+    expect(inShared?.n).toBe(0);
+  });
+
+  it("reads a stored turn back and removes it through the same routed object", async () => {
+    const store = conversationStoreFromEnv(env);
+    await store.append(ROUTED, turn("resp_do_get", null, 0, "only"));
+    expect(await store.get(ROUTED, "resp_do_get", 1_000)).not.toBeNull();
+    expect(await store.remove(ROUTED, "resp_do_get", 1_000)).toBe(true);
+    expect(await store.get(ROUTED, "resp_do_get", 1_000)).toBeNull();
   });
 });
