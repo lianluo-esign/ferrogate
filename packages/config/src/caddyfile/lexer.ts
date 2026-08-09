@@ -1,4 +1,3 @@
-const nn = <T>(v: T): NonNullable<T> => v as NonNullable<T>;
 /**
  * Port of `ferrogate-config`'s `caddyfile/lexer.rs`: the tiny tokenizer for the
  * FerroGate Caddyfile compatibility subset (inventory §5.6).
@@ -27,7 +26,7 @@ export function lex(raw: string): Token[] {
   const peek = (offset = 0): string | undefined => chars[i + offset];
 
   while (i < chars.length) {
-    const ch = nn(chars[i]);
+    const ch = chars[i]!;
     const startColumn = column;
     if (ch === "\n") {
       tokens.push({ kind: { type: "newline" }, line, column });
@@ -41,7 +40,7 @@ export function lex(raw: string): Token[] {
       i += 1;
       // comment to end of line
       while (i < chars.length) {
-        const next = nn(chars[i]);
+        const next = chars[i]!;
         i += 1;
         if (next === "\n") {
           tokens.push({ kind: { type: "newline" }, line, column });
@@ -56,7 +55,7 @@ export function lex(raw: string): Token[] {
       i += 1;
       column += 1;
       while (i < chars.length) {
-        const next = nn(chars[i]);
+        const next = chars[i]!;
         i += 1;
         column += 1;
         word += next;
@@ -76,7 +75,7 @@ export function lex(raw: string): Token[] {
       i += 1;
       column += 1;
       while (i < chars.length) {
-        const next = nn(chars[i]);
+        const next = chars[i]!;
         i += 1;
         column += 1;
         if (next === '"') break;
@@ -88,7 +87,7 @@ export function lex(raw: string): Token[] {
       i += 1;
       column += 1;
       while (i < chars.length) {
-        const next = nn(chars[i]);
+        const next = chars[i]!;
         if (/\s/.test(next) || next === "{" || next === "}" || next === "#") break;
         word += next;
         i += 1;

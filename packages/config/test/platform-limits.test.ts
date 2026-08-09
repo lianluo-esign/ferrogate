@@ -19,7 +19,6 @@ import { UnauthenticatedIpRateLimiter, resolveClientIp } from "../src/network-ac
 import { configSchema } from "../src/schema/config.js";
 import { resolveEnvPlaceholders } from "../src/secrets.js";
 import { validateConfig } from "../src/validate.js";
-const nn = <T>(v: T): NonNullable<T> => v as NonNullable<T>;
 
 describe("secrets: no std::env (the env is an explicit argument)", () => {
   test("resolves against a Worker-style `env` binding object handed in by the caller", () => {
@@ -32,8 +31,7 @@ describe("secrets: no std::env (the env is an explicit argument)", () => {
     const ambient = (globalThis as { process?: { env?: Record<string, string | undefined> } })
       .process;
     expect(ambient?.env).toBeDefined(); // this suite runs under Node, unlike workerd
-    nn((ambient as NonNullable<typeof ambient>).env).FERROGATE_PLATFORM_LIMIT_PROBE =
-      "from-process";
+    (ambient as NonNullable<typeof ambient>).env!.FERROGATE_PLATFORM_LIMIT_PROBE = "from-process";
     try {
       expect(
         resolveEnvPlaceholders("{env.FERROGATE_PLATFORM_LIMIT_PROBE}", {
@@ -42,7 +40,7 @@ describe("secrets: no std::env (the env is an explicit argument)", () => {
       ).toBe("from-binding");
     } finally {
       // biome-ignore lint/performance/noDelete: removes the own-property key entirely; assigning undefined would leave an enumerable undefined-valued key and change JSON serialization, the 'in' operator, and Object.keys semantics
-      delete nn((ambient as NonNullable<typeof ambient>).env).FERROGATE_PLATFORM_LIMIT_PROBE;
+      delete (ambient as NonNullable<typeof ambient>).env!.FERROGATE_PLATFORM_LIMIT_PROBE;
     }
   });
 

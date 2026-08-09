@@ -30,7 +30,6 @@ import {
   toChatCompletions,
 } from "../src/index.js";
 import type { ProviderConfig } from "../src/index.js";
-const nn = <T>(v: T): NonNullable<T> => v as NonNullable<T>;
 
 // --- fixtures --------------------------------------------------------------
 
@@ -471,8 +470,8 @@ describe("preparing one family never rewrites the caller's body", () => {
       const shared = chatBody({ mode: "auto" });
       const solo = chatBody({ mode: "auto" });
       const [first, second] = order as [string, string];
-      const prepareFirst = nn(preparers.find(([name]) => name === first))[1];
-      const prepareSecond = nn(preparers.find(([name]) => name === second))[1];
+      const prepareFirst = preparers.find(([name]) => name === first)![1];
+      const prepareSecond = preparers.find(([name]) => name === second)![1];
 
       prepareFirst(shared as Record<string, unknown>);
       expect(

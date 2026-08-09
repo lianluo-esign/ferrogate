@@ -14,7 +14,6 @@ import {
   sseSerializeStream,
 } from "../../src/streaming/sse.js";
 import { bytes, chunkBytes, drainBytes, drainFrames, splitBytes, streamOf } from "./helpers.js";
-const nn = <T>(v: T): NonNullable<T> => v as NonNullable<T>;
 
 describe("SSE field grammar", () => {
   test("parses event / data / id / retry and strips exactly one space", () => {
@@ -28,63 +27,63 @@ describe("SSE field grammar", () => {
   });
 
   test("a colon with no space is still a field separator", () => {
-    const frame = nn(parseSse('event:ping\ndata:{"a":1}\n\n')[0]);
+    const frame = parseSse('event:ping\ndata:{"a":1}\n\n')[0]!;
     expect(frame.event).toBe("ping");
     expect(frame.data).toBe('{"a":1}');
   });
 
   test("only ONE leading space is stripped from a value", () => {
-    const frame = nn(parseSse("data:  two-spaces\n\n")[0]);
+    const frame = parseSse("data:  two-spaces\n\n")[0]!;
     expect(frame.data).toBe(" two-spaces");
   });
 
   test("multi-line data joins with \\n and round-trips", () => {
-    const frame = nn(parseSse("data: line one\ndata: line two\ndata: \n\n")[0]);
+    const frame = parseSse("data: line one\ndata: line two\ndata: \n\n")[0]!;
     expect(frame.data).toBe("line one\nline two\n");
     const reserialized = serializeSseFrame(sseFrame({ data: frame.data }), { preferRaw: false });
     expect(reserialized).toBe("data: line one\ndata: line two\ndata: \n\n");
   });
 
   test("a present-but-empty data field is distinct from an absent one", () => {
-    expect(nn(parseSse("data:\n\n")[0]).data).toBe("");
-    expect(nn(parseSse("event: ping\n\n")[0]).data).toBeUndefined();
+    expect(parseSse("data:\n\n")[0]!.data).toBe("");
+    expect(parseSse("event: ping\n\n")[0]!.data).toBeUndefined();
   });
 
   test("comment lines are retained, not silently dropped", () => {
-    const frame = nn(parseSse(": keep-alive\ndata: x\n\n")[0]);
+    const frame = parseSse(": keep-alive\ndata: x\n\n")[0]!;
     expect(frame.comments).toEqual([" keep-alive"]);
     expect(frame.data).toBe("x");
   });
 
   test("a field with no colon is a field with an empty value", () => {
-    const frame = nn(parseSse("data\n\n")[0]);
+    const frame = parseSse("data\n\n")[0]!;
     expect(frame.data).toBe("");
   });
 
   test("a non-numeric retry is ignored", () => {
-    expect(nn(parseSse("retry: soon\ndata: x\n\n")[0]).retry).toBeUndefined();
+    expect(parseSse("retry: soon\ndata: x\n\n")[0]!.retry).toBeUndefined();
   });
 
   test("unknown fields are ignored but preserved in raw", () => {
-    const frame = nn(parseSse("weird: value\ndata: x\n\n")[0]);
+    const frame = parseSse("weird: value\ndata: x\n\n")[0]!;
     expect(frame.data).toBe("x");
     expect(frame.raw).toBe("weird: value\ndata: x\n\n");
   });
 
   test("[DONE] sentinel is recognized with or without padding", () => {
-    expect(isDoneFrame(nn(parseSse("data: [DONE]\n\n")[0]))).toBe(true);
-    expect(isDoneFrame(nn(parseSse("data:[DONE]\n\n")[0]))).toBe(true);
-    expect(isDoneFrame(nn(parseSse("data: [DONE] \n\n")[0]))).toBe(true);
-    expect(isDoneFrame(nn(parseSse("data: not-done\n\n")[0]))).toBe(false);
+    expect(isDoneFrame(parseSse("data: [DONE]\n\n")[0]!)).toBe(true);
+    expect(isDoneFrame(parseSse("data:[DONE]\n\n")[0]!)).toBe(true);
+    expect(isDoneFrame(parseSse("data: [DONE] \n\n")[0]!)).toBe(true);
+    expect(isDoneFrame(parseSse("data: not-done\n\n")[0]!)).toBe(false);
     expect(DONE_SENTINEL).toBe("[DONE]");
   });
 });
 
 describe("SSE line terminators", () => {
   test("LF, CRLF and bare CR all terminate a line", () => {
-    expect(nn(parseSse("data: a\n\n")[0]).data).toBe("a");
-    expect(nn(parseSse("data: b\r\n\r\n")[0]).data).toBe("b");
-    expect(nn(parseSse("data: c\r\r")[0]).data).toBe("c");
+    expect(parseSse("data: a\n\n")[0]!.data).toBe("a");
+    expect(parseSse("data: b\r\n\r\n")[0]!.data).toBe("b");
+    expect(parseSse("data: c\r\r")[0]!.data).toBe("c");
   });
 
   test("a CRLF split across chunks is NOT read as a bare CR", () => {
@@ -173,7 +172,7 @@ describe("SSE UTF-8 safety", () => {
       );
       expect(frames).toHaveLength(1);
       expect((frames[0] as NonNullable<(typeof frames)[0]>).data).toBe('{"t":"\u{1F680}"}');
-      expect(JSON.parse(nn((frames[0] as NonNullable<(typeof frames)[0]>).data))).toEqual({
+      expect(JSON.parse((frames[0] as NonNullable<(typeof frames)[0]>).data!)).toEqual({
         t: "\u{1F680}",
       });
     }
@@ -204,7 +203,7 @@ describe("SSE serialization", () => {
 
   test("comments, id and retry survive a serialize round-trip", () => {
     const original = ": ping\nevent: tick\nid: 7\nretry: 1000\ndata: x\n\n";
-    const frame = nn(parseSse(original)[0]);
+    const frame = parseSse(original)[0]!;
     expect(serializeSseFrame(frame, { preferRaw: false })).toBe(original);
   });
 });

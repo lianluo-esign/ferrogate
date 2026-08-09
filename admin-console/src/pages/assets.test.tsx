@@ -520,7 +520,6 @@ describe("AssetsPage presigned large-object upload", () => {
     expect(commitBody).not.toBeNull();
     // The commit re-declares the same identity the intent registered so the
     // gateway can verify size + SHA-256 over the staged bytes.
-    // biome-ignore lint/style/noNonNullAssertion: commitBody is assigned only inside the mock fetch callback, so TS control-flow narrows the outer binding to null and no cast can name its declared payload type; ! reads the capture the expect() above just asserted is present
     const commitReq = commitBody!;
     expect(commitReq.upload_id).toMatch(/^upl_[0-9a-f]{32}$/);
     expect(commitReq.size_bytes).toBe(file.size);
@@ -645,7 +644,6 @@ describe("AssetsPage presigned large-object upload", () => {
     await waitFor(() => expect(abortBody).not.toBeNull());
     // The staging key is server-derived from all three declarations, so an
     // abort that names them wrongly would release nothing.
-    // biome-ignore lint/style/noNonNullAssertion: abortBody is assigned only inside the mock fetch callback, so TS control-flow narrows the outer binding to null and no cast can name its declared payload type; ! reads the capture the expect() above just asserted is present
     const abortReq = abortBody!;
     expect(abortReq.upload_id).toBe(UPLOAD_ID);
     expect(abortReq.size_bytes).toBe(intentSize);

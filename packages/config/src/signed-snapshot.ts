@@ -28,7 +28,6 @@
  */
 import type { ApiKey, PolicyRule } from "./schema/index.js";
 import type { ClusterConfig } from "./schema/index.js";
-const nn = <T>(v: T): NonNullable<T> => v as NonNullable<T>;
 
 /** Schema version this build knows how to verify. */
 export const SIGNED_SNAPSHOT_SCHEMA_VERSION = 1;
@@ -236,7 +235,7 @@ function decompressEdPoint(bytes: Uint8Array): { x: bigint; y: bigint } | null {
   if (bytes.length !== ED25519_KEY_LEN) return null;
   let value = 0n;
   for (let index = ED25519_KEY_LEN - 1; index >= 0; index -= 1) {
-    value = (value << 8n) | BigInt(nn(bytes[index]));
+    value = (value << 8n) | BigInt(bytes[index]!);
   }
   const sign = (value >> 255n) & 1n;
   const y = value & ((1n << 255n) - 1n);

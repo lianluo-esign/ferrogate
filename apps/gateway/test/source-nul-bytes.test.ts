@@ -51,7 +51,6 @@
  * remain outside its scope because they are neither source trees nor test trees.
  */
 import { describe, expect, it } from "vitest";
-const nn = <T>(v: T): NonNullable<T> => v as NonNullable<T>;
 
 /**
  * The byte itself, built at RUNTIME.
@@ -309,7 +308,7 @@ describe("source hygiene", () => {
   // -----------------------------------------------------------------------
 
   function extractMember(path: string, tree: string): string {
-    return nn(path.match(new RegExp(`/${tree}/([^/]+)`)))[1] as string;
+    return path.match(new RegExp(`/${tree}/([^/]+)`))![1] as string;
   }
 
   it("scanned every package — a packages glob that matched nothing would assert nothing", () => {

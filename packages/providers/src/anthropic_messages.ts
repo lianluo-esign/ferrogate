@@ -9,7 +9,6 @@ import type { Json, JsonObject } from "./json.js";
  * JSON ⇄ JSON, no I/O.
  */
 import { AdapterError } from "./types.js";
-const nn = <T>(v: T): NonNullable<T> => v as NonNullable<T>;
 
 /** Anthropic Messages request → OpenAI chat-completions request. */
 export function toChatCompletions(body: Json): Json {
@@ -20,7 +19,7 @@ export function toChatCompletions(body: Json): Json {
 
   const out: JsonObject = {};
   for (const key of ["model", "max_tokens", "temperature", "top_p", "stream"]) {
-    if (object[key] !== undefined) out[key] = nn(object[key]);
+    if (object[key] !== undefined) out[key] = object[key]!;
   }
   if (object.stop_sequences !== undefined) out.stop = object.stop_sequences;
 

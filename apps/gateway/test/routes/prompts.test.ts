@@ -30,7 +30,6 @@ import {
   renderPromptText,
 } from "../../src/routes/prompts.js";
 import { resetApiKeysTable, seedApiKey, testSecret } from "../keys/seed.js";
-const nn = <T>(v: T): NonNullable<T> => v as NonNullable<T>;
 
 const BASE = "https://ferrogate.test";
 
@@ -173,7 +172,7 @@ async function render(id: string, secret: string, body?: unknown): Promise<Respo
 // ---------------------------------------------------------------------------
 
 const templates = parsePromptTemplates(JSON.stringify(TEMPLATES));
-const greeting = nn(templates.find((t) => t.id === "tpl_greeting"));
+const greeting = templates.find((t) => t.id === "tpl_greeting")!;
 
 describe("parsePromptTemplates — fail-closed, entry by entry", () => {
   it("treats absent, blank, non-JSON and non-array values as NO templates", () => {
@@ -217,7 +216,7 @@ describe("version selection", () => {
   it("falls back to the newest INACTIVE version so the refusal can say 'inactive'", () => {
     // Rust's `.or_else(...)`. Returning undefined here would turn a 409
     // `prompt_template_version_inactive` into a 404, losing the reason.
-    const draftOnly = nn(templates.find((t) => t.id === "tpl_no_active_version"));
+    const draftOnly = templates.find((t) => t.id === "tpl_no_active_version")!;
     const chosen = activePromptTemplateVersion(draftOnly);
     expect(chosen?.revision).toBe(3);
     expect(chosen?.status).toBe("draft");
@@ -278,7 +277,7 @@ describe("renderPromptText", () => {
 
 describe("renderPromptTemplate", () => {
   it("emits `messages` for a chat_completions target", () => {
-    const version = nn(findPromptTemplateVersion(greeting, 2));
+    const version = findPromptTemplateVersion(greeting, 2)!;
     expect(renderPromptTemplate(greeting, version, { who: "Ada" })).toEqual({
       model: "prompt-model",
       messages: [
@@ -291,7 +290,7 @@ describe("renderPromptTemplate", () => {
   });
 
   it("emits `input` for a responses target, and omits absent sampling fields", () => {
-    const responses = nn(templates.find((t) => t.id === "tpl_responses"));
+    const responses = templates.find((t) => t.id === "tpl_responses")!;
     const rendered = renderPromptTemplate(
       responses,
       responses.versions[0] as NonNullable<(typeof responses.versions)[0]>,

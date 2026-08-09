@@ -202,7 +202,6 @@ describe("WithheldAssetsPage", () => {
     );
 
     await waitFor(() => expect(promoteRequest).not.toBeNull());
-    // biome-ignore lint/style/noNonNullAssertion: promoteRequest is assigned only inside the mock fetch callback, so TS control-flow narrows the outer binding to null and no cast can name its declared type; ! reads the capture the expect() above just asserted is present
     const promoteReq = promoteRequest!;
     expect(promoteReq.body.scan_outcome).toBe("clean");
     expect(promoteReq.body.evidence).toBe("clean scan, ticket OPS-42");

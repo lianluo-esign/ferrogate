@@ -353,17 +353,13 @@ function percentEncodeSegment(segment: string): string {
   let out = "";
   let index = 0;
   while (index < bytes.length) {
-    // biome-ignore lint/style/noNonNullAssertion: index is loop-bounded within a fixed-length buffer; the assertion is load-bearing under noUncheckedIndexedAccess and a runtime guard would burden a crypto hot path
     const byte = bytes[index]!;
     if (
       byte === 0x25 && // '%'
       index + 2 < bytes.length &&
-      // biome-ignore lint/style/noNonNullAssertion: index is loop-bounded within a fixed-length buffer; the assertion is load-bearing under noUncheckedIndexedAccess and a runtime guard would burden a crypto hot path
       isHexDigit(bytes[index + 1]!) &&
-      // biome-ignore lint/style/noNonNullAssertion: index is loop-bounded within a fixed-length buffer; the assertion is load-bearing under noUncheckedIndexedAccess and a runtime guard would burden a crypto hot path
       isHexDigit(bytes[index + 2]!)
     ) {
-      // biome-ignore lint/style/noNonNullAssertion: index is loop-bounded within a fixed-length buffer; the assertion is load-bearing under noUncheckedIndexedAccess and a runtime guard would burden a crypto hot path
       out += `%${String.fromCharCode(bytes[index + 1]!)}${String.fromCharCode(bytes[index + 2]!)}`;
       index += 3;
       continue;

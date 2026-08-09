@@ -45,7 +45,6 @@ import {
   defaultGatewayConfig,
   defaultGatewayRoute,
 } from "./types.js";
-const nn = <T>(v: T): NonNullable<T> => v as NonNullable<T>;
 
 /** Parse a Caddyfile source into the intermediate `GatewayConfig`. Throws `CaddyfileDiagnostic`. */
 export function parseCaddyfile(raw: string, file: string, env?: EnvSource): GatewayConfig {
@@ -196,7 +195,7 @@ class Parser {
     if (!this.consumeLbrace()) return;
     let depth = 1;
     while (this.pos < this.tokens.length) {
-      const token = nn(this.tokens[this.pos]);
+      const token = this.tokens[this.pos]!;
       if (token.kind.type === "lbrace") depth += 1;
       else if (token.kind.type === "rbrace") {
         depth -= 1;
@@ -254,7 +253,7 @@ class Parser {
     const body = args.find((arg) => !arg.startsWith("/") && !/^\d+$/.test(arg)) ?? "";
     let status = 200;
     for (let i = args.length - 1; i >= 0; i -= 1) {
-      const arg = nn(args[i]);
+      const arg = args[i]!;
       if (/^\d+$/.test(arg)) {
         status = Number.parseInt(arg, 10);
         break;

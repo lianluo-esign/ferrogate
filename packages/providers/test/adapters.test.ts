@@ -13,7 +13,6 @@ import {
   VertexAiAdapter,
 } from "../src/index.js";
 import type { ProviderConfig, ProviderHeader } from "../src/index.js";
-const nn = <T>(v: T): NonNullable<T> => v as NonNullable<T>;
 
 const bytes = (value: string): Uint8Array => new TextEncoder().encode(value);
 const headerValue = (headers: ProviderHeader[], name: string): string | undefined =>
@@ -99,7 +98,7 @@ describe("OpenAiCompatibleAdapter", () => {
       ),
       "fg-test",
     );
-    const error = nn((normalized.body as Record<string, Record<string, unknown>>).error);
+    const error = (normalized.body as Record<string, Record<string, unknown>>).error!;
     expect(error.message).toBe("rate limited");
     expect(error.provider_type).toBe("rate_limit_error");
     expect(error.code).toBe("rate_limit_exceeded");
@@ -130,7 +129,7 @@ describe("OpenAiCompatibleAdapter", () => {
       bytes("upstream unavailable"),
       "fg-test",
     );
-    const error = nn((normalized.body as Record<string, Record<string, unknown>>).error);
+    const error = (normalized.body as Record<string, Record<string, unknown>>).error!;
     expect(error.message).toBe("upstream unavailable");
     expect(error.code).toBe("provider_error");
   });

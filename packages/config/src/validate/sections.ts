@@ -49,7 +49,6 @@ import {
   validatePostgresIdentifier,
   validateSecretRef,
 } from "./helpers.js";
-const nn = <T>(v: T): NonNullable<T> => v as NonNullable<T>;
 
 // `StorageProviderKind::is_durable()` / `::implemented()` are OWNED by
 // `@ferrogate/storage` (that is where the backends actually exist), so they are
@@ -314,7 +313,7 @@ function validatePostgresWireStorage(config: Config, fieldPrefix: string): void 
   for (let index = 0; index < storage.postgres_search_path.length; index += 1) {
     validatePostgresIdentifier(
       `storage.postgres_search_path[${index}]`,
-      nn(storage.postgres_search_path[index]),
+      storage.postgres_search_path[index]!,
     );
   }
   if (
@@ -336,7 +335,7 @@ export function validateStorage(config: Config): void {
   }
   const seen = new Set<StorageProviderKind>();
   for (let index = 0; index < storage.provider_order.length; index += 1) {
-    const provider = nn(storage.provider_order[index]);
+    const provider = storage.provider_order[index]!;
     if (provider === "memory") {
       fail(`storage.provider_order[${index}]`, "memory is not a durable provider");
     }
@@ -693,7 +692,7 @@ function validateClusterSnapshotShape(config: Config): void {
 export function validateNetworkAccess(config: Config): void {
   const networkAccess = config.network_access;
   for (let index = 0; index < networkAccess.ip_allowlist.length; index += 1) {
-    const entry = nn(networkAccess.ip_allowlist[index]);
+    const entry = networkAccess.ip_allowlist[index]!;
     try {
       IpCidr.parse(entry);
     } catch (error) {
@@ -794,7 +793,7 @@ export function inertBillingServiceWarnings(config: Config): string[] {
  */
 export function validateCloudflareAiGatewayProviders(config: Config): void {
   for (let index = 0; index < config.providers.length; index += 1) {
-    const routing = nn(config.providers[index]).cloudflare_ai_gateway;
+    const routing = config.providers[index]!.cloudflare_ai_gateway;
     if (routing === null) continue;
     const at = (field: string) => `providers[${index}].cloudflare_ai_gateway${field}`;
     const cloudflare = config.cloudflare;

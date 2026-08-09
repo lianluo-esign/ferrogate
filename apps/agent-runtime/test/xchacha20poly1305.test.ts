@@ -28,7 +28,6 @@ import {
   xchacha20poly1305Open,
   xchacha20poly1305Seal,
 } from "../src/workers/xchacha20poly1305.js";
-const nn = <T>(v: T): NonNullable<T> => v as NonNullable<T>;
 
 function hex(bytes: Uint8Array): string {
   return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
@@ -168,13 +167,13 @@ describe("AEAD_CHACHA20_POLY1305 — RFC 8439 §2.8.2", () => {
 
   it("REFUSES a flipped ciphertext byte, returning NO plaintext at all", () => {
     const sealed = unhex(CIPHERTEXT + TAG);
-    sealed[3] = nn(sealed[3]) ^ 0x01;
+    sealed[3] = sealed[3]! ^ 0x01;
     expect(chacha20poly1305Open(KEY, NONCE, sealed, AAD)).toBeUndefined();
   });
 
   it("REFUSES a flipped tag byte", () => {
     const sealed = unhex(CIPHERTEXT + TAG);
-    sealed[sealed.length - 1] = nn(sealed[sealed.length - 1]) ^ 0x01;
+    sealed[sealed.length - 1] = sealed[sealed.length - 1]! ^ 0x01;
     expect(chacha20poly1305Open(KEY, NONCE, sealed, AAD)).toBeUndefined();
   });
 
@@ -238,7 +237,7 @@ describe("XChaCha20-Poly1305 — draft-irtf-cfrg-xchacha §A.3", () => {
   it("round trips a payload spanning many keystream blocks", () => {
     const plaintext = Uint8Array.from({ length: 4096 }, (_, i) => (i * 31) & 0xff);
     const sealed = xchacha20poly1305Seal(KEY, NONCE24, plaintext, AAD);
-    expect(hex(nn(xchacha20poly1305Open(KEY, NONCE24, sealed, AAD)))).toBe(hex(plaintext));
+    expect(hex(xchacha20poly1305Open(KEY, NONCE24, sealed, AAD)!)).toBe(hex(plaintext));
   });
 });
 

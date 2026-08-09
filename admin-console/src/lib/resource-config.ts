@@ -1,6 +1,5 @@
 import type { InterpolationValues, TranslationKey } from "@/i18n";
 import type { ReactNode } from "react";
-const nn = <T>(v: T): NonNullable<T> => v as NonNullable<T>;
 
 /**
  * Translator shape (the subset of `useI18n().t` the framework needs) used to
@@ -470,7 +469,7 @@ export function clearDependentReferenceValues(
   const cleared = new Set<string>();
 
   while (pending.length > 0) {
-    const parent = nn(pending.shift());
+    const parent = pending.shift()!;
     for (const field of fields) {
       if (cleared.has(field.name) || !referenceDependsOn(field, parent)) {
         continue;

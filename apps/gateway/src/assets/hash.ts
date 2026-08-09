@@ -51,38 +51,26 @@ function compressSha256Block(state: Uint32Array, block: Uint8Array): void {
   const schedule = new Uint32Array(64);
   for (let i = 0; i < 16; i += 1) schedule[i] = view.getUint32(i * 4, false);
   for (let i = 16; i < 64; i += 1) {
-    // biome-ignore lint/style/noNonNullAssertion: index is loop-bounded within a fixed-length buffer; the assertion is load-bearing under noUncheckedIndexedAccess and a runtime guard would burden a crypto hot path
     const prior15 = schedule[i - 15]!;
-    // biome-ignore lint/style/noNonNullAssertion: index is loop-bounded within a fixed-length buffer; the assertion is load-bearing under noUncheckedIndexedAccess and a runtime guard would burden a crypto hot path
     const prior2 = schedule[i - 2]!;
     const s0 = streamRotateRight(prior15, 7) ^ streamRotateRight(prior15, 18) ^ (prior15 >>> 3);
     const s1 = streamRotateRight(prior2, 17) ^ streamRotateRight(prior2, 19) ^ (prior2 >>> 10);
-    // biome-ignore lint/style/noNonNullAssertion: index is loop-bounded within a fixed-length buffer; the assertion is load-bearing under noUncheckedIndexedAccess and a runtime guard would burden a crypto hot path
     schedule[i] = (schedule[i - 16]! + s0 + schedule[i - 7]! + s1) >>> 0;
   }
 
   let [a, b, c, d, e, f, g, h] = [
-    // biome-ignore lint/style/noNonNullAssertion: index is loop-bounded within a fixed-length buffer; the assertion is load-bearing under noUncheckedIndexedAccess and a runtime guard would burden a crypto hot path
     state[0]!,
-    // biome-ignore lint/style/noNonNullAssertion: index is loop-bounded within a fixed-length buffer; the assertion is load-bearing under noUncheckedIndexedAccess and a runtime guard would burden a crypto hot path
     state[1]!,
-    // biome-ignore lint/style/noNonNullAssertion: index is loop-bounded within a fixed-length buffer; the assertion is load-bearing under noUncheckedIndexedAccess and a runtime guard would burden a crypto hot path
     state[2]!,
-    // biome-ignore lint/style/noNonNullAssertion: index is loop-bounded within a fixed-length buffer; the assertion is load-bearing under noUncheckedIndexedAccess and a runtime guard would burden a crypto hot path
     state[3]!,
-    // biome-ignore lint/style/noNonNullAssertion: index is loop-bounded within a fixed-length buffer; the assertion is load-bearing under noUncheckedIndexedAccess and a runtime guard would burden a crypto hot path
     state[4]!,
-    // biome-ignore lint/style/noNonNullAssertion: index is loop-bounded within a fixed-length buffer; the assertion is load-bearing under noUncheckedIndexedAccess and a runtime guard would burden a crypto hot path
     state[5]!,
-    // biome-ignore lint/style/noNonNullAssertion: index is loop-bounded within a fixed-length buffer; the assertion is load-bearing under noUncheckedIndexedAccess and a runtime guard would burden a crypto hot path
     state[6]!,
-    // biome-ignore lint/style/noNonNullAssertion: index is loop-bounded within a fixed-length buffer; the assertion is load-bearing under noUncheckedIndexedAccess and a runtime guard would burden a crypto hot path
     state[7]!,
   ];
   for (let i = 0; i < 64; i += 1) {
     const s1 = streamRotateRight(e, 6) ^ streamRotateRight(e, 11) ^ streamRotateRight(e, 25);
     const choose = (e & f) ^ (~e & g);
-    // biome-ignore lint/style/noNonNullAssertion: index is loop-bounded within a fixed-length buffer; the assertion is load-bearing under noUncheckedIndexedAccess and a runtime guard would burden a crypto hot path
     const t1 = (h + s1 + choose + STREAM_SHA256_K[i]! + schedule[i]!) >>> 0;
     const s0 = streamRotateRight(a, 2) ^ streamRotateRight(a, 13) ^ streamRotateRight(a, 22);
     const majority = (a & b) ^ (a & c) ^ (b & c);
@@ -96,21 +84,13 @@ function compressSha256Block(state: Uint32Array, block: Uint8Array): void {
     b = a;
     a = (t1 + t2) >>> 0;
   }
-  // biome-ignore lint/style/noNonNullAssertion: index is loop-bounded within a fixed-length buffer; the assertion is load-bearing under noUncheckedIndexedAccess and a runtime guard would burden a crypto hot path
   state[0] = (state[0]! + a) >>> 0;
-  // biome-ignore lint/style/noNonNullAssertion: index is loop-bounded within a fixed-length buffer; the assertion is load-bearing under noUncheckedIndexedAccess and a runtime guard would burden a crypto hot path
   state[1] = (state[1]! + b) >>> 0;
-  // biome-ignore lint/style/noNonNullAssertion: index is loop-bounded within a fixed-length buffer; the assertion is load-bearing under noUncheckedIndexedAccess and a runtime guard would burden a crypto hot path
   state[2] = (state[2]! + c) >>> 0;
-  // biome-ignore lint/style/noNonNullAssertion: index is loop-bounded within a fixed-length buffer; the assertion is load-bearing under noUncheckedIndexedAccess and a runtime guard would burden a crypto hot path
   state[3] = (state[3]! + d) >>> 0;
-  // biome-ignore lint/style/noNonNullAssertion: index is loop-bounded within a fixed-length buffer; the assertion is load-bearing under noUncheckedIndexedAccess and a runtime guard would burden a crypto hot path
   state[4] = (state[4]! + e) >>> 0;
-  // biome-ignore lint/style/noNonNullAssertion: index is loop-bounded within a fixed-length buffer; the assertion is load-bearing under noUncheckedIndexedAccess and a runtime guard would burden a crypto hot path
   state[5] = (state[5]! + f) >>> 0;
-  // biome-ignore lint/style/noNonNullAssertion: index is loop-bounded within a fixed-length buffer; the assertion is load-bearing under noUncheckedIndexedAccess and a runtime guard would burden a crypto hot path
   state[6] = (state[6]! + g) >>> 0;
-  // biome-ignore lint/style/noNonNullAssertion: index is loop-bounded within a fixed-length buffer; the assertion is load-bearing under noUncheckedIndexedAccess and a runtime guard would burden a crypto hot path
   state[7] = (state[7]! + h) >>> 0;
 }
 
@@ -163,7 +143,6 @@ export class StreamingSha256 {
     }
     const digest = new Uint8Array(32);
     const output = new DataView(digest.buffer);
-    // biome-ignore lint/style/noNonNullAssertion: index is loop-bounded within a fixed-length buffer; the assertion is load-bearing under noUncheckedIndexedAccess and a runtime guard would burden a crypto hot path
     for (let i = 0; i < 8; i += 1) output.setUint32(i * 4, state[i]!, false);
     return digest;
   }

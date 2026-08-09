@@ -25,7 +25,6 @@
  */
 import { SELF, env } from "cloudflare:test";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-const nn = <T>(v: T): NonNullable<T> => v as NonNullable<T>;
 
 const BASE = "https://gw.test";
 const UPSTREAM_HOST = "api.telemetry-probe.example";
@@ -223,7 +222,7 @@ describe("the deployed Worker emits telemetry to the collector binding", () => {
       ];
     };
     const attributes = Object.fromEntries(
-      nn(traces.resourceSpans[0].scopeSpans[0].spans[0]).attributes.map((attribute) => [
+      traces.resourceSpans[0].scopeSpans[0].spans[0]!.attributes.map((attribute) => [
         attribute.key,
         attribute.value.stringValue,
       ]),
@@ -304,7 +303,7 @@ describe("the deployed Worker emits telemetry to the collector binding", () => {
         },
       ];
     };
-    const span = nn(traces.resourceSpans[0].scopeSpans[0].spans[0]);
+    const span = traces.resourceSpans[0].scopeSpans[0].spans[0]!;
     const attributes = Object.fromEntries(
       span.attributes.map((attribute) => [attribute.key, attribute.value.stringValue]),
     );

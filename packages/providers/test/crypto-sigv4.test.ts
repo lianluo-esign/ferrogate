@@ -10,7 +10,6 @@ import {
   signStreamedWithContentHashHeader,
   signWithContentHashHeader,
 } from "../src/sigv4.js";
-const nn = <T>(v: T): NonNullable<T> => v as NonNullable<T>;
 
 describe("SHA-256 / HMAC primitives", () => {
   test("SHA-256 of empty string matches the known NIST vector", () => {
@@ -68,7 +67,7 @@ describe("SigV4 signing", () => {
       "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/bedrock/aws4_request, ",
     );
     expect(signed.authorization).toContain("SignedHeaders=host;x-amz-date, ");
-    const signature = nn(signed.authorization.split("Signature=")[1]);
+    const signature = signed.authorization.split("Signature=")[1]!;
     expect(signature).toHaveLength(64);
     expect(signature).toMatch(/^[0-9a-f]{64}$/);
     // L11: shape is not enough — a structurally wrong canonical request is also

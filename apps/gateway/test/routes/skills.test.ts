@@ -26,7 +26,6 @@ import {
   parseSkillPackages,
   skillPackageVisibleToAuth,
 } from "../../src/routes/skills.js";
-const nn = <T>(v: T): NonNullable<T> => v as NonNullable<T>;
 
 const BASE = "https://ferrogate.test";
 
@@ -117,7 +116,7 @@ describe("parseSkillPackages — fail-closed, entry by entry", () => {
 
 describe("skillPackageVisibleToAuth", () => {
   const packages = parseSkillPackages(JSON.stringify(SKILL_PACKAGES));
-  const find = (id: string) => nn(packages.find((pkg) => pkg.id === id));
+  const find = (id: string) => packages.find((pkg) => pkg.id === id)!;
 
   it("hides a DISABLED package from everyone, allowlist or not", () => {
     expect(skillPackageVisibleToAuth(find("pkg_disabled"), auth("key_readonly"))).toBe(false);
@@ -139,7 +138,7 @@ describe("skillPackageVisibleToAuth", () => {
 });
 
 describe("agentSkillPackage", () => {
-  const pkg = nn(parseSkillPackages(JSON.stringify(SKILL_PACKAGES))[0]);
+  const pkg = parseSkillPackages(JSON.stringify(SKILL_PACKAGES))[0]!;
 
   it("projects exactly the six Rust fields", () => {
     expect(Object.keys(agentSkillPackage(pkg)).sort()).toEqual([
@@ -161,7 +160,7 @@ describe("agentSkillPackage", () => {
   });
 
   it("serializes an absent description as an explicit null", () => {
-    const pinned = nn(parseSkillPackages(JSON.stringify(SKILL_PACKAGES))[1]);
+    const pinned = parseSkillPackages(JSON.stringify(SKILL_PACKAGES))[1]!;
     expect(agentSkillPackage(pinned).description).toBeNull();
   });
 });

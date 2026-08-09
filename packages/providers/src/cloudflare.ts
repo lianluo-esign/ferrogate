@@ -11,7 +11,6 @@ import { asStr, getField } from "./json.js";
 import type { Json } from "./json.js";
 import { AdapterError, SecretValue } from "./types.js";
 import type { ProviderAdapterFamily, ProviderHeader, ProviderHttpRequest } from "./types.js";
-const nn = <T>(v: T): NonNullable<T> => v as NonNullable<T>;
 
 /** Which Cloudflare AI Gateway surface a provider routes through. */
 export type CloudflareAiGatewayMode = "Compat" | "Unified";
@@ -118,7 +117,7 @@ function rewriteModelToAuthorForm(body: Json, author: string): void {
 function upsertHeader(headers: ProviderHeader[], name: string, value: string): void {
   const lowered = name.toLowerCase();
   for (let i = headers.length - 1; i >= 0; i--) {
-    if (nn(headers[i]).name.toLowerCase() === lowered) headers.splice(i, 1);
+    if (headers[i]!.name.toLowerCase() === lowered) headers.splice(i, 1);
   }
   headers.push({ name, value: new SecretValue(value) });
 }

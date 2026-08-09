@@ -1,7 +1,6 @@
 import { describe, expect, test } from "vitest";
 
 import { ToolCallAccumulator } from "../../src/streaming/toolcalls.js";
-const nn = <T>(v: T): NonNullable<T> => v as NonNullable<T>;
 
 describe("ToolCallAccumulator", () => {
   test("concatenates argument fragments across deltas", () => {
@@ -36,8 +35,8 @@ describe("ToolCallAccumulator", () => {
     accumulator.applyToolCallDeltas([{ index: 1, function: { arguments: "B2" } }]);
     // Snapshot order is ascending index (Rust BTreeMap), not arrival order.
     expect(accumulator.snapshot().map((call) => call.index)).toEqual([0, 1]);
-    expect(nn(accumulator.get(1)).arguments).toBe("BB2");
-    expect(nn(accumulator.get(0)).arguments).toBe("A");
+    expect(accumulator.get(1)!.arguments).toBe("BB2");
+    expect(accumulator.get(0)!.arguments).toBe("A");
   });
 
   test("falls back to the array position when index is omitted", () => {
@@ -89,7 +88,7 @@ describe("ToolCallAccumulator", () => {
   test("empty argument fragments never widen the accumulated string", () => {
     const accumulator = new ToolCallAccumulator();
     accumulator.applyToolCallDeltas([{ index: 0, function: { arguments: "" } }]);
-    expect(nn(accumulator.get(0)).arguments).toBe("");
+    expect(accumulator.get(0)!.arguments).toBe("");
     expect(accumulator.size).toBe(1);
   });
 });

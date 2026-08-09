@@ -21,7 +21,6 @@ import {
   splitBytes,
   streamOf,
 } from "./helpers.js";
-const nn = <T>(v: T): NonNullable<T> => v as NonNullable<T>;
 
 const decoder = new TextDecoder();
 
@@ -75,7 +74,7 @@ describe("messageToAnthropicSse (buffered serialization)", () => {
 
   test("message_start reports output_tokens 0; the tail reports the real count", () => {
     const frames = parseSse(messageToAnthropicSse(message));
-    const start = JSON.parse(nn((frames[0] as NonNullable<(typeof frames)[0]>).data)) as {
+    const start = JSON.parse((frames[0] as NonNullable<(typeof frames)[0]>).data!) as {
       message: { usage: { input_tokens: number; output_tokens: number } };
     };
     expect(start.message.usage).toEqual({ input_tokens: 5, output_tokens: 0 });
@@ -276,7 +275,7 @@ describe("OpenAI -> Anthropic incremental normalizer", () => {
     // Not awaited: `write` only settles once the readable side drains, which is
     // itself the proof that the normalizer emits before the stream is closed.
     const firstWrite = writer.write(
-      nn(parseSse('data: {"id":"chatcmpl-1","choices":[{"delta":{"content":"first"}}]}\n\n')[0]),
+      parseSse('data: {"id":"chatcmpl-1","choices":[{"delta":{"content":"first"}}]}\n\n')[0]!,
     );
 
     const early: string[] = [];
@@ -323,7 +322,7 @@ describe("OpenAI -> Anthropic incremental normalizer", () => {
     ]);
     expect(normalizer.completed).toBe(true);
     expect(normalizer.finish()).toEqual([]);
-    expect(normalizer.push(nn(parseSse('data: {"choices":[{"delta":{}}]}\n\n')[0]))).toEqual([]);
+    expect(normalizer.push(parseSse('data: {"choices":[{"delta":{}}]}\n\n')[0]!)).toEqual([]);
   });
 });
 

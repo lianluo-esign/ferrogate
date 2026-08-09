@@ -12,7 +12,6 @@ import {
   signSnapshot,
   verifySnapshot,
 } from "../src/signed-snapshot.js";
-const nn = <T>(v: T): NonNullable<T> => v as NonNullable<T>;
 
 // A deterministic 32-byte Ed25519 seed and its public key are derived at runtime
 // via WebCrypto so the test is self-contained.
@@ -135,7 +134,7 @@ describe("buildSnapshotCrypto", () => {
  */
 describe("verify_strict parity: small-order / non-canonical points", () => {
   const hex = (value: string) =>
-    Uint8Array.from(nn(value.match(/../g)).map((b) => Number.parseInt(b, 16)));
+    Uint8Array.from(value.match(/../g)!.map((b) => Number.parseInt(b, 16)));
   const leBytes = (value: bigint) => {
     const out = new Uint8Array(32);
     let rest = value;

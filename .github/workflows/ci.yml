@@ -81,7 +81,7 @@ jobs:
         run: bun run test:sdk-python
 
       # BLOCKING as of #706. `bun run lint` (`biome check .`) is clean on this
-      # tree: 0 errors, with 81 `noExplicitAny` diagnostics that biome.json keeps
+      # tree: 0 errors, with 81 `noExplicitAny` diagnostics that biome.jsonc keeps
       # at `warn` on purpose. A lint error now fails the build.
       #
       # Zero was reached WITHOUT turning any rule off (see the #706 PR): formatter
@@ -92,7 +92,7 @@ jobs:
       # set (idiomatic here because of `noUncheckedIndexedAccess`) became
       # `x as NonNullable<typeof x>` casts / a typed helper, NOT the unsafe
       # `x!.y -> x?.y` rewrite that silently weakens assertions. Generated
-      # artifacts (`**/*.generated.ts`, `docs/openapi`) are in biome.json's
+      # artifacts (`**/*.generated.ts`, `docs/openapi`) are in biome.jsonc's
       # `files.ignore` because the drift gate owns their byte-exact shape — no lint
       # RULE is disabled.
       - name: Lint (blocking — biome check . must be clean, see #706)

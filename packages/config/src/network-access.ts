@@ -1,4 +1,3 @@
-const nn = <T>(v: T): NonNullable<T> => v as NonNullable<T>;
 /**
  * Port of `ferrogate-config`'s `config/network_access.rs` (inventory §5.4,
  * "Network access", issue #166): pre-authentication IP/CIDR allowlisting,
@@ -146,7 +145,7 @@ function parseIpv6(s: string): bigint | null {
   // Expand a trailing embedded IPv4 (`::ffff:1.2.3.4`) into two hex groups.
   const expandV4 = (groups: string[]): string[] | null => {
     if (groups.length === 0) return groups;
-    const last = nn(groups[groups.length - 1]);
+    const last = groups[groups.length - 1]!;
     if (last.includes(".")) {
       const v4 = parseIpv4(last);
       if (v4 === null) return null;
@@ -219,7 +218,7 @@ export function resolveClientIp(
         .filter((e) => e.length > 0);
       const idx = entries.length - hops;
       if (idx >= 0 && idx < entries.length) {
-        const entry = nn(entries[idx]);
+        const entry = entries[idx]!;
         if (parseIp(entry) !== null) return entry;
       }
     }

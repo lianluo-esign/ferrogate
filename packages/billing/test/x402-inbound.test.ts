@@ -9,7 +9,6 @@ import {
   settleInboundPayment,
   validateInboundX402Endpoint,
 } from "../src/index.js";
-const nn = <T>(v: T): NonNullable<T> => v as NonNullable<T>;
 
 /** Assert `fn` throws a {@link BillingError} carrying `code`. */
 function expectBillingCode(fn: () => unknown, code: string): void {
@@ -53,7 +52,7 @@ describe("InMemoryRevenueSink (fully ported — issue #356)", () => {
     const totals = sink.totals();
     expect(totals.records).toBe(2);
     expect(totals.total_atomic_amount).toBe(350n);
-    expect(nn(sink.get("a")).atomic_amount).toBe(100n);
+    expect(sink.get("a")!.atomic_amount).toBe(100n);
     expect(sink.list(0, 10)).toHaveLength(2);
   });
 
@@ -70,7 +69,7 @@ describe("InMemoryRevenueSink (fully ported — issue #356)", () => {
     expect(sink.length).toBe(1);
     expect(sink.recordedTotal()).toBe(2);
     expect(sink.get("a")).toBeUndefined();
-    expect(nn(sink.get("b")).atomic_amount).toBe(200n);
+    expect(sink.get("b")!.atomic_amount).toBe(200n);
   });
 });
 

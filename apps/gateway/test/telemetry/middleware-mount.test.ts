@@ -24,7 +24,6 @@
 import { SELF, env } from "cloudflare:test";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { seedApiKey } from "../keys/seed.js";
-const nn = <T>(v: T): NonNullable<T> => v as NonNullable<T>;
 
 const BASE = "https://gw.test";
 const TENANT = "tenant_telemetry_mw";
@@ -201,7 +200,7 @@ describe("the deployed Worker emits telemetry for NON-inference operations", () 
         },
       ];
     };
-    const span = nn(traces.resourceSpans[0].scopeSpans[0].spans[0]);
+    const span = traces.resourceSpans[0].scopeSpans[0].spans[0]!;
     const attributes = Object.fromEntries(
       span.attributes.map((attribute) => [attribute.key, attribute.value.stringValue]),
     );

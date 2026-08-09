@@ -21,13 +21,12 @@ import {
   validateHeaders,
   validateSecretRef,
 } from "./helpers.js";
-const nn = <T>(v: T): NonNullable<T> => v as NonNullable<T>;
 
 /** `validate_providers` → the set of declared provider names. */
 export function validateProviders(config: Config): Set<string> {
   const names = new Set<string>();
   for (let index = 0; index < config.providers.length; index += 1) {
-    const provider = nn(config.providers[index]);
+    const provider = config.providers[index]!;
     const at = (field: string) => `providers[${index}].${field}`;
     if (isBlank(provider.name)) fail(at("name"), "cannot be empty");
     if (names.has(provider.name)) fail(at("name"), `duplicate provider name ${provider.name}`);
@@ -88,7 +87,7 @@ export function validateProviders(config: Config): Set<string> {
 export function validateModels(config: Config, providerNames: Set<string>): Set<string> {
   const names = new Set<string>();
   for (let index = 0; index < config.models.length; index += 1) {
-    const model = nn(config.models[index]);
+    const model = config.models[index]!;
     const at = (field: string) => `models[${index}].${field}`;
     if (isBlank(model.name)) fail(at("name"), "cannot be empty");
     if (names.has(model.name)) fail(at("name"), `duplicate model name ${model.name}`);
@@ -119,7 +118,7 @@ export function validateModels(config: Config, providerNames: Set<string>): Set<
       );
     }
     for (let fallbackIndex = 0; fallbackIndex < model.fallbacks.length; fallbackIndex += 1) {
-      const fallback = nn(model.fallbacks[fallbackIndex]);
+      const fallback = model.fallbacks[fallbackIndex]!;
       if (!fallback.enabled) continue;
       const atFallback = (field: string) => `${at("fallbacks")}[${fallbackIndex}].${field}`;
       if (!providerNames.has(fallback.provider)) {
@@ -423,7 +422,7 @@ export function validateMcpServerConfig(server: McpServerConfig): void {
 export function validateMcpServers(config: Config): void {
   const names = new Set<string>();
   for (let index = 0; index < config.mcp_servers.length; index += 1) {
-    const server = nn(config.mcp_servers[index]);
+    const server = config.mcp_servers[index]!;
     if (names.has(server.name)) {
       fail(`mcp_servers[${index}].name`, `duplicate MCP server name ${server.name}`);
     }
@@ -463,7 +462,7 @@ export function validateApiKeys(
 ): Set<string> {
   const ids = new Set<string>();
   for (let index = 0; index < config.api_keys.length; index += 1) {
-    const key = nn(config.api_keys[index]);
+    const key = config.api_keys[index]!;
     const at = (field: string) => `api_keys[${index}].${field}`;
     if (isBlank(key.id)) fail(at("id"), "cannot be empty");
     if (ids.has(key.id)) fail(at("id"), `duplicate api key id ${key.id}`);
@@ -542,7 +541,7 @@ export function validatePolicies(
 ): void {
   const names = new Set<string>();
   for (let index = 0; index < config.policies.length; index += 1) {
-    const policy = nn(config.policies[index]);
+    const policy = config.policies[index]!;
     const at = (field: string) => `policies[${index}].${field}`;
     if (isBlank(policy.name)) fail(at("name"), "cannot be empty");
     if (names.has(policy.name)) fail(at("name"), `duplicate policy name ${policy.name}`);
@@ -572,7 +571,7 @@ export function validatePolicies(
 export function validateGatewayConfigs(config: Config, apiKeyIds: Set<string>): void {
   const ids = new Set<string>();
   for (let index = 0; index < config.gateway_configs.length; index += 1) {
-    const profile = nn(config.gateway_configs[index]);
+    const profile = config.gateway_configs[index]!;
     const at = (field: string) => `gateway_configs[${index}].${field}`;
     if (isBlank(profile.id)) fail(at("id"), "cannot be empty");
     if (ids.has(profile.id)) fail(at("id"), `duplicate gateway config id ${profile.id}`);
@@ -599,7 +598,7 @@ export function validateGatewayConfigs(config: Config, apiKeyIds: Set<string>): 
 export function validateAgentUpstreams(config: Config): void {
   const ids = new Set<string>();
   for (let index = 0; index < config.agent_upstreams.length; index += 1) {
-    const upstream = nn(config.agent_upstreams[index]);
+    const upstream = config.agent_upstreams[index]!;
     const at = (field: string) => `agent_upstreams[${index}].${field}`;
     if (isBlank(upstream.id)) fail(at("id"), "cannot be empty");
     if (ids.has(upstream.id)) fail(at("id"), `duplicate agent upstream id ${upstream.id}`);
@@ -625,7 +624,7 @@ export function validateAgentUpstreams(config: Config): void {
 export function validateUpstreams(config: Config): Set<string> {
   const names = new Set<string>();
   for (let index = 0; index < config.upstreams.length; index += 1) {
-    const upstream = nn(config.upstreams[index]);
+    const upstream = config.upstreams[index]!;
     if (isBlank(upstream.name)) fail(`upstreams[${index}].name`, "cannot be empty");
     if (names.has(upstream.name)) {
       fail(`upstreams[${index}].name`, `duplicate upstream name ${upstream.name}`);
@@ -636,7 +635,7 @@ export function validateUpstreams(config: Config): Set<string> {
       fail(`upstreams[${index}].url`, "upstream must define url or urls");
     }
     for (let endpointIndex = 0; endpointIndex < endpoints.length; endpointIndex += 1) {
-      const endpoint = nn(endpoints[endpointIndex]);
+      const endpoint = endpoints[endpointIndex]!;
       try {
         parseUpstreamEndpoint(endpoint);
       } catch (error) {
@@ -656,7 +655,7 @@ export function validateUpstreams(config: Config): Set<string> {
 export function validateRoutes(config: Config, upstreamNames: Set<string>): void {
   const names = new Set<string>();
   for (let index = 0; index < config.routes.length; index += 1) {
-    const route = nn(config.routes[index]);
+    const route = config.routes[index]!;
     const at = (field: string) => `routes[${index}].${field}`;
     if (isBlank(route.name)) fail(at("name"), "cannot be empty");
     if (names.has(route.name)) fail(at("name"), `duplicate route name ${route.name}`);

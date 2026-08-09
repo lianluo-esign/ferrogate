@@ -44,7 +44,6 @@ import {
   storageProviderKindSchema,
 } from "../src/schema/enums.js";
 import { validateConfig } from "../src/validate.js";
-const nn = <T>(v: T): NonNullable<T> => v as NonNullable<T>;
 
 function firstError(raw: Record<string, unknown>): string | null {
   try {
@@ -80,10 +79,8 @@ describe("ContentSource is @ferrogate/guardrails'", () => {
 
   test("a rule may name `unknown` explicitly, and a bogus source is still refused", () => {
     expect(
-      nn(
-        configSchema.parse({ guardrails: [{ id: "g", name: "g", sources: ["unknown"] }] })
-          .guardrails[0],
-      ).sources,
+      configSchema.parse({ guardrails: [{ id: "g", name: "g", sources: ["unknown"] }] })
+        .guardrails[0]!.sources,
     ).toEqual(["unknown"]);
     expect(() =>
       configSchema.parse({ guardrails: [{ id: "g", name: "g", sources: ["telepathy"] }] }),
@@ -117,7 +114,7 @@ describe("ModelCapability / RoutingStrategy are @ferrogate/providers'", () => {
       provider_model: "pm",
       capabilities: providersModelCapabilitySchema.options,
     };
-    expect(nn(configSchema.parse({ models: [model] }).models[0]).capabilities).toEqual(
+    expect(configSchema.parse({ models: [model] }).models[0]!.capabilities).toEqual(
       providersModelCapabilitySchema.options,
     );
     expect(() =>

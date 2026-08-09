@@ -37,7 +37,6 @@ import {
   sha256,
   validateX402SpendPolicy,
 } from "../src/index.js";
-const nn = <T>(v: T): NonNullable<T> => v as NonNullable<T>;
 
 const USDC_DEVNET = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
 const USDC_MAINNET = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
@@ -177,7 +176,7 @@ describe("ConversionRule.convert", () => {
       [500n, 500n],
     ];
     for (const [a, b] of pairs) {
-      expect(nn(convert(rule, a)) <= nn(convert(rule, b))).toBe(true);
+      expect(convert(rule, a)! <= convert(rule, b)!).toBe(true);
     }
   });
 });
@@ -565,7 +564,7 @@ describe("config validation", () => {
 
 describe("URL canonicalisation (security-load-bearing)", () => {
   test("path-prefix matching respects segment boundaries", () => {
-    const url = nn(canonicalUrl("https://api.example.com/payment"));
+    const url = canonicalUrl("https://api.example.com/payment")!;
     expect(
       resourceRuleMatches({ origin: "https://api.example.com", pathPrefix: "/pay" }, url),
     ).toBe(false);

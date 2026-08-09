@@ -7,7 +7,6 @@
  * text.
  */
 import { parseSecretRef } from "@ferrogate/secrets";
-const nn = <T>(v: T): NonNullable<T> => v as NonNullable<T>;
 
 /** Throw the Rust `bail!("field {field}: {reason}")` shape. */
 export function fail(field: string, reason: string): never {
@@ -83,7 +82,7 @@ export function validateHeaders(
   headers: { name: string; value: string }[],
 ): void {
   for (let index = 0; index < headers.length; index += 1) {
-    const header = nn(headers[index]);
+    const header = headers[index]!;
     if (!isValidHeaderName(header.name)) {
       fail(`routes[${routeIndex}].${field}[${index}].name`, "invalid header name");
     }
@@ -121,7 +120,7 @@ export function validateExtensionPermissionNames(
 ): void {
   const seen = new Set<string>();
   for (let index = 0; index < names.length; index += 1) {
-    const name = nn(names[index]);
+    const name = names[index]!;
     if (isBlank(name)) fail(`${section}[${extensionIndex}].${field}[${index}]`, "cannot be empty");
     if (seen.has(name)) {
       fail(
@@ -147,7 +146,7 @@ export function validatePluginManifestNames(
 ): void {
   const seen = new Set<string>();
   for (let index = 0; index < names.length; index += 1) {
-    const name = nn(names[index]);
+    const name = names[index]!;
     if (!isPluginManifestName(name)) {
       fail(
         `${section}[${extensionIndex}].${field}[${index}]`,
@@ -187,7 +186,7 @@ export function compareVersionParts(left: string, right: string): number {
   const a = versionParts(left) ?? [0, 0, 0];
   const b = versionParts(right) ?? [0, 0, 0];
   for (let index = 0; index < 3; index += 1) {
-    if (nn(a[index]) !== nn(b[index])) return nn(a[index]) < nn(b[index]) ? -1 : 1;
+    if (a[index]! !== b[index]!) return a[index]! < b[index]! ? -1 : 1;
   }
   return 0;
 }
@@ -292,7 +291,7 @@ export function validatePromptPlaceholders(
 export function usesRegexCrateUnsupportedSyntax(pattern: string): boolean {
   let inClass = false;
   for (let index = 0; index < pattern.length; index += 1) {
-    const char = nn(pattern[index]);
+    const char = pattern[index]!;
     if (char === "\\") {
       const next = pattern[index + 1];
       if (next === undefined) return false; // trailing `\` — `new RegExp` rejects it anyway
@@ -355,7 +354,7 @@ function isIpv6Literal(value: string): boolean {
     const pieces = text.split(":");
     let groups = 0;
     for (let index = 0; index < pieces.length; index += 1) {
-      const piece = nn(pieces[index]);
+      const piece = pieces[index]!;
       if (index === pieces.length - 1 && piece.includes(".")) {
         if (!isIpv4Literal(piece)) return null;
         groups += 2; // an embedded IPv4 fills the low 32 bits

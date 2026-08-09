@@ -10,7 +10,6 @@ import {
   providerAttemptIsLegacy,
   validateRequestMetadata,
 } from "../src/index.js";
-const nn = <T>(v: T): NonNullable<T> => v as NonNullable<T>;
 
 function wireEvent(request_id: string): Record<string, unknown> {
   return {
@@ -107,7 +106,7 @@ describe("InMemoryBillingEventSink", () => {
     expect(sink.recordedTotal()).toBe(3);
     expect((events[0] as NonNullable<(typeof events)[0]>).request_id).toBe("fg-2");
     expect((events[1] as NonNullable<(typeof events)[1]>).request_id).toBe("fg-3");
-    expect(nn(sink.listPaginated(1, 1)[0]).request_id).toBe("fg-3");
+    expect(sink.listPaginated(1, 1)[0]!.request_id).toBe("fg-3");
   });
 
   it("uses providerAttemptForRequest to build a request-scoped attempt id", () => {

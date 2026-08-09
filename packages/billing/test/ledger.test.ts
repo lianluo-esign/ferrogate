@@ -13,7 +13,6 @@ import {
   parseBillingEvent,
   priceEntry,
 } from "../src/index.js";
-const nn = <T>(v: T): NonNullable<T> => v as NonNullable<T>;
 
 function event(request_id: string, provider: string, model: string): BillingEvent {
   return parseBillingEvent({
@@ -392,7 +391,7 @@ describe("InMemoryLedgerSink idempotency", () => {
       expect((error as BillingError).code).toBe("billing_idempotency_conflict");
     }
     expect(sink.length).toBe(1);
-    expect(nn(sink.get(original.id)).tenant.organization_id).toBe("org");
+    expect(sink.get(original.id)!.tenant.organization_id).toBe("org");
   });
 
   it("lists (tenant-filtered) and gets by id", () => {
@@ -402,7 +401,7 @@ describe("InMemoryLedgerSink idempotency", () => {
     expect(sink.list({}, 0, 10)).toHaveLength(1);
     expect(sink.list({ organization_id: "org" }, 0, 10)).toHaveLength(1);
     expect(sink.list({ organization_id: "nope" }, 0, 10)).toHaveLength(0);
-    expect(nn(sink.get(entry.id)).request_id).toBe("req-4");
+    expect(sink.get(entry.id)!.request_id).toBe("req-4");
     expect(sink.get("missing")).toBeUndefined();
   });
 });

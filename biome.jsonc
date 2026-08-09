@@ -25,7 +25,16 @@
     "enabled": true,
     "rules": {
       "recommended": true,
-      "suspicious": { "noExplicitAny": "warn" }
+      "suspicious": { "noExplicitAny": "warn" },
+      "style": {
+        // noNonNullAssertion is OFF deliberately (#706), not to dodge defects:
+        // with tsconfig `noUncheckedIndexedAccess` every index/Map access is
+        // `T | undefined`, so `x!` is the idiomatic narrowing here. The rule has
+        // no safe autofix and fires on ~127 load-bearing sites; keeping it on
+        // only invites `x! -> nn(x)` dodges that assert the same thing while
+        // blinding the linter. Every OTHER recommended rule stays enforced.
+        "noNonNullAssertion": "off"
+      }
     }
   },
   "formatter": {
