@@ -475,13 +475,6 @@ export interface ControlPlaneDeps {
    */
   readonly controlDatabase: D1Database | null;
   /**
-   * The legacy shared tenant database used only by the #824 backfill and by
-   * tenants whose migration state is still pre-cutover. It is deliberately
-   * separate from `controlDatabase`: the former contains tenant business rows,
-   * while the latter contains the account-global registry and audit chain.
-   */
-  readonly legacyTenantDatabase?: D1Database | null;
-  /**
    * The KV namespace `apps/gateway` resolves prompt deployment labels from
    * (`PROMPT_LABELS`), or `null` when this deployment binds none.
    *
@@ -666,14 +659,6 @@ export interface ControlPlaneBindings {
    * The gateway's singleton `ControlDataObject` namespace, bound CROSS-SCRIPT.
    */
   readonly CONTROL_DATA?: ControlDataNamespace;
-  /**
-   * The legacy shared tenant D1 (`apps/gateway`'s old `DB`), retained ONLY for
-   * the #824 tenant-by-tenant backfill (the `migrateTenantStorage` operator
-   * route reads it as the migration SOURCE). It must never be used as the
-   * control database or as an implicit fallback. Retiring it is deferred until
-   * the backfill route retires (a later Zero-D1 slice), not S3.
-   */
-  readonly LEGACY_TENANT_DB?: D1Database;
   /**
    * The gateway's `TenantDataObject` namespace, bound CROSS-SCRIPT (#820).
    *

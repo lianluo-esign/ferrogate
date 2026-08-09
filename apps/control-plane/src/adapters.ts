@@ -46,7 +46,6 @@ import {
   type BindingEnvironment,
   DurableObjectTenantDatabaseRouter,
   EnvBindingTenantDatabaseRouter,
-  SharedDatabaseTenantRouter,
   type TenantDatabaseRouter,
   type TenantObjectOperator,
   backfillTenantConfigurationPolicy,
@@ -1340,12 +1339,10 @@ export function resolveTenantDatabases(
     env as unknown as BindingEnvironment,
     controlDb,
   );
-  // The legacy shared-tenant router, retained for the #824 backfill migration
-  // source. It is NOT retired in S3 because `migrateTenantStorage` still reads it.
-  const legacyShared =
-    env.LEGACY_TENANT_DB === undefined
-      ? undefined
-      : new SharedDatabaseTenantRouter(env.LEGACY_TENANT_DB);
+  // #821 PR2d retired the shared `ferrogate-tenant` D1 (`LEGACY_TENANT_DB`) and
+  // with it the `legacyShared` router arm. The tenant-by-tenant backfill that was
+  // its only reader is gone (`migrateTenantStorage` now answers 410), so a tenant
+  // with no Durable Object is fail-closed here — never a shared-DB fallback.
   // PER TENANT, from the roster — not per Worker, from a var. See
   // `BackendDispatchingTenantDatabaseRouter`: since #820 every newly onboarded
   // tenant lives in a Durable Object that the binding router cannot reach, and
@@ -1361,7 +1358,6 @@ export function resolveTenantDatabases(
   // D1 database holding none of its rows.
   return new BackendDispatchingTenantDatabaseRouter(controlDb, {
     fallback: bindings,
-    ...(legacyShared === undefined ? {} : { legacyShared }),
     ...(env.TENANT_DATA === undefined
       ? {}
       : { durableObject: new DurableObjectTenantDatabaseRouter(env.TENANT_DATA, controlDb) }),
@@ -1549,7 +1545,6 @@ export function resolveDeps(
     tenantStorage: resolveTenantStorage(env, controlDatabase),
     tenantObjectOperator: resolveTenantObjectOperator(env, controlDatabase),
     controlDatabase: controlDatabase ?? null,
-    legacyTenantDatabase: env.LEGACY_TENANT_DB ?? null,
     promptLabels: resolvePromptLabels(env),
     // Delete-only by construction — see `resolveAssetObjects`.
     assetObjects: resolveAssetObjects(env),

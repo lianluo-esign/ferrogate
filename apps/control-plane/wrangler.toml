@@ -229,7 +229,7 @@ SPEND_ANOMALY_WEBHOOK_TIMEOUT_SECS = "5"
 # here rather than declared so an operator can discover the knobs exist.
 
 # ---------------------------------------------------------------------------
-# D1: legacy tenant compatibility only
+# D1: none — this Worker binds no D1 database
 # ---------------------------------------------------------------------------
 #
 # Zero-D1 S5 (#881) deleted the CONTROL database stanza (`binding = "DB"`,
@@ -238,18 +238,13 @@ SPEND_ANOMALY_WEBHOOK_TIMEOUT_SECS = "5"
 # `env.DB` control binding and no `d1_compat` fallback. `src/store/d1.ts`
 # resolves the control facade, not a `[[d1_databases]]` binding.
 #
-# The only `[[d1_databases]]` stanza that survives here is LEGACY_TENANT_DB,
-# which belongs to the per-tenant migration epic (#821/#824), not to Zero-D1.
-
-# LEGACY_TENANT_DB is the pre-M9 shared tenant database. It is retained only
-# while issue #824 runs its tenant-by-tenant backfill; the migration writes a
-# source-side fence before copying and never treats this binding as a fallback
-# for ordinary control-plane requests.
-[[d1_databases]]
-binding = "LEGACY_TENANT_DB"
-database_name = "ferrogate-tenant"
-database_id = "PLACEHOLDER_SET_AT_DEPLOY_TIME"
-migrations_dir = "../../sql/d1-ts/tenant"
+# #821 PR2d then deleted the LAST `[[d1_databases]]` stanza, LEGACY_TENANT_DB
+# (`database_name = "ferrogate-tenant"`) — the pre-M9 shared tenant database.
+# It survived only as the SOURCE of the tenant-by-tenant backfill, and that
+# backfill retired once every tenant was cut over to its own Durable Object
+# (`TENANT_DATA`). The `migrateTenantStorage` operator route now answers 410
+# Gone, so nothing reads this binding and there is nothing left to migrate.
+# This Worker therefore binds NO D1 database at all.
 
 # ---------------------------------------------------------------------------
 # PROMPT DEPLOYMENT LABELS — the `label -> revision` pointer (#694)
