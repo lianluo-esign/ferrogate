@@ -18,6 +18,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, type RenderResult } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { AuthProvider } from "@/hooks/use-auth";
+import { CatalogScopeProvider } from "@/hooks/use-catalog-scope";
 import { I18nProvider, type Locale } from "@/i18n";
 import { saveStoredSession, type StoredSession } from "@/lib/session-storage";
 
@@ -30,9 +31,12 @@ export function seedSession(overrides: Partial<StoredSession> = {}): StoredSessi
     refreshToken: "test-refresh-token",
     // Far enough out that AuthProvider's proactive refresh never fires mid-test.
     expiresAt: Date.now() + 60 * 60 * 1000,
-    user: { id: "user-1", email: "admin@example.com", display_name: "Admin" },
+    user: { id: "user-1", email: "admin@example.com", display_name: "Admin", superadmin: false },
     tenant: { id: "tenant-1", name: "Acme", role: "owner" },
     gatewayApiKey: TEST_GATEWAY_API_KEY,
+    // Default: a non-superadmin session with no platform-operator credential, so
+    // `canUsePlatform` is false and the catalog scope toggle stays hidden.
+    platformOperatorApiKey: null,
     ...overrides,
   };
   saveStoredSession(session);
@@ -60,9 +64,11 @@ export function AllProviders({
     <MemoryRouter>
       <I18nProvider initialLocale={locale}>
         <AuthProvider>
-          <QueryClientProvider client={createTestQueryClient()}>
-            {children}
-          </QueryClientProvider>
+          <CatalogScopeProvider>
+            <QueryClientProvider client={createTestQueryClient()}>
+              {children}
+            </QueryClientProvider>
+          </CatalogScopeProvider>
         </AuthProvider>
       </I18nProvider>
     </MemoryRouter>

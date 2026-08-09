@@ -27,7 +27,7 @@ function renderNavUser(locale: Locale = "en") {
 
 beforeEach(() => {
   seedSession({
-    user: { id: "user-1", email: "admin@example.com", display_name: "Admin" },
+    user: { id: "user-1", email: "admin@example.com", display_name: "Admin", superadmin: false },
   });
 });
 

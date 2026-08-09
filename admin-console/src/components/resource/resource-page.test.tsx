@@ -6,6 +6,7 @@ import { MemoryRouter, useLocation } from "react-router-dom";
 import { beforeEach, describe, expect, it } from "vitest";
 import { ResourcePage } from "@/components/resource/resource-page";
 import { AuthProvider } from "@/hooks/use-auth";
+import { CatalogScopeProvider } from "@/hooks/use-catalog-scope";
 import { I18nProvider } from "@/i18n";
 import type { ResourceConfig } from "@/lib/resource-config";
 import { plansConfig, type AdminPlan } from "@/resources/plans";
@@ -61,10 +62,12 @@ function renderAt(entry: string) {
     <MemoryRouter initialEntries={[entry]}>
       <I18nProvider>
         <AuthProvider>
-          <QueryClientProvider client={createTestQueryClient()}>
-            <ResourcePage config={widgetsConfig} />
-            <LocationProbe />
-          </QueryClientProvider>
+          <CatalogScopeProvider>
+            <QueryClientProvider client={createTestQueryClient()}>
+              <ResourcePage config={widgetsConfig} />
+              <LocationProbe />
+            </QueryClientProvider>
+          </CatalogScopeProvider>
         </AuthProvider>
       </I18nProvider>
     </MemoryRouter>,

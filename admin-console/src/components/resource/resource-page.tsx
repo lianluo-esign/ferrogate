@@ -21,9 +21,12 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet";
+import { CatalogScopeToggle } from "@/components/resource/catalog-scope-toggle";
 import { ResourceForm } from "@/components/resource/resource-form";
 import { ResourceTable } from "@/components/resource/resource-table";
 import { useAuth } from "@/hooks/use-auth";
+import { useCatalogApiKey } from "@/hooks/use-catalog-api-key";
+import { useCatalogScope } from "@/hooks/use-catalog-scope";
 import { useI18n } from "@/i18n";
 import { useOperatorError } from "@/hooks/use-operator-error";
 import {
@@ -46,7 +49,14 @@ export function ResourcePage<T extends Record<string, unknown>>({
   config: ResourceConfig<T>;
 }) {
   const { session } = useAuth();
-  const apiKey = session!.gatewayApiKey;
+  // Platform-scopable catalog pages (#912) select their credential by the active
+  // catalog scope — the platform-operator key under "platform", the tenant key
+  // otherwise — so create/edit/delete AND the list all address one catalog. The
+  // catalog hooks are called unconditionally to satisfy the rules of hooks;
+  // non-scopable resources keep exactly their prior tenant-key behavior.
+  const catalogApiKey = useCatalogApiKey();
+  const { scope } = useCatalogScope();
+  const apiKey = config.platformScopable ? catalogApiKey : session!.gatewayApiKey;
   const { t } = useI18n();
   const { toastError } = useOperatorError();
   // Per-resource copy resolves the typed catalog key when present (migrated
@@ -64,7 +74,12 @@ export function ResourcePage<T extends Record<string, unknown>>({
   const page = paginationMode === "offset" && requestedPage > 0 ? requestedPage : 1;
   const pageSize = 25;
   const offset = (page - 1) * pageSize;
-  const queryKey = ["resource", config.key, paginationMode === "offset" ? offset : 0];
+  // A scopable resource keys its list on the active scope so flipping the toggle
+  // refetches the OTHER catalog rather than serving stale rows; non-scopable
+  // resources keep the prior key shape exactly.
+  const queryKey = config.platformScopable
+    ? ["resource", config.key, paginationMode === "offset" ? offset : 0, scope]
+    : ["resource", config.key, paginationMode === "offset" ? offset : 0];
 
   const [formOpen, setFormOpen] = useState(false);
   const [editingRow, setEditingRow] = useState<T | null>(null);
@@ -143,19 +158,22 @@ export function ResourcePage<T extends Record<string, unknown>>({
             <p className="text-sm text-muted-foreground">{description}</p>
           )}
         </div>
-        {!config.readOnly && (
-          <Button
-            ref={newButtonRef}
-            onClick={() => {
-              formReturnFocusRef.current = newButtonRef.current;
-              setEditingRow(null);
-              setFormOpen(true);
-            }}
-          >
-            <Plus className="mr-1 h-4 w-4" />
-            {t("resource.action.new")}
-          </Button>
-        )}
+        <div className="flex items-center gap-3">
+          {config.platformScopable && <CatalogScopeToggle />}
+          {!config.readOnly && (
+            <Button
+              ref={newButtonRef}
+              onClick={() => {
+                formReturnFocusRef.current = newButtonRef.current;
+                setEditingRow(null);
+                setFormOpen(true);
+              }}
+            >
+              <Plus className="mr-1 h-4 w-4" />
+              {t("resource.action.new")}
+            </Button>
+          )}
+        </div>
       </div>
 
       {listError && (
