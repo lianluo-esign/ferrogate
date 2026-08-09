@@ -194,6 +194,7 @@ export function ResourcePage<T extends Record<string, unknown>>({
           listError ? t("resource.table.unavailable") : t("resource.table.empty")
         }
         rowLabel={config.rowLabel}
+        rowHref={config.rowHref}
         onEdit={
           canEdit
             ? (row, trigger) => {

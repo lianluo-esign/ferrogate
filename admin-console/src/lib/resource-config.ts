@@ -393,6 +393,15 @@ export interface ResourceConfig<T extends Record<string, unknown>> {
   /** Accessible record label for row actions; defaults to the first column value. */
   rowLabel?: (row: T) => string;
   /**
+   * When set, each list row's FIRST column becomes a `<Link>` to this target
+   * (#912): the minimal row-nav affordance the generic table otherwise lacks.
+   * Used by the models list to reach a model's nested offerings page. The
+   * returned string is a client-side route path (e.g. `/app/models/{id}/offerings`),
+   * not an operator-facing copy string, so it is built here rather than via the
+   * i18n catalog.
+   */
+  rowHref?: (row: T) => string;
+  /**
    * Typed list fetcher backed by the generated OpenAPI client (#314):
    * migrated resources implement this with `adminGet(apiKey, "<contract
    * path>")` so contract drift becomes a type error; ResourcePage falls

@@ -42,6 +42,11 @@ export const modelsConfig: ResourceConfig<AdminModel> = {
   basePath: "/admin/v1/models",
   idField: "id",
   platformScopable: true,
+  // Row-nav to the nested offerings CRUD page (#912 slice 2c): the model name in
+  // the first column links to `/app/models/{id}/offerings`. Rows without an id
+  // (should not happen — the backend mints one) fall back to a non-navigating
+  // empty href rather than a broken `/undefined/` path.
+  rowHref: (row) => (row.id ? `/app/models/${encodeURIComponent(row.id)}/offerings` : ""),
   fetchList: async (apiKey, request) =>
     adminGet(apiKey, "/admin/v1/models", {
       query: { offset: request.offset, limit: request.limit },

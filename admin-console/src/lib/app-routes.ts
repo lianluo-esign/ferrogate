@@ -34,6 +34,7 @@ export const APP_ROUTES = {
   tools: "/app/tools",
   pluginTools: "/app/plugins/:pluginId/tools",
   toolSessions: "/app/tool-sessions",
+  modelOfferings: "/app/models/:modelId/offerings",
 } as const;
 
 export const APP_DETAIL_ROUTE_PARENTS: Readonly<Record<string, string>> = {
@@ -41,4 +42,5 @@ export const APP_DETAIL_ROUTE_PARENTS: Readonly<Record<string, string>> = {
   [APP_ROUTES.guardrailPolicyDetail]: APP_ROUTES.guardrailPolicies,
   [APP_ROUTES.selfHostedWorkerDetail]: APP_ROUTES.selfHostedWorkerOperations,
   [APP_ROUTES.pluginTools]: "/app/plugins",
+  [APP_ROUTES.modelOfferings]: "/app/models",
 };

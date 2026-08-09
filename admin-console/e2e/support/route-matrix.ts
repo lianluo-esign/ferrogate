@@ -37,6 +37,7 @@ export const ROUTE_PARAM_SAMPLES: Readonly<Record<string, string>> = {
   policyId: "policy-sample-0001",
   workerId: "worker-sample-0001",
   pluginId: "plugin-sample-0001",
+  modelId: "model-sample-0001",
 };
 
 /** The auth routes, registered directly in `App.tsx` rather than in a registry. */
