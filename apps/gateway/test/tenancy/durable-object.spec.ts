@@ -31,10 +31,12 @@
  */
 import { env } from "cloudflare:test";
 import {
+  ControlDatabaseTenantRegistry,
   D1WalletStore,
   DurableObjectTenantDatabaseRouter,
   requireAtomicBatch,
 } from "@ferrogate/storage";
+import type { ControlDataNamespace } from "@ferrogate/storage/durable-objects";
 import { Hono } from "hono";
 import { beforeAll, describe, expect, test } from "vitest";
 import { HttpError } from "../../src/middleware/errors.js";
@@ -63,22 +65,43 @@ function defaultBindings(): TenancyBindings {
   return rest as TenancyBindings;
 }
 
-/** A control database that counts every statement prepared against it. */
-function countingControlDb(): { db: D1Database; prepared: string[] } {
-  const prepared: string[] = [];
-  const db = new Proxy(env.CONTROL_DB, {
-    get(target, property, receiver) {
-      if (property === "prepare") {
-        return (query: string) => {
-          prepared.push(query);
-          return target.prepare(query);
-        };
-      }
-      const value = Reflect.get(target, property, receiver);
-      return typeof value === "function" ? value.bind(target) : value;
+/**
+ * A `CONTROL_DATA` namespace that records every read RPC into the control
+ * object, so §2 can COUNT what the request path touches.
+ *
+ * Since Zero-D1 S5 (#914) retired `d1_compat`, the resolver reads its control
+ * store through `controlDatabaseFrom(env)` — `env.CONTROL_DATA`, never
+ * `env.CONTROL_DB` — so the tally must sit on the namespace, not on a D1 handle.
+ * It wraps the REAL object (`env.CONTROL_DATA`), so a counted read still hits the
+ * registry `setupTenancy` seeded: the counting is transparent, and
+ * `provisionedTenants()` below finds the real rows through it.
+ */
+function countingControlNamespace(): { namespace: ControlDataNamespace; reads: string[] } {
+  const reads: string[] = [];
+  const real = env.CONTROL_DATA as unknown as {
+    idFromName(name: string): unknown;
+    get(id: unknown): {
+      query(request: { sql: string }): unknown;
+      batch(request: { statements: { sql: string }[] }): unknown;
+    };
+  };
+  const namespace = {
+    idFromName: (name: string) => real.idFromName(name),
+    get(id: unknown) {
+      const stub = real.get(id);
+      return {
+        query(request: { sql: string }) {
+          reads.push(request.sql);
+          return stub.query(request);
+        },
+        batch(request: { statements: { sql: string }[] }) {
+          for (const statement of request.statements) reads.push(statement.sql);
+          return stub.batch(request);
+        },
+      };
     },
-  }) as D1Database;
-  return { db, prepared };
+  };
+  return { namespace: namespace as unknown as ControlDataNamespace, reads };
 }
 
 // ---------------------------------------------------------------------------
@@ -94,7 +117,7 @@ describe("durable_object is the default topology, and it is the library's router
     expect(parseTenantDatabaseRoutingMode("off")).toBe("off");
   });
 
-  test("the resolver mounts DurableObjectTenantDatabaseRouter, lazily", () => {
+  test("the resolver mounts DurableObjectTenantDatabaseRouter, lazily", async () => {
     const resolver = createTenantDatabaseResolver(defaultBindings());
     expect(resolver.mode).toBe("durable_object");
     // THE UNMOUNT GATE, same shape as `resolver.spec.ts` §1: re-implementing
@@ -107,7 +130,14 @@ describe("durable_object is the default topology, and it is the library's router
     // have been deployed.
     expect(resolver.eager).toBe(false);
     // The CONTROL database is still account-global, and is NOT any tenant's.
-    expect(resolver.control()).toBe(env.CONTROL_DB);
+    // Since Zero-D1 S5 (#914) it is the `CONTROL_DATA` object facade (a fresh
+    // handle per resolve), so prove it by what it is not and by the
+    // account-global registry it reads, never by `===`.
+    const control = resolver.control();
+    expect(control).not.toBe(env.TENANT_DB_ACME);
+    expect(control).not.toBe(env.TENANT_DB_GLOBEX);
+    const registry = new ControlDatabaseTenantRegistry(control);
+    expect((await registry.get(TENANT_ACME))?.bindingName).toBe("TENANT_DB_ACME");
   });
 
   test("a handle reports source durable_object and supportsAtomicBatch", async () => {
@@ -155,11 +185,11 @@ describe("durable_object is the default topology, and it is the library's router
 // ---------------------------------------------------------------------------
 
 describe("a request-path resolution performs NO control-database read", () => {
-  test("resolving ten tenants prepares zero statements on CONTROL_DB", async () => {
-    const { db, prepared } = countingControlDb();
+  test("resolving ten tenants issues zero reads against the control store", async () => {
+    const { namespace, reads } = countingControlNamespace();
     const resolver = createTenantDatabaseResolver({
       ...defaultBindings(),
-      CONTROL_DB: db,
+      CONTROL_DATA: namespace,
     } as TenancyBindings);
 
     const tenants = Array.from({ length: 10 }, (_, index) => `tenant_counted_${index}`);
@@ -170,7 +200,7 @@ describe("a request-path resolution performs NO control-database read", () => {
     // binding router charged one `tenant_databases` SELECT per uncached tenant
     // on the inference hot path, and the 30 s cache that softened it was deleted
     // rather than left guarding a read that no longer happens.
-    expect(prepared).toEqual([]);
+    expect(reads).toEqual([]);
   });
 
   test("a resolution the tenancy MIDDLEWARE performs reads nothing either", async () => {
@@ -186,7 +216,7 @@ describe("a request-path resolution performs NO control-database read", () => {
     // `RequestTenantDatabaseAccessor`. Adding
     // `void this.resolver().control().prepare("SELECT 1")` to that constructor
     // turns this red; it left the old version green.
-    const { db, prepared } = countingControlDb();
+    const { namespace, reads } = countingControlNamespace();
     const app = new Hono<GatewayEnv>();
     app.use("*", async (c, next) => {
       c.set("auth", {
@@ -213,7 +243,7 @@ describe("a request-path resolution performs NO control-database read", () => {
 
     const response = await app.request("https://probe.test/probe", {}, {
       ...defaultBindings(),
-      CONTROL_DB: db,
+      CONTROL_DATA: namespace,
     } as unknown as Record<string, unknown>);
 
     expect(response.status).toBe(200);
@@ -221,14 +251,14 @@ describe("a request-path resolution performs NO control-database read", () => {
       tenantId: TENANT_ACME,
       source: "durable_object",
     });
-    expect(prepared).toEqual([]);
+    expect(reads).toEqual([]);
   });
 
   test("provisionedTenants DOES read it — the registry survives, off the request path", async () => {
-    const { db, prepared } = countingControlDb();
+    const { namespace, reads } = countingControlNamespace();
     const resolver = createTenantDatabaseResolver({
       ...defaultBindings(),
-      CONTROL_DB: db,
+      CONTROL_DATA: namespace,
     } as TenancyBindings);
 
     const tenants = await resolver.router.provisionedTenants();
@@ -237,7 +267,7 @@ describe("a request-path resolution performs NO control-database read", () => {
     // that had lost the control database entirely — and every fleet view would
     // report an empty fleet. A DO namespace cannot be enumerated in production,
     // so `tenant_databases` is the only possible answer here.
-    expect(prepared.length).toBeGreaterThan(0);
+    expect(reads.length).toBeGreaterThan(0);
     expect(tenants).toContain(TENANT_ACME);
     expect(tenants).toContain(TENANT_GLOBEX);
   });
@@ -424,13 +454,18 @@ describe("fail closed — an unreachable tenant NEVER falls back", () => {
     );
   });
 
-  test("no CONTROL_DB is a refusal too, even though routing would not need it", () => {
+  test("no CONTROL_DATA is a refusal too, even though routing would not need it", () => {
     // `durable_object` resolution reads nothing, so this could have been made
     // optional. It is not: without the control database `control()` and
     // `provisionedTenants()` cannot answer, and a gateway that cannot enumerate
     // its fleet should say so at configuration time rather than at the first
-    // admin fan-out.
-    const { CONTROL_DB: _absent, ...withoutControl } = defaultBindings() as Record<string, unknown>;
+    // admin fan-out. Since Zero-D1 S5 (#914) that control binding is
+    // `CONTROL_DATA` — the store `controlDatabaseFrom` resolves — not the raw
+    // `CONTROL_DB`, whose absence the resolver no longer even observes.
+    const { CONTROL_DATA: _absent, ...withoutControl } = defaultBindings() as Record<
+      string,
+      unknown
+    >;
     expect(() => createTenantDatabaseResolver(withoutControl as TenancyBindings)).toThrow(
       expect.objectContaining({ code: TENANT_DATABASE_ROUTING_MISCONFIGURED }),
     );

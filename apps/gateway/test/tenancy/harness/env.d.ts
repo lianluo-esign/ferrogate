@@ -11,12 +11,22 @@ import type { D1Migration } from "cloudflare:test";
  * plus `GATEWAY_TENANT_DB_ROUTING` there — see the WIRING block in
  * `src/tenancy/index.ts`.
  */
-import type { TenantDataNamespace } from "@ferrogate/storage/durable-objects";
+import type { ControlDataNamespace, TenantDataNamespace } from "@ferrogate/storage/durable-objects";
 
 declare global {
   namespace Cloudflare {
     interface Env {
-      /** Account-global; holds `tenant_databases`. */
+      /**
+       * The RESOLVER's control store since Zero-D1 S5 (#914): the singleton
+       * `ControlDataObject`, reached through `controlDatabaseFrom(env)`. Holds
+       * `tenant_databases`, seeded here by `setupTenancy` through the facade.
+       */
+      CONTROL_DATA: ControlDataNamespace;
+      /**
+       * The NATIVE control D1, retained only as a RAW HANDLE for the specs that
+       * introspect the schema split on `sqlite_master`. Not what the router
+       * reads — that is `CONTROL_DATA` above.
+       */
       CONTROL_DB: D1Database;
       /**
        * The per-tenant Durable Object namespace — the DEFAULT topology. One

@@ -24,6 +24,7 @@ import {
   requireAtomicBatch,
 } from "@ferrogate/storage";
 import { beforeAll, describe, expect, test } from "vitest";
+import { controlDatabaseFrom } from "../../src/control-data.js";
 import { HttpError } from "../../src/middleware/errors.js";
 import {
   TENANT_DATABASE_ROUTING_DISABLED,
@@ -69,7 +70,7 @@ async function refusal(work: Promise<unknown>, code: string, status = 503): Prom
 // ---------------------------------------------------------------------------
 
 describe("the resolver is @ferrogate/storage's router, not a second implementation", () => {
-  test('"binding" mode mounts EnvBindingTenantDatabaseRouter over CONTROL_DB', () => {
+  test('"binding" mode mounts EnvBindingTenantDatabaseRouter over the CONTROL_DATA facade', async () => {
     const resolver = createTenantDatabaseResolver({
       ...bindings(),
       GATEWAY_TENANT_DB_ROUTING: "binding",
@@ -79,9 +80,17 @@ describe("the resolver is @ferrogate/storage's router, not a second implementati
     expect(resolver.router).toBeInstanceOf(EnvBindingTenantDatabaseRouter);
     expect(resolver.mode).toBe("binding");
     expect(resolver.eager).toBe(false);
-    // The CONTROL database is the account-global one, and it is NOT any
-    // tenant's database.
-    expect(resolver.control()).toBe(env.CONTROL_DB);
+    // The CONTROL database is the account-global one, and it is NOT any tenant's
+    // database. Since Zero-D1 S5 (#914) retired `d1_compat`, it is the
+    // `CONTROL_DATA` object facade rather than `env.CONTROL_DB` — a fresh handle
+    // per resolve, so identity is proved by WHAT IT IS NOT (either tenant's own
+    // database) and by WHAT IT READS (the account-global `tenant_databases`
+    // registry), never by `===`.
+    const control = resolver.control();
+    expect(control).not.toBe(env.TENANT_DB_ACME);
+    expect(control).not.toBe(env.TENANT_DB_GLOBEX);
+    const registry = new ControlDatabaseTenantRegistry(control);
+    expect((await registry.get(TENANT_ACME))?.bindingName).toBe("TENANT_DB_ACME");
   });
 
   test('"binding_strict" is the same router, resolved eagerly', () => {
@@ -101,7 +110,10 @@ describe("the resolver is @ferrogate/storage's router, not a second implementati
   });
 
   test("the registry the router reads is the control database's tenant_databases", async () => {
-    const registry = new ControlDatabaseTenantRegistry(env.CONTROL_DB);
+    // The router reads its control store through `controlDatabaseFrom(env)` — the
+    // `CONTROL_DATA` object facade since Zero-D1 S5 — so the registry is seeded
+    // and read there, NOT in the native `CONTROL_DB` D1.
+    const registry = new ControlDatabaseTenantRegistry(controlDatabaseFrom(bindings()) as D1Database);
     const acme = await registry.get(TENANT_ACME);
     expect(acme?.bindingName).toBe("TENANT_DB_ACME");
     // `tenant_unbound` is provisioned but has no binding: the column is NULL,
@@ -295,7 +307,10 @@ describe("GATEWAY_TENANT_DB_ROUTING parsing", () => {
   });
 
   test("a mode whose required binding is absent is misconfigured, not degraded", () => {
-    const { CONTROL_DB: _control, ...withoutControl } = bindings() as Record<string, unknown>;
+    // The control binding a `binding`-mode router requires is now `CONTROL_DATA`
+    // (the store `controlDatabaseFrom` resolves), not the native `CONTROL_DB`.
+    // Removing it must be a loud misconfiguration, never a silent degrade.
+    const { CONTROL_DATA: _control, ...withoutControl } = bindings() as Record<string, unknown>;
     expect(() =>
       createTenantDatabaseResolver({
         ...withoutControl,

@@ -37,6 +37,18 @@ import { tenantDatabase } from "../../../src/tenancy/index.js";
  */
 export { TenantDataObject } from "@ferrogate/storage/durable-objects";
 
+/**
+ * The `CONTROL_DATA` Durable Object class — the singleton `ControlDataObject`
+ * that is the control database (Zero-D1 S5, #914). Same workerd startup rule as
+ * `TenantDataObject` above: `class_name = "ControlDataObject"` in
+ * `harness/wrangler.toml` resolves against THIS entry module, so without this
+ * re-export the harness isolate refuses to boot. It is the harness's copy of
+ * `apps/gateway/src/worker.ts`'s CONTROL_DATA export, and it is what makes
+ * `controlDatabaseFrom(env)` resolve a real facade instead of the retired
+ * `d1_compat` `CONTROL_DB` leg.
+ */
+export { ControlDataObject } from "@ferrogate/storage/durable-objects";
+
 const { app } = createGatewayApp({
   modules: [...GATEWAY_ROUTE_MODULES],
   // THE MOUNT UNDER TEST. `harness/wrangler.toml` pins
