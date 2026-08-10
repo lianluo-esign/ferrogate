@@ -36,6 +36,7 @@
  * gateway — see the PR for #675 for the write-up and follow-up issues.
  */
 import { env } from "cloudflare:test";
+import { controlDataObjectDatabase } from "@ferrogate/storage";
 import {
   APIError,
   AuthenticationError,
@@ -63,14 +64,26 @@ const REQUEST = {
 
 /**
  * The gateway prefers the CONTROL database over the `GATEWAY_QUOTA_POLICIES`
- * var whenever one is bound, and `apps/gateway/wrangler.toml` binds it — so the
- * 429 leg has to seed a real row rather than rely on the var. This is the same
- * durable path a production deployment enforces on.
+ * var whenever one is bound, and it is — since Zero-D1 S5 (#881) the control
+ * database is the singleton `ControlDataObject`, resolved by
+ * `controlDatabaseFrom(env)` from the `CONTROL_DATA` binding. So the 429 leg has
+ * to seed a real `quota_policies` row through that same facade rather than rely
+ * on the var, which is the exact durable path a production deployment enforces
+ * on.
+ *
+ * The seed is UNCONDITIONAL: `CONTROL_DATA` is always bound in this config (the
+ * setup guard throws otherwise), so there is no `=== undefined` early-return to
+ * silently drop the row and leave the 429 leg proving nothing. The facade is
+ * built HERE, at call time inside `beforeAll`, not at module load: the object
+ * stub must be resolved inside the test's `isolatedStorage` context so the seed
+ * and the gateway's read share one backend (see `apps/gateway/test/setup-d1.ts`
+ * for the same rationale). The first query wakes the object and applies its
+ * schema, so the `quota_policies` table exists by the time the row lands.
  */
 beforeAll(async () => {
-  const control = (env as unknown as { CONTROL_DB?: D1Database; BILLING_DB?: D1Database })
-    .CONTROL_DB;
-  if (control === undefined) return;
+  const control = controlDataObjectDatabase(
+    (env as unknown as { CONTROL_DATA: never }).CONTROL_DATA,
+  );
   await control
     .prepare(
       "INSERT OR REPLACE INTO quota_policies (id, scope_type, scope_id, rpm_limit, enabled) " +
