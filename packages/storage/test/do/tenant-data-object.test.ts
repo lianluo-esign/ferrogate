@@ -335,16 +335,18 @@ describe("the statement splitter", () => {
       alterTable: count(/^ALTER TABLE/i),
       insert: count(/^INSERT/i),
     }).toEqual({
-      // #698 slices 1-3: `0022_batches` (+1 table) and `0023_batch_execution`
+      // #698 slices 1-3: `0022_batches` (+1 table) and `0024_batch_execution`
       // (+1 table, +11 `ALTER TABLE … ADD COLUMN`). The ALTERs are the half
       // that matters — they are the statements the version gate exists to stop
-      // re-running, and they more than doubled.
-      files: 23,
-      statements: 431,
+      // re-running, and they more than doubled. Then two more tenant migrations
+      // landed: `0023_online_eval_leg_index` (#894, +1 `CREATE INDEX`) and
+      // `0025_request_log_routing_decision` (#699, +1 `ALTER TABLE … ADD COLUMN`).
+      files: 25,
+      statements: 433,
       createTable: 74,
-      createIndex: 94,
+      createIndex: 95,
       createUniqueIndex: 6,
-      alterTable: 21,
+      alterTable: 22,
       insert: 6,
     });
 
@@ -373,9 +375,10 @@ describe("the statement splitter", () => {
       "0017_worker_schedule_state": 1,
       "0018_usage_evaluation_audit": 1,
       "0021_tenant_backfill_fence": 1,
-      "0023_batch_execution": 1,
+      "0024_batch_execution": 1,
+      "0025_request_log_routing_decision": 1,
     });
-    expect(Object.values(commentSemicolons).reduce((total, n) => total + n, 0)).toBe(38);
+    expect(Object.values(commentSemicolons).reduce((total, n) => total + n, 0)).toBe(39);
 
     // Ordinary statements still have their terminator removed, while each
     // trigger stays whole because its body contains internal terminators.
@@ -397,7 +400,7 @@ describe("a fresh tenant object", () => {
     expect(status.latest).toBe(TENANT_SCHEMA_VERSION);
     // A guard on the fixture: if `TENANT_MIGRATIONS` were ever empty the
     // version assertions above would both read 0 and pass vacuously.
-    expect(TENANT_MIGRATIONS.length).toBe(23);
+    expect(TENANT_MIGRATIONS.length).toBe(25);
     expect(status.appliedThisWake).toEqual(TENANT_MIGRATIONS.map((m) => m.name));
 
     const tables = await object.query({
