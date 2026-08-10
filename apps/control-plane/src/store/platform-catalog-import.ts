@@ -58,6 +58,8 @@ const PLATFORM_DEFAULT_PROVIDER_BASE_URL = "platform://default";
 export const IMPORT_SOURCE_ENV = "env_import";
 /** `source` stamped on offerings imported from `withDefaultRateCard()`. */
 export const IMPORT_SOURCE_RATE_CARD = "default_rate_card";
+/** `source` stamped on offerings synced from a provider's live `/v1/models` (#944). */
+export const IMPORT_SOURCE_PROVIDER_SYNC = "provider_sync";
 
 /**
  * One offering row for the import — the `platform_catalog_offerings` columns.
@@ -361,6 +363,100 @@ export function rateCardToImportGraph(
         ];
 
   return { providers, models: modelRows, offerings: offeringRows };
+}
+
+/** One row of an upstream provider's `GET /v1/models` list (#944). */
+export interface UpstreamModel {
+  /** The upstream model id — the only field OpenAI's `/v1/models` guarantees. */
+  readonly id: string;
+  /** Upstream `owned_by`, when advertised; carried onto the catalog model row. */
+  readonly owned_by?: string | null;
+}
+
+/**
+ * A provider's live `GET /v1/models` list → the platform import graph (#944).
+ *
+ * The INVERSE end of {@link rateCardToImportGraph}: that turns a compiled-in
+ * rate card into price-only `platform`-kind rows; this turns an upstream's real
+ * model inventory into REAL offerings on the provider channel being synced. Each
+ * upstream model becomes one `platform_catalog_models` row (name = the upstream
+ * id, so the natural key is stable across re-syncs) and one primary
+ * `platform_catalog_offerings` row whose `upstream_model_id` is that same id.
+ *
+ * `providers` is deliberately EMPTY: the channel already exists in the control
+ * database — it is the row the operator pointed the sync at — so re-inserting it
+ * would be redundant, and the offering's `provider_id` foreign key is satisfied
+ * by the live row rather than by a member of this graph. The handler therefore
+ * does NOT run {@link importGraphReferentialError} (which only knows the graph's
+ * own providers) against a provider-sync graph.
+ *
+ * Prices come from `priceBook` matched by model NAME on the wildcard (`"*"`)
+ * provider — the upstream `/v1/models` endpoint advertises none — and are left
+ * `null` for a model the card does not cover, exactly the "priced from the seed
+ * where the upstream gives none" the issue asks for. Duplicate upstream ids are
+ * collapsed to the first, so a malformed upstream list cannot fan out into a
+ * `ux_..._primary` collision.
+ */
+export function providerModelsToImportGraph(
+  provider: Pick<SeedProviderChannel, "id" | "name">,
+  upstreamModels: readonly UpstreamModel[],
+  priceBook: PriceBook,
+): PlatformCatalogImportGraph {
+  const priceByModel = new Map(
+    priceBook.entries
+      .filter((entry) => entry.provider === "*")
+      .map((entry) => [entry.model, entry.price] as const),
+  );
+  const modelRows: SeedCatalogModel[] = [];
+  const offeringRows: ImportOfferingRow[] = [];
+  const seen = new Set<string>();
+
+  for (const upstream of upstreamModels) {
+    const name = upstream.id;
+    if (seen.has(name)) continue;
+    seen.add(name);
+
+    modelRows.push({
+      id: modelId(name),
+      name,
+      family: null,
+      owned_by: upstream.owned_by ?? null,
+      capabilities_json: "[]",
+      context_window: null,
+      routing_strategy: "priority",
+      enabled: 1,
+    });
+
+    const price = priceByModel.get(name);
+    offeringRows.push({
+      id: offeringId(name, provider.name, name),
+      model_id: modelId(name),
+      provider_id: provider.id,
+      upstream_model_id: name,
+      role: "primary",
+      priority: 0,
+      weight: 1,
+      canary_percent: null,
+      shadow_percent: null,
+      shadow_max_requests: null,
+      capabilities_json: null,
+      context_window: null,
+      region: null,
+      zero_data_retention: null,
+      input_price_per_1m: price?.input_price_per_1m ?? null,
+      output_price_per_1m: price?.output_price_per_1m ?? null,
+      cached_input_price_per_1m: price?.cached_input_price_per_1m ?? null,
+      cache_write_price_per_1m: price?.cache_write_price_per_1m ?? null,
+      reasoning_price_per_1m: price?.reasoning_price_per_1m ?? null,
+      audio_second_price_per_1m: price?.audio_second_price_per_1m ?? null,
+      audio_character_price_per_1m: price?.audio_character_price_per_1m ?? null,
+      currency: price?.currency ?? "USD",
+      enabled: 1,
+      source: IMPORT_SOURCE_PROVIDER_SYNC,
+    });
+  }
+
+  return { providers: [], models: modelRows, offerings: offeringRows };
 }
 
 /**

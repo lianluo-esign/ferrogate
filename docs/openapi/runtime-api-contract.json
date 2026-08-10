@@ -283,6 +283,10 @@
       "group": "admin_provider"
     },
     {
+      "pattern": "/admin/v1/providers/{id}/sync-models",
+      "group": "admin_provider"
+    },
+    {
       "pattern": "/admin/v1/provider-health",
       "group": "admin_provider"
     },
@@ -974,6 +978,17 @@
       "path": "/admin/v1/providers/{id}",
       "method": "delete",
       "operation_id": "deleteAdminProvider",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/providers/{id}/sync-models",
+      "method": "post",
+      "operation_id": "syncProviderModels",
       "visibility": "admin",
       "auth": {
         "kind": "bearer",

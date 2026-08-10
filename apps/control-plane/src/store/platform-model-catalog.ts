@@ -853,6 +853,22 @@ export class PlatformModelCatalogStore {
     return row === null ? null : providerRecord(row);
   }
 
+  /**
+   * The RAW provider channel columns — including `api_key_var`/`byok_alias` —
+   * for the model sync (#944).
+   *
+   * Deliberately NOT {@link getProvider}, whose {@link providerRecord} masks the
+   * credential reference into a `has_api_key` boolean: the sync must READ
+   * `api_key_var` to resolve the outbound credential it presents to the
+   * upstream, so it needs the same verbatim shape {@link exportForSeed} carries
+   * (`seedProvider`), never the admin projection. The resolved secret VALUE
+   * never enters this store — the reference name is all it returns.
+   */
+  async getProviderSeed(id: string): Promise<SeedProviderChannel | null> {
+    const row = await this.#providerRow(id);
+    return row === null ? null : seedProvider(row);
+  }
+
   async createProvider(scope: CallerScope, input: ProviderChannelInput): Promise<CatalogRecord> {
     const normalized = this.#validateProvider(input);
     const now = Math.floor(Date.now() / 1000);
