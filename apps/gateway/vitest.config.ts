@@ -164,6 +164,16 @@ export default defineConfig({
       // throws `Binding AI needs to be run remotely` if a test ever calls it
       // for real instead of installing a double.
       remoteBindings: false,
+      // Run every test file SERIALLY in one workerd instance. The Zero-D1
+      // control/tenant objects migrate lazily under `blockConcurrencyWhile`, and
+      // with `isolatedStorage` each file gets fresh object storage; but files
+      // running CONCURRENTLY across separate pool workers cross-contaminate that
+      // per-object migration state, so a read in one file can race another
+      // file's reset object and see `no such table` / leak an unhandled
+      // rejection. Different files flaked on different CI runs for exactly this
+      // reason. CI here proves BUSINESS FLOW, not throughput (project decision),
+      // so serial-and-deterministic beats parallel-and-flaky.
+      singleWorker: true,
       miniflare: {
         // #821 PR2-delete: `DB` is no longer a `wrangler.toml` stanza, so bind a
         // test-only local D1 here purely to exercise the `@ferrogate/storage` D1
