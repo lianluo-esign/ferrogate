@@ -333,8 +333,16 @@ describe("failure direction: every failure REMOVES an upstream", () => {
     // synchronous throw from `prepare()` makes workerd flag the correctly
     // fail-closed rejection as UNHANDLED on a microtask boundary and fails the
     // suite even though the read fails closed exactly as pinned below.
-    const outage = () => Promise.reject(new Error("D1_ERROR: no such table: control_plane_resources"));
-    const brokenStatement = { bind() { return this; }, all: outage, first: outage, run: outage };
+    const outage = () =>
+      Promise.reject(new Error("D1_ERROR: no such table: control_plane_resources"));
+    const brokenStatement = {
+      bind() {
+        return this;
+      },
+      all: outage,
+      first: outage,
+      run: outage,
+    };
     const broken = {
       prepare() {
         return brokenStatement;
