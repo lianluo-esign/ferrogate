@@ -323,6 +323,7 @@ describe("column parity with sql/d1/001_init_d1.sql", () => {
       "expires_at_unix",
       "revoked_at_unix",
       "attribution_tags_json",
+      "billing_group_id",
     ]);
   });
 

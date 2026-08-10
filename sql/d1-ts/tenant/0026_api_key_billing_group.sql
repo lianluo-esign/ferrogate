@@ -1,0 +1,34 @@
+-- ===========================================================================
+-- `api_keys.billing_group_id` — the key's billing group (#942, epic #941)
+--
+-- The request→group resolution key for the billing-group multiplier layer. A
+-- key bound to a group is charged the group's `multiplier` on top of the
+-- provider's official offering price; a key with no group is charged 1.0.
+--
+-- ## Why the key
+--
+-- Same reasoning as `attribution_tags_json` beside it (0003): the key is the
+-- finest identity the request path already resolves, and it is what an operator
+-- hands out per customer/team. one-api pins a token to a group for exactly this
+-- reason. Pinning at the tenant would give every key one multiplier, which is a
+-- plan, not a group.
+--
+-- ## The value is a PLATFORM group id, held cross-database with no FK
+--
+-- `billing_group_id` references `platform_billing_groups.id`, which lives in the
+-- CONTROL database (0028). A tenant row cannot carry a foreign key into another
+-- database, so this is a plain id the admin surface validates against the
+-- platform store at write time, and the gateway resolves against the cached
+-- `PlatformBillingGroupSource` at settlement. A dangling id (its group was
+-- deleted) resolves to "no group" — i.e. multiplier 1.0 — never a 500 on the
+-- money path: a missing multiplier bills at the official price, the same
+-- fail-open direction the batch discount takes when its source is unavailable.
+--
+-- ## Nullable, no default, no index
+--
+-- `ADD COLUMN ... TEXT` (no `NOT NULL DEFAULT`) is a metadata-only change:
+-- every existing key reads NULL, meaning "no billing group / multiplier 1.0".
+-- No index — it is read as part of a row already located by `key_prefix`.
+-- ===========================================================================
+
+ALTER TABLE api_keys ADD COLUMN billing_group_id TEXT;
