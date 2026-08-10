@@ -206,10 +206,34 @@ function agentAuth(tenantId: string, operator = false): AgentAuth {
   };
 }
 
-/** A database that fails every statement, as an outage would. */
+/**
+ * A database that fails every statement, as an outage would. It REJECTS
+ * asynchronously (a real unreachable object/D1 rejects the RPC; it does not
+ * throw synchronously from `prepare()`) — a synchronous throw here makes
+ * workerd flag the correctly-handled rejection as UNHANDLED on a microtask
+ * boundary, failing the suite even though every read fails closed as pinned.
+ */
+const OUTAGE = "D1_ERROR: control database is unreachable";
+const rejectingStatement = {
+  bind() {
+    return this;
+  },
+  all(): Promise<never> {
+    return Promise.reject(new Error(OUTAGE));
+  },
+  first(): Promise<never> {
+    return Promise.reject(new Error(OUTAGE));
+  },
+  run(): Promise<never> {
+    return Promise.reject(new Error(OUTAGE));
+  },
+};
 const failingDb = {
-  prepare(): never {
-    throw new Error("D1_ERROR: control database is unreachable");
+  prepare() {
+    return rejectingStatement;
+  },
+  batch(): Promise<never> {
+    return Promise.reject(new Error(OUTAGE));
   },
 } as unknown as D1Database;
 
