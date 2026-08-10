@@ -292,10 +292,7 @@ describe("the prepaid wallet, off wallets + wallet_reservations in the tenant OB
       .run();
     // One credit funded, and a live hold that already commits it (far-future
     // expiry, so it is not swept before the second admission reads it).
-    await objectDb
-      .prepare(INSERT_WALLET_SQL)
-      .bind(tenantId, tenantId, 1)
-      .run();
+    await objectDb.prepare(INSERT_WALLET_SQL).bind(tenantId, tenantId, 1).run();
     await objectDb
       .prepare(
         "INSERT OR REPLACE INTO wallet_reservations (id, tenant_id, amount_credits, status, " +

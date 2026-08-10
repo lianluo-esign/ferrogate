@@ -312,10 +312,11 @@ async function storeVerbatimTurnAsKeyA(
   expect(outputText(body)).toBe(`your card ${CARD} was charged`);
   expect(created.headers.get("x-ferrogate-response-stored")).toBe("true");
 
-  const rows = await conversationDb().prepare(
-    "SELECT response_json, screening_api_key_id, screening_policy_revision " +
-      "FROM responses_conversations WHERE response_id = ?",
-  )
+  const rows = await conversationDb()
+    .prepare(
+      "SELECT response_json, screening_api_key_id, screening_policy_revision " +
+        "FROM responses_conversations WHERE response_id = ?",
+    )
     .bind(String(body.id))
     .all<{
       response_json: string;
@@ -399,9 +400,8 @@ describe("GET /v1/responses/{id} is screened under the READER's policy (#689)", 
     // continuation would silently inherit B's policy, and a shared store would
     // become order-dependent: whichever credential read the turn first would
     // decide what every other credential sees.
-    const rows = await conversationDb().prepare(
-      "SELECT response_json FROM responses_conversations WHERE response_id = ?",
-    )
+    const rows = await conversationDb()
+      .prepare("SELECT response_json FROM responses_conversations WHERE response_id = ?")
       .bind(aId)
       .all<{ response_json: string }>();
     expect((rows.results ?? [])[0]?.response_json).toContain(CARD);

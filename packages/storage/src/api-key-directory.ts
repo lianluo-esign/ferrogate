@@ -278,7 +278,10 @@ export class D1TwoHopApiKeyDirectory implements TwoHopApiKeyDirectory {
       // would reject such a row anyway, and delete-on-revoke removes its KV
       // entry, so caching it would only widen the stale-positive window.
       // Best-effort: a failed populate just leaves the next request on the RPC.
-      if (this.#projection !== undefined && apiKeyLifecycleReason(directory, this.#now()) === null) {
+      if (
+        this.#projection !== undefined &&
+        apiKeyLifecycleReason(directory, this.#now()) === null
+      ) {
         try {
           await this.#projection.write(keyHash, directory);
         } catch {

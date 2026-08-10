@@ -196,16 +196,16 @@ function getResponse(responseId: string): Promise<Response> {
 
 /** Every `response_json` this tenant currently has filed. */
 async function storedBodies(): Promise<string[]> {
-  const rows = await conversationDb().prepare(
-    "SELECT response_id, response_json FROM responses_conversations ORDER BY response_id",
-  ).all<{ response_id: string; response_json: string }>();
+  const rows = await conversationDb()
+    .prepare("SELECT response_id, response_json FROM responses_conversations ORDER BY response_id")
+    .all<{ response_id: string; response_json: string }>();
   return (rows.results ?? []).map((row) => row.response_json);
 }
 
 async function storedIds(): Promise<string[]> {
-  const rows = await conversationDb().prepare(
-    "SELECT response_id FROM responses_conversations ORDER BY response_id",
-  ).all<{ response_id: string }>();
+  const rows = await conversationDb()
+    .prepare("SELECT response_id FROM responses_conversations ORDER BY response_id")
+    .all<{ response_id: string }>();
   return (rows.results ?? []).map((row) => row.response_id);
 }
 

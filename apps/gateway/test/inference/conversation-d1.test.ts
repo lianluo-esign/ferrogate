@@ -187,9 +187,7 @@ describe("conversationStoreFromEnv routes to the caller tenant's own object (#82
     // Register the tenant as `durable_object` so the backend-dispatching router
     // places it in its own object rather than the legacy shared `DB`.
     await seedTenantRosterRows([ROUTED.tenantId]);
-    await tenantObjectDb(ROUTED.tenantId)
-      .prepare("DELETE FROM responses_conversations")
-      .run();
+    await tenantObjectDb(ROUTED.tenantId).prepare("DELETE FROM responses_conversations").run();
     // The shared `env.DB` starts empty, so any row found there afterwards would
     // prove the store failed to route.
     await DB.prepare("DELETE FROM responses_conversations").run();
@@ -216,9 +214,9 @@ describe("conversationStoreFromEnv routes to the caller tenant's own object (#82
     expect(inObject?.n).toBe(2);
 
     // ...and NOT in the shared `env.DB`, which a routed deployment never writes.
-    const inShared = await DB.prepare(
-      "SELECT COUNT(*) AS n FROM responses_conversations",
-    ).first<{ n: number }>();
+    const inShared = await DB.prepare("SELECT COUNT(*) AS n FROM responses_conversations").first<{
+      n: number;
+    }>();
     expect(inShared?.n).toBe(0);
   });
 
