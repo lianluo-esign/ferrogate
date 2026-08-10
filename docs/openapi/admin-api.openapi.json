@@ -2172,6 +2172,78 @@
         }
       }
     },
+    "/admin/v1/providers/{id}/sync-models": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "operationId": "syncProviderModels",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Import a platform provider's live upstream model list (GET /v1/models) into the platform catalog. Platform-operator only; idempotent and additive.",
+        "responses": {
+          "200": {
+            "description": "Sync result: models added (inserted), updated (always 0 — the upstream list carries no price to update from), skipped (already present), the upstream model count, and the new catalog revision.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "object": { "type": "string" },
+                    "scope": { "type": "string" },
+                    "provider_id": { "type": "string" },
+                    "added": { "type": "integer" },
+                    "updated": { "type": "integer" },
+                    "skipped": { "type": "integer" },
+                    "upstream_count": { "type": "integer" },
+                    "revision": { "type": "integer" }
+                  },
+                  "required": ["object", "scope", "provider_id", "added", "updated", "skipped", "revision"]
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "502": {
+            "description": "The upstream provider was unreachable, answered non-2xx, returned a malformed model list, or its credential could not be resolved.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.write"
+          },
+          "rbac_action": null
+        }
+      }
+    },
     "/admin/v1/provider-health": {
       "parameters": [
         {

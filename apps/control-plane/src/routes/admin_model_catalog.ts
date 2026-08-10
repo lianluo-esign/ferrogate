@@ -1,4 +1,6 @@
+import { PriceBook } from "@ferrogate/billing";
 import { z } from "zod";
+import { providerSecretRefusal, resolveProviderSecret } from "../../../gateway/src/keys/index.js";
 import { HttpError } from "../middleware/errors.js";
 import type { StoreRecord } from "../ports.js";
 import { adminDeleted, adminItem, listResponse, parseListQuery } from "../responses.js";
@@ -6,6 +8,10 @@ import {
   PlatformModelCatalogStore,
   isMissingPlatformCatalogError,
 } from "../store/platform-model-catalog.js";
+import {
+  ProviderModelSyncError,
+  syncProviderModelsIntoCatalog,
+} from "../store/platform-provider-sync.js";
 import { matchesFilters, matchesSearch } from "../store/query.js";
 import { tenantDatabaseFor } from "../store/tenancy.js";
 import {
@@ -666,6 +672,83 @@ async function offeringDelete(c: Parameters<Handler>[0]): Promise<Response> {
   return json(c, 200, scoped(adminDeleted("offering", id), target));
 }
 
+/**
+ * `POST /admin/v1/providers/{id}/sync-models` — import a platform provider's
+ * live model list into the platform catalog (#944).
+ *
+ * PLATFORM-OPERATOR ONLY, on the same reasoning as {@link importModelCatalog}
+ * and {@link setAdminDrain}: the platform catalog is deployment-wide state a
+ * tenant credential must never write, so a non-platform caller is
+ * `403 tenant_scope_denied` and never reaches the provider row, the upstream
+ * fetch, or the store. The fence returns before {@link platformCatalogStore},
+ * which is why the 403 probe writes nothing.
+ *
+ * The provider is read RAW ({@link PlatformModelCatalogStore.getProviderSeed})
+ * so `api_key_var` survives the admin projection, then resolved through the SAME
+ * outbound credential seam the data plane uses ({@link resolveProviderSecret});
+ * a channel with no `api_key_var` syncs unauthenticated. A credential named but
+ * unbound FAILS CLOSED (`502`) rather than syncing with an empty header — the
+ * fail-closed rule `provider-secrets.ts` exists to hold.
+ */
+async function providerSyncModels(c: Parameters<Handler>[0]): Promise<Response> {
+  const scope = scopeOf(c);
+  if (scope.kind !== "platform_operator") {
+    throw new HttpError(
+      403,
+      "tenant_scope_denied",
+      "the platform model catalog is deployment-wide state; a tenant-scoped credential cannot sync a provider's models",
+    );
+  }
+  const id = pathParam(c, "id");
+  const store = platformCatalogStore(c);
+  const provider = await store.getProviderSeed(id);
+  if (provider === null) throw new TenantCatalogNotFoundError(`provider ${id} not found`);
+
+  let apiKey: string | undefined;
+  if (provider.api_key_var !== null && provider.api_key_var !== undefined) {
+    const resolution = resolveProviderSecret(
+      c.env as unknown as Readonly<Record<string, unknown>>,
+      provider.api_key_var,
+    );
+    if (!resolution.ok) {
+      throw new HttpError(
+        502,
+        "provider_credential_unresolved",
+        providerSecretRefusal(provider.name, "api_key_var", provider.api_key_var, resolution),
+      );
+    }
+    apiKey = resolution.value;
+  }
+
+  let result: Awaited<ReturnType<typeof syncProviderModelsIntoCatalog>>;
+  try {
+    result = await syncProviderModelsIntoCatalog({
+      store,
+      scope,
+      provider,
+      apiKey,
+      priceBook: PriceBook.withDefaultRateCard(),
+      fetchImpl: fetch,
+    });
+  } catch (error) {
+    if (error instanceof ProviderModelSyncError) {
+      throw new HttpError(error.status, error.code, error.message);
+    }
+    throw error;
+  }
+
+  return json(c, 200, {
+    object: "provider_model_sync",
+    scope: "platform",
+    provider_id: id,
+    added: result.added,
+    updated: result.updated,
+    skipped: result.skipped,
+    upstream_count: result.upstreamCount,
+    revision: result.revision,
+  });
+}
+
 function wrapped(handler: Handler): Handler {
   return catalogHandler(handler);
 }
@@ -678,6 +761,7 @@ export function providerCatalogOverrides(): Readonly<Record<string, Handler>> {
     replaceAdminProvider: wrapped((c) => providerUpdate(c, "replace")),
     patchAdminProvider: wrapped((c) => providerUpdate(c, "merge")),
     deleteAdminProvider: wrapped(providerDelete),
+    syncProviderModels: wrapped(providerSyncModels),
   };
 }
 

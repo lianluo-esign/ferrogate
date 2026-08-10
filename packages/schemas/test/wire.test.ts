@@ -156,7 +156,7 @@ describe("OPENAPI_OPERATION_COUNT is checked against the committed contract", ()
 
 describe("wireSchemas registry", () => {
   test("exposes the OpenAPI operation count", () => {
-    expect(OPENAPI_OPERATION_COUNT).toBe(320);
+    expect(OPENAPI_OPERATION_COUNT).toBe(321);
   });
 
   test("resolves the seeded cross-plane + ferrogate-core schemas by name", () => {
@@ -334,7 +334,7 @@ describe("PORT-TODO STATE PIN — the registry seeds only cross-plane shapes", (
     // and main wrote 269, and 271 is the value the merged document produces.
     // #943 adds seven `admin_billing_group` operations, none of which seed a
     // wire schema, so the shortfall grows one-for-one: 313 - 10 = 303 becomes
-    // 320 - 10 = 310 (main + this slice alone; #944 reconciled at integration).
-    expect(OPENAPI_OPERATION_COUNT - seeded).toBe(310);
+    // 321 - 10 = 311 (main + S2 + this slice, reconciled at integration).
+    expect(OPENAPI_OPERATION_COUNT - seeded).toBe(311);
   });
 });

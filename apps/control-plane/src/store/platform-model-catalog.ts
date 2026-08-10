@@ -853,6 +853,22 @@ export class PlatformModelCatalogStore {
     return row === null ? null : providerRecord(row);
   }
 
+  /**
+   * The RAW provider channel columns — including `api_key_var`/`byok_alias` —
+   * for the model sync (#944).
+   *
+   * Deliberately NOT {@link getProvider}, whose {@link providerRecord} masks the
+   * credential reference into a `has_api_key` boolean: the sync must READ
+   * `api_key_var` to resolve the outbound credential it presents to the
+   * upstream, so it needs the same verbatim shape {@link exportForSeed} carries
+   * (`seedProvider`), never the admin projection. The resolved secret VALUE
+   * never enters this store — the reference name is all it returns.
+   */
+  async getProviderSeed(id: string): Promise<SeedProviderChannel | null> {
+    const row = await this.#providerRow(id);
+    return row === null ? null : seedProvider(row);
+  }
+
   async createProvider(scope: CallerScope, input: ProviderChannelInput): Promise<CatalogRecord> {
     const normalized = this.#validateProvider(input);
     const now = Math.floor(Date.now() / 1000);
@@ -1191,6 +1207,33 @@ export class PlatformModelCatalogStore {
       throw new TenantCatalogNotFoundError(`model ${modelId} not found`);
     }
     return (await this.#offeringRows(modelId)).map(offeringRecord);
+  }
+
+  /**
+   * For the given `modelIds`, the provider that currently owns each one's single
+   * `primary` offering slot — the input the provider-sync path needs to decide
+   * whether a second provider's model must be laid down as a `fallback` rather
+   * than collide with an existing primary (#944). A model_id with no primary is
+   * absent from the map. The `platform-default` rate-card provider IS reported
+   * (the caller ignores it, because {@link importGraph} purges that stale primary
+   * in favour of a real provider's offering).
+   */
+  async primaryOfferingOwners(modelIds: readonly string[]): Promise<ReadonlyMap<string, string>> {
+    const unique = [...new Set(modelIds)];
+    if (unique.length === 0) return new Map();
+    const placeholders = unique.map(() => "?").join(", ");
+    const rows = (
+      await this.#db
+        .prepare(
+          `SELECT model_id, provider_id FROM ${PLATFORM_OFFERING_TABLE}
+            WHERE role = 'primary' AND model_id IN (${placeholders})`,
+        )
+        .bind(...unique)
+        .all<{ model_id: string; provider_id: string }>()
+    ).results;
+    const owners = new Map<string, string>();
+    for (const row of rows) owners.set(row.model_id, row.provider_id);
+    return owners;
   }
 
   async createOffering(
