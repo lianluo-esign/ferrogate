@@ -67,17 +67,17 @@ const OWNED_RAW = RAW.operations.filter(
 );
 
 describe("contract document", () => {
-  it("is version 1 and carries all 313 operations", () => {
+  it("is version 1 and carries all 320 operations", () => {
     expect(RAW.version).toBe(1);
     expect(RAW.operations).toHaveLength(EXPECTED_TOTAL_OPERATION_COUNT);
   });
 
-  it("assigns exactly 240 operations to apps/control-plane", () => {
+  it("assigns exactly 248 operations to apps/control-plane", () => {
     expect(OWNED_RAW).toHaveLength(EXPECTED_CONTROL_PLANE_OPERATION_COUNT);
     expect(CONTROL_PLANE_OPERATIONS).toHaveLength(EXPECTED_CONTROL_PLANE_OPERATION_COUNT);
   });
 
-  it("declares exactly 47 route groups", () => {
+  it("declares exactly 48 route groups", () => {
     // `ROUTE-MAP.md` line 4 designates itself the source of truth and states
     // the group count in PROSE, where nothing held it: it read "40 route
     // groups" for two merges after the 41st group appeared, because a group
@@ -90,7 +90,9 @@ describe("contract document", () => {
     // the first, so 43 is COUNTED off the merged `route_patterns`, not
     // incremented off the 42 this test first shipped with. 46 -> 47 with
     // #698's `batches` group, counted off the merged document the same way.
-    expect(new Set(RAW.route_patterns.map((pattern) => pattern.group)).size).toBe(47);
+    // 47 -> 48 with #943's `admin_billing_group` group (main + this slice
+    // alone; #944 adds no new group).
+    expect(new Set(RAW.route_patterns.map((pattern) => pattern.group)).size).toBe(48);
   });
 
   it("ownership predicate agrees with the raw document, path by path", () => {
@@ -103,7 +105,7 @@ describe("contract document", () => {
 });
 
 describe("anti-drift: every contract operation has a registered route", () => {
-  it("registers every one of this app's 211 operation ids", () => {
+  it("registers every one of this app's 248 operation ids", () => {
     const registered = new Set(registeredOperationIds());
     const missing = OWNED_RAW.map((operation) => operation.operation_id)
       .filter((operationId) => !registered.has(operationId))

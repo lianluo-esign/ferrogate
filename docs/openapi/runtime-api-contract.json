@@ -633,6 +633,18 @@
     {
       "pattern": "/admin/v1/payment-attempts/{*rest}",
       "group": "payment_attempt"
+    },
+    {
+      "pattern": "/admin/v1/billing-groups",
+      "group": "admin_billing_group"
+    },
+    {
+      "pattern": "/admin/v1/billing-groups/{id}",
+      "group": "admin_billing_group"
+    },
+    {
+      "pattern": "/admin/v1/billing-groups/{id}/providers/{providerId}",
+      "group": "admin_billing_group"
     }
   ],
   "dynamic_surfaces": [
@@ -4097,6 +4109,83 @@
       "path": "/admin/v1/semantic-cache-policies/{scope_type}/{scope_id}/invalidate",
       "method": "post",
       "operation_id": "invalidateSemanticCachePolicy",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/billing-groups",
+      "method": "get",
+      "operation_id": "listBillingGroups",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.read"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/billing-groups",
+      "method": "post",
+      "operation_id": "createBillingGroup",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/billing-groups/{id}",
+      "method": "get",
+      "operation_id": "getBillingGroup",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.read"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/billing-groups/{id}",
+      "method": "patch",
+      "operation_id": "patchBillingGroup",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/billing-groups/{id}",
+      "method": "delete",
+      "operation_id": "deleteBillingGroup",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/billing-groups/{id}/providers/{providerId}",
+      "method": "put",
+      "operation_id": "bindBillingGroupProvider",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/billing-groups/{id}/providers/{providerId}",
+      "method": "delete",
+      "operation_id": "unbindBillingGroupProvider",
       "visibility": "admin",
       "auth": {
         "kind": "bearer",

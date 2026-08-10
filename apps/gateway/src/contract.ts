@@ -120,7 +120,7 @@ export const SUPPORTED_CONTRACT_VERSION = 1;
  * makes this the anti-drift gate: if the JSON changes, the assertion in
  * `test/contract.test.ts` fails before any route silently disappears.
  */
-export const EXPECTED_OPERATION_COUNT = 313;
+export const EXPECTED_OPERATION_COUNT = 320;
 
 // ---------------------------------------------------------------------------
 // Segment matcher (the `matchit` radix tree, re-implemented)

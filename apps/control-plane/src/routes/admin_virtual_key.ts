@@ -29,6 +29,7 @@ import { z } from "zod";
 import { HttpError } from "../middleware/errors.js";
 import { type ControlPlaneEnv, StoreConflictError, type StoreRecord } from "../ports.js";
 import { adminItem } from "../responses.js";
+import { PlatformBillingGroupStore } from "../store/platform-billing-group.js";
 import { tenantDatabaseFor, tenantOf } from "../store/tenancy.js";
 import {
   type VirtualKeyWriteDirection,
@@ -69,6 +70,13 @@ export const virtualKeySchema = adminRecordSchema.extend({
    * `apps/gateway/src/attribution/policy.ts`.
    */
   attribution_tags: z.record(z.string().trim().min(1)).optional(),
+  /**
+   * #943 — the platform billing group this key is charged through. A non-null
+   * value is validated against {@link PlatformBillingGroupStore} at create time
+   * (an unknown id is `400`), then persisted to `api_keys.billing_group_id` in
+   * the tenant database; `null` clears it, meaning "no group / multiplier 1.0".
+   */
+  billing_group_id: z.string().trim().min(1).nullish(),
 });
 
 const VIRTUAL_KEY_SPEC: CollectionSpec = {
@@ -145,6 +153,40 @@ async function projectCredential(
   );
 }
 
+/**
+ * Validate an incoming `billing_group_id` against the platform store (#943).
+ *
+ * `undefined`/`null`/`""` is "no group" and passes through (a `null` CLEARS an
+ * existing binding). A non-empty value must name a real platform billing group,
+ * validated against the SAME control database the gateway settlement path reads
+ * the multiplier from — so a key can never be bound to a group that does not
+ * exist. With no control database bound the id cannot be validated and would not
+ * be projected either, so the request is refused with `503` rather than silently
+ * accepting an unenforced binding.
+ */
+async function validateBillingGroup(
+  c: Context<ControlPlaneEnv>,
+  body: { billing_group_id?: string | null },
+): Promise<void> {
+  const raw = body.billing_group_id;
+  if (typeof raw !== "string" || raw.trim() === "") return;
+  const deps = depsOf(c);
+  if (deps.controlDatabase === null) {
+    throw new HttpError(
+      503,
+      "control_database_unavailable",
+      "control database is required to bind a billing group",
+    );
+  }
+  const store = new PlatformBillingGroupStore({
+    db: deps.controlDatabase,
+    requestId: c.get("requestId") ?? null,
+  });
+  if ((await store.getGroup(raw.trim())) === null) {
+    throw new HttpError(400, "invalid_request_body", `billing group ${raw.trim()} not found`);
+  }
+}
+
 export const adminVirtualKeyRoutes: GroupModule = crudGroup(
   "admin_virtual_key",
   [VIRTUAL_KEY_SPEC],
@@ -154,6 +196,7 @@ export const adminVirtualKeyRoutes: GroupModule = crudGroup(
       const deps = c.get("deps");
       const scope = scopeOf(c);
       const body = await readJson(c, virtualKeySchema);
+      await validateBillingGroup(c, body);
       const id =
         typeof body.id === "string" && body.id.trim() !== "" ? body.id.trim() : crypto.randomUUID();
       const secret = mintSecret();

@@ -120,8 +120,12 @@ describe("contract table", () => {
     // #892 adds one more bearer op: `POST /admin/v1/config/import-model-catalog`,
     // the platform-catalog bootstrap import (admin.write, like the config ops
     // beside it), taking bearer 298 -> 299.
+    // #943 adds seven bearer-guarded `admin_billing_group` operations (two
+    // reads at `admin.read`, five writes at `admin.write`), taking bearer
+    // 299 -> 306. CORRECT for main + this slice alone; #944's parallel op is
+    // reconciled at integration.
     expect(census(OPERATIONS.map<AuthKind>((operation) => operation.auth.kind))).toEqual({
-      bearer: 299,
+      bearer: 306,
       internal: 6,
       anonymous: 7,
       method_dependent: 1,
@@ -152,7 +156,9 @@ describe("contract table", () => {
       // #813 adds fifteen admin-visible catalog operations.
       // #892 adds one admin-visible op (the platform-catalog bootstrap import),
       // taking admin 236 -> 237.
-      admin: 237,
+      // #943 adds seven admin-visible `admin_billing_group` operations, taking
+      // admin 237 -> 244 (main + this slice alone; #944 reconciled later).
+      admin: 244,
       // 51 -> 52 with `countMessageTokens` (issue #671): a data-plane
       // operation, publicly reachable, bearer-guarded; then 52 -> 53 with
       // `getModel` (issue #670), public for the same reason as `listModels`.
@@ -224,17 +230,22 @@ describe("contract table", () => {
       // `Counter(o["method"] for o in operations)` over the merged JSON.
       // #813 adds three reads: provider/model item reads and offering lists.
       // #892's bootstrap import is a POST (see below); GET is unchanged.
-      GET: 140,
+      // #943 adds two GETs (billing-group list + item read), 140 -> 142.
+      GET: 142,
       // 78 -> 79 with `POST /v1/messages/count_tokens` (issue #671), then
       // 79 -> 81 with the two #695 semantic-cache-policy POSTs, then 82 with
       // #676's `/v1/rerank` and 85 with #703's three audio POSTs, then 86 with
       // #743's `POST /admin/v1/assets/quarantine/{asset_id}`. Re-counted off
       // the merged document, never summed. #892's
       // `POST /admin/v1/config/import-model-catalog` takes POST 96 -> 97.
-      POST: 97,
-      DELETE: 33,
-      PUT: 24,
-      PATCH: 19,
+      // #943 adds one POST (billing-group create, 97 -> 98), two DELETEs
+      // (billing-group delete + provider unbind, 33 -> 35), one PUT (provider
+      // bind, 24 -> 25) and one PATCH (billing-group patch, 19 -> 20). CORRECT
+      // for main + this slice alone; #944 reconciled at integration.
+      POST: 98,
+      DELETE: 35,
+      PUT: 25,
+      PATCH: 20,
     });
   });
 

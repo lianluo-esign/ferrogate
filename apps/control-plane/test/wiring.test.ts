@@ -305,6 +305,14 @@ const GROUP_PROBES: readonly (readonly [string, string, HttpMethod, string, numb
   // real exported Worker. `isRouterMiss` still separates it from an unmounted
   // route, so the probe keeps proving the mount.
   ["admin_asset", "listFleetAssets", "GET", "/admin/v1/assets", 403],
+  // 503, not 200, and that IS the mounted behaviour (issue #943), for the SAME
+  // reason `admin_experiment` above is: this probe runs against the MEMORY
+  // store, i.e. a deployment with no control database — and platform billing
+  // groups live in the control database. The route builds its store over
+  // `deps.controlDatabase`, which is null here, so it refuses with 503 rather
+  // than answering an empty list it cannot support. `isRouterMiss` still tells
+  // this apart from an unmounted route, so the probe keeps proving the mount.
+  ["admin_billing_group", "listBillingGroups", "GET", "/admin/v1/billing-groups", 503],
   ["admin_config_ops", "validateAdminConfig", "POST", "/admin/v1/config/validate", 200],
   ["admin_cost_record", "listAdminCostRecords", "GET", "/admin/v1/cost-records", 200],
   // 503, not 200, and that IS the mounted behaviour (issue #693). This probe
@@ -374,7 +382,7 @@ const GROUP_PROBES: readonly (readonly [string, string, HttpMethod, string, numb
 ];
 
 describe("every contract GROUP is reachable on the deployed Worker", () => {
-  it("covers all 39 owned groups — a new group cannot slip past this table", () => {
+  it("covers all 40 owned groups — a new group cannot slip past this table", () => {
     expect(new Set(GROUP_PROBES.map(([group]) => group))).toEqual(new Set(CONTROL_PLANE_GROUPS));
     expect(GROUP_PROBES).toHaveLength(CONTROL_PLANE_GROUPS.length);
   });
