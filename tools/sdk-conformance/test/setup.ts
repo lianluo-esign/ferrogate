@@ -1,65 +1,50 @@
 /**
- * Applies the DEPLOYED D1 migrations before every file in this project.
+ * Boot guard for the SDK-conformance suite under the post-Zero-D1 topology.
  *
- * `apps/gateway/wrangler.toml` binds `DB` (tenant) and `BILLING_DB` (control),
- * and the gateway makes the durable key/quota/RBAC legs the PRIMARY sources
- * whenever those bindings exist. A bound database whose tables do not exist is
- * a FAILURE, not an empty result, so without this file every request in the
- * suite would answer `503 external_auth_unavailable` and the conformance
- * findings would be about a broken harness rather than about the gateway.
+ * ## There is no `applyD1Migrations` step any more
  *
- * With the tables present and empty the durable legs simply find nothing, the
- * config fallbacks in `vitest.config.ts` answer, and the suite exercises the
- * same admission ladder a deployment with no seeded rows would.
+ * `apps/gateway/wrangler.toml` (the config this suite boots via `configPath`)
+ * declares NO `[[d1_databases]]` at all since Zero-D1 #821/#881: the shared
+ * `ferrogate-tenant` D1 (`env.DB`) and the `CONTROL_DB` / `BILLING_DB` control
+ * D1s were all retired. Production now reads tenant-schema tables through the
+ * per-tenant `TenantDataObject` (`env.TENANT_DATA`) and control-schema tables
+ * through the singleton `ControlDataObject` (`env.CONTROL_DATA`), because
+ * `GATEWAY_TENANT_DB_ROUTING` and `GATEWAY_CONTROL_STORAGE` are both
+ * `"durable_object"` in that toml. Each Durable Object applies its own deployed
+ * schema on first wake (see `packages/storage/src/{control,tenant}-data-object.ts`
+ * — the constructor migrates under `blockConcurrencyWhile`), so there is nothing
+ * for the harness to migrate. The single DB seed in the whole suite — the
+ * `quota_policies` row the 429 leg needs — is written through the CONTROL_DATA
+ * facade in `test/errors.test.ts::beforeAll`, which wakes and migrates the
+ * object on its first query.
  *
- * Same shape and same rationale as `apps/gateway/test/setup-d1.ts`; the
- * migrations are the deployed ones (`sql/d1-ts/**`), never a fixture copy.
+ * ## What this file does instead: fail LOUD if the objects are unbound
+ *
+ * A missing `CONTROL_DATA` / `TENANT_DATA` binding would make every
+ * authenticated request answer `503` (control/quota/rbac resolution
+ * unavailable) and the conformance findings would be about a broken harness
+ * rather than about the gateway. Rather than let that pass as a silent skip, the
+ * guard throws at collection — same shape and rationale as
+ * `apps/gateway/test/setup-d1.ts:50-59`.
  */
-import { applyD1Migrations, env } from "cloudflare:test";
-import { beforeAll } from "vitest";
-import controlMigrationSql from "../../../sql/d1-ts/control/0001_init_control.sql?raw";
+import { env } from "cloudflare:test";
 
-interface D1TestBindings {
-  readonly DB?: D1Database;
-  readonly BILLING_DB?: D1Database;
-  readonly CONTROL_DB?: D1Database;
-  readonly TEST_D1_SCHEMA?: Parameters<typeof applyD1Migrations>[1];
+interface DurableObjectBindings {
+  readonly CONTROL_DATA?: unknown;
+  readonly TENANT_DATA?: unknown;
 }
 
-/** Split a `.sql` migration into statements, dropping the (heavy) prose first. */
-function sqlStatements(migration: string): string[] {
-  return migration
-    .split("\n")
-    .filter((line) => !line.trimStart().startsWith("--"))
-    .join("\n")
-    .split(";")
-    .map((statement) => statement.trim())
-    .filter((statement) => statement.length > 0);
+const bindings = env as unknown as DurableObjectBindings;
+
+if (bindings.CONTROL_DATA === undefined || bindings.TENANT_DATA === undefined) {
+  // Loud, never a silent skip: `apps/gateway/wrangler.toml` declares the
+  // [[durable_objects.bindings]] CONTROL_DATA + TENANT_DATA stanzas and every
+  // rbac/quota/tenant-data read resolves them (Zero-D1 S5/S6, #881/#882). An
+  // absent one means the deploy config changed and the suite is about to prove
+  // something other than what it claims.
+  throw new Error(
+    "sdk-conformance setup: expected the [[durable_objects.bindings]] `CONTROL_DATA` and " +
+      "`TENANT_DATA` stanzas (apps/gateway/wrangler.toml). The retired `env.DB` tenant D1 is " +
+      "gone (Zero-D1 #821); tenant reads route through TENANT_DATA and control through CONTROL_DATA.",
+  );
 }
-
-beforeAll(async () => {
-  const { DB, BILLING_DB, CONTROL_DB, TEST_D1_SCHEMA } = env as unknown as D1TestBindings;
-  if (DB === undefined || TEST_D1_SCHEMA === undefined) {
-    // Loud, never a silent skip: both are supplied by this project's
-    // `vitest.config.ts` + `apps/gateway/wrangler.toml`. An absent one means the
-    // wiring changed and the suite is about to prove something else.
-    throw new Error(
-      "sdk-conformance setup: expected the `DB` binding (apps/gateway/wrangler.toml) " +
-        "and `TEST_D1_SCHEMA` (tools/sdk-conformance/vitest.config.ts).",
-    );
-  }
-  await applyD1Migrations(DB, TEST_D1_SCHEMA);
-
-  // BOTH control bindings, because `apps/gateway/wrangler.toml` declares both
-  // (`BILLING_DB` is the historical name, `CONTROL_DB` the purpose-named one)
-  // and miniflare gives each binding its own local SQLite file even though they
-  // name one database in production. Whichever the gateway happens to prefer —
-  // quota reads take `CONTROL_DB ?? BILLING_DB` — the tables exist. Every
-  // statement is `CREATE … IF NOT EXISTS`, so this is idempotent.
-  for (const control of [CONTROL_DB, BILLING_DB]) {
-    if (control === undefined) continue;
-    for (const statement of sqlStatements(controlMigrationSql)) {
-      await control.prepare(statement).run();
-    }
-  }
-});

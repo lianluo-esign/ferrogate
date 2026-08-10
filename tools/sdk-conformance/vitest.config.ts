@@ -1,4 +1,4 @@
-import { cloudflareTest, readD1Migrations } from "@cloudflare/vitest-pool-workers";
+import { cloudflareTest } from "@cloudflare/vitest-pool-workers";
 import { defineConfig } from "vitest/config";
 
 /**
@@ -26,9 +26,6 @@ import { defineConfig } from "vitest/config";
  * deployed Worker's dependency closure would be buying the compatibility claim
  * by importing the counterparty.
  */
-
-/** The REAL tenant migration — see `apps/gateway/test/setup-d1.ts` for why. */
-const migrations = await readD1Migrations("../../sql/d1-ts/tenant");
 
 /**
  * The credentials the suite presents, covering the whole auth taxonomy.
@@ -112,11 +109,13 @@ const MODELS = [
  * and needs no clock control: the third request in a file is refused.
  *
  * Read by `quotaPolicySourceFromEnv` (`apps/gateway/src/ratelimit/quota.ts`)
- * ONLY while no control database is bound. `apps/gateway/wrangler.toml` binds
- * `BILLING_DB`, which is the control database and therefore wins — so
- * `test/errors.test.ts` seeds the equivalent `quota_policies` ROW instead and
- * this table is the documented fallback, not the live source. Both are kept in
- * step deliberately: if the binding is ever dropped, the leg still runs.
+ * ONLY while no control database is bound. Since Zero-D1 S5 the control database
+ * is the singleton `ControlDataObject` (`env.CONTROL_DATA`), which
+ * `controlDatabaseFrom(env)` resolves and which therefore wins — so
+ * `test/errors.test.ts` seeds the equivalent `quota_policies` ROW through the
+ * CONTROL_DATA facade instead, and this table is the documented fallback, not
+ * the live source. Both are kept in step deliberately: if the object binding is
+ * ever dropped, the leg still runs.
  */
 const QUOTA_POLICIES = [{ scope_type: "tenant", scope_id: "tenant_sdk_rpm", rpm_limit: 2 }];
 
@@ -167,7 +166,6 @@ export default defineConfig({
           // `test/chat.test.ts` to show the gateway substitutes its OWN
           // upstream credential for the caller's.
           CONFORMANCE_UPSTREAM_KEY: "upstream-key-placeholder-not-a-credential",
-          TEST_D1_SCHEMA: migrations,
         },
         workers: [TELEMETRY_COLLECTOR_STUB],
       },

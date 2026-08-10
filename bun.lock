@@ -258,6 +258,7 @@
       "name": "ferrogate-sdk-conformance",
       "devDependencies": {
         "@anthropic-ai/sdk": "0.115.0",
+        "@ferrogate/storage": "workspace:*",
         "openai": "7.3.0",
       },
     },
