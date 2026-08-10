@@ -109,6 +109,8 @@ export interface TenantApiKeyRow {
   readonly expires_at_unix: number | null;
   readonly revoked_at_unix: number | null;
   readonly attribution_tags_json: string | null;
+  /** #945 — the billing group this key is bound to, or NULL for the official price. */
+  readonly billing_group_id: string | null;
 }
 
 /** The three lifecycle states that deny, reported for logs only — all mean 401. */
@@ -160,7 +162,7 @@ const DIRECTORY_SQL = `SELECT id, tenant_id, project_id, workspace_id, enabled, 
 const TENANT_KEY_SQL = `SELECT id, tenant_id, project_id, workspace_id, name, key_prefix, key_hash, last4,
           enabled, scopes_json, allowed_models_json, allowed_providers_json,
           monthly_token_budget, request_limit_per_minute,
-          expires_at_unix, revoked_at_unix, attribution_tags_json
+          expires_at_unix, revoked_at_unix, attribution_tags_json, billing_group_id
    FROM ${TENANT_API_KEY_TABLE} WHERE key_hash = ?`;
 
 /**

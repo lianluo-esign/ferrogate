@@ -87,6 +87,7 @@ function tenantRow(overrides: Partial<TenantApiKeyRow> = {}): TenantApiKeyRow {
     expires_at_unix: null,
     revoked_at_unix: null,
     attribution_tags_json: "{}",
+    billing_group_id: null,
     ...overrides,
   };
 }

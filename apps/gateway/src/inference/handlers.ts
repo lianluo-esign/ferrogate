@@ -1611,6 +1611,38 @@ function routePricing(route: PhysicalRoute): {
 }
 
 /**
+ * The billing-group fields to stamp on a metering event (#945), resolved ONCE
+ * per request from the caller's `billingGroupId`.
+ *
+ * The multiplier read is done HERE — in the request's async body, where `env`
+ * and the resolved caller are both in hand — and NOT at settlement: `sink.ts`'s
+ * settle path is synchronous, and the multiplier is a per-`env` control-object
+ * read, so it must arrive PRE-RESOLVED on `Usage` (the same discipline the route
+ * prices and the native-batch scalar already follow). It is also emphatically
+ * NOT read in `orderCandidatesByStrategy`, which stays synchronous and never
+ * touches storage — this is a settlement input, not a routing one.
+ *
+ * Returns an EMPTY object when the caller is bound to no group, so a request
+ * with no group produces byte-identical `Usage` and metadata to before this
+ * slice, and the sink's own `1.0` default settles it at the official price.
+ * `billingGroups.multiplierForGroup` fails open to `1.0` on every error axis, so
+ * this never rejects and never blocks the response on a control-object blip.
+ */
+async function billingGroupMeterFields(
+  deps: ResolvedInferenceDeps,
+  env: unknown,
+  caller: Caller,
+): Promise<{ billingGroupId?: string; billingMultiplier?: number }> {
+  const groupId = caller.billingGroupId;
+  if (groupId === undefined) return {};
+  const billingMultiplier = await deps.billingGroups.multiplierForGroup(
+    env as InferenceBindings,
+    groupId,
+  );
+  return { billingGroupId: groupId, billingMultiplier };
+}
+
+/**
  * Publish the ROUTING half of this request's GenAI observation (#669) — what
  * model, on which provider, under which operation.
  *
@@ -2311,6 +2343,9 @@ async function handleOpenAiInference(
 
   const routeLabel = ROUTE_LABELS[operation];
   const usageDialect = usageProviderKindFor(operation, servedRoute.providerKind);
+  // #945 — resolve the billing-group multiplier once, in this async body, and
+  // bake it onto the row the synchronous sink settles from.
+  const billingGroup = await billingGroupMeterFields(deps, c.env, caller);
   const meterBase = {
     requestId,
     route: routeLabel,
@@ -2323,6 +2358,7 @@ async function handleOpenAiInference(
     ...(servedRoute.tenantId !== undefined ? { tenantId: servedRoute.tenantId } : {}),
     providerAttemptIndex: attemptIndex,
     ...routePricing(servedRoute),
+    ...billingGroup,
   } satisfies Omit<Usage, "promptTokens" | "completionTokens" | "totalTokens">;
   // #669 — publish the routing half NOW, before the streaming branch returns a
   // response whose usage frame has not arrived yet. `recordUsage` publishes it
@@ -2931,6 +2967,8 @@ async function handleMessages(c: InferenceContext, deps: ResolvedInferenceDeps):
   const relay: UpstreamRelay = { headers: upstreamResponse.headers, failedOver };
 
   const usageDialect = usageProviderKindFor("messages", servedRoute.providerKind);
+  // #945 — resolve the billing-group multiplier once, in this async body.
+  const billingGroup = await billingGroupMeterFields(deps, c.env, caller);
   const meterBase = {
     requestId,
     route: ROUTE_LABELS.messages,
@@ -2942,6 +2980,7 @@ async function handleMessages(c: InferenceContext, deps: ResolvedInferenceDeps):
     ...(servedRoute.tenantId !== undefined ? { tenantId: servedRoute.tenantId } : {}),
     providerAttemptIndex: attemptIndex,
     ...routePricing(servedRoute),
+    ...billingGroup,
   } satisfies Omit<Usage, "promptTokens" | "completionTokens" | "totalTokens">;
   // #669 — see the same call in `handleChatCompletionsLike`: the streaming
   // branch below returns before any usage frame exists.
@@ -3187,6 +3226,8 @@ async function handleEmbeddings(
   if (isRejection(text)) {
     return errorResponse(text, requestId);
   }
+  // #945 — resolve the billing-group multiplier once, in this async body.
+  const billingGroup = await billingGroupMeterFields(deps, c.env, caller);
   const meterBase = {
     requestId,
     route: ROUTE_LABELS.embeddings,
@@ -3199,6 +3240,7 @@ async function handleEmbeddings(
     ...(servedRoute.tenantId !== undefined ? { tenantId: servedRoute.tenantId } : {}),
     providerAttemptIndex: attemptIndex,
     ...routePricing(servedRoute),
+    ...billingGroup,
   } satisfies Omit<Usage, "promptTokens" | "completionTokens" | "totalTokens">;
 
   if (!upstreamResponse.ok) {
@@ -3333,6 +3375,8 @@ async function handleRerank(c: InferenceContext, deps: ResolvedInferenceDeps): P
   if (isRejection(text)) {
     return errorResponse(text, requestId);
   }
+  // #945 — resolve the billing-group multiplier once, in this async body.
+  const billingGroup = await billingGroupMeterFields(deps, c.env, caller);
   const meterBase = {
     requestId,
     route: ROUTE_LABELS.rerank,
@@ -3345,6 +3389,7 @@ async function handleRerank(c: InferenceContext, deps: ResolvedInferenceDeps): P
     ...(servedRoute.tenantId !== undefined ? { tenantId: servedRoute.tenantId } : {}),
     providerAttemptIndex: attemptIndex,
     ...routePricing(servedRoute),
+    ...billingGroup,
   } satisfies Omit<Usage, "promptTokens" | "completionTokens" | "totalTokens">;
 
   if (!upstreamResponse.ok) {
@@ -3508,6 +3553,8 @@ async function handleAudioUpload(
   if (isRejection(text)) {
     return errorResponse(text, requestId);
   }
+  // #945 — resolve the billing-group multiplier once, in this async body.
+  const billingGroup = await billingGroupMeterFields(deps, c.env, caller);
   const meterBase = {
     requestId,
     route: ROUTE_LABELS[operation],
@@ -3520,6 +3567,7 @@ async function handleAudioUpload(
     ...(servedRoute.tenantId !== undefined ? { tenantId: servedRoute.tenantId } : {}),
     providerAttemptIndex: attemptIndex,
     ...routePricing(servedRoute),
+    ...billingGroup,
   } satisfies Omit<Usage, "promptTokens" | "completionTokens" | "totalTokens">;
 
   if (!upstreamResponse.ok) {
@@ -3757,6 +3805,8 @@ async function handleSpeech(c: InferenceContext, deps: ResolvedInferenceDeps): P
 
   const upstreamContentType =
     upstreamResponse.headers.get("content-type") ?? "application/octet-stream";
+  // #945 — resolve the billing-group multiplier once, in this async body.
+  const billingGroup = await billingGroupMeterFields(deps, c.env, caller);
   const meterBase = {
     requestId,
     route: ROUTE_LABELS["audio.speech"],
@@ -3769,6 +3819,7 @@ async function handleSpeech(c: InferenceContext, deps: ResolvedInferenceDeps): P
     ...(servedRoute.tenantId !== undefined ? { tenantId: servedRoute.tenantId } : {}),
     providerAttemptIndex: attemptIndex,
     ...routePricing(servedRoute),
+    ...billingGroup,
   } satisfies Omit<Usage, "promptTokens" | "completionTokens" | "totalTokens">;
 
   if (!upstreamResponse.ok) {
@@ -3903,6 +3954,9 @@ async function handleImages(c: InferenceContext, deps: ResolvedInferenceDeps): P
     ? (parsed as { data: unknown[] }).data.length
     : undefined;
 
+  // #945 — the image surface settles on a route price too, so it takes the same
+  // billing-group multiplier as the token surfaces.
+  const billingGroup = await billingGroupMeterFields(deps, c.env, caller);
   recordUsage(
     c,
     deps,
@@ -3919,6 +3973,7 @@ async function handleImages(c: InferenceContext, deps: ResolvedInferenceDeps): P
       ...(servedRoute.tenantId !== undefined ? { tenantId: servedRoute.tenantId } : {}),
       providerAttemptIndex: attemptIndex,
       ...routePricing(servedRoute),
+      ...billingGroup,
     },
     servedRoute.providerKind,
     // `/v1/images` settles on IMAGES, not tokens, so there is no

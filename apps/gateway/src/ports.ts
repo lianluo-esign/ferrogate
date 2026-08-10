@@ -101,6 +101,18 @@ export interface AuthContext {
    * spend.
    */
   readonly attributionTags?: Readonly<Record<string, string>>;
+  /**
+   * #945 — the billing GROUP this credential is bound to
+   * (`api_keys.billing_group_id`), or a configured key record's
+   * `billing_group_id`. Read by `inference/identity.ts::callerFromAuth`, which
+   * forwards it to {@link inference/ports.Caller.billingGroupId}; the settlement
+   * path resolves its multiplier and scales the settled cost.
+   *
+   * Absent means "no group", which — like an absent LIMIT and unlike an absent
+   * attribution map — is the fail-OPEN direction: the request settles at the
+   * official price rather than being refused.
+   */
+  readonly billingGroupId?: string;
 }
 
 /** Rust `AuthContext::caller_scope`. */

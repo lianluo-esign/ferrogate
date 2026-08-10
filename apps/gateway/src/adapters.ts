@@ -122,6 +122,13 @@ export interface ApiKeyRecord {
    * `api_keys.attribution_tags_json` (`keys/store.ts`).
    */
   readonly attribution_tags?: Readonly<Record<string, string>>;
+  /**
+   * #945 — the billing GROUP this key is bound to, whose multiplier scales the
+   * settled cost. The durable twin is `api_keys.billing_group_id`
+   * (`keys/store.ts`); a configured static key carries it here so a deployment
+   * driven off `GATEWAY_STATIC_API_KEYS` can still attribute group pricing.
+   */
+  readonly billing_group_id?: string | null;
 }
 
 /**
@@ -164,6 +171,11 @@ function toAuthContext(record: ApiKeyRecord, scopes: readonly string[]): AuthCon
     ...(attributionTagsOf(record) === undefined
       ? {}
       : { attributionTags: attributionTagsOf(record) }),
+    // #945 — forward the billing group only when the record names a non-empty
+    // one; absent/blank means "no group", which settles at the official price.
+    ...(typeof record.billing_group_id === "string" && record.billing_group_id !== ""
+      ? { billingGroupId: record.billing_group_id }
+      : {}),
   };
 }
 

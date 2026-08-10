@@ -1055,6 +1055,23 @@ const CONTROLS: readonly FleetControl[] = [
   },
   {
     /**
+     * Billing-group multipliers (#942/#945). The control plane authors the
+     * `platform_billing_groups` rows (and stamps `platform_billing_group_revisions`
+     * so the data plane can invalidate its cache) through `PlatformBillingGroupStore`,
+     * and the gateway data plane reads the SAME two tables through
+     * `controlDatabaseFrom` at settlement to scale the settled cost by a group's
+     * multiplier. An operator who raises a group's multiplier on the control plane
+     * must see the gateway bill at the new rate — the authoritative-when-present
+     * rule, so both Workers resolve it from the same durable tables.
+     */
+    id: "billing-group-multiplier",
+    title: "the platform billing-group cost multipliers",
+    required: "self",
+    enforcement: /PlatformBillingGroupStore|platformBillingGroupSourceFromControlData/,
+    authorityTables: ["platform_billing_groups", "platform_billing_group_revisions"],
+  },
+  {
+    /**
      * The tenant-owned MCP server catalog (Zero-D1). `apps/control-plane`
      * authors it through the admin CRUD surface and `apps/mcp` resolves which
      * upstream server a tenant's call reaches from the SAME tenant-object

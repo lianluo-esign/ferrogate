@@ -135,6 +135,12 @@ export function callerFromAuth(
     // drives the deployed chain, so dropping this argument goes red rather than
     // silently un-arming the gate the way `regionAllowlist` was un-armed.
     ...(residency === null ? {} : { residency }),
+    // #945 — the billing group whose multiplier scales this request's settled
+    // cost. Copied straight off `AuthContext` (populated by both key sources:
+    // `keys/resolver.ts` for durable keys, `adapters.ts` for static ones) and
+    // read by the settlement path, which resolves the multiplier once per
+    // request. Absent ⇒ no group ⇒ the official price.
+    ...(auth.billingGroupId !== undefined ? { billingGroupId: auth.billingGroupId } : {}),
   };
 }
 

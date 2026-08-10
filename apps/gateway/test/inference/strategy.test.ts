@@ -757,6 +757,10 @@ describe("orderCandidatesByStrategy stays a pure, synchronous permutation (#699)
     const result = orderCandidatesByStrategy([leg("a"), leg("b")], "priority", { cursor: 0 });
     expect(Array.isArray(result)).toBe(true);
     expect((result as unknown as { then?: unknown }).then).toBeUndefined();
+    // #945 — the billing-group multiplier read is a SETTLEMENT input, resolved in
+    // the handler's async body and baked onto `Usage`, never read here. The
+    // ordering function is not an async function, so no `await` could hide in it.
+    expect(orderCandidatesByStrategy.constructor.name).toBe("Function");
   });
 
   it("never filters, even when the quality snapshot has the dial on and every leg lags", () => {

@@ -159,6 +159,10 @@ function toAuthContext(row: StoredApiKey): AuthContext {
     ...(Object.keys(row.attributionTags).length === 0
       ? {}
       : { attributionTags: row.attributionTags }),
+    // #945 — the billing group whose multiplier scales this key's settled cost.
+    // Forwarded only when the key names one; absent means "no group", which
+    // settles at the official price (a `1.0` multiplier).
+    ...(row.billingGroupId === null ? {} : { billingGroupId: row.billingGroupId }),
   };
 }
 

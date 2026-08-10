@@ -16,6 +16,7 @@ import type { ResponsesStreamProviderKind } from "../streaming/index.js";
 import { canonicalProviderKind, defaultAdapterRegistry } from "./adapters.js";
 import { defaultAnthropicTranslator } from "./anthropic.js";
 import { audioObjectsFromEnv } from "./audio-objects.js";
+import { platformBillingGroupSourceFromControlData } from "./billing-group-source.js";
 import { byokPortsFromEnv } from "./byok.js";
 import { orderCandidates } from "./candidates.js";
 import { DurableObjectProviderCircuit } from "./circuit-do.js";
@@ -213,6 +214,14 @@ export function providerCircuitFor(
  * error direction is "reacts later", never "reacts wrongly".
  */
 export const isolateRoutingMetrics: RoutingMetrics = new ProviderRoutingMetrics();
+
+/**
+ * #945 — the billing-group multiplier source, a module-scope singleton for the
+ * same reason {@link isolateRoutingMetrics} is one: its revision-gated cache is
+ * keyed by the Worker `env` and must survive every per-request `resolveDeps` so
+ * the steady state is O(revisions), not a fresh control-object read per request.
+ */
+export const isolateBillingGroupSource = platformBillingGroupSourceFromControlData();
 
 /** An empty registry — every model resolves to `model_not_found` (400). */
 export const emptyModelResolver: ModelResolver = new InMemoryModelResolver([]);
@@ -503,5 +512,10 @@ export function resolveDeps(
     responseRetentionSeconds:
       deps.responseRetentionSeconds ??
       ((tenantId: string) => resolveRetentionSeconds(env.GATEWAY_RESPONSES_RETENTION, tenantId)),
+    // #945 — the billing-group multiplier source. The module-scope singleton by
+    // default so its per-`env` cache accumulates across requests; an injected
+    // source always wins, which is what lets a workerd test pin a multiplier
+    // without standing up a CONTROL_DATA binding.
+    billingGroups: deps.billingGroups ?? isolateBillingGroupSource,
   };
 }
