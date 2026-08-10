@@ -66,17 +66,12 @@ interface DeliberateExclusion {
 }
 
 const DELIBERATE_EXCLUSIONS: Readonly<Record<string, DeliberateExclusion>> = {
-  // Platform billing groups + their provider bindings (#943, epic #941). A
-  // PLATFORM-OPERATOR surface: it defines the price multipliers applied at
-  // settlement, so its operator UI belongs in the same billing/ops cockpit that
-  // owns wallets and metering, next to the per-tenant spend controls — not a
-  // standalone page stranded from them. Deferred, needs UI — tracked on the
-  // #313 chain as the #941 billing-group cockpit follow-up.
-  "billing-groups": {
-    owner: "billing/ops cockpit (#941 follow-up, #313 chain)",
-    reason:
-      "platform price-multiplier groups and their provider bindings; the operator UI belongs as a panel inside the existing wallets/metering billing cockpit rather than a standalone page — deferred, needs UI",
-  },
+  // (`billing-groups` used to be excluded here as "deferred, needs UI". #946
+  // shipped that UI as the bespoke src/pages/billing-groups.tsx surface — group
+  // CRUD, the price multiplier, and provider bind/unbind over the dedicated
+  // /admin/v1/billing-groups/{id}/providers/{providerId} endpoints — so the
+  // exclusion was DELETED: the group is now covered by a real call site, and the
+  // obsolete-exclusion check below would fail if the entry stayed.)
   // Read-only cost-burn rollup (#428 slice B-surface): GET-only, no write verbs,
   // and it renders the SAME per-tenant billing period the wallets + metering
   // cockpit already owns. A standalone page would strand it away from the spend

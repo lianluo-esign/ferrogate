@@ -7,6 +7,66 @@
  */
 
 export interface paths {
+    "/admin/v1/billing-groups": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List platform billing groups with their bound provider ids. */
+        get: operations["listBillingGroups"];
+        put?: never;
+        /** Create a platform billing group with a price multiplier. */
+        post: operations["createBillingGroup"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/v1/billing-groups/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        /** Get one platform billing group. */
+        get: operations["getBillingGroup"];
+        put?: never;
+        post?: never;
+        /** Delete a platform billing group; its provider bindings cascade away. */
+        delete: operations["deleteBillingGroup"];
+        options?: never;
+        head?: never;
+        /** Partially update a platform billing group. */
+        patch: operations["patchBillingGroup"];
+        trace?: never;
+    };
+    "/admin/v1/billing-groups/{id}/providers/{providerId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                providerId: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        /** Bind a platform provider channel to a billing group (idempotent). */
+        put: operations["bindBillingGroupProvider"];
+        post?: never;
+        /** Unbind a platform provider channel from a billing group. */
+        delete: operations["unbindBillingGroupProvider"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/healthz": {
         parameters: {
             query?: never;
@@ -569,6 +629,25 @@ export interface paths {
         head?: never;
         /** Partially update a tenant-owned provider channel. */
         patch: operations["patchAdminProvider"];
+        trace?: never;
+    };
+    "/admin/v1/providers/{id}/sync-models": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Import a platform provider's live upstream model list (GET /v1/models) into the platform catalog. Platform-operator only; idempotent and additive. */
+        post: operations["syncProviderModels"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
         trace?: never;
     };
     "/admin/v1/provider-health": {
@@ -9474,6 +9553,24 @@ export interface components {
             /** Format: int64 */
             revoked_at_unix?: number | null;
         };
+        /** @description A platform billing group: a price multiplier applied to the bound providers' official offering prices. */
+        BillingGroup: {
+            id: string;
+            /** @constant */
+            scope: "platform";
+            name: string;
+            multiplier: number;
+            description?: string | null;
+            enabled: boolean;
+            provider_ids: string[];
+        };
+        BillingGroupMutation: {
+            id?: string;
+            name: string;
+            multiplier: number;
+            description?: string | null;
+            enabled?: boolean;
+        };
         AdminVirtualApiKeyCreateRequest: {
             id?: string | null;
             name?: string | null;
@@ -9487,6 +9584,7 @@ export interface components {
             request_limit_per_minute?: number | null;
             /** Format: int64 */
             expires_at_unix?: number | null;
+            billing_group_id?: string | null;
         };
         AdminVirtualApiKeyMutationResponse: {
             /** @constant */
@@ -12024,6 +12122,213 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    listBillingGroups: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Billing group list. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        object?: string;
+                        data?: components["schemas"]["BillingGroup"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    createBillingGroup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BillingGroupMutation"];
+            };
+        };
+        responses: {
+            /** @description Created billing group. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        object?: string;
+                        billing_group?: components["schemas"]["BillingGroup"];
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    getBillingGroup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Billing group. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        object?: string;
+                        billing_group?: components["schemas"]["BillingGroup"];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    deleteBillingGroup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted billing group. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        object?: string;
+                        id?: string;
+                        deleted?: boolean;
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    patchBillingGroup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BillingGroupMutation"];
+            };
+        };
+        responses: {
+            /** @description Updated billing group. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        object?: string;
+                        billing_group?: components["schemas"]["BillingGroup"];
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    bindBillingGroupProvider: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                providerId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Billing group with the provider bound. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        object?: string;
+                        billing_group?: components["schemas"]["BillingGroup"];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    unbindBillingGroupProvider: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                providerId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Billing group with the provider unbound. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        object?: string;
+                        billing_group?: components["schemas"]["BillingGroup"];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
     getHealthz: {
         parameters: {
             query?: never;
@@ -12957,6 +13262,50 @@ export interface operations {
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
+        };
+    };
+    syncProviderModels: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Sync result: models added (inserted), updated (always 0 — the upstream list carries no price to update from), skipped (already present), the upstream model count, and the new catalog revision. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        object: string;
+                        scope: string;
+                        provider_id: string;
+                        added: number;
+                        updated: number;
+                        skipped: number;
+                        upstream_count?: number;
+                        revision: number;
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            /** @description The upstream provider was unreachable, answered non-2xx, returned a malformed model list, or its credential could not be resolved. */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            503: components["responses"]["ServiceUnavailable"];
         };
     };
     listAdminProviderHealth: {

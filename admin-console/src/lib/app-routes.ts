@@ -35,6 +35,7 @@ export const APP_ROUTES = {
   pluginTools: "/app/plugins/:pluginId/tools",
   toolSessions: "/app/tool-sessions",
   modelOfferings: "/app/models/:modelId/offerings",
+  billingGroups: "/app/billing-groups",
 } as const;
 
 export const APP_DETAIL_ROUTE_PARENTS: Readonly<Record<string, string>> = {

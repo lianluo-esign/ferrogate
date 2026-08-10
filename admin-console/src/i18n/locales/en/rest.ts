@@ -544,6 +544,21 @@ export const enRest = {
   "resource.providers.field.zeroDataRetention": "Zero data retention",
   "resource.providers.field.enabled": "Enabled",
 
+  // Platform billing groups (#946, epic #941). resource.* is the shared title/
+  // columns/fields copy; the bespoke page copy lives under page.billingGroups.*.
+  "resource.billingGroups.title": "Billing groups",
+  "resource.billingGroups.description":
+    "Platform price-multiplier groups: each group applies one multiplier to the official offering prices of the provider channels bound to it.",
+  "resource.billingGroups.col.name": "Name",
+  "resource.billingGroups.col.multiplier": "Multiplier",
+  "resource.billingGroups.col.description": "Description",
+  "resource.billingGroups.col.providers": "Providers",
+  "resource.billingGroups.col.enabled": "Enabled",
+  "resource.billingGroups.field.name": "Name",
+  "resource.billingGroups.field.multiplier": "Multiplier",
+  "resource.billingGroups.field.description": "Description",
+  "resource.billingGroups.field.enabled": "Enabled",
+
   "resource.models.title": "Models",
   "resource.models.description": "Logical model routes exposed by the gateway.",
   "resource.models.col.name": "Name",
@@ -2156,6 +2171,36 @@ export const enRest = {
   "page.modelOfferings.option.role.fallback": "Fallback",
   "page.modelOfferings.option.role.canary": "Canary",
   "page.modelOfferings.option.role.shadow": "Shadow",
+  // Sync-models action (#946, S3 #944): import the row's provider's live upstream
+  // model list into the platform catalog; the toast reports the counts.
+  "page.modelOfferings.action.syncModels": "Sync models",
+  "page.modelOfferings.toast.synced":
+    "Synced models: {added} added, {updated} updated, {skipped} skipped.",
+
+  // Platform billing groups page (src/pages/billing-groups.tsx, #946, epic #941).
+  "page.billingGroups.platformHint":
+    "Billing groups are a platform-operator surface. Switch to platform scope to manage them.",
+  "page.billingGroups.loadError": "Failed to load billing groups: {message}",
+  "page.billingGroups.empty": "No billing groups yet.",
+  "page.billingGroups.create.title": "New billing group",
+  "page.billingGroups.edit.title": "Edit billing group",
+  "page.billingGroups.delete.title": "Delete billing group?",
+  "page.billingGroups.delete.description":
+    "This removes the group and all of its provider bindings. Keys pointing at it fall back to the ungrouped price. This cannot be undone.",
+  "page.billingGroups.field.multiplier.hint":
+    "Applied to the bound providers' official offering prices. Must be 0 or greater (1 = no markup).",
+  "page.billingGroups.toast.created": "Billing group created.",
+  "page.billingGroups.toast.updated": "Billing group updated.",
+  "page.billingGroups.toast.deleted": "Billing group deleted.",
+  "page.billingGroups.toast.providerBound": "Provider bound.",
+  "page.billingGroups.toast.providerUnbound": "Provider unbound.",
+  "page.billingGroups.validation.nameRequired": "Name is required.",
+  "page.billingGroups.validation.multiplierInvalid": "Multiplier must be a number 0 or greater.",
+  "page.billingGroups.providers.title": "Bound providers",
+  "page.billingGroups.providers.description":
+    "Toggle a provider channel to bind or unbind it from this group. Changes apply immediately.",
+  "page.billingGroups.providers.empty": "No providers available in this scope.",
+  "page.billingGroups.providers.toggleLabel": "Bind provider {provider}",
 
   // Self-hosted run inspector (src/pages/self-hosted-runs.tsx).
   "page.selfHostedRuns.title": "Self-hosted runs",
