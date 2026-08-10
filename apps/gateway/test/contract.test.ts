@@ -125,7 +125,7 @@ describe("contract table", () => {
     // 299 -> 306. CORRECT for main + this slice alone; #944's parallel op is
     // reconciled at integration.
     expect(census(OPERATIONS.map<AuthKind>((operation) => operation.auth.kind))).toEqual({
-      bearer: 306,
+      bearer: 307,
       internal: 6,
       anonymous: 7,
       method_dependent: 1,
@@ -158,7 +158,7 @@ describe("contract table", () => {
       // taking admin 236 -> 237.
       // #943 adds seven admin-visible `admin_billing_group` operations, taking
       // admin 237 -> 244 (main + this slice alone; #944 reconciled later).
-      admin: 244,
+      admin: 245,
       // 51 -> 52 with `countMessageTokens` (issue #671): a data-plane
       // operation, publicly reachable, bearer-guarded; then 52 -> 53 with
       // `getModel` (issue #670), public for the same reason as `listModels`.
@@ -242,7 +242,7 @@ describe("contract table", () => {
       // (billing-group delete + provider unbind, 33 -> 35), one PUT (provider
       // bind, 24 -> 25) and one PATCH (billing-group patch, 19 -> 20). CORRECT
       // for main + this slice alone; #944 reconciled at integration.
-      POST: 98,
+      POST: 99,
       DELETE: 35,
       PUT: 25,
       PATCH: 20,
