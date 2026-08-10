@@ -203,6 +203,7 @@ export const zhCN = {
   "nav.item.mcpIdentities": "MCP 身份",
   "nav.item.providers": "提供商",
   "nav.item.models": "模型",
+  "nav.item.billingGroups": "计费分组",
   "nav.item.agentUpstreams": "智能体上游",
   "nav.item.agentWorkflows": "智能体工作流",
   "nav.item.skillPackages": "技能包",
@@ -581,6 +582,20 @@ export const zhCN = {
   "resource.providers.field.region": "区域",
   "resource.providers.field.zeroDataRetention": "零数据保留",
   "resource.providers.field.enabled": "已启用",
+
+  // 平台计费分组 (#946, epic #941)。
+  "resource.billingGroups.title": "计费分组",
+  "resource.billingGroups.description":
+    "平台价格倍率分组：每个分组会将一个倍率应用到绑定到它的提供商渠道的官方定价上。",
+  "resource.billingGroups.col.name": "名称",
+  "resource.billingGroups.col.multiplier": "倍率",
+  "resource.billingGroups.col.description": "描述",
+  "resource.billingGroups.col.providers": "提供商",
+  "resource.billingGroups.col.enabled": "已启用",
+  "resource.billingGroups.field.name": "名称",
+  "resource.billingGroups.field.multiplier": "倍率",
+  "resource.billingGroups.field.description": "描述",
+  "resource.billingGroups.field.enabled": "已启用",
 
   "resource.models.title": "模型",
   "resource.models.description": "网关对外暴露的逻辑模型路由。",
@@ -2125,6 +2140,33 @@ export const zhCN = {
   "page.modelOfferings.option.role.fallback": "回退",
   "page.modelOfferings.option.role.canary": "金丝雀",
   "page.modelOfferings.option.role.shadow": "影子",
+  // 同步模型 (#946, S3 #944)。
+  "page.modelOfferings.action.syncModels": "同步模型",
+  "page.modelOfferings.toast.synced":
+    "已同步模型：新增 {added} 个，更新 {updated} 个，跳过 {skipped} 个。",
+
+  // 平台计费分组页面 (src/pages/billing-groups.tsx, #946, epic #941)。
+  "page.billingGroups.platformHint": "计费分组是平台运维专用界面。请切换到平台范围以进行管理。",
+  "page.billingGroups.loadError": "加载计费分组失败：{message}",
+  "page.billingGroups.empty": "暂无计费分组。",
+  "page.billingGroups.create.title": "新建计费分组",
+  "page.billingGroups.edit.title": "编辑计费分组",
+  "page.billingGroups.delete.title": "删除计费分组？",
+  "page.billingGroups.delete.description":
+    "此操作会删除该分组及其全部提供商绑定。指向它的密钥将回退到未分组价格。此操作无法撤销。",
+  "page.billingGroups.field.multiplier.hint":
+    "应用于所绑定提供商的官方定价。必须大于或等于 0（1 表示不加价）。",
+  "page.billingGroups.toast.created": "计费分组已创建。",
+  "page.billingGroups.toast.updated": "计费分组已更新。",
+  "page.billingGroups.toast.deleted": "计费分组已删除。",
+  "page.billingGroups.toast.providerBound": "提供商已绑定。",
+  "page.billingGroups.toast.providerUnbound": "提供商已解绑。",
+  "page.billingGroups.validation.nameRequired": "名称为必填项。",
+  "page.billingGroups.validation.multiplierInvalid": "倍率必须是大于或等于 0 的数字。",
+  "page.billingGroups.providers.title": "已绑定的提供商",
+  "page.billingGroups.providers.description": "切换某个提供商渠道以将其绑定或从此分组解绑。更改会立即生效。",
+  "page.billingGroups.providers.empty": "此范围内没有可用的提供商。",
+  "page.billingGroups.providers.toggleLabel": "绑定提供商 {provider}",
 
   // Self-hosted run inspector (src/pages/self-hosted-runs.tsx).
   "page.selfHostedRuns.title": "自托管运行",

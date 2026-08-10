@@ -378,6 +378,32 @@ export default function ModelOfferingsPage() {
     },
   });
 
+  // Sync-models (#946, S3 #944): import a platform provider's live upstream model
+  // list into the platform catalog. It is a per-PROVIDER action, driven here from
+  // each offering row's provider_id — the provider whose catalogue that offering
+  // routes to. Platform-operator only and additive; the toast reports the
+  // {added, updated, skipped} result. The offerings list is refetched because a
+  // sync bumps the catalog revision.
+  const syncModelsMutation = useMutation({
+    mutationFn: (providerId: string) =>
+      adminPost(apiKey, "/admin/v1/providers/{id}/sync-models", undefined, {
+        params: { id: providerId },
+      }),
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey });
+      toast.success(
+        t("page.modelOfferings.toast.synced", {
+          added: result.added,
+          updated: result.updated,
+          skipped: result.skipped,
+        }),
+      );
+    },
+    onError: (error: Error) => {
+      toastError(error);
+    },
+  });
+
   function submitForm() {
     setFormError(null);
     if (form.provider_id.trim() === "") {
@@ -480,6 +506,16 @@ export default function ModelOfferingsPage() {
                   <TableCell>{scopeLabel(offering.scope)}</TableCell>
                   <TableCell className="text-right">
                     <div className="flex justify-end gap-2">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        disabled={
+                          syncModelsMutation.isPending || str(offering.provider_id) === ""
+                        }
+                        onClick={() => syncModelsMutation.mutate(str(offering.provider_id))}
+                      >
+                        {t("page.modelOfferings.action.syncModels")}
+                      </Button>
                       <Button variant="ghost" size="sm" onClick={() => openEdit(offering)}>
                         {t("resource.action.edit")}
                       </Button>

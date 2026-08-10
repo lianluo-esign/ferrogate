@@ -112,6 +112,7 @@ export const NAV_GROUPS: NavGroup[] = [
     titleKey: "nav.group.billing",
     icon: CreditCard,
     items: [
+      { titleKey: "nav.item.billingGroups", url: APP_ROUTES.billingGroups },
       { titleKey: "nav.item.usageReports", url: "/app/usage-reports" },
       { titleKey: "nav.item.billingEvents", url: "/app/billing-events" },
       { titleKey: "nav.item.wallets", url: APP_ROUTES.wallets },

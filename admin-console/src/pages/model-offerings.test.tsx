@@ -141,6 +141,46 @@ describe("ModelOfferingsPage", () => {
   });
 });
 
+describe("ModelOfferingsPage sync-models action (#946)", () => {
+  it("posts sync-models for the row's provider and reports the result", async () => {
+    seedSuperadmin();
+    stubOfferings();
+    const syncs: { url: string; authorization: string | null }[] = [];
+    server.use(
+      http.post(
+        gatewayUrl("/admin/v1/providers/provider-openai/sync-models"),
+        ({ request }) => {
+          syncs.push({
+            url: request.url,
+            authorization: request.headers.get("authorization"),
+          });
+          return HttpResponse.json({
+            object: "provider_model_sync",
+            scope: "platform",
+            provider_id: "provider-openai",
+            added: 3,
+            updated: 0,
+            skipped: 5,
+            upstream_count: 8,
+            revision: 2,
+          });
+        },
+      ),
+    );
+    renderPage();
+    await screen.findByText("provider-openai");
+
+    // Flip to platform scope so the sync rides the operator key, then trigger it
+    // from the offering row's action.
+    await userEvent.click(screen.getByRole("switch"));
+    await userEvent.click(screen.getByRole("button", { name: "Sync models" }));
+
+    await waitFor(() => expect(syncs).toHaveLength(1));
+    expect(syncs[0].url).toContain("/admin/v1/providers/provider-openai/sync-models");
+    expect(syncs[0].authorization).toBe(`Bearer ${OPERATOR_KEY}`);
+  });
+});
+
 describe("ModelOfferingsPage platform scope", () => {
   it("sends the operator key and NO tenant_id after toggling platform scope", async () => {
     seedSuperadmin();

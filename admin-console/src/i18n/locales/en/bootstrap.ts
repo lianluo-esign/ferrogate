@@ -108,6 +108,7 @@ export const enBootstrap = {
   "nav.item.mcpIdentities": "MCP Identities",
   "nav.item.providers": "Providers",
   "nav.item.models": "Models",
+  "nav.item.billingGroups": "Billing Groups",
   "nav.item.agentUpstreams": "Agent Upstreams",
   "nav.item.agentWorkflows": "Agent Workflows",
   "nav.item.skillPackages": "Skill Packages",
