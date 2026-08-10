@@ -32,9 +32,17 @@
  */
 import type { PriceBook } from "@ferrogate/billing";
 import type { SeedProviderChannel } from "@ferrogate/storage";
-import { defaultAuthScheme } from "../../../gateway/src/inference/adapters.js";
+import {
+  canonicalProviderKind,
+  defaultAuthScheme,
+} from "../../../gateway/src/inference/adapters.js";
 import type { CallerScope } from "../ports.js";
-import { type UpstreamModel, providerModelsToImportGraph } from "./platform-catalog-import.js";
+import {
+  PLATFORM_DEFAULT_PROVIDER_ID,
+  type UpstreamModel,
+  platformCatalogModelId,
+  providerModelsToImportGraph,
+} from "./platform-catalog-import.js";
 import type { PlatformModelCatalogStore } from "./platform-model-catalog.js";
 
 /**
@@ -78,7 +86,9 @@ function joinUrl(baseUrl: string, path: string): string {
  * adapter does — `x-api-key` for anthropic, `Authorization: Bearer` otherwise,
  * unless the channel pins an `auth_scheme`. No credential ⇒ no header, so an
  * unauthenticated local upstream can be pointed at without a secret (the Rust
- * `api_key.filter(|v| !v.is_empty())` behaviour).
+ * `api_key.filter(|v| !v.is_empty())` behaviour). An anthropic channel also
+ * carries the mandatory `anthropic-version` header, without which its
+ * `/v1/models` answers 400.
  *
  * `fetchImpl` is injected so a workerd test can drive a STUB `/v1/models`
  * without a live upstream and without the (unavailable) pool-workers fetch mock;
@@ -93,6 +103,14 @@ export async function fetchUpstreamModels(options: {
   const fetchImpl = options.fetchImpl ?? fetch;
   const url = joinUrl(provider.base_url, "/models");
   const headers: Record<string, string> = { accept: "application/json" };
+  // Anthropic's API — GET /v1/models included — REJECTS any request without the
+  // `anthropic-version` header (400), so it is pinned here exactly as the data
+  // plane's `anthropicHeaders` does. It is keyed on the provider KIND, not the
+  // auth scheme: an anthropic channel needs it even under a bearer override, and
+  // it is a harmless protocol header when no credential is sent.
+  if (canonicalProviderKind(provider.kind) === "anthropic") {
+    headers["anthropic-version"] = "2023-06-01";
+  }
   if (apiKey !== undefined && apiKey.trim().length > 0) {
     const scheme = provider.auth_scheme ?? defaultAuthScheme(provider.kind);
     if (scheme === "x-api-key") headers["x-api-key"] = apiKey;
@@ -184,11 +202,37 @@ export async function syncProviderModelsIntoCatalog(options: {
     apiKey: options.apiKey,
     fetchImpl: options.fetchImpl,
   });
-  const graph = providerModelsToImportGraph(options.provider, upstreamModels, options.priceBook);
+
+  // A model whose single primary slot a DIFFERENT real provider already owns
+  // must be laid down as a `fallback`, or `INSERT OR IGNORE` collides it with
+  // that primary and drops it silently behind a 200 (#944 review). A
+  // `platform-default` rate-card primary is NOT a real owner — `importGraph`
+  // purges it for a real offering — so it does not force a demotion.
+  const candidateModelIds = [...new Set(upstreamModels.map((model) => model.id))].map(
+    platformCatalogModelId,
+  );
+  const primaryOwners = await options.store.primaryOfferingOwners(candidateModelIds);
+  const fallbackModelIds = new Set<string>();
+  for (const [modelId, ownerProviderId] of primaryOwners) {
+    if (
+      ownerProviderId !== options.provider.id &&
+      ownerProviderId !== PLATFORM_DEFAULT_PROVIDER_ID
+    ) {
+      fallbackModelIds.add(modelId);
+    }
+  }
+
+  const graph = providerModelsToImportGraph(
+    options.provider,
+    upstreamModels,
+    options.priceBook,
+    fallbackModelIds,
+  );
   const result = await options.store.importGraph(options.scope, graph);
 
-  // `graph.offerings` is the deduped upstream list (one primary per model), so
-  // its length is the true "how many distinct models did the upstream offer".
+  // `graph.offerings` is the deduped upstream list (one offering per distinct
+  // model, primary or fallback), so its length is the true "how many distinct
+  // models did the upstream offer".
   const upstreamCount = graph.offerings.length;
   const added = result.inserted.offerings;
   return {

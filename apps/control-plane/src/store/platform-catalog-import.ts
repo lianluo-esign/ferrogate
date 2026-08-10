@@ -86,6 +86,17 @@ function providerId(name: string): string {
 function modelId(name: string): string {
   return `platform:model:${name}`;
 }
+
+/**
+ * The deterministic `platform_catalog_models.id` an upstream model name maps to
+ * (#944). Exported so the sync orchestration can compute the candidate model ids
+ * — WITHOUT rebuilding the graph — to ask the store which of them already carry
+ * a real primary offering (see {@link providerModelsToImportGraph}'s
+ * `fallbackModelIds`).
+ */
+export function platformCatalogModelId(name: string): string {
+  return modelId(name);
+}
 function offeringId(model: string, providerName: string, upstream: string): string {
   return `platform:offering:${model}:${providerName}:${upstream}`;
 }
@@ -396,11 +407,27 @@ export interface UpstreamModel {
  * where the upstream gives none" the issue asks for. Duplicate upstream ids are
  * collapsed to the first, so a malformed upstream list cannot fan out into a
  * `ux_..._primary` collision.
+ *
+ * ## Two providers serving the same model → the later one is a FALLBACK, not a drop
+ *
+ * `model_id` is `platform:model:{name}` — keyed on the upstream name ALONE, so
+ * two providers that both serve `gpt-4o` share one model row. The schema allows
+ * exactly ONE `role = 'primary'` offering per model_id
+ * (`ux_platform_catalog_offerings_primary`), and {@link importGraph} writes with
+ * `INSERT OR IGNORE`; so a naive "everything is primary" would let the second
+ * provider's offering collide with the first's primary and be SILENTLY DROPPED,
+ * misreported as `skipped` behind a 200 (#944 review). `fallbackModelIds` names
+ * the model_ids whose primary slot a DIFFERENT real provider already holds; this
+ * provider's offering for those is laid down as a routable `fallback` (a legal
+ * second leg, ordered after the primary) so it actually routes and is counted as
+ * `added`. The orchestration derives the set from the live catalog, so the FIRST
+ * provider synced for a model owns its primary and later ones become fallbacks.
  */
 export function providerModelsToImportGraph(
   provider: Pick<SeedProviderChannel, "id" | "name">,
   upstreamModels: readonly UpstreamModel[],
   priceBook: PriceBook,
+  fallbackModelIds: ReadonlySet<string> = new Set(),
 ): PlatformCatalogImportGraph {
   const priceByModel = new Map(
     priceBook.entries
@@ -427,14 +454,19 @@ export function providerModelsToImportGraph(
       enabled: 1,
     });
 
+    const asFallback = fallbackModelIds.has(modelId(name));
     const price = priceByModel.get(name);
     offeringRows.push({
       id: offeringId(name, provider.name, name),
       model_id: modelId(name),
       provider_id: provider.id,
       upstream_model_id: name,
-      role: "primary",
-      priority: 0,
+      // A model whose primary slot another real provider already holds gets a
+      // `fallback` leg (priority 100, the env-fallback default) so it routes
+      // rather than colliding with the primary and being dropped; otherwise this
+      // provider owns the primary.
+      role: asFallback ? "fallback" : "primary",
+      priority: asFallback ? 100 : 0,
       weight: 1,
       canary_percent: null,
       shadow_percent: null,

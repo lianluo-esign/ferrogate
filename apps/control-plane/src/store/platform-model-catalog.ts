@@ -1209,6 +1209,33 @@ export class PlatformModelCatalogStore {
     return (await this.#offeringRows(modelId)).map(offeringRecord);
   }
 
+  /**
+   * For the given `modelIds`, the provider that currently owns each one's single
+   * `primary` offering slot — the input the provider-sync path needs to decide
+   * whether a second provider's model must be laid down as a `fallback` rather
+   * than collide with an existing primary (#944). A model_id with no primary is
+   * absent from the map. The `platform-default` rate-card provider IS reported
+   * (the caller ignores it, because {@link importGraph} purges that stale primary
+   * in favour of a real provider's offering).
+   */
+  async primaryOfferingOwners(modelIds: readonly string[]): Promise<ReadonlyMap<string, string>> {
+    const unique = [...new Set(modelIds)];
+    if (unique.length === 0) return new Map();
+    const placeholders = unique.map(() => "?").join(", ");
+    const rows = (
+      await this.#db
+        .prepare(
+          `SELECT model_id, provider_id FROM ${PLATFORM_OFFERING_TABLE}
+            WHERE role = 'primary' AND model_id IN (${placeholders})`,
+        )
+        .bind(...unique)
+        .all<{ model_id: string; provider_id: string }>()
+    ).results;
+    const owners = new Map<string, string>();
+    for (const row of rows) owners.set(row.model_id, row.provider_id);
+    return owners;
+  }
+
   async createOffering(
     scope: CallerScope,
     modelId: string,
