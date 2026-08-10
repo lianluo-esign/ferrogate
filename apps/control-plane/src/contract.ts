@@ -125,7 +125,7 @@ export const SUPPORTED_CONTRACT_VERSION = 1;
  * incremented. 312 -> 313 with #892's `POST /admin/v1/config/import-model-catalog`,
  * the platform-catalog bootstrap import.
  */
-export const EXPECTED_TOTAL_OPERATION_COUNT = 313;
+export const EXPECTED_TOTAL_OPERATION_COUNT = 320;
 
 /**
  * Operations `ROUTE-MAP.md` assigns to `apps/control-plane`: `/admin/v1/**`
@@ -161,8 +161,12 @@ export const EXPECTED_TOTAL_OPERATION_COUNT = 313;
  * 240 -> 241 with #892's `POST /admin/v1/config/import-model-catalog`, the
  * platform-catalog bootstrap import, which `apps/control-plane` owns like the
  * rest of the `admin_config_ops` group.
+ *
+ * 241 -> 248 with #943's seven `admin_billing_group` operations, all under
+ * `/admin/v1/billing-groups`. CORRECT for main + this slice ALONE; #944's
+ * parallel operation is reconciled by the integrator.
  */
-export const EXPECTED_CONTROL_PLANE_OPERATION_COUNT = 241;
+export const EXPECTED_CONTROL_PLANE_OPERATION_COUNT = 248;
 
 // ---------------------------------------------------------------------------
 // Ownership predicate

@@ -201,6 +201,15 @@ export async function projectVirtualKey(
   const enabled = bit(record.enabled !== false);
   const expiresAt = finite(record.expires_at) ?? finite(record.expires_at_unix);
   const revoked = revokedAt(record, nowUnix);
+  // #943 — the platform billing group this key is charged through. A blank or
+  // absent value is NULL ("no group / multiplier 1.0"), exactly the fail-open
+  // direction the gateway settlement path takes for a dangling id. NOT mirrored
+  // into `api_key_directory`: the router does not price, so the multiplier key
+  // belongs only on the tenant authority row the settlement path reads.
+  const billingGroupId =
+    typeof record.billing_group_id === "string" && record.billing_group_id.trim() !== ""
+      ? record.billing_group_id.trim()
+      : null;
 
   // #882 — the KV projection row, exactly the `api_key_directory` columns the
   // gateway's HOP-1 read-ahead consumes (never `key_hash`, which is the KV key).
@@ -240,9 +249,9 @@ export async function projectVirtualKey(
            enabled, scopes_json, allowed_models_json, allowed_providers_json,
            monthly_token_budget, request_limit_per_minute,
            created_at_unix, updated_at_unix, rotated_at_unix, expires_at_unix, revoked_at_unix,
-           attribution_tags_json
+           attribution_tags_json, billing_group_id
          )
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (id) DO UPDATE SET
            workspace_id = excluded.workspace_id,
            project_id = excluded.project_id,
@@ -260,7 +269,8 @@ export async function projectVirtualKey(
            rotated_at_unix = excluded.rotated_at_unix,
            expires_at_unix = excluded.expires_at_unix,
            revoked_at_unix = excluded.revoked_at_unix,
-           attribution_tags_json = excluded.attribution_tags_json`,
+           attribution_tags_json = excluded.attribution_tags_json,
+           billing_group_id = excluded.billing_group_id`,
       )
       .bind(
         id,
@@ -290,6 +300,7 @@ export async function projectVirtualKey(
         // would put one tenant's cost-centre names in a table every tenant's
         // authentication reads.
         stringMapJson(record.attribution_tags),
+        billingGroupId,
       )
       .run();
   };

@@ -88,6 +88,386 @@
     }
   ],
   "paths": {
+    "/admin/v1/billing-groups": {
+      "get": {
+        "operationId": "listBillingGroups",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "List platform billing groups with their bound provider ids.",
+        "responses": {
+          "200": {
+            "description": "Billing group list.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "object": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/BillingGroup"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.read"
+          },
+          "rbac_action": null
+        }
+      },
+      "post": {
+        "operationId": "createBillingGroup",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Create a platform billing group with a price multiplier.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BillingGroupMutation"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created billing group.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "object": {
+                      "type": "string"
+                    },
+                    "billing_group": {
+                      "$ref": "#/components/schemas/BillingGroup"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.write"
+          },
+          "rbac_action": null
+        }
+      }
+    },
+    "/admin/v1/billing-groups/{id}": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "get": {
+        "operationId": "getBillingGroup",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "Get one platform billing group.",
+        "responses": {
+          "200": {
+            "description": "Billing group.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "object": {
+                      "type": "string"
+                    },
+                    "billing_group": {
+                      "$ref": "#/components/schemas/BillingGroup"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.read"
+          },
+          "rbac_action": null
+        }
+      },
+      "patch": {
+        "operationId": "patchBillingGroup",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Partially update a platform billing group.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BillingGroupMutation"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated billing group.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "object": {
+                      "type": "string"
+                    },
+                    "billing_group": {
+                      "$ref": "#/components/schemas/BillingGroup"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.write"
+          },
+          "rbac_action": null
+        }
+      },
+      "delete": {
+        "operationId": "deleteBillingGroup",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Delete a platform billing group; its provider bindings cascade away.",
+        "responses": {
+          "200": {
+            "description": "Deleted billing group.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "object": {
+                      "type": "string"
+                    },
+                    "id": {
+                      "type": "string"
+                    },
+                    "deleted": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.write"
+          },
+          "rbac_action": null
+        }
+      }
+    },
+    "/admin/v1/billing-groups/{id}/providers/{providerId}": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "providerId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "operationId": "bindBillingGroupProvider",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Bind a platform provider channel to a billing group (idempotent).",
+        "responses": {
+          "200": {
+            "description": "Billing group with the provider bound.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "object": {
+                      "type": "string"
+                    },
+                    "billing_group": {
+                      "$ref": "#/components/schemas/BillingGroup"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.write"
+          },
+          "rbac_action": null
+        }
+      },
+      "delete": {
+        "operationId": "unbindBillingGroupProvider",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Unbind a platform provider channel from a billing group.",
+        "responses": {
+          "200": {
+            "description": "Billing group with the provider unbound.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "object": {
+                      "type": "string"
+                    },
+                    "billing_group": {
+                      "$ref": "#/components/schemas/BillingGroup"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.write"
+          },
+          "rbac_action": null
+        }
+      }
+    },
     "/healthz": {
       "parameters": [
         {
@@ -35910,6 +36290,80 @@
           "updated_at_unix"
         ]
       },
+      "BillingGroup": {
+        "type": "object",
+        "description": "A platform billing group: a price multiplier applied to the bound providers' official offering prices.",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string",
+            "const": "platform"
+          },
+          "name": {
+            "type": "string"
+          },
+          "multiplier": {
+            "type": "number",
+            "minimum": 0
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "provider_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "id",
+          "scope",
+          "name",
+          "multiplier",
+          "enabled",
+          "provider_ids"
+        ]
+      },
+      "BillingGroupMutation": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "multiplier": {
+            "type": "number",
+            "minimum": 0
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "enabled": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "multiplier"
+        ],
+        "additionalProperties": false
+      },
       "AdminVirtualApiKeyCreateRequest": {
         "type": "object",
         "properties": {
@@ -35992,6 +36446,12 @@
               "null"
             ],
             "format": "int64"
+          },
+          "billing_group_id": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "additionalProperties": false

@@ -156,7 +156,7 @@ describe("OPENAPI_OPERATION_COUNT is checked against the committed contract", ()
 
 describe("wireSchemas registry", () => {
   test("exposes the OpenAPI operation count", () => {
-    expect(OPENAPI_OPERATION_COUNT).toBe(313);
+    expect(OPENAPI_OPERATION_COUNT).toBe(320);
   });
 
   test("resolves the seeded cross-plane + ferrogate-core schemas by name", () => {
@@ -332,6 +332,9 @@ describe("PORT-TODO STATE PIN — the registry seeds only cross-plane shapes", (
     // #703/#737, then #743/#689, then #743/#693, and now #693/#697 landing in
     // parallel is exactly why it must not be the source: this branch wrote 270
     // and main wrote 269, and 271 is the value the merged document produces.
-    expect(OPENAPI_OPERATION_COUNT - seeded).toBe(303);
+    // #943 adds seven `admin_billing_group` operations, none of which seed a
+    // wire schema, so the shortfall grows one-for-one: 313 - 10 = 303 becomes
+    // 320 - 10 = 310 (main + this slice alone; #944 reconciled at integration).
+    expect(OPENAPI_OPERATION_COUNT - seeded).toBe(310);
   });
 });
