@@ -45,8 +45,6 @@ import type { TenantDataNamespace } from "@ferrogate/storage/durable-objects";
 import type { ApiOperation } from "./contract.js";
 import { controlDatabaseFrom } from "./control-data.js";
 import { d1ApiKeyResolverFromEnv } from "./keys/index.js";
-import type { TenancyBindings } from "./tenancy/ports.js";
-import { parseTenantDatabaseRoutingMode, resolverForEnv } from "./tenancy/resolver.js";
 import type {
   ApiKeyAuthenticatorPort,
   ApiKeyResolution,
@@ -61,6 +59,8 @@ import type {
   TenancyLifecycleGatePort,
 } from "./ports.js";
 import { WILDCARD_SCOPE, callerScope } from "./ports.js";
+import type { TenancyBindings } from "./tenancy/ports.js";
+import { parseTenantDatabaseRoutingMode, resolverForEnv } from "./tenancy/resolver.js";
 
 // ---------------------------------------------------------------------------
 // helpers

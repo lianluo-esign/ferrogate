@@ -150,7 +150,9 @@ export class KvApiKeyDirectoryProjection implements ApiKeyDirectoryProjection {
   constructor(kv: KeyDirectoryKv, options: KvApiKeyDirectoryProjectionOptions = {}) {
     this.#kv = kv;
     const ttl = options.ttlSeconds ?? DEFAULT_KEY_DIRECTORY_PROJECTION_TTL_SECONDS;
-    const floored = Number.isFinite(ttl) ? Math.floor(ttl) : DEFAULT_KEY_DIRECTORY_PROJECTION_TTL_SECONDS;
+    const floored = Number.isFinite(ttl)
+      ? Math.floor(ttl)
+      : DEFAULT_KEY_DIRECTORY_PROJECTION_TTL_SECONDS;
     this.#expirationTtl = Math.max(floored, KV_MIN_EXPIRATION_TTL_SECONDS);
   }
 

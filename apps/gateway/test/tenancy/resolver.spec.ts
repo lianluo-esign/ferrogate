@@ -102,7 +102,9 @@ describe("the resolver is @ferrogate/storage's router, not a second implementati
     // The router reads its control store through `controlDatabaseFrom(env)` — the
     // `CONTROL_DATA` object facade since Zero-D1 S5 — so the registry is seeded
     // and read there, NOT in the native `CONTROL_DB` D1.
-    const registry = new ControlDatabaseTenantRegistry(controlDatabaseFrom(bindings()) as D1Database);
+    const registry = new ControlDatabaseTenantRegistry(
+      controlDatabaseFrom(bindings()) as D1Database,
+    );
     const acme = await registry.get(TENANT_ACME);
     expect(acme?.bindingName).toBe("TENANT_DB_ACME");
     // `tenant_unbound` is provisioned but has no binding: the column is NULL,
@@ -241,7 +243,9 @@ describe("fail closed — an unresolvable tenant NEVER falls back", () => {
         GATEWAY_TENANT_DB_ROUTING: "off",
         DB: env.TENANT_DB_ACME,
       }),
-    ).toThrow(expect.objectContaining({ code: TENANT_DATABASE_ROUTING_MISCONFIGURED, status: 503 }));
+    ).toThrow(
+      expect.objectContaining({ code: TENANT_DATABASE_ROUTING_MISCONFIGURED, status: 503 }),
+    );
   });
 
   test("EVERY refusal above is an error — none of them is a database", async () => {

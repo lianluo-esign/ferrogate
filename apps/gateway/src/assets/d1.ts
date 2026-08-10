@@ -644,7 +644,9 @@ export class D1AssetMetadataStore implements AssetMetadataStore {
  * no shared database for this base factory to read. It answers `null` — no base
  * store — and `buildAssetService` keeps the in-isolate store for local dev.
  */
-export function assetMetadataStoreFromEnv(_env: Record<string, unknown>): AssetMetadataStore | null {
+export function assetMetadataStoreFromEnv(
+  _env: Record<string, unknown>,
+): AssetMetadataStore | null {
   return null;
 }
 

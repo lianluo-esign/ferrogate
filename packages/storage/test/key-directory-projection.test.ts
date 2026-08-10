@@ -20,14 +20,14 @@ import {
   type ApiKeyDirectoryProjection,
   type ApiKeyDirectoryRow,
   D1TwoHopApiKeyDirectory,
-  KvApiKeyDirectoryProjection,
-  type KeyDirectoryKv,
   KEY_DIRECTORY_PROJECTION_PREFIX,
   KV_MIN_EXPIRATION_TTL_SECONDS,
+  type KeyDirectoryKv,
+  KvApiKeyDirectoryProjection,
+  StorageError,
   type TenantApiKeyRow,
   type TenantDatabaseHandle,
   type TenantDatabaseRouter,
-  StorageError,
   keyDirectoryProjectionKey,
 } from "../src/index.js";
 
@@ -241,9 +241,13 @@ describe("HOP-1 read-ahead over the KV projection", () => {
     const control = controlDb(() => null);
     const tenant = fakeDb(() => tenantRow());
     const projection = new SpyProjection({ seed: { [HASH]: DIR } });
-    const resolver = new D1TwoHopApiKeyDirectory(control.db, tenantRouter({ tenant_a: tenant.db }), {
-      projection,
-    });
+    const resolver = new D1TwoHopApiKeyDirectory(
+      control.db,
+      tenantRouter({ tenant_a: tenant.db }),
+      {
+        projection,
+      },
+    );
 
     const result = await resolver.resolve(HASH);
 
@@ -258,9 +262,13 @@ describe("HOP-1 read-ahead over the KV projection", () => {
     const control = controlDb(() => null);
     const tenant = fakeDb(() => tenantRow({ revoked_at_unix: 1 }));
     const projection = new SpyProjection({ seed: { [HASH]: DIR } });
-    const resolver = new D1TwoHopApiKeyDirectory(control.db, tenantRouter({ tenant_a: tenant.db }), {
-      projection,
-    });
+    const resolver = new D1TwoHopApiKeyDirectory(
+      control.db,
+      tenantRouter({ tenant_a: tenant.db }),
+      {
+        projection,
+      },
+    );
 
     expect(await resolver.resolve(HASH)).toEqual({ kind: "suspended", reason: "revoked" });
   });
@@ -270,9 +278,13 @@ describe("HOP-1 read-ahead over the KV projection", () => {
     const tenant = fakeDb(() => tenantRow());
     const disabled: ApiKeyDirectoryRow = { ...DIR, enabled: 0 };
     const projection = new SpyProjection({ seed: { [HASH]: disabled } });
-    const resolver = new D1TwoHopApiKeyDirectory(control.db, tenantRouter({ tenant_a: tenant.db }), {
-      projection,
-    });
+    const resolver = new D1TwoHopApiKeyDirectory(
+      control.db,
+      tenantRouter({ tenant_a: tenant.db }),
+      {
+        projection,
+      },
+    );
 
     expect(await resolver.resolve(HASH)).toEqual({ kind: "suspended", reason: "disabled" });
   });
@@ -281,9 +293,13 @@ describe("HOP-1 read-ahead over the KV projection", () => {
     const control = controlDb(() => DIR);
     const tenant = fakeDb(() => tenantRow());
     const projection = new SpyProjection();
-    const resolver = new D1TwoHopApiKeyDirectory(control.db, tenantRouter({ tenant_a: tenant.db }), {
-      projection,
-    });
+    const resolver = new D1TwoHopApiKeyDirectory(
+      control.db,
+      tenantRouter({ tenant_a: tenant.db }),
+      {
+        projection,
+      },
+    );
 
     const result = await resolver.resolve(HASH);
 
@@ -318,9 +334,13 @@ describe("HOP-1 read-ahead over the KV projection", () => {
     const control = controlDb(() => DIR);
     const tenant = fakeDb(() => tenantRow());
     const projection = new SpyProjection({ throwOnRead: true });
-    const resolver = new D1TwoHopApiKeyDirectory(control.db, tenantRouter({ tenant_a: tenant.db }), {
-      projection,
-    });
+    const resolver = new D1TwoHopApiKeyDirectory(
+      control.db,
+      tenantRouter({ tenant_a: tenant.db }),
+      {
+        projection,
+      },
+    );
 
     const result = await resolver.resolve(HASH);
     expect(result.kind).toBe("resolved");

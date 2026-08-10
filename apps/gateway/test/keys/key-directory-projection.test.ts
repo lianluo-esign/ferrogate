@@ -32,7 +32,14 @@ import {
   D1ApiKeyResolver,
   hashVirtualApiKeySecret,
 } from "../../src/keys/index.js";
-import { controlDb, resetApiKeysTable, seedApiKey, tenantDb, tenantRouter, testSecret } from "./seed.js";
+import {
+  controlDb,
+  resetApiKeysTable,
+  seedApiKey,
+  tenantDb,
+  tenantRouter,
+  testSecret,
+} from "./seed.js";
 
 const NOW = 1_800_000_000;
 
