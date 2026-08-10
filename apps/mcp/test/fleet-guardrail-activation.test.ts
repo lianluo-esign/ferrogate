@@ -158,28 +158,55 @@ import {
   seedFixture,
   setMcpEnvVar,
 } from "./fixtures.js";
+import {
+  registerDurableObjectTenant,
+  tenantObjectDb,
+  type tenantObjectNamespace,
+} from "./tenant-object.js";
 
 interface Bindings {
   /** `apps/mcp`'s `DB` IS the CONTROL database (`wrangler.toml`). */
   readonly DB: D1Database;
   /** A provisioned tenant database, declared in `vitest.config.ts`. */
   readonly TENANT_DB_A: D1Database;
+  /**
+   * The per-tenant `TenantDataObject` namespace. Zero-D1 #921 rewired
+   * agent-runtime's composition root onto the TWO-HOP credential model
+   * (`api_key_directory@CONTROL` → the routed tenant object's `api_keys` row),
+   * so `resolveDeps` fails CLOSED without this binding. Bound in
+   * `wrangler.toml` and registered in `vitest.config.ts` (`tenantData:true`).
+   */
+  readonly TENANT_DATA: ReturnType<typeof tenantObjectNamespace>;
   readonly TEST_CONTROL_D1_SCHEMA: Parameters<typeof applyD1Migrations>[1];
   readonly TEST_TENANT_D1_SCHEMA: Parameters<typeof applyD1Migrations>[1];
 }
 
 function bindings(): Bindings {
   const b = env as unknown as Partial<Bindings>;
-  if (b.DB === undefined || b.TENANT_DB_A === undefined) {
-    // Loud rather than a silent skip: without both handles the A2A door below
-    // would resolve no credential and prove nothing about any Worker.
-    throw new Error("the FC-3 fleet gate needs both the `DB` (control) and `TENANT_DB_A` bindings");
+  if (b.DB === undefined || b.TENANT_DB_A === undefined || b.TENANT_DATA === undefined) {
+    // Loud rather than a silent skip: without these handles the A2A door below
+    // would resolve no credential and prove nothing about any Worker. The
+    // `TENANT_DATA` namespace is the credential authority #921 made mandatory —
+    // absent it `resolveDeps` returns undefined and every A2A assertion is
+    // moot.
+    throw new Error(
+      "the FC-3 fleet gate needs the `DB` (control), `TENANT_DB_A` and `TENANT_DATA` bindings",
+    );
   }
   return b as Bindings;
 }
 
 const control = (): D1Database => bindings().DB;
 const tenantDb = (): D1Database => bindings().TENANT_DB_A;
+/**
+ * The routed tenant object addressed by `TENANT` — where #921's second hop
+ * reads the authoritative `api_keys` row.
+ * `DurableObjectTenantDatabaseRouter.databaseFor` routes purely by
+ * `idFromName(tenantId)` in the `durable_object` topology, so the credential
+ * (and the project/workspace lifecycle rows the gate consults) MUST live in
+ * this object, NOT in `TENANT_DB_A`.
+ */
+const tenantObject = (): D1Database => tenantObjectDb(TENANT);
 
 /**
  * The payload. The same string on every surface, so any refusal below is
@@ -356,6 +383,13 @@ function agentRuntimeEnv(): Record<string, unknown> {
     DB: tenantDb(),
     CONTROL_DB: control(),
     CONTROL_DATA: controlNamespace(),
+    // #921 — the credential authority the composition root now REQUIRES: the
+    // second hop of the two-hop directory model routes to this per-tenant
+    // object. Remove this line and `resolveDeps` fails CLOSED (returns
+    // undefined), which is exactly the fail-closed proof `agentRuntimeDeps`
+    // asserts against — verified by temporarily deleting it and watching the
+    // A2A tests re-red.
+    TENANT_DATA: bindings().TENANT_DATA,
     // Non-empty and NOT the upstream's host: a sealed tier would also refuse
     // the forward, but with a message naming no host, and a test that cannot
     // tell WHICH endpoint was about to be contacted proves less.
@@ -477,22 +511,46 @@ async function seedA2aFixture(): Promise<void> {
   const hash = await hashApiKeySecret(A2A_KEY);
   const now = 1_700_000_000;
 
-  await tenantDb().batch([
-    tenantDb()
+  // #921 — the `durable_object` topology routes purely by `idFromName(tenantId)`
+  // (no `tenant_databases` read), but registering the tenant is harmless and
+  // mirrors the FC-2 sibling.
+  await registerDurableObjectTenant(TENANT);
+
+  // HOP 1 of the two-hop directory model: `api_key_directory` in CONTROL maps
+  // `hashApiKeySecret(secret)` — the SAME `sha256:`-tagged value the second hop
+  // probes with — to the tenant that owns the key. Absent this row the
+  // composition root resolves no credential and fails CLOSED.
+  await control()
+    .prepare(
+      `INSERT INTO api_key_directory (key_hash, id, tenant_id, project_id, workspace_id,
+         key_prefix, last4, enabled)
+       VALUES (?1, 'key-fc3', ?2, ?3, ?4, ?5, ?6, 1)
+       ON CONFLICT (key_hash) DO UPDATE SET tenant_id = excluded.tenant_id, enabled = 1`,
+    )
+    .bind(hash, TENANT, A2A_PROJECT, A2A_WORKSPACE, A2A_KEY.slice(0, 16), A2A_KEY.slice(-4))
+    .run();
+
+  // HOP 2 rows — the authoritative `api_keys` row plus the `projects`/
+  // `workspaces` lifecycle rows the tenancy gate consults — live in the tenant
+  // object addressed by `TENANT`, NOT in `TENANT_DB_A`. Seeding the wrong
+  // database leaves resolution unknown/401 and the CONTROL case never reaches
+  // the 422 egress signal.
+  await tenantObject().batch([
+    tenantObject()
       .prepare(
         `INSERT INTO projects (id, tenant_id, name, slug, status)
          VALUES (?1, ?2, 'p', 'p-fc3', 'active')
          ON CONFLICT (id) DO UPDATE SET status = 'active'`,
       )
       .bind(A2A_PROJECT, TENANT),
-    tenantDb()
+    tenantObject()
       .prepare(
         `INSERT INTO workspaces (id, project_id, tenant_id, name, slug, status)
          VALUES (?1, ?2, ?3, 'w', 'w-fc3', 'active')
          ON CONFLICT (id) DO UPDATE SET status = 'active'`,
       )
       .bind(A2A_WORKSPACE, A2A_PROJECT, TENANT),
-    tenantDb()
+    tenantObject()
       .prepare(
         `INSERT INTO api_keys (id, workspace_id, tenant_id, project_id, name, key_prefix,
            key_hash, last4, enabled, scopes_json)
