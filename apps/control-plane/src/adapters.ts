@@ -133,7 +133,18 @@ function parseJson<T>(raw: string | undefined, fallback: T): T {
 }
 
 /** Constant-time-ish comparison; the secrets here are short and fixed-length. */
-function secretsEqual(a: string, b: string): boolean {
+function secretsEqual(a: string | undefined, b: string): boolean {
+  // `a` is a config entry's `secret`. It is declared `string`, but the entries
+  // arrive from `parseJson`, which casts raw JSON without validating each
+  // field — so an entry that OMITS `secret` (or gives it a non-string value)
+  // reaches here as `undefined`. Reading `.length` off it threw a `TypeError`
+  // that Hono's `onError` turned into a `500` on EVERY authenticated request:
+  // one mis-shaped key entry took the whole admin surface down. A non-string
+  // stored secret must simply never match, so the entry is skipped and an
+  // unmatched credential falls through to `401 invalid_api_key` — the same
+  // fail-closed posture `parseJson` documents for a malformed binding, applied
+  // one level deeper (at the entry, not just the whole array).
+  if (typeof a !== "string") return false;
   if (a.length !== b.length) return false;
   let diff = 0;
   for (let i = 0; i < a.length; i += 1) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
