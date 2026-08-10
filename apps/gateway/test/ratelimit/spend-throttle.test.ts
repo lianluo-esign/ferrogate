@@ -100,7 +100,7 @@ async function seedKey(scope: { org: string; keyId: string }): Promise<string> {
     .run();
   return await seedApiKey({
     id: scope.keyId,
-    secret: testSecret(`spend-throttle-${scope.keyId}`),
+    secret: testSecret(scope.keyId),
     tenantId: scope.org,
     scopes: [],
   });

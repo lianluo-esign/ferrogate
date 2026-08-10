@@ -326,11 +326,17 @@ describe("streaming and metering over the env-driven registry", () => {
     const provider = interceptProviderFetch(() => providerSse(ANTHROPIC_STREAM_FRAMES));
     try {
       const { sink, send } = metered();
-      const res = await send({
-        model: "ferrogate-reasoning",
-        messages: [{ role: "user", content: "hi" }],
-        stream: true,
-      });
+      const res = await send(
+        {
+          model: "ferrogate-reasoning",
+          messages: [{ role: "user", content: "hi" }],
+          stream: true,
+        },
+        // Post-#886 the byte-for-byte Anthropic SSE relay is only valid on the
+        // native Anthropic dialect leg; `/v1/chat/completions` returns 501
+        // (streaming_translation_unsupported) until the SSE translator lands.
+        "/v1/messages",
+      );
 
       expect(res.status).toBe(200);
       expect(res.headers.get("content-type")).toBe("text/event-stream");
