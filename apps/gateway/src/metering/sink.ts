@@ -236,6 +236,25 @@ function usableSettledCostUsd(value: number | undefined): number | undefined {
   return value !== undefined && Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
+/**
+ * Apply the billing-group multiplier (#945) to a settled cost.
+ *
+ * The multiplier is a POST-PRICE scalar: `cost × multiplier`. An ABSENT cost
+ * stays absent (the rate-card / unpriced paths are untouched — there is nothing
+ * to scale). An absent, non-finite, or negative multiplier FAILS OPEN to `1.0`,
+ * i.e. the official price, so a corrupted or unresolved group can never move an
+ * invoice. `0` is a legitimate multiplier (a comp) and scales to `$0`.
+ */
+function applyBillingMultiplier(
+  cost: number | undefined,
+  multiplier: number | undefined,
+): number | undefined {
+  if (cost === undefined) return undefined;
+  const factor =
+    multiplier !== undefined && Number.isFinite(multiplier) && multiplier >= 0 ? multiplier : 1;
+  return cost * factor;
+}
+
 /** Construction options. Every one has a runnable default. */
 export interface MeteringSinkOptions {
   /**
@@ -537,7 +556,18 @@ export class MeteringUsageSink implements UsageSink {
 
   #settle(usage: Usage, rc: MeteringDrainContext | undefined): void {
     const now = this.#clock.nowUnixSeconds();
-    const candidateSettledCostUsd = this.#settledCostUsd?.(usage);
+    // #945 — the billing-group multiplier, applied HERE as a post-price scalar,
+    // exactly as `batch/provider-native.ts` scales the settled cost. It arrives
+    // PRE-RESOLVED on the row (`Usage.billingMultiplier`) because this settle
+    // path is synchronous and the multiplier is a per-`env` control-object read:
+    // the inference handler resolves it during the request's async phase and
+    // bakes it on. Absent/invalid ⇒ `1.0`, the official price (fail open). A
+    // `0` multiplier is honoured — an enabled comp group settles at $0 — while
+    // an absent settled cost stays absent so the rate-card path is unchanged.
+    const candidateSettledCostUsd = applyBillingMultiplier(
+      this.#settledCostUsd?.(usage),
+      usage.billingMultiplier,
+    );
     const settledCostUsd =
       this.#settlementMode === "serving_offering"
         ? usableSettledCostUsd(candidateSettledCostUsd)

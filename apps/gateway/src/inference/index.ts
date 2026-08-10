@@ -40,6 +40,7 @@ export type {
 export * from "./catalog.js";
 export * from "./tenant-catalog.js";
 export * from "./platform-catalog.js";
+export * from "./billing-group-source.js";
 export * from "./candidates.js";
 export {
   runShadowMirror,

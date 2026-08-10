@@ -32,6 +32,9 @@ const API_KEY_COLUMNS = [
   // #678 — the tags this virtual key stands for, defaulted onto a request whose
   // tenant policy says `default_from_key`. `sql/d1-ts/tenant/0003_*.sql`.
   "attribution_tags_json",
+  // #945 — the billing GROUP this key is bound to, whose multiplier scales the
+  // settled cost. `sql/d1-ts/tenant/0026_api_key_billing_group.sql`.
+  "billing_group_id",
 ].join(", ");
 
 /**
@@ -68,6 +71,7 @@ interface ApiKeyRow {
   readonly expires_at_unix: number | null;
   readonly revoked_at_unix: number | null;
   readonly attribution_tags_json?: string | null;
+  readonly billing_group_id?: string | null;
 }
 
 /** Rust `StoredApiKey`, narrowed to the fields authentication actually uses. */
@@ -94,6 +98,13 @@ export interface StoredApiKey {
    * a refusal rather than a pass (`attribution/policy.ts`).
    */
   readonly attributionTags: Readonly<Record<string, string>>;
+  /**
+   * #945 — the billing GROUP this key is bound to (`api_keys.billing_group_id`),
+   * or `null`. Its multiplier is resolved from `platform_billing_groups` at
+   * settlement and scales the settled cost; `null` means "no group", which
+   * settles at the official price.
+   */
+  readonly billingGroupId: string | null;
 }
 
 /**
@@ -148,6 +159,14 @@ export function storedApiKeyFromRow(row: ApiKeyRow): StoredApiKey {
     expiresAtUnix: parseOptionalUnsigned(row.expires_at_unix),
     revokedAtUnix: parseOptionalUnsigned(row.revoked_at_unix),
     attributionTags: parseJsonStringMap(row.attribution_tags_json ?? null),
+    // A blank id is no id: an empty string can never match a `platform_billing_groups`
+    // row, so normalising it to `null` keeps "no group" a single value downstream.
+    billingGroupId:
+      row.billing_group_id === undefined ||
+      row.billing_group_id === null ||
+      row.billing_group_id === ""
+        ? null
+        : row.billing_group_id,
   };
 }
 

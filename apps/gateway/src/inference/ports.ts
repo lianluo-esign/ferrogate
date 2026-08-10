@@ -859,6 +859,32 @@ export interface Usage {
   readonly audioSecondPricePer1m?: number | undefined;
   /** `[[models]].audio_character_price_per_1m` — USD per 1M synthesized characters. */
   readonly audioCharacterPricePer1m?: number | undefined;
+  /**
+   * #945 — the billing GROUP this request's key belongs to, when any, carried
+   * so the settled cost record and its billing event can attribute the applied
+   * discount/surcharge to a group an operator named.
+   *
+   * ABSENT means the key is bound to no group, which settles at the official
+   * price ({@link billingMultiplier} `1.0`). It travels on `Usage` for the same
+   * reason {@link inputPricePer1m} does: the sink is module-scoped and the group
+   * table is a per-`env` control-object read, so the number is resolved during
+   * the request's async phase (where the env and the caller are in hand) and
+   * baked onto the row, never read inside the synchronous settle path.
+   */
+  readonly billingGroupId?: string | undefined;
+  /**
+   * #945 — the POST-PRICE multiplier the request's billing group applies, as a
+   * finite non-negative scalar, resolved from `platform_billing_groups`.
+   *
+   * The settled cost is multiplied by this at `metering/sink.ts`
+   * (`effective = candidateSettledCostUsd × multiplier`) BEFORE it enters the
+   * billing event — the same post-price-scalar seam the native-batch discount
+   * uses (`batch/provider-native.ts`). ABSENT ⇒ `1.0`: an unrouted key, an
+   * absent/disabled group, or any control-object read failure all FAIL OPEN to
+   * the official price. `0` is billed only when an ENABLED group explicitly sets
+   * it (a comp), never as a failure default.
+   */
+  readonly billingMultiplier?: number | undefined;
 }
 
 /**
@@ -972,6 +998,14 @@ export interface Caller {
    * `regionAllowlist` stays exactly the ported field it has always been.
    */
   readonly residency?: ResidencyPolicy | undefined;
+  /**
+   * #945 — the billing GROUP this key belongs to (`api_keys.billing_group_id`),
+   * copied off {@link AuthContext} by `identity.ts::callerFromAuth`. The
+   * settlement path resolves its multiplier from `platform_billing_groups` once
+   * per request and stamps both onto {@link Usage}. Absent ⇒ no group ⇒ the
+   * official price, exactly as an absent per-key allowlist means "no allowlist".
+   */
+  readonly billingGroupId?: string | undefined;
 }
 
 /** `AuthContext::can_use_model` — deny wins, then the allowlist if non-empty. */
@@ -1194,6 +1228,14 @@ export interface InferenceDeps {
    * ports is therefore unaffected.
    */
   readonly platformCatalog?: PlatformModelCatalogSource;
+  /**
+   * #945 — the billing-group multiplier source. Absent ⇒ the control-object
+   * source (`billing-group-source.ts`), which reads `platform_billing_groups`
+   * per Worker `env` and answers `1.0` (the official price) for every failure
+   * axis. Injected by tests so a group multiplier can be exercised without a
+   * CONTROL_DATA binding.
+   */
+  readonly billingGroups?: PlatformBillingGroupSource;
   readonly adapters?: AdapterRegistry;
   /**
    * The provider egress, or a factory resolved per Worker `env` — the same
@@ -1360,4 +1402,28 @@ export interface ResolvedInferenceDeps {
   readonly conversations: ConversationStore;
   readonly responseStoreMode: ResponseStoreMode;
   readonly responseRetentionSeconds: (tenantId: string) => number;
+  /** #945 — the billing-group multiplier source; never `undefined`, see above. */
+  readonly billingGroups: PlatformBillingGroupSource;
+}
+
+/**
+ * #945 — resolves the POST-PRICE multiplier a request's billing group applies.
+ *
+ * The single method is `async` because the production implementation
+ * (`billing-group-source.ts`) reads `platform_billing_groups` through the
+ * CONTROL_DATA facade, with a revision-gated per-`env` cache. It is called ONCE
+ * per request during the async body — never inside the synchronous settle path
+ * and never in `orderCandidatesByStrategy` — and the resolved scalar is baked
+ * onto {@link Usage.billingMultiplier}.
+ *
+ * MONEY PATH: every failure axis (no control database, a missing/rolled-back
+ * table, an absent or DISABLED group, a dangling id, a read error) resolves to
+ * `1.0` — the official price. A failure is NEVER cached.
+ */
+export interface PlatformBillingGroupSource {
+  /**
+   * The multiplier for `groupId`, or `1.0` when it is absent, disabled, or
+   * unresolvable. `env` carries the CONTROL_DATA binding the read needs.
+   */
+  multiplierForGroup(env: InferenceBindings, groupId: string | undefined): Promise<number>;
 }

@@ -18,7 +18,11 @@
 import { PriceBook, modelPriceUsd, priceEntry } from "@ferrogate/billing";
 import { afterEach, describe, expect, it } from "vitest";
 import { InMemoryModelResolver, inferenceRouteModule } from "../../src/inference/index.js";
-import type { PhysicalRoute, RequestIdFactory } from "../../src/inference/index.js";
+import type {
+  PhysicalRoute,
+  PlatformBillingGroupSource,
+  RequestIdFactory,
+} from "../../src/inference/index.js";
 import {
   InMemoryLedgerStore,
   InMemoryMeteringOutbox,
@@ -686,5 +690,165 @@ describe("serving offering settlement (#814)", () => {
       (11 / 1_000_000) * 7 + (4 / 1_000_000) * 11,
       12,
     );
+  });
+});
+
+describe("billing-group multiplier settlement (#945)", () => {
+  const MODEL = "group-priced-model";
+  const ROUTE: PhysicalRoute = {
+    ...OPENAI_ROUTE,
+    logicalModel: MODEL,
+    provider: "grp-channel",
+    providerModel: "grp-upstream",
+    baseUrl: "https://api.grp-offering.example/v1/",
+    priority: 0,
+    inputPricePer1m: 10,
+    outputPricePer1m: 20,
+  };
+  /** The official settled price for the fixture usage frame (11 in, 4 out). */
+  const OFFICIAL = (11 / 1_000_000) * 10 + (4 / 1_000_000) * 20;
+  /** Pinned ≠ 1 so a run at the fail-open default 1.0 could not pass. */
+  const GROUP_MULTIPLIER = 1.5;
+  const WILDCARD_CARD = PriceBook.new([priceEntry("*", "*", modelPriceUsd(99, 99))]);
+
+  /**
+   * A source that scales ONLY the `premium` group. Injected so the multiply is
+   * exercised through the whole app — static key → auth context → caller →
+   * `Usage.billingMultiplier` → `sink.ts` — without standing up CONTROL_DATA.
+   */
+  const billingGroups: PlatformBillingGroupSource = {
+    multiplierForGroup: async (_env, groupId) => (groupId === "premium" ? GROUP_MULTIPLIER : 1),
+  };
+
+  interface GroupHarness {
+    readonly ledger: InMemoryLedgerStore;
+    readonly scheduler: TrackingScheduler;
+    call(path: string, init?: RequestInit): Promise<Response>;
+  }
+
+  /** Compose the app with a static key optionally bound to `keyGroup`. */
+  function groupGateway(keyGroup: string | undefined): GroupHarness {
+    const ledger = new InMemoryLedgerStore();
+    const outbox = new InMemoryMeteringOutbox();
+    const scheduler = new TrackingScheduler();
+    const sink = new MeteringUsageSink({
+      priceBook: WILDCARD_CARD,
+      settlementMode: "serving_offering",
+      settledCostUsd: routePriceSettledCostUsd,
+      ledger,
+      outbox,
+      scheduler,
+    });
+    const { app } = createGatewayApp({
+      modules: [
+        inferenceRouteModule({
+          models: new InMemoryModelResolver([ROUTE]),
+          requestIds: incrementingRequestIds(),
+          usage: sink,
+          billingGroups,
+        }),
+      ],
+    });
+    const env = {
+      GATEWAY_STATIC_API_KEYS: JSON.stringify([
+        {
+          key: "fg_grp",
+          id: "key_grp",
+          platform_operator: true,
+          ...(keyGroup === undefined ? {} : { billing_group_id: keyGroup }),
+        },
+      ]),
+    };
+    return {
+      ledger,
+      scheduler,
+      call: async (path, init) => app.request(`${BASE}${path}`, init, env),
+    };
+  }
+
+  function serveOnce(): void {
+    provider = interceptProviderFetch(() =>
+      providerJson({
+        id: "chatcmpl-grp",
+        object: "chat.completion",
+        model: ROUTE.providerModel,
+        choices: [{ index: 0, message: { role: "assistant", content: "ok" } }],
+        usage: { prompt_tokens: 11, completion_tokens: 4, total_tokens: 15 },
+      }),
+    );
+  }
+
+  const groupChat = JSON.stringify({ model: MODEL, messages: [{ role: "user", content: "hi" }] });
+  const GRP_AUTH = { authorization: "Bearer fg_grp", "content-type": "application/json" };
+
+  it("bills a group-bound key at offering_price × M", async () => {
+    serveOnce();
+    const h = groupGateway("premium");
+
+    const response = await h.call("/v1/chat/completions", {
+      method: "POST",
+      headers: GRP_AUTH,
+      body: groupChat,
+    });
+    expect(response.status).toBe(200);
+    await h.scheduler.idle();
+
+    const charge = h.ledger.charges[0];
+    if (charge === undefined) throw new Error("expected a recorded charge");
+    // The whole point: the settled cost is the OFFICIAL price times the group
+    // multiplier. Inverting the multiply in `sink.ts::applyBillingMultiplier`
+    // moves this to `OFFICIAL / 1.5` (or `OFFICIAL`) and this line goes red.
+    expect(charge.entry.cost.total_cost).toBeCloseTo(OFFICIAL * GROUP_MULTIPLIER, 12);
+    // And it is emphatically NOT the official price — the negative control on
+    // the same request, so a multiplier silently dropped to 1.0 cannot pass.
+    expect(charge.entry.cost.total_cost).not.toBeCloseTo(OFFICIAL, 12);
+    // The applied multiplier and group id are recorded on the event.
+    expect(charge.event.metadata?.billing_group_id).toBe("premium");
+    expect(charge.event.metadata?.billing_multiplier).toBe("1.5");
+    expect(h.scheduler.errors).toEqual([]);
+  });
+
+  it("bills a key with no group at the official price (× 1.0)", async () => {
+    serveOnce();
+    const h = groupGateway(undefined);
+
+    const response = await h.call("/v1/chat/completions", {
+      method: "POST",
+      headers: GRP_AUTH,
+      body: groupChat,
+    });
+    expect(response.status).toBe(200);
+    await h.scheduler.idle();
+
+    const charge = h.ledger.charges[0];
+    if (charge === undefined) throw new Error("expected a recorded charge");
+    expect(charge.entry.cost.total_cost).toBeCloseTo(OFFICIAL, 12);
+    // A no-group request carries byte-identical metadata to before this slice:
+    // the group fields are stamped only when a group actually applied.
+    expect(charge.event.metadata?.billing_group_id).toBeUndefined();
+    expect(charge.event.metadata?.billing_multiplier).toBeUndefined();
+  });
+
+  it("fails open to the official price when the bound group is unknown to the source", async () => {
+    serveOnce();
+    // The key names a group the source does not scale (multiplierForGroup → 1.0),
+    // the dangling-id axis: it must settle at the official price, never refuse.
+    const h = groupGateway("no-such-group");
+
+    const response = await h.call("/v1/chat/completions", {
+      method: "POST",
+      headers: GRP_AUTH,
+      body: groupChat,
+    });
+    expect(response.status).toBe(200);
+    await h.scheduler.idle();
+
+    const charge = h.ledger.charges[0];
+    if (charge === undefined) throw new Error("expected a recorded charge");
+    expect(charge.entry.cost.total_cost).toBeCloseTo(OFFICIAL, 12);
+    // The group id is still recorded (it is what the key declared), at the
+    // applied 1.0 multiplier — the export shows the group settled at par.
+    expect(charge.event.metadata?.billing_group_id).toBe("no-such-group");
+    expect(charge.event.metadata?.billing_multiplier).toBe("1");
   });
 });

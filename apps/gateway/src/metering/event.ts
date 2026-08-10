@@ -207,7 +207,18 @@ export function billingEventFromUsage(
   usage: UsageWithProviderAttempt,
   context: BillingEventContext,
 ): BillingEvent {
-  const metadata = usage.metadata === undefined ? {} : { ...usage.metadata };
+  const metadata: Record<string, string> =
+    usage.metadata === undefined ? {} : { ...usage.metadata };
+  // #945 — record the applied billing group and multiplier ON the event, so a
+  // cost record / chargeback export shows WHY the settled cost differs from the
+  // official price. Stamped ONLY when a group applied, so a request bound to no
+  // group carries byte-identical metadata to before this slice. The multiplier
+  // is the value actually applied at settlement (`sink.ts::applyBillingMultiplier`
+  // reads the same `Usage.billingMultiplier`), defaulting to `1.0` for display.
+  if (usage.billingGroupId !== undefined) {
+    metadata.billing_group_id = usage.billingGroupId;
+    metadata.billing_multiplier = String(usage.billingMultiplier ?? 1);
+  }
   if (usage.metadata !== undefined) {
     // Defence in depth only: `Usage.metadata` is documented as already
     // bounds-checked at ingress (issue #171). The map is NOT dropped on a
