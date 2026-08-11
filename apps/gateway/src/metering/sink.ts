@@ -84,6 +84,7 @@ import {
 } from "@ferrogate/billing";
 import type { Usage, UsageSink } from "../inference/ports.js";
 import { chargeWithAgentRun } from "./agent-run.js";
+import { billingAnalyticsFromEnv, writeBillingAnalytics } from "./billing-analytics.js";
 import {
   type BudgetAlertPorts,
   budgetAlertPortsFrom,
@@ -564,14 +565,24 @@ export class MeteringUsageSink implements UsageSink {
     // bakes it on. Absent/invalid ⇒ `1.0`, the official price (fail open). A
     // `0` multiplier is honoured — an enabled comp group settles at $0 — while
     // an absent settled cost stays absent so the rate-card path is unchanged.
-    const candidateSettledCostUsd = applyBillingMultiplier(
-      this.#settledCostUsd?.(usage),
-      usage.billingMultiplier,
-    );
+    const offerCostUsd = this.#settledCostUsd?.(usage);
+    const candidateSettledCostUsd = applyBillingMultiplier(offerCostUsd, usage.billingMultiplier);
     const settledCostUsd =
       this.#settlementMode === "serving_offering"
         ? usableSettledCostUsd(candidateSettledCostUsd)
         : candidateSettledCostUsd;
+
+    // #956 — dual-write the priced event to Analytics Engine for the CROSS-TENANT
+    // fleet view (offer price + final post-multiplier price). Best-effort mirror:
+    // the authoritative per-transaction cost is the tenant object's
+    // `billing_events` row this same settle path commits. No tenant-private data
+    // is copied into the control database. Absent binding ⇒ skip.
+    if (rc?.env !== undefined) {
+      const analytics = billingAnalyticsFromEnv(rc.env);
+      if (analytics !== null) {
+        writeBillingAnalytics(analytics, usage, offerCostUsd, settledCostUsd);
+      }
+    }
     const event = billingEventFromUsage(usage, {
       nowUnixSeconds: now,
       ...(settledCostUsd !== undefined ? { settledCostUsd } : {}),
