@@ -84,7 +84,7 @@ import {
 } from "@ferrogate/billing";
 import type { Usage, UsageSink } from "../inference/ports.js";
 import { chargeWithAgentRun } from "./agent-run.js";
-import { billingAnalyticsFromEnv, writeBillingAnalytics } from "./billing-analytics.js";
+import { billingAnalyticsFromEnv, writeBillingAnalyticsForEvent } from "./billing-analytics.js";
 import {
   type BudgetAlertPorts,
   budgetAlertPortsFrom,
@@ -572,20 +572,14 @@ export class MeteringUsageSink implements UsageSink {
         ? usableSettledCostUsd(candidateSettledCostUsd)
         : candidateSettledCostUsd;
 
-    // #956 — dual-write the priced event to Analytics Engine for the CROSS-TENANT
-    // fleet view (offer price + final post-multiplier price). Best-effort mirror:
-    // the authoritative per-transaction cost is the tenant object's
-    // `billing_events` row this same settle path commits. No tenant-private data
-    // is copied into the control database. Absent binding ⇒ skip.
-    if (rc?.env !== undefined) {
-      const analytics = billingAnalyticsFromEnv(rc.env);
-      if (analytics !== null) {
-        writeBillingAnalytics(analytics, usage, offerCostUsd, settledCostUsd);
-      }
-    }
+    // #956 — the OFFER price (pre-multiplier) is stamped onto the event so the
+    // Analytics Engine fleet mirror can report offer vs final even for a 0×
+    // comp; the mirror WRITE itself happens in `#deliverOnce`, the only stage
+    // that holds the request env carrying the `BILLING_ANALYTICS` binding.
     const event = billingEventFromUsage(usage, {
       nowUnixSeconds: now,
       ...(settledCostUsd !== undefined ? { settledCostUsd } : {}),
+      ...(offerCostUsd !== undefined ? { offerCostUsd } : {}),
       ...(this.#clusterId !== undefined ? { clusterId: this.#clusterId } : {}),
       ...(this.#nodeId !== undefined ? { nodeId: this.#nodeId } : {}),
       diagnostics: this.#diagnostics,
@@ -866,6 +860,16 @@ export class MeteringUsageSink implements UsageSink {
       }
       await backend.publisher.deliver(charge);
       this.#stats.delivered += 1;
+      // #956 — mirror the delivered charge to Analytics Engine for the
+      // CROSS-TENANT fleet view (offer + final price + dimensions). Here, not in
+      // `#settle`, because only the drain holds the request env that carries the
+      // `BILLING_ANALYTICS` binding. Best-effort: the tenant object's
+      // `billing_events` row this same drain wrote is the invoicing authority,
+      // and a mirror write can never fail a settled, delivered charge.
+      if (rc?.env !== undefined) {
+        const analytics = billingAnalyticsFromEnv(rc.env);
+        if (analytics !== null) writeBillingAnalyticsForEvent(analytics, charge.event);
+      }
       this.#outbox.delete(id);
       await this.#reap(backend, id);
     } catch (error) {

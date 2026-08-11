@@ -133,6 +133,15 @@ export interface BillingEventContext {
    * unpriced instead.
    */
   readonly settledCostUsd?: number | undefined;
+  /**
+   * #956 — the OFFER price (the provider's official price BEFORE the
+   * billing-group multiplier). `settledCostUsd` is the FINAL price (offer ×
+   * multiplier), so the offer is not otherwise recoverable when the multiplier
+   * is `0` (a comp settles final `$0`). Stamped on the event metadata when a
+   * group applied, so the Analytics Engine fleet mirror can report offer vs
+   * final. Absent ⇒ no group, and offer == the final cost.
+   */
+  readonly offerCostUsd?: number | undefined;
   /** `cluster_identity.cluster_id` — a Worker's colo/deployment identity. */
   readonly clusterId?: string | undefined;
   /** `cluster_identity.node_id`. */
@@ -218,6 +227,11 @@ export function billingEventFromUsage(
   if (usage.billingGroupId !== undefined) {
     metadata.billing_group_id = usage.billingGroupId;
     metadata.billing_multiplier = String(usage.billingMultiplier ?? 1);
+    // #956 — the pre-multiplier offer price, so the fleet mirror can report
+    // offer vs final even for a 0× comp (whose final is $0).
+    if (context.offerCostUsd !== undefined) {
+      metadata.offer_cost_usd = String(context.offerCostUsd);
+    }
   }
   if (usage.metadata !== undefined) {
     // Defence in depth only: `Usage.metadata` is documented as already
