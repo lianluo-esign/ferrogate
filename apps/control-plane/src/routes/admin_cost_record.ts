@@ -523,6 +523,31 @@ async function costRecordPage(
 }
 
 /**
+ * The database a cost query reads (#954).
+ *
+ * Tenant billing settles into the tenant's OWN Durable Object: `billing_events`
+ * (whose `event_json` carries `cost_usd`) and the authoritative `request_logs`
+ * are tenant-private and are NEVER projected to the control database. So a
+ * tenant-fenced cost read routes to that tenant's object — the only place its
+ * cost exists — while a `platform_operator` (unscoped) read stays on the control
+ * database, where the un-attributed billing rows live.
+ *
+ * A tenant with no provisioned object records no cost; `null` yields the same
+ * truthful empty page an unbound control database does.
+ */
+async function costRecordDatabase(
+  deps: ReturnType<typeof depsOf>,
+  scope: CallerScope,
+): Promise<D1Database | null> {
+  if (scope.kind === "platform_operator") return deps.controlDatabase;
+  try {
+    return (await deps.tenantDatabases.forTenant(scope.tenantId)).db;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * `GET /admin/v1/cost-records` — per-request cost, newest first.
  *
  * The paginated envelope UNCONDITIONALLY, like the two sibling evidence lists:
@@ -536,7 +561,7 @@ function listCostRecordsHandler(): Handler {
     const scope = scopeOf(c);
     const url = new URL(c.req.url);
     const query = parseListQuery(url, deps.listDefaultLimit, deps.listMaxLimit);
-    const db = deps.controlDatabase;
+    const db = await costRecordDatabase(deps, scope);
 
     if (db === null) {
       // No control database means neither table exists AND no gateway is
@@ -728,7 +753,7 @@ function exportCostRecordsHandler(): Handler {
     // full table scan followed by a 400.
     const format = resolveFormat(url);
     const query = parseListQuery(url, COST_EXPORT_DEFAULT_LIMIT, COST_EXPORT_MAX_LIMIT);
-    const db = deps.controlDatabase;
+    const db = await costRecordDatabase(deps, scope);
 
     const records =
       db === null

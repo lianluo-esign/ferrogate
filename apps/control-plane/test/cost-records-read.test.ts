@@ -37,6 +37,7 @@ import { parquetReadObjects } from "hyparquet";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { applySchema, db, resetD1, seedBillingEvents, seedRequestLogs } from "./d1.js";
 import { BASE, arm, bearer, operatorKey, tenantKey } from "./harness.js";
+import { registerDurableObjectTenant, tenantObjectDb } from "./tenant-object.js";
 
 interface ListBody {
   object: string;
@@ -527,18 +528,53 @@ describe("cost is queryable by tenant, project, key, model, tag and agent run", 
 
 describe("the tenant fence on cost records", () => {
   beforeEach(async () => {
-    await seedRequestLogs([
-      { ...REQUEST, requestId: "fg-t1", tenant: "t-1" },
-      { ...REQUEST, requestId: "fg-t2", tenant: "t-2" },
-      // An UNATTRIBUTED row: a request whose credential resolved no tenant,
-      // i.e. a platform-operator call. It is nobody's tenant data.
-      { ...REQUEST, requestId: "fg-none", tenant: null },
-    ]);
+    // Tenant object storage is not reset by `resetD1` (it clears control D1);
+    // clear each tenant object's cost tables so the per-test seed is clean.
+    for (const t of ["t-1", "t-2"]) {
+      const tdb = tenantObjectDb(t);
+      await tdb.batch([
+        tdb.prepare("DELETE FROM billing_events"),
+        tdb.prepare("DELETE FROM request_logs"),
+      ]);
+    }
+    // Control holds ONLY the un-attributed (platform-operator) row. Tenant cost
+    // is tenant-private and lives in each tenant's own object (seeded below),
+    // NEVER in control — so a tenant read that wrongly went to control would
+    // find nothing, which is what makes the tenant-object routing testable.
+    await seedRequestLogs([{ ...REQUEST, requestId: "fg-none", tenant: null }]);
     await seedBillingEvents([
-      { id: "b1", requestId: "fg-t1", occurredAtUnix: 1, event: { ...EVENT, cost_usd: 1 } },
-      { id: "b2", requestId: "fg-t2", occurredAtUnix: 2, event: { ...EVENT, cost_usd: 2 } },
       { id: "b3", requestId: "fg-none", occurredAtUnix: 3, event: { ...EVENT, cost_usd: 4 } },
     ]);
+    // #954: a tenant's cost is its OWN object's rows, not a control projection.
+    // Seed each tenant's object so a tenant-fenced read resolves there; the
+    // control seed above stays for the platform-operator (unscoped) view (which
+    // includes the `fg-none` row that belongs to no tenant).
+    await registerDurableObjectTenant("t-1");
+    await registerDurableObjectTenant("t-2");
+    await seedRequestLogs(
+      [{ ...REQUEST, requestId: "fg-t1", tenant: "t-1" }],
+      tenantObjectDb("t-1"),
+    );
+    await seedBillingEvents(
+      [{ id: "b1", requestId: "fg-t1", occurredAtUnix: 1, event: { ...EVENT, cost_usd: 1 } }],
+      tenantObjectDb("t-1"),
+      "t-1",
+    );
+    await seedRequestLogs(
+      [{ ...REQUEST, requestId: "fg-t2", tenant: "t-2" }],
+      tenantObjectDb("t-2"),
+    );
+    await seedBillingEvents(
+      [{ id: "b2", requestId: "fg-t2", occurredAtUnix: 2, event: { ...EVENT, cost_usd: 2 } }],
+      tenantObjectDb("t-2"),
+      "t-2",
+    );
+  });
+
+  it("reads a tenant's cost from its OWN object (#954)", async () => {
+    const page = await readCosts("k-tenant");
+    expect(page.data).toHaveLength(1);
+    expect(page.data[0]).toMatchObject({ request_id: "fg-t1", cost_usd: 1 });
   });
 
   it("shows a tenant only its own rows", async () => {
@@ -556,8 +592,8 @@ describe("the tenant fence on cost records", () => {
     }
   });
 
-  it("shows a platform operator every row", async () => {
-    expect((await ids(operatorKey.secret)).sort()).toEqual(["fg-none", "fg-t1", "fg-t2"]);
+  it("shows a platform operator only the un-attributed control rows (tenant cost lives in tenant objects)", async () => {
+    expect((await ids(operatorKey.secret)).sort()).toEqual(["fg-none"]);
   });
 
   /**
