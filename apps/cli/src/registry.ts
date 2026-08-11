@@ -475,6 +475,7 @@ const PLUGINS = new ResourceApi("/admin/v1/plugins");
 const MODELS = new ResourceApi("/admin/v1/models");
 const PROVIDERS = new ResourceApi("/admin/v1/providers");
 const PROVIDER_MODELS = new ResourceApi("/admin/v1/provider-models");
+const BILLING_GROUPS = new ResourceApi("/admin/v1/billing-groups");
 const EXTENSIONS = new ResourceApi("/admin/v1/extensions");
 const FRAMEWORK_ADAPTERS = new ResourceApi("/admin/v1/framework-adapters");
 
@@ -507,6 +508,45 @@ function buildOfferingRequest(verb: string, input: ResourceInput): RequestSpec {
     }
     default:
       throw CliError.usage(`verb '${verb}' is not a model-offerings verb`);
+  }
+}
+
+/**
+ * Billing groups (#942, epic #941). CRUD on the group plus the two-segment
+ * provider-binding sub-resource `PUT/DELETE .../{id}/providers/{providerId}`:
+ * `bind`/`unbind` take the group id and the provider id as two positionals and
+ * the "providers" segment is injected between them, the same shape
+ * {@link buildOfferingRequest} uses for `.../{model}/offerings/{id}`.
+ */
+function buildBillingGroupRequest(verb: string, input: ResourceInput): RequestSpec {
+  switch (verb) {
+    case "list":
+      return BILLING_GROUPS.read(input.segments, input.list);
+    case "show":
+      return BILLING_GROUPS.get(requireTargetSegments(BILLING_GROUPS, verb, input.segments, 1));
+    case "add":
+      return BILLING_GROUPS.create(requireBody(input, verb));
+    case "update":
+      return BILLING_GROUPS.update(
+        requireTargetSegments(BILLING_GROUPS, verb, input.segments, 1),
+        requireBody(input, verb),
+      );
+    case "rm":
+      return BILLING_GROUPS.delete(requireTargetSegments(BILLING_GROUPS, verb, input.segments, 1));
+    case "bind-provider": {
+      const [groupId, providerId] = requireTargetSegments(BILLING_GROUPS, verb, input.segments, 2);
+      return BILLING_GROUPS.mutate("PUT", [groupId as string, "providers", providerId as string]);
+    }
+    case "unbind-provider": {
+      const [groupId, providerId] = requireTargetSegments(BILLING_GROUPS, verb, input.segments, 2);
+      return BILLING_GROUPS.mutate("DELETE", [
+        groupId as string,
+        "providers",
+        providerId as string,
+      ]);
+    }
+    default:
+      throw CliError.usage(`verb '${verb}' is not a billing-groups verb`);
   }
 }
 
@@ -587,7 +627,7 @@ function policyAndRevision(input: ResourceInput, verb: string): [string, string]
 }
 
 // ---------------------------------------------------------------------------
-// The 52 registered command groups (12 family modules)
+// The 53 registered command groups (12 family modules)
 // ---------------------------------------------------------------------------
 
 /** Every registered `ctl` group, in registration order. */
@@ -1505,8 +1545,30 @@ export const GROUPS: readonly GroupDescriptor[] = [
       mutating("replace", "Replace a provider channel", "replaceAdminProvider"),
       mutating("update", "Patch a provider channel", "patchAdminProvider"),
       mutating("rm", "Delete a provider channel", "deleteAdminProvider"),
+      mutating("sync-models", "Import the provider's upstream model list", "syncProviderModels"),
     ],
-    build: (verb, input) => buildAliasedCrud(PROVIDERS, verb, input),
+    build: (verb, input) =>
+      verb === "sync-models"
+        ? buildItemAction(PROVIDERS, "provider", "sync-models", input)
+        : buildAliasedCrud(PROVIDERS, verb, input),
+  },
+  {
+    name: "billing-groups",
+    about: "Manage billing groups and their per-group price multipliers",
+    verbs: [
+      read("list", "List billing groups", "listBillingGroups"),
+      read("show", "Show a billing group", "getBillingGroup"),
+      mutating("add", "Create a billing group", "createBillingGroup"),
+      mutating("update", "Patch a billing group", "patchBillingGroup"),
+      mutating("rm", "Delete a billing group", "deleteBillingGroup"),
+      mutating("bind-provider", "Bind a provider to a billing group", "bindBillingGroupProvider"),
+      mutating(
+        "unbind-provider",
+        "Unbind a provider from a billing group",
+        "unbindBillingGroupProvider",
+      ),
+    ],
+    build: (verb, input) => buildBillingGroupRequest(verb, input),
   },
   {
     name: "models",
