@@ -432,11 +432,14 @@ export interface RequestLogSeed {
 }
 
 /** Seed `request_logs` with raw SQL — see {@link RequestLogSeed}. */
-export async function seedRequestLogs(rows: readonly RequestLogSeed[]): Promise<void> {
+export async function seedRequestLogs(
+  rows: readonly RequestLogSeed[],
+  target: D1Database = db(),
+): Promise<void> {
   if (rows.length === 0) return;
-  await db().batch(
+  await target.batch(
     rows.map((row) =>
-      db()
+      target
         .prepare(
           `INSERT INTO ${REQUEST_LOG_TABLE}
              (request_id, trace_id, agent_run_id, tenant, project, workspace, api_key_id,
@@ -501,24 +504,40 @@ export interface BillingEventSeed {
 }
 
 /** Seed `billing_events` with raw SQL — see {@link BillingEventSeed}. */
-export async function seedBillingEvents(rows: readonly BillingEventSeed[]): Promise<void> {
+export async function seedBillingEvents(
+  rows: readonly BillingEventSeed[],
+  target: D1Database = db(),
+  tenantId?: string,
+): Promise<void> {
   if (rows.length === 0) return;
-  await db().batch(
-    rows.map((row) =>
-      db()
-        .prepare(
-          `INSERT INTO ${BILLING_EVENT_TABLE}
-             (billing_event_id, request_id, provider_attempt_index, occurred_at_unix, event_json)
-           VALUES (?, ?, ?, ?, ?)`,
-        )
-        .bind(
-          row.id,
-          row.requestId,
-          row.attemptIndex ?? 0,
-          row.occurredAtUnix,
-          JSON.stringify(row.event),
-        ),
-    ),
+  // The tenant object's `billing_events` carries a NOT NULL `tenant_id`; the
+  // control compatibility table (unscoped rows) does not list it. Seed to
+  // whichever shape the target uses.
+  const columns =
+    tenantId === undefined
+      ? "(billing_event_id, request_id, provider_attempt_index, occurred_at_unix, event_json)"
+      : "(billing_event_id, tenant_id, request_id, provider_attempt_index, occurred_at_unix, event_json)";
+  const values = tenantId === undefined ? "(?, ?, ?, ?, ?)" : "(?, ?, ?, ?, ?, ?)";
+  await target.batch(
+    rows.map((row) => {
+      const stmt = target.prepare(`INSERT INTO ${BILLING_EVENT_TABLE} ${columns} VALUES ${values}`);
+      return tenantId === undefined
+        ? stmt.bind(
+            row.id,
+            row.requestId,
+            row.attemptIndex ?? 0,
+            row.occurredAtUnix,
+            JSON.stringify(row.event),
+          )
+        : stmt.bind(
+            row.id,
+            tenantId,
+            row.requestId,
+            row.attemptIndex ?? 0,
+            row.occurredAtUnix,
+            JSON.stringify(row.event),
+          );
+    }),
   );
 }
 
