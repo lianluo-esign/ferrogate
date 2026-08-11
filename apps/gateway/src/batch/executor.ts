@@ -89,7 +89,7 @@ import {
 } from "../assets/index.js";
 import { defaultAdapterRegistry } from "../inference/adapters.js";
 import { modelsFromEnv } from "../inference/catalog.js";
-import { dispatcherFromEnv } from "../inference/defaults.js";
+import { dispatcherFromEnv, isolateBillingGroupSource } from "../inference/defaults.js";
 import { readBoundedProviderBody } from "../inference/dispatch.js";
 import type {
   InferenceBindings,
@@ -182,6 +182,13 @@ export interface BatchExecutorDeps {
   readonly dispatcher?: ((env: unknown) => UpstreamDispatcher) | undefined;
   readonly governance?: ((env: unknown, batch: StoredBatch) => BatchGovernance) | undefined;
   readonly usage?: UsageSink | undefined;
+  /**
+   * #952 — resolve the key-bound billing-group multiplier for a batch. Batch
+   * LLM calls MUST honour the same multiplier the synchronous inference path
+   * applies; the default resolver re-reads the creating key's group and fails
+   * open to `1.0`. Tests replace it.
+   */
+  readonly billingMultiplier?: ((env: unknown, batch: StoredBatch) => Promise<number>) | undefined;
   readonly http?: NativeBatchFetch | undefined;
   /** Unix SECONDS. */
   readonly now?: (() => number) | undefined;
@@ -204,6 +211,7 @@ interface ResolvedDeps {
   readonly dispatcherFor: (env: unknown) => UpstreamDispatcher;
   readonly governanceFor: (env: unknown, batch: StoredBatch) => BatchGovernance;
   readonly usage: UsageSink | undefined;
+  readonly billingMultiplierFor: (env: unknown, batch: StoredBatch) => Promise<number>;
   readonly http: NativeBatchFetch;
   readonly now: () => number;
   readonly owner: string;
@@ -217,6 +225,46 @@ interface ResolvedDeps {
 
 async function tenantHandleFor(env: unknown, tenantId: string) {
   return resolverForEnv(env as TenancyBindings).forTenant(tenantId);
+}
+
+/** `api_keys.billing_group_id` for the batch's creating key. */
+const BATCH_KEY_BILLING_GROUP_SQL = "SELECT billing_group_id FROM api_keys WHERE id = ?";
+
+/**
+ * #952 — the key-bound billing-group multiplier for a batch's owning key.
+ *
+ * Batch LLM calls must honour the SAME multiplier the synchronous inference path
+ * applies (`inference/handlers.ts::billingGroupMeterFields`). The batch row
+ * records only the creating credential's id, so this re-reads that key's
+ * `api_keys.billing_group_id` and resolves the multiplier through the SAME
+ * `PlatformBillingGroupSource` the request path uses ({@link isolateBillingGroupSource},
+ * so the per-`env` snapshot cache is shared).
+ *
+ * Fail OPEN to `1.0` on EVERY axis — no creating key on the row, no group on the
+ * key, a disabled/missing/dangling group, or any read error — so a lookup blip
+ * bills at the OFFICIAL price rather than moving an invoice. An enabled `0×`
+ * comp group still settles the batch at `$0`, exactly as on the sync path. The
+ * multiplier is baked onto each line's {@link Usage} and composes with the
+ * native-batch discount in the sink's `applyBillingMultiplier`.
+ */
+async function defaultBillingMultiplier(env: unknown, batch: StoredBatch): Promise<number> {
+  const apiKeyId = batch.apiKeyId;
+  if (apiKeyId === undefined || apiKeyId === "") return 1;
+  try {
+    const handle = await tenantHandleFor(env, batch.tenantId);
+    const row = await handle.db
+      .prepare(BATCH_KEY_BILLING_GROUP_SQL)
+      .bind(apiKeyId)
+      .first<{ billing_group_id: string | null }>();
+    const groupId =
+      row === null || row.billing_group_id === null || row.billing_group_id === ""
+        ? undefined
+        : row.billing_group_id;
+    return await isolateBillingGroupSource.multiplierForGroup(env as InferenceBindings, groupId);
+  } catch {
+    // MONEY PATH: any read failure bills at the official price (fail open).
+    return 1;
+  }
 }
 
 /**
@@ -278,6 +326,7 @@ function resolveDeps(deps: BatchExecutorDeps): ResolvedDeps {
     dispatcherFor: deps.dispatcher ?? ((env) => dispatcherFromEnv(env as InferenceBindings)),
     governanceFor: deps.governance ?? ((env, batch) => createBatchGovernance(env, batch)),
     usage: deps.usage,
+    billingMultiplierFor: deps.billingMultiplier ?? defaultBillingMultiplier,
     http: deps.http ?? ((input, init) => fetch(input, init)),
     now: deps.now ?? (() => Math.floor(Date.now() / 1000)),
     owner: deps.owner ?? `tick_${crypto.randomUUID()}`,
@@ -532,6 +581,7 @@ function usageForLine(
   status: number,
   body: unknown,
   discount: number,
+  billingMultiplier: number,
 ): Usage {
   // `usageProviderKindFor` is the security control `chat.rs:1026` describes:
   // reading an Anthropic envelope with the OpenAI extractor scrapes nothing and
@@ -561,6 +611,11 @@ function usageForLine(
     // tokens would corrupt every usage rollup and every quota that reads them.
     inputPricePer1m: scale(route.inputPricePer1m),
     outputPricePer1m: scale(route.outputPricePer1m),
+    // #952 — the key-bound billing-group multiplier, applied by the sink's
+    // `applyBillingMultiplier` exactly as on the synchronous path. It COMPOSES
+    // with the native-batch `discount` already baked into the scaled prices
+    // above: settlement is `tokens × price × discount × billingMultiplier`.
+    billingMultiplier,
   };
 }
 
@@ -577,6 +632,7 @@ async function executeLine(
   governance: BatchGovernance,
   dispatcher: UpstreamDispatcher,
   resolved: ResolvedDeps,
+  billingMultiplier: number,
 ): Promise<LineOutcome> {
   const nowUnix = resolved.now();
   const error = (code: string, message: string): LineOutcome => ({
@@ -650,7 +706,16 @@ async function executeLine(
   // a provider that answered 400 after reading the prompt has still consumed
   // input tokens on some families, and a 200-only meter under-bills them.
   resolved.usage?.record(
-    usageForLine(batch, route, operation, line.lineIndex, response.status, body, 1),
+    usageForLine(
+      batch,
+      route,
+      operation,
+      line.lineIndex,
+      response.status,
+      body,
+      1,
+      billingMultiplier,
+    ),
     { env },
   );
 
@@ -1143,6 +1208,9 @@ async function advanceNative(
     if (customId !== "" && !indexByCustomId.has(customId)) indexByCustomId.set(customId, index);
   }
   let unmatched = inputLines.length;
+  // #952 — the key-bound billing-group multiplier, resolved ONCE for the whole
+  // native collection (every line shares the batch's owning key).
+  const billingMultiplier = await resolved.billingMultiplierFor(env, batch);
 
   const results: StoredBatchResult[] = [];
   for (const { reference, fromErrorFile } of references) {
@@ -1196,6 +1264,7 @@ async function advanceNative(
           statusCode,
           response?.body,
           NATIVE_BATCH_COST_MULTIPLIER,
+          billingMultiplier,
         ),
         { env },
       );
@@ -1269,6 +1338,9 @@ async function advanceLocal(
   }
 
   const dispatcher = resolved.dispatcherFor(env);
+  // #952 — resolve the key-bound billing-group multiplier ONCE per tick; every
+  // line of a batch shares the same owning key and therefore the same group.
+  const billingMultiplier = await resolved.billingMultiplierFor(env, batch);
   const slice = pending.slice(0, resolved.maxLinesPerTick);
   const results: StoredBatchResult[] = [];
   let executed = 0;
@@ -1313,6 +1385,7 @@ async function advanceLocal(
       governance,
       dispatcher,
       resolved,
+      billingMultiplier,
     );
     results.push(outcome.result);
     if (outcome.succeeded) executed += 1;

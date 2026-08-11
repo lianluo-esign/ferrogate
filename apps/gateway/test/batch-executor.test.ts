@@ -97,6 +97,7 @@ async function harness(
     readonly nativePassthrough?: boolean;
     readonly route?: PhysicalRoute | null;
     readonly now?: () => number;
+    readonly billingMultiplier?: (env: unknown, batch: StoredBatch) => Promise<number>;
   } = {},
 ): Promise<Harness> {
   const store = new MemoryBatchStore();
@@ -135,6 +136,9 @@ async function harness(
     maxLinesPerTick: options.maxLinesPerTick ?? 25,
     nativePassthrough: options.nativePassthrough ?? false,
     ...(options.http === undefined ? {} : { http: options.http }),
+    ...(options.billingMultiplier === undefined
+      ? {}
+      : { billingMultiplier: options.billingMultiplier }),
   };
 
   return {
@@ -400,6 +404,62 @@ describe("batch executor — local path", () => {
 
     expect(result.status).toBe("unclaimed");
     expect(fixture.dispatched.count).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Billing-group multiplier (#952) — a batch LLM call must honour the SAME
+// key-bound multiplier the synchronous inference path applies. The executor
+// bakes the resolved multiplier onto every metered `Usage` row; the sink's
+// `applyBillingMultiplier` (proven in `metering/gateway.test.ts`) then scales
+// the settled cost by it. Here we prove the BAKING half end of that seam.
+// ---------------------------------------------------------------------------
+
+describe("batch executor — billing-group multiplier (#952)", () => {
+  test("bakes the resolved multiplier onto EVERY metered line (local path)", async () => {
+    const seen: string[] = [];
+    const fixture = await harness({
+      billingMultiplier: async (_env, batch) => {
+        seen.push(batch.id);
+        return 1.5;
+      },
+    });
+    const batch = await fixture.createBatch(`${chatLine("a")}\n${chatLine("b")}\n`);
+
+    const result = await runBatchTick({}, TENANT, batch.id, fixture.deps);
+
+    expect(result.status).toBe("completed");
+    expect(fixture.metered).toHaveLength(2);
+    expect(fixture.metered[0]?.billingMultiplier).toBe(1.5);
+    expect(fixture.metered[1]?.billingMultiplier).toBe(1.5);
+    // Resolved ONCE per tick, not once per line — both lines share the key.
+    expect(seen).toEqual([batch.id]);
+    // The multiplier is a POST-price scalar; the prices themselves are the
+    // undiscounted local ones, so it never double-counts against the discount.
+    expect(fixture.metered[0]).toMatchObject({ inputPricePer1m: 100, outputPricePer1m: 200 });
+  });
+
+  test("honours an enabled comp (0×) — the metered line carries multiplier 0", async () => {
+    const fixture = await harness({ billingMultiplier: async () => 0 });
+    const batch = await fixture.createBatch(`${chatLine("a")}\n`);
+
+    await runBatchTick({}, TENANT, batch.id, fixture.deps);
+
+    expect(fixture.metered).toHaveLength(1);
+    expect(fixture.metered[0]?.billingMultiplier).toBe(0);
+  });
+
+  test("fails OPEN to 1.0 when the multiplier cannot be resolved", async () => {
+    // No `billingMultiplier` override ⇒ the production default resolver runs
+    // against the empty test env, finds no api_keys row (and no control DB), and
+    // must bill at the official price rather than throwing or billing at 0.
+    const fixture = await harness();
+    const batch = await fixture.createBatch(`${chatLine("a")}\n`);
+
+    await runBatchTick({}, TENANT, batch.id, fixture.deps);
+
+    expect(fixture.metered).toHaveLength(1);
+    expect(fixture.metered[0]?.billingMultiplier).toBe(1);
   });
 });
 
@@ -731,6 +791,31 @@ describe("batch executor — native path", () => {
     const stored = await fixture.store.get(TENANT, batch.id);
     expect(stored?.outputFileId).toBeDefined();
     expect(stored?.requestCounts).toEqual({ total: 1, completed: 1, failed: 0 });
+  });
+
+  test("composes the billing-group multiplier WITH the batch discount (#952)", async () => {
+    const state: { phase: "running" | "done" } = { phase: "running" };
+    const calls: string[] = [];
+    const fixture = await harness({
+      nativePassthrough: true,
+      http: nativeHttp(state, calls),
+      billingMultiplier: async () => 1.5,
+    });
+    const batch = await fixture.createBatch(`${chatLine("a")}\n`);
+
+    await runBatchTick({}, TENANT, batch.id, fixture.deps); // submit
+    state.phase = "done";
+    const finished = await runBatchTick({}, TENANT, batch.id, fixture.deps); // collect + meter
+
+    expect(finished.status).toBe("completed");
+    expect(fixture.metered).toHaveLength(1);
+    // The two scalars do not collide: the DISCOUNT halves the prices
+    // (200 → 100), the MULTIPLIER rides separately on the row for the sink's
+    // `applyBillingMultiplier` to scale the settled cost by.
+    expect(fixture.metered[0]).toMatchObject({
+      outputPricePer1m: 100,
+      billingMultiplier: 1.5,
+    });
   });
 
   test("a mixed-model job cannot be one native submission and runs locally", async () => {
