@@ -483,3 +483,37 @@ describe("MeteringUsageSink — post-response scheduling", () => {
     expect(sink.stats.deliveryFailures).toBe(1);
   });
 });
+
+describe("MeteringUsageSink — billing-analytics dual-write (#956)", () => {
+  it("mirrors the priced event to Analytics Engine with offer + final(×multiplier)", async () => {
+    const points: { blobs?: (string | null)[]; doubles?: number[]; indexes?: string[] }[] = [];
+    const h = harness({ settledCostUsd: () => 0.001161, settlementMode: "serving_offering" });
+    h.sink.record(usageFixture({ billingMultiplier: 1.5, billingGroupId: "grp-markup" }), {
+      env: {
+        BILLING_ANALYTICS: {
+          writeDataPoint: (p: {
+            blobs?: (string | null)[];
+            doubles?: number[];
+            indexes?: string[];
+          }) => points.push(p),
+        },
+      },
+    });
+    await h.scheduler.idle();
+
+    expect(points).toHaveLength(1);
+    expect(points[0]?.doubles?.[0]).toBeCloseTo(0.001161, 9); // offer price
+    expect(points[0]?.doubles?.[1]).toBeCloseTo(0.0017415, 9); // final = offer × 1.5
+    expect(points[0]?.doubles?.[2]).toBe(1.5); // multiplier
+    expect(points[0]?.blobs?.[0]).toBe("tenant_a"); // tenant dimension
+    expect(points[0]?.blobs?.[4]).toBe("grp-markup"); // billing group
+    expect(points[0]?.indexes).toEqual(["tenant_a"]); // sampling key
+  });
+
+  it("settles normally and does not require the binding when it is absent", async () => {
+    const h = harness({ settledCostUsd: () => 0.001161 });
+    h.sink.record(usageFixture({ billingMultiplier: 1.5 }), { env: {} });
+    await h.scheduler.idle();
+    expect(h.ledger.size).toBe(1);
+  });
+});

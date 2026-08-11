@@ -1592,6 +1592,25 @@ service = "ferrogate-telemetry"
 binding = "AI"
 
 # ---------------------------------------------------------------------------
+# BILLING ANALYTICS (#956) — the CROSS-TENANT fleet view.
+#
+# Settlement dual-writes one data point per priced event here (offer price,
+# final post-multiplier price, tokens, and the tenant/key/model/provider/group
+# dimensions). The authoritative per-transaction cost stays in the tenant's own
+# object (`billing_events`); this is the SAMPLED, bounded-retention analytics
+# mirror the control plane queries with ONE cross-tenant SQL aggregate, with no
+# tenant-private data copied into the control database and no O(N) object
+# fan-out. Absent binding ⇒ the dual-write is skipped (see `billing-analytics.ts`).
+#
+# `dataset` is a PLACEHOLDER; the deploy step substitutes the account's dataset
+# name. Like all Analytics Engine datasets it is created on first write — nothing
+# to pre-provision — but Analytics Engine must be enabled on the account.
+# ---------------------------------------------------------------------------
+[[analytics_engine_datasets]]
+binding = "BILLING_ANALYTICS"
+dataset = "PLACEHOLDER_ferrogate_billing"
+
+# ---------------------------------------------------------------------------
 # Cron — the billing-outbox recovery sweep
 #
 # Handled by `scheduled` on the default export of `src/worker.ts`, which calls
