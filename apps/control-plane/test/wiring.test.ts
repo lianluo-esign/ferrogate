@@ -313,6 +313,7 @@ const GROUP_PROBES: readonly (readonly [string, string, HttpMethod, string, numb
   // than answering an empty list it cannot support. `isRouterMiss` still tells
   // this apart from an unmounted route, so the probe keeps proving the mount.
   ["admin_billing_group", "listBillingGroups", "GET", "/admin/v1/billing-groups", 503],
+  ["admin_billing_fleet", "queryBillingFleet", "GET", "/admin/v1/billing-fleet", 503],
   ["admin_config_ops", "validateAdminConfig", "POST", "/admin/v1/config/validate", 200],
   ["admin_cost_record", "listAdminCostRecords", "GET", "/admin/v1/cost-records", 200],
   // 503, not 200, and that IS the mounted behaviour (issue #693). This probe

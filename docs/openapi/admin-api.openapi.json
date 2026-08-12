@@ -2197,16 +2197,40 @@
                 "schema": {
                   "type": "object",
                   "properties": {
-                    "object": { "type": "string" },
-                    "scope": { "type": "string" },
-                    "provider_id": { "type": "string" },
-                    "added": { "type": "integer" },
-                    "updated": { "type": "integer" },
-                    "skipped": { "type": "integer" },
-                    "upstream_count": { "type": "integer" },
-                    "revision": { "type": "integer" }
+                    "object": {
+                      "type": "string"
+                    },
+                    "scope": {
+                      "type": "string"
+                    },
+                    "provider_id": {
+                      "type": "string"
+                    },
+                    "added": {
+                      "type": "integer"
+                    },
+                    "updated": {
+                      "type": "integer"
+                    },
+                    "skipped": {
+                      "type": "integer"
+                    },
+                    "upstream_count": {
+                      "type": "integer"
+                    },
+                    "revision": {
+                      "type": "integer"
+                    }
                   },
-                  "required": ["object", "scope", "provider_id", "added", "updated", "skipped", "revision"]
+                  "required": [
+                    "object",
+                    "scope",
+                    "provider_id",
+                    "added",
+                    "updated",
+                    "skipped",
+                    "revision"
+                  ]
                 }
               }
             }
@@ -6617,22 +6641,40 @@
                   "providers": {
                     "description": "GATEWAY_PROVIDERS, as a JSON string or a parsed array. Falls back to the bound var when omitted.",
                     "oneOf": [
-                      { "type": "string" },
-                      { "type": "array", "items": { "type": "object" } }
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "object"
+                        }
+                      }
                     ]
                   },
                   "models": {
                     "description": "GATEWAY_MODELS, as a JSON string or a parsed array. Falls back to the bound var when omitted.",
                     "oneOf": [
-                      { "type": "string" },
-                      { "type": "array", "items": { "type": "object" } }
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "object"
+                        }
+                      }
                     ]
                   },
                   "cloudflare": {
                     "description": "The account-level [cloudflare] block, as a JSON string or object. Falls back to the bound var when omitted.",
                     "oneOf": [
-                      { "type": "string" },
-                      { "type": "object" }
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "object"
+                      }
                     ]
                   },
                   "include_default_rate_card": {
@@ -6652,15 +6694,36 @@
                 "schema": {
                   "type": "object",
                   "properties": {
-                    "object": { "type": "string" },
-                    "scope": { "type": "string" },
-                    "include_default_rate_card": { "type": "boolean" },
-                    "attempted": { "$ref": "#/components/schemas/PlatformCatalogImportCounts" },
-                    "inserted": { "$ref": "#/components/schemas/PlatformCatalogImportCounts" },
-                    "counts": { "$ref": "#/components/schemas/PlatformCatalogImportCounts" },
-                    "revision": { "type": "integer" }
+                    "object": {
+                      "type": "string"
+                    },
+                    "scope": {
+                      "type": "string"
+                    },
+                    "include_default_rate_card": {
+                      "type": "boolean"
+                    },
+                    "attempted": {
+                      "$ref": "#/components/schemas/PlatformCatalogImportCounts"
+                    },
+                    "inserted": {
+                      "$ref": "#/components/schemas/PlatformCatalogImportCounts"
+                    },
+                    "counts": {
+                      "$ref": "#/components/schemas/PlatformCatalogImportCounts"
+                    },
+                    "revision": {
+                      "type": "integer"
+                    }
                   },
-                  "required": ["object", "scope", "attempted", "inserted", "counts", "revision"]
+                  "required": [
+                    "object",
+                    "scope",
+                    "attempted",
+                    "inserted",
+                    "counts",
+                    "revision"
+                  ]
                 }
               }
             },
@@ -22847,6 +22910,100 @@
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.read"
+          },
+          "rbac_action": null
+        }
+      }
+    },
+    "/admin/v1/billing-fleet": {
+      "get": {
+        "operationId": "queryBillingFleet",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "Cross-tenant billing fleet aggregate over Analytics Engine (sample-corrected).",
+        "parameters": [
+          {
+            "name": "group_by",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "tenant",
+                "project",
+                "logical_model",
+                "provider",
+                "billing_group",
+                "provider_model"
+              ],
+              "default": "tenant"
+            },
+            "description": "Dimension to aggregate by."
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "description": "Inclusive lower bound, unix seconds. Defaults to until - 30 days."
+          },
+          {
+            "name": "until",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "description": "Exclusive upper bound, unix seconds. Defaults to now."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Fleet billing aggregate.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BillingFleetReport"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
           }
         },
         "x-ferrogate-contract": {
@@ -42594,6 +42751,73 @@
           }
         },
         "additionalProperties": false
+      },
+      "BillingFleetReport": {
+        "type": "object",
+        "required": [
+          "object",
+          "group_by",
+          "since_unix",
+          "until_unix",
+          "sampled",
+          "rows"
+        ],
+        "properties": {
+          "object": {
+            "type": "string"
+          },
+          "group_by": {
+            "type": "string"
+          },
+          "since_unix": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "until_unix": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "sampled": {
+            "type": "boolean"
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BillingFleetRow"
+            }
+          }
+        }
+      },
+      "BillingFleetRow": {
+        "type": "object",
+        "required": [
+          "key",
+          "offer_usd",
+          "final_usd",
+          "prompt_tokens",
+          "completion_tokens",
+          "events"
+        ],
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "offer_usd": {
+            "type": "number"
+          },
+          "final_usd": {
+            "type": "number"
+          },
+          "prompt_tokens": {
+            "type": "number"
+          },
+          "completion_tokens": {
+            "type": "number"
+          },
+          "events": {
+            "type": "number"
+          }
+        }
       }
     }
   }

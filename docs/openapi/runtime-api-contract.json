@@ -649,6 +649,10 @@
     {
       "pattern": "/admin/v1/billing-groups/{id}/providers/{providerId}",
       "group": "admin_billing_group"
+    },
+    {
+      "pattern": "/admin/v1/billing-fleet",
+      "group": "admin_billing_fleet"
     }
   ],
   "dynamic_surfaces": [
@@ -4205,6 +4209,17 @@
       "auth": {
         "kind": "bearer",
         "scope": "admin.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/billing-fleet",
+      "method": "get",
+      "operation_id": "queryBillingFleet",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.read"
       },
       "rbac_action": null
     }

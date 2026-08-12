@@ -72,7 +72,7 @@ describe("contract document", () => {
     expect(RAW.operations).toHaveLength(EXPECTED_TOTAL_OPERATION_COUNT);
   });
 
-  it("assigns exactly 248 operations to apps/control-plane", () => {
+  it("assigns exactly 250 operations to apps/control-plane", () => {
     expect(OWNED_RAW).toHaveLength(EXPECTED_CONTROL_PLANE_OPERATION_COUNT);
     expect(CONTROL_PLANE_OPERATIONS).toHaveLength(EXPECTED_CONTROL_PLANE_OPERATION_COUNT);
   });
@@ -91,8 +91,8 @@ describe("contract document", () => {
     // incremented off the 42 this test first shipped with. 46 -> 47 with
     // #698's `batches` group, counted off the merged document the same way.
     // 47 -> 48 with #943's `admin_billing_group` group (main + this slice
-    // alone; #944 adds no new group).
-    expect(new Set(RAW.route_patterns.map((pattern) => pattern.group)).size).toBe(48);
+    // alone; #944 adds no new group). 48 -> 49 with #956's `admin_billing_fleet`.
+    expect(new Set(RAW.route_patterns.map((pattern) => pattern.group)).size).toBe(49);
   });
 
   it("ownership predicate agrees with the raw document, path by path", () => {
@@ -105,7 +105,7 @@ describe("contract document", () => {
 });
 
 describe("anti-drift: every contract operation has a registered route", () => {
-  it("registers every one of this app's 248 operation ids", () => {
+  it("registers every one of this app's 250 operation ids", () => {
     const registered = new Set(registeredOperationIds());
     const missing = OWNED_RAW.map((operation) => operation.operation_id)
       .filter((operationId) => !registered.has(operationId))

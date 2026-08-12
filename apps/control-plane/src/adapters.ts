@@ -80,6 +80,13 @@ import {
 } from "./site_domain_txt.js";
 import { D1ApiKeyAuthenticator, D1NativeApiKeyAuthenticator } from "./store/api_keys.js";
 import {
+  type BillingFleetQueryPort,
+  type BillingFleetService,
+  BillingFleetUnavailableError,
+  type FleetQuery,
+  runFleetReport,
+} from "./store/billing-fleet.js";
+import {
   type LifecycleStatus,
   StoreTenancyLifecycleGate,
   decideLifecycleChain,
@@ -1556,6 +1563,83 @@ export function resolveAssetObjects(env: ControlPlaneBindings): AssetObjectRecla
   };
 }
 
+/**
+ * The Analytics Engine SQL REST client for the #956 fleet read side.
+ *
+ * The AE read side is the account-scoped `/analytics_engine/sql` REST endpoint:
+ * a POST whose BODY is the raw SQL, authorized with an account API token. There
+ * is no offline emulation (miniflare discards `writeDataPoint` and answers no
+ * query), so this is exercised live; `fetchImpl` is injectable purely so a test
+ * can assert the request shape without a network. A non-2xx or unparseable
+ * response is a {@link BillingFleetUnavailableError} the route maps to 503.
+ */
+export class CloudflareAnalyticsEngineQuery implements BillingFleetQueryPort {
+  readonly #accountId: string;
+  readonly #token: string;
+  readonly #fetch: typeof fetch;
+
+  constructor(accountId: string, token: string, fetchImpl: typeof fetch = fetch) {
+    this.#accountId = accountId;
+    this.#token = token;
+    this.#fetch = fetchImpl;
+  }
+
+  async runSql(sql: string): Promise<readonly Record<string, unknown>[]> {
+    let response: Response;
+    try {
+      response = await this.#fetch(
+        `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(this.#accountId)}/analytics_engine/sql`,
+        {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${this.#token}`,
+            "content-type": "text/plain",
+          },
+          body: sql,
+        },
+      );
+    } catch (cause) {
+      throw new BillingFleetUnavailableError("Analytics Engine SQL request failed", { cause });
+    }
+    if (!response.ok) {
+      throw new BillingFleetUnavailableError(
+        `Analytics Engine SQL returned HTTP ${response.status}`,
+      );
+    }
+    let payload: unknown;
+    try {
+      payload = await response.json();
+    } catch (cause) {
+      throw new BillingFleetUnavailableError("Analytics Engine SQL response was not JSON", {
+        cause,
+      });
+    }
+    // A 200 whose body carries no `data` array is a genuinely empty result set
+    // (the window had no billed events) → an empty report, not an error: AE SQL
+    // signals a query FAILURE with a non-2xx, which `!response.ok` already maps
+    // to a 503 above. So a data-less 200 is "no spend", not a masked failure.
+    const data = (payload as { data?: unknown } | null)?.data;
+    return Array.isArray(data) ? (data as Record<string, unknown>[]) : [];
+  }
+}
+
+/**
+ * Build the fleet service, or `null` when the account query surface is
+ * unconfigured. All three of dataset / account id / token are required — a
+ * partial config would 500 at query time, so it fails shut to a 503 instead.
+ */
+export function resolveBillingFleet(
+  env: ControlPlaneBindings,
+  fetchImpl: typeof fetch = fetch,
+): BillingFleetService | null {
+  const dataset = env.BILLING_ANALYTICS_DATASET?.trim();
+  const accountId = env.BILLING_ANALYTICS_ACCOUNT_ID?.trim();
+  const token = env.BILLING_ANALYTICS_API_TOKEN?.trim();
+  if (!dataset || !accountId || !token) return null;
+  const port = new CloudflareAnalyticsEngineQuery(accountId, token, fetchImpl);
+  return { report: (query: FleetQuery) => runFleetReport(port, dataset, query) };
+}
+
 export function resolveDeps(
   env: ControlPlaneBindings,
   context: RequestContext = {},
@@ -1574,6 +1658,9 @@ export function resolveDeps(
     tenantStorage: resolveTenantStorage(env, controlDatabase),
     tenantObjectOperator: resolveTenantObjectOperator(env, controlDatabase),
     controlDatabase: controlDatabase ?? null,
+    // #956 read side. Null unless BILLING_ANALYTICS_{DATASET,ACCOUNT_ID,API_TOKEN}
+    // are all bound; the fleet endpoint then answers 503 rather than fabricating.
+    billingFleet: resolveBillingFleet(env),
     promptLabels: resolvePromptLabels(env),
     keyDirectory: resolveKeyDirectory(env),
     // Delete-only by construction — see `resolveAssetObjects`.
