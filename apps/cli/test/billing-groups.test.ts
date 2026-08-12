@@ -51,10 +51,7 @@ describe("ctl billing-groups", () => {
       },
     });
     expect(
-      await main(
-        ["ctl", "billing-groups", "update", "g1", "--data", '{"multiplier":2}'],
-        runtime,
-      ),
+      await main(["ctl", "billing-groups", "update", "g1", "--data", '{"multiplier":2}'], runtime),
     ).toBe(0);
     expect(runtime.client.requests[0]?.spec.method).toBe("PATCH");
     expect(runtime.client.requests[0]?.spec.path).toBe("/admin/v1/billing-groups/g1");

@@ -41,7 +41,10 @@ async function auditActions(): Promise<readonly string[]> {
   for (const row of rows.results) {
     const parsed = JSON.parse(row.audit_json) as { collection?: string; action?: string };
     if (parsed.collection === "platform_billing_groups") {
-      expect(row.tenant, "a platform billing-group audit row must not be tenant-attributed").toBeNull();
+      expect(
+        row.tenant,
+        "a platform billing-group audit row must not be tenant-attributed",
+      ).toBeNull();
       actions.push(String(parsed.action));
     }
   }
