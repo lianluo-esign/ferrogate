@@ -33,6 +33,7 @@ import { adminAgentUpstreamRoutes } from "./admin_agent_upstream.js";
 import { adminAgentWorkflowRoutes } from "./admin_agent_workflow.js";
 import { adminApiKeyRoutes } from "./admin_api_key.js";
 import { adminAssetRoutes } from "./admin_asset.js";
+import { adminBillingFleetRoutes } from "./admin_billing_fleet.js";
 import { adminBillingGroupRoutes } from "./admin_billing_group.js";
 import { adminConfigOpsRoutes } from "./admin_config_ops.js";
 import { adminCostRecordRoutes } from "./admin_cost_record.js";
@@ -77,6 +78,7 @@ export const GROUP_MODULES: readonly GroupModule[] = [
   adminAgentWorkflowRoutes,
   adminApiKeyRoutes,
   adminAssetRoutes,
+  adminBillingFleetRoutes,
   adminBillingGroupRoutes,
   adminConfigOpsRoutes,
   adminCostRecordRoutes,

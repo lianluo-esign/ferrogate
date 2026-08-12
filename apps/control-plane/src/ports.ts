@@ -26,6 +26,7 @@ import type {
 // node importer of this module's siblings.
 import type { TenantDataNamespace } from "@ferrogate/storage/durable-objects";
 import type { ApiOperation } from "./contract.js";
+import type { BillingFleetService } from "./store/billing-fleet.js";
 import type { SiteDomainCertificatePort } from "./site_domain_certificates.js";
 import type { SiteDomainTxtResolver } from "./site_domain_txt.js";
 
@@ -479,6 +480,12 @@ export interface ControlPlaneDeps {
    */
   readonly controlDatabase: D1Database | null;
   /**
+   * The cross-tenant billing fleet view over Analytics Engine (#956 read side),
+   * or `null` when the account query surface is unconfigured (no account id /
+   * token). Null ⇒ the fleet endpoint answers 503, never a fabricated report.
+   */
+  readonly billingFleet: BillingFleetService | null;
+  /**
    * The KV namespace `apps/gateway` resolves prompt deployment labels from
    * (`PROMPT_LABELS`), or `null` when this deployment binds none.
    *
@@ -649,6 +656,21 @@ export interface ControlPlaneBindings {
    * `[vars]` entry — that file is committed plaintext.
    */
   readonly SITE_DOMAIN_CF_API_TOKEN?: string;
+  /**
+   * The Analytics Engine dataset the gateway dual-writes billing to
+   * (`apps/gateway/wrangler.toml` binds it as `BILLING_ANALYTICS`), named here
+   * so the #956 fleet-query read side can `SELECT ... FROM <dataset>`. Absent ⇒
+   * the fleet endpoint answers 503.
+   */
+  readonly BILLING_ANALYTICS_DATASET?: string;
+  /** The Cloudflare account id whose `/analytics_engine/sql` REST API is queried. */
+  readonly BILLING_ANALYTICS_ACCOUNT_ID?: string;
+  /**
+   * The account-scoped API token for the AE SQL REST API, as a `wrangler secret
+   * put` binding — never a committed `[vars]` entry. Absent ⇒ 503, the same
+   * fail-shut the SITE_DOMAIN token takes.
+   */
+  readonly BILLING_ANALYTICS_API_TOKEN?: string;
   /**
    * The control database (`[[d1_databases]] binding = "DB"` in
    * `wrangler.toml`) — the native replacement for BOTH the D1 REST client and

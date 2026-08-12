@@ -17,7 +17,7 @@ class Operation(TypedDict):
     security: SecurityRequirements
     tags: tuple[str, ...]
 
-OPENAPI_OPERATION_COUNT: Final[int] = 313
+OPENAPI_OPERATION_COUNT: Final[int] = 322
 
 OPERATIONS: Final[dict[str, Operation]] = {
     "abortAssetUpload": {
@@ -73,6 +73,12 @@ OPERATIONS: Final[dict[str, Operation]] = {
         "path": "/v1/mcp/identity/{server}/authorize",
         "security": ((("bearerAuth", ()),),),
         "tags": ("gateway",),
+    },
+    "bindBillingGroupProvider": {
+        "method": "PUT",
+        "path": "/admin/v1/billing-groups/{id}/providers/{providerId}",
+        "security": ((("bearerAuth", ()),),),
+        "tags": ("admin-write",),
     },
     "bindSiteDomain": {
         "method": "POST",
@@ -217,6 +223,12 @@ OPERATIONS: Final[dict[str, Operation]] = {
         "path": "/v1/batches",
         "security": ((("bearerAuth", ()),),),
         "tags": ("gateway",),
+    },
+    "createBillingGroup": {
+        "method": "POST",
+        "path": "/admin/v1/billing-groups",
+        "security": ((("bearerAuth", ()),),),
+        "tags": ("admin-write",),
     },
     "createChatCompletion": {
         "method": "POST",
@@ -445,6 +457,12 @@ OPERATIONS: Final[dict[str, Operation]] = {
         "path": "/v1/assets/{asset_type}/{name}/channels/{channel}",
         "security": ((("bearerAuth", ()),),),
         "tags": ("gateway",),
+    },
+    "deleteBillingGroup": {
+        "method": "DELETE",
+        "path": "/admin/v1/billing-groups/{id}",
+        "security": ((("bearerAuth", ()),),),
+        "tags": ("admin-write",),
     },
     "deleteFile": {
         "method": "DELETE",
@@ -781,6 +799,12 @@ OPERATIONS: Final[dict[str, Operation]] = {
         "path": "/v1/assets/storage/summary",
         "security": ((("bearerAuth", ()),),),
         "tags": ("gateway",),
+    },
+    "getBillingGroup": {
+        "method": "GET",
+        "path": "/admin/v1/billing-groups/{id}",
+        "security": ((("bearerAuth", ()),),),
+        "tags": ("admin-read",),
     },
     "getEffectiveX402SpendPolicy": {
         "method": "GET",
@@ -1232,6 +1256,12 @@ OPERATIONS: Final[dict[str, Operation]] = {
         "security": ((("bearerAuth", ()),),),
         "tags": ("gateway",),
     },
+    "listBillingGroups": {
+        "method": "GET",
+        "path": "/admin/v1/billing-groups",
+        "security": ((("bearerAuth", ()),),),
+        "tags": ("admin-read",),
+    },
     "listBillingOutboxDeadLetters": {
         "method": "GET",
         "path": "/admin/v1/billing-outbox-dead-letters",
@@ -1490,6 +1520,12 @@ OPERATIONS: Final[dict[str, Operation]] = {
         "security": ((("AdminBearerAuth", ()),), (("ApiKeyAuth", ()),)),
         "tags": ("Admin",),
     },
+    "patchBillingGroup": {
+        "method": "PATCH",
+        "path": "/admin/v1/billing-groups/{id}",
+        "security": ((("bearerAuth", ()),),),
+        "tags": ("admin-write",),
+    },
     "pollSelfHostedWorkerRun": {
         "method": "POST",
         "path": "/v1/self-hosted-workers/runs/poll",
@@ -1585,6 +1621,12 @@ OPERATIONS: Final[dict[str, Operation]] = {
         "path": "/admin/v1/provider-credentials/{alias}",
         "security": ((("bearerAuth", ()),),),
         "tags": ("admin-write",),
+    },
+    "queryBillingFleet": {
+        "method": "GET",
+        "path": "/admin/v1/billing-fleet",
+        "security": ((("bearerAuth", ()),),),
+        "tags": ("admin-read",),
     },
     "queryTenantData": {
         "method": "POST",
@@ -1808,6 +1850,18 @@ OPERATIONS: Final[dict[str, Operation]] = {
         "security": ((("bearerAuth", ()),),),
         "tags": ("gateway",),
     },
+    "syncProviderModels": {
+        "method": "POST",
+        "path": "/admin/v1/providers/{id}/sync-models",
+        "security": ((("bearerAuth", ()),),),
+        "tags": ("admin-write",),
+    },
+    "unbindBillingGroupProvider": {
+        "method": "DELETE",
+        "path": "/admin/v1/billing-groups/{id}/providers/{providerId}",
+        "security": ((("bearerAuth", ()),),),
+        "tags": ("admin-write",),
+    },
     "unbindSiteDomain": {
         "method": "DELETE",
         "path": "/admin/v1/site-domains/{hostname}",
@@ -1907,6 +1961,7 @@ ADMIN_OPERATION_IDS: Final[tuple[str, ...]] = (
     "archiveAdminPromptTemplate",
     "archiveGuardrailPolicyRevision",
     "assignTenantPlan",
+    "bindBillingGroupProvider",
     "bindSiteDomain",
     "bindTenantRole",
     "chargeWallet",
@@ -1923,6 +1978,7 @@ ADMIN_OPERATION_IDS: Final[tuple[str, ...]] = (
     "createAdminPromptTemplate",
     "createAdminProvider",
     "createAdminSkillPackage",
+    "createBillingGroup",
     "createGuardrailPolicyRevision",
     "createNextGuardrailPolicyRevision",
     "createPaymentMethod",
@@ -1949,6 +2005,7 @@ ADMIN_OPERATION_IDS: Final[tuple[str, ...]] = (
     "deleteAdminPromptTemplateLabel",
     "deleteAdminProvider",
     "deleteAdminSkillPackage",
+    "deleteBillingGroup",
     "deletePaymentMethod",
     "deletePermission",
     "deleteProject",
@@ -1988,6 +2045,7 @@ ADMIN_OPERATION_IDS: Final[tuple[str, ...]] = (
     "getAdminStatus",
     "getAdminToolApproval",
     "getAssetRetentionPolicy",
+    "getBillingGroup",
     "getEffectiveX402SpendPolicy",
     "getGuardrailInvestigation",
     "getGuardrailPolicyRevision",
@@ -2048,6 +2106,7 @@ ADMIN_OPERATION_IDS: Final[tuple[str, ...]] = (
     "listAdminToolSessionEvents",
     "listAdminTools",
     "listAdminUsageAggregates",
+    "listBillingGroups",
     "listBillingOutboxDeadLetters",
     "listFleetAssets",
     "listGuardrailEvaluations",
@@ -2086,6 +2145,7 @@ ADMIN_OPERATION_IDS: Final[tuple[str, ...]] = (
     "patchAdminPromptTemplate",
     "patchAdminProvider",
     "patchAdminSkillPackage",
+    "patchBillingGroup",
     "putAdminAgentSchedule",
     "putAdminAgentUpstream",
     "putAdminAgentWorkflow",
@@ -2098,6 +2158,7 @@ ADMIN_OPERATION_IDS: Final[tuple[str, ...]] = (
     "putAdminSkillPackage",
     "putAssetRetentionPolicy",
     "putProviderCredential",
+    "queryBillingFleet",
     "queryTenantData",
     "recordAdminSelfHostedWorkerArtifact",
     "recordAdminSelfHostedWorkerCheckpoint",
@@ -2126,6 +2187,8 @@ ADMIN_OPERATION_IDS: Final[tuple[str, ...]] = (
     "rotateVirtualKey",
     "runAdminAgentScheduleNow",
     "setAdminDrain",
+    "syncProviderModels",
+    "unbindBillingGroupProvider",
     "unbindSiteDomain",
     "unbindTenantRole",
     "updateAdminPlugin",

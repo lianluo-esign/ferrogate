@@ -476,6 +476,7 @@ const MODELS = new ResourceApi("/admin/v1/models");
 const PROVIDERS = new ResourceApi("/admin/v1/providers");
 const PROVIDER_MODELS = new ResourceApi("/admin/v1/provider-models");
 const BILLING_GROUPS = new ResourceApi("/admin/v1/billing-groups");
+const BILLING_FLEET = new ResourceApi("/admin/v1/billing-fleet");
 const EXTENSIONS = new ResourceApi("/admin/v1/extensions");
 const FRAMEWORK_ADAPTERS = new ResourceApi("/admin/v1/framework-adapters");
 
@@ -627,7 +628,7 @@ function policyAndRevision(input: ResourceInput, verb: string): [string, string]
 }
 
 // ---------------------------------------------------------------------------
-// The 53 registered command groups (12 family modules)
+// The 54 registered command groups (12 family modules)
 // ---------------------------------------------------------------------------
 
 /** Every registered `ctl` group, in registration order. */
@@ -1569,6 +1570,20 @@ export const GROUPS: readonly GroupDescriptor[] = [
       ),
     ],
     build: (verb, input) => buildBillingGroupRequest(verb, input),
+  },
+  {
+    name: "billing-fleet",
+    about: "Cross-tenant billing fleet aggregate over Analytics Engine (platform operator)",
+    verbs: [
+      read(
+        "report",
+        "Aggregate fleet billing; filter group_by/since/until, page with --limit",
+        "queryBillingFleet",
+      ),
+    ],
+    // group_by/since/until arrive as `--filter k=v` (→ `?k=v`) and the row cap as
+    // `--limit`; the endpoint reads them straight off the query string.
+    build: (_verb, input) => BILLING_FLEET.read([], input.list),
   },
   {
     name: "models",
