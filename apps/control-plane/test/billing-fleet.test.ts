@@ -144,4 +144,20 @@ describe("CloudflareAnalyticsEngineQuery", () => {
     const port = new CloudflareAnalyticsEngineQuery("a", "t", fakeFetch);
     await expect(port.runSql("SELECT 1")).rejects.toBeInstanceOf(BillingFleetUnavailableError);
   });
+
+  it("calls fetch bound to globalThis, not the instance (Workers Illegal-invocation guard)", async () => {
+    // A REGULAR (non-arrow) fake records its `this`. The Workers global `fetch`
+    // throws "Illegal invocation" unless called with `this === globalThis`; the
+    // adapter must bind it, so a detached `this.#fetch(...)` cannot smuggle the
+    // instance in as `this`. Without the constructor's `.bind(globalThis)` this
+    // records the adapter instance and the assertion fails.
+    const seen: unknown[] = [];
+    const fakeFetch = function (this: unknown): Promise<Response> {
+      seen.push(this);
+      return Promise.resolve(new Response(JSON.stringify({ data: [] }), { status: 200 }));
+    } as unknown as typeof fetch;
+    const port = new CloudflareAnalyticsEngineQuery("a", "t", fakeFetch);
+    await port.runSql("SELECT 1");
+    expect(seen[0]).toBe(globalThis);
+  });
 });
