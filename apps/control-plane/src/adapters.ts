@@ -1581,7 +1581,12 @@ export class CloudflareAnalyticsEngineQuery implements BillingFleetQueryPort {
   constructor(accountId: string, token: string, fetchImpl: typeof fetch = fetch) {
     this.#accountId = accountId;
     this.#token = token;
-    this.#fetch = fetchImpl;
+    // Bind to `globalThis`: the Workers runtime's global `fetch` throws
+    // "Illegal invocation: incorrect `this` reference" when called as a method
+    // (`this.#fetch(...)`), because `this` is then the instance rather than the
+    // global scope. Only the LIVE runtime enforces this — an injected test fake
+    // does not — so binding here is what makes the deployed query actually run.
+    this.#fetch = fetchImpl.bind(globalThis);
   }
 
   async runSql(sql: string): Promise<readonly Record<string, unknown>[]> {
