@@ -155,9 +155,7 @@ export class PlatformBillingGroupStore {
         list.push(edge.provider_id);
         byGroup.set(edge.group_id, list);
       }
-      return groups.results.map((row) =>
-        groupRecord(row, (byGroup.get(row.id) ?? []).sort()),
-      );
+      return groups.results.map((row) => groupRecord(row, (byGroup.get(row.id) ?? []).sort()));
     } catch (error) {
       if (isMissingPlatformCatalogError(error)) return [];
       throw error;
@@ -317,11 +315,7 @@ export class PlatformBillingGroupStore {
    * violation silently (0 rows) instead of raising it — so an unknown provider
    * would otherwise read back as an unremarkable no-op rather than a 404.
    */
-  async bindProvider(
-    scope: CallerScope,
-    groupId: string,
-    providerId: string,
-  ): Promise<boolean> {
+  async bindProvider(scope: CallerScope, groupId: string, providerId: string): Promise<boolean> {
     if ((await this.getGroup(groupId)) === null) {
       throw new TenantCatalogNotFoundError(`billing group ${groupId} not found`);
     }
@@ -362,17 +356,18 @@ export class PlatformBillingGroupStore {
   }
 
   /** `false` if the binding did not exist. */
-  async unbindProvider(
-    scope: CallerScope,
-    groupId: string,
-    providerId: string,
-  ): Promise<boolean> {
+  async unbindProvider(scope: CallerScope, groupId: string, providerId: string): Promise<boolean> {
     return this.#commit(
       scope,
       // `remove`, not `merge`: an auditor reading the platform chain must be
       // able to tell an unbind from the `merge` a bind writes on the same id.
       "remove",
-      { id: `${groupId}:${providerId}`, scope: PLATFORM_SCOPE, group_id: groupId, provider_id: providerId },
+      {
+        id: `${groupId}:${providerId}`,
+        scope: PLATFORM_SCOPE,
+        group_id: groupId,
+        provider_id: providerId,
+      },
       this.#db
         .prepare(
           `DELETE FROM ${BILLING_GROUP_PROVIDER_TABLE} WHERE group_id = ? AND provider_id = ?`,
