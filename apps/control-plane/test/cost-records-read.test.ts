@@ -752,3 +752,63 @@ describe("GET /admin/v1/cost-record-exports", () => {
     expect(await parquetReadObjects({ file: parquet })).toEqual([]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// `?search=` — narrowing the spend table, not just windowing it (#963)
+// ---------------------------------------------------------------------------
+
+describe("GET /admin/v1/cost-records narrows on ?search=", () => {
+  it("keeps only rows whose model, provider, tenant or request id matches", async () => {
+    await seedRequestLogs([
+      REQUEST,
+      {
+        ...REQUEST,
+        requestId: "fg-cost-2",
+        provider: "anthropic",
+        logicalModel: "claude-sonnet-4",
+        providerModel: "claude-sonnet-4-20250514",
+      },
+    ]);
+
+    const hit = await readCosts(operatorKey.secret, "?search=claude");
+    expect(hit.total).toBe(1);
+    expect(hit.data[0]).toMatchObject({ request_id: "fg-cost-2" });
+
+    const byProvider = await readCosts(operatorKey.secret, "?search=openai");
+    expect(byProvider.total).toBe(1);
+    expect(byProvider.data[0]).toMatchObject({ request_id: REQUEST.requestId });
+  });
+
+  it("accepts ?q= and matches case-insensitively", async () => {
+    await seedRequestLogs([REQUEST]);
+
+    const hit = await readCosts(operatorKey.secret, "?q=GPT-4O-MINI");
+    expect(hit.total).toBe(1);
+  });
+
+  it("reports an empty page — not the whole table — when nothing matches", async () => {
+    await seedRequestLogs([REQUEST]);
+
+    const miss = await readCosts(operatorKey.secret, "?search=zzz-no-such-model");
+    expect(miss.data).toHaveLength(0);
+    expect(miss.total).toBe(0);
+  });
+
+  it("pages the narrowed set, and the total counts only matches", async () => {
+    await seedRequestLogs([
+      { ...REQUEST, requestId: "fg-cost-a" },
+      { ...REQUEST, requestId: "fg-cost-b" },
+      {
+        ...REQUEST,
+        requestId: "fg-cost-c",
+        provider: "anthropic",
+        logicalModel: "claude-sonnet-4",
+        providerModel: "claude-sonnet-4-20250514",
+      },
+    ]);
+
+    const first = await readCosts(operatorKey.secret, "?search=gpt-4o-mini&limit=1");
+    expect(first.data).toHaveLength(1);
+    expect(first.total).toBe(2);
+  });
+});
