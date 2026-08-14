@@ -507,6 +507,20 @@ async function listBillingAuthority(
     }));
   }
 
+  // `?tenant_id=` narrows an OPERATOR read to one tenant. Stated as a routing decision rather than
+  // a predicate because that is what it is: the authority for a tenant's billing is that tenant's
+  // object, so the answer is "read that one" — not "read the fleet and drop the rest", which would
+  // page over tenants whose rows can never match and would let the fleet's un-attributed control
+  // rows (which belong to no tenant) survive a tenant filter.
+  const wantTenant = url?.searchParams.get("tenant_id")?.trim() || url?.searchParams.get("tenant")?.trim();
+  if (kind === "events" && wantTenant !== undefined && wantTenant !== "") {
+    const page = await tenantBillingEventPage(deps, wantTenant, fetchLimit, filters, url);
+    return {
+      items: page.items.slice(query.offset, query.offset + query.limit),
+      total: page.total,
+    };
+  }
+
   const tenantPage = await provisionedTenantPage(deps.tenantDatabases, tenantOffset);
 
   const rowsById = new Map<string, StoreRecord>();
