@@ -407,6 +407,35 @@ export const walletsRoutes: GroupModule = crudGroup(
     { segment: "payment-methods", object: "payment_method", body: paymentMethodSchema },
   ],
   {
+    /**
+     * `POST /admin/v1/wallets` — a wallet is keyed by `tenant_id`, so that field is REQUIRED here
+     * even though the schema leaves it optional for the merge legs (#965).
+     *
+     * The generic `createHandler` mints `crypto.randomUUID()` when the id field is absent, which is
+     * right where the id is a surrogate and wrong here: this collection's id is a FOREIGN identity.
+     * A generated one produces a wallet belonging to a tenant that does not exist — and, because
+     * this module deliberately has no wallet DELETE (a balance with a ledger behind it is not
+     * disposable), that row is permanently orphaned. An empty `POST {}` therefore used to answer
+     * `201` and leave unreachable state behind; it now answers `400` and leaves nothing.
+     */
+    createWallet: async (c) => {
+      const deps = c.get("deps");
+      const scope = scopeOf(c);
+      const body = await readJson(c, walletSchema);
+      const tenantId = body.tenant_id?.trim();
+      if (tenantId === undefined || tenantId === "") {
+        throw new HttpError(
+          400,
+          "invalid_request_body",
+          "request body is invalid: tenant_id: Required",
+        );
+      }
+      authorizeWalletTenant(scope, tenantId);
+      const record: StoreRecord = { ...body, tenant_id: tenantId, id: tenantId };
+      const stored = await deps.store.create(WALLETS, scope, record);
+      return json(c, 201, adminItem("wallet", stored));
+    },
+
     getWallet: async (c) => {
       const scope = scopeOf(c);
       const tenantId = pathParam(c, "tenant_id");
