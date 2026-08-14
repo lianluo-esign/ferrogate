@@ -124,6 +124,74 @@ export function billingEventFilters(url: URL): BillingEventFilter[] {
   return out;
 }
 
+/**
+ * The same narrowing, applied to the LEGACY document rows.
+ *
+ * The feed merges three sources — the tenant object's typed rows, the control mirror, and the
+ * legacy `metering-events` documents — and a filter that reaches only the SQL two lets the third
+ * leak unfiltered rows into a narrowed page (`?provider=nobody` answered with the documents).
+ * Stated over the projected document so it cannot drift from what the caller is shown.
+ */
+export function billingEventDocumentMatches(
+  record: StoreRecord,
+  url: URL,
+): boolean {
+  const want = (name: string): string | undefined => {
+    const raw = url.searchParams.get(name);
+    const trimmed = raw?.trim();
+    return trimmed === undefined || trimmed === "" ? undefined : trimmed;
+  };
+  const str = (value: unknown): string | null => (typeof value === "string" ? value : null);
+
+  const provider = want("provider");
+  if (provider !== undefined && str(record.provider) !== provider) return false;
+
+  const model = want("model");
+  if (model !== undefined && str(record.logical_model) !== model && str(record.provider_model) !== model) {
+    return false;
+  }
+
+  const status = want("status");
+  if (status !== undefined) {
+    const parsed = Number.parseInt(status, 10);
+    if (Number.isSafeInteger(parsed) && record.status_code !== parsed) return false;
+  }
+
+  const group = want("billing_group_id") ?? want("group");
+  if (group !== undefined) {
+    const metadata = record.metadata;
+    const actual =
+      typeof metadata === "object" && metadata !== null
+        ? str((metadata as Record<string, unknown>).billing_group_id)
+        : null;
+    if (actual !== group) return false;
+  }
+
+  const occurred = typeof record.occurred_at_unix === "number" ? record.occurred_at_unix : null;
+  const since = want("since");
+  if (since !== undefined) {
+    const parsed = Number.parseInt(since, 10);
+    if (Number.isSafeInteger(parsed) && (occurred === null || occurred < parsed)) return false;
+  }
+  const until = want("until");
+  if (until !== undefined) {
+    const parsed = Number.parseInt(until, 10);
+    if (Number.isSafeInteger(parsed) && (occurred === null || occurred >= parsed)) return false;
+  }
+
+  return true;
+}
+
+/** Apply the document-level narrowing to a legacy page, leaving its shape intact. */
+function narrowLegacy(
+  page: { items: readonly StoreRecord[]; total: number },
+  url?: URL,
+): { items: StoreRecord[]; total: number } {
+  if (url === undefined) return { items: [...page.items], total: page.total };
+  const items = page.items.filter((record) => billingEventDocumentMatches(record, url));
+  return { items, total: items.length };
+}
+
 /** Join filter predicates onto a WHERE that may or may not already exist. */
 function withFilters(
   base: string,
@@ -248,6 +316,7 @@ async function tenantBillingEventPage(
   tenantId: string,
   limit: number,
   filters: readonly BillingEventFilter[] = [],
+  url?: URL,
 ): Promise<{ items: StoreRecord[]; total: number }> {
   const rowsByKey = new Map<string, StoreRecord>();
   let sourceTotal = 0;
@@ -263,7 +332,7 @@ async function tenantBillingEventPage(
       filters: {},
     },
   );
-  ({ total: sourceTotal, duplicates } = addBillingPage(rowsByKey, legacy));
+  ({ total: sourceTotal, duplicates } = addBillingPage(rowsByKey, narrowLegacy(legacy, url)));
   const control = await controlBillingEventPage(deps.controlDatabase, limit, tenantId, filters);
   const controlAdded = addBillingPage(rowsByKey, control);
   sourceTotal += controlAdded.total;
@@ -416,6 +485,7 @@ async function listBillingAuthority(
   kind: "events" | "outbox",
   tenantOffset = 0,
   filters: readonly BillingEventFilter[] = [],
+  url?: URL,
 ): Promise<{
   items: StoreRecord[];
   total: number;
@@ -429,7 +499,7 @@ async function listBillingAuthority(
   if (scope.kind === "tenant") {
     const page =
       kind === "events"
-        ? tenantBillingEventPage(deps, scope.tenantId, fetchLimit, filters)
+        ? tenantBillingEventPage(deps, scope.tenantId, fetchLimit, filters, url)
         : tenantBillingOutboxPage(deps, scope.tenantId, fetchLimit);
     return page.then((result) => ({
       items: result.items.slice(query.offset, query.offset + query.limit),
@@ -448,7 +518,7 @@ async function listBillingAuthority(
     limit: fetchLimit,
     paginate: false,
   });
-  const legacyAdded = addBillingPage(rowsById, legacy);
+  const legacyAdded = addBillingPage(rowsById, narrowLegacy(legacy, url));
   sourceTotal += legacyAdded.total;
   duplicates += legacyAdded.duplicates;
 
@@ -463,7 +533,7 @@ async function listBillingAuthority(
   for (const tenantId of tenantPage.tenantIds) {
     const page =
       kind === "events"
-        ? await tenantBillingEventPage(deps, tenantId, fetchLimit, filters)
+        ? await tenantBillingEventPage(deps, tenantId, fetchLimit, filters, url)
         : await tenantBillingOutboxPage(deps, tenantId, fetchLimit);
     const tenantAdded = addBillingPage(rowsById, page);
     sourceTotal += tenantAdded.total;
@@ -493,6 +563,7 @@ function listBillingAuthorityHandler(
       kind,
       tenantFanoutOffset(url),
       kind === "events" ? billingEventFilters(url) : [],
+      kind === "events" ? url : undefined,
     );
     return json(c, 200, {
       ...adminListPaginated(page.items, page.total, query.offset, query.limit),
