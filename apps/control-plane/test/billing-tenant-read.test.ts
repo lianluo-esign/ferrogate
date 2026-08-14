@@ -256,3 +256,93 @@ describe("billing admin reads use tenant billing authority", () => {
     ).toEqual({ dead_lettered_at_unix: 1800 });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Server-side narrowing of the billing feed (#967)
+// ---------------------------------------------------------------------------
+
+/** One billing event with the dimensions an operator filters on. */
+function filterEventJson(input: {
+  provider: string
+  model: string
+  status: number
+  group?: string
+}): string {
+  return JSON.stringify({
+    request_id: "req_filter",
+    tenant: { organization_id: TENANT },
+    logical_model: input.model,
+    provider: input.provider,
+    provider_model: `${input.model}-snapshot`,
+    status_code: input.status,
+    cost_usd: 1,
+    ...(input.group === undefined
+      ? {}
+      : { metadata: { billing_group_id: input.group, billing_multiplier: "2" } }),
+  })
+}
+
+describe("the billing feed narrows on filters instead of shipping everything", () => {
+  beforeEach(async () => {
+    await resetD1()
+    await resetBillingState()
+    await registerDurableObjectTenant(TENANT)
+    arm({ store: "d1", staticKeys: [operatorKey], nativeKeys: [tenantKey(TENANT_SECRET, TENANT)] })
+    const tenantDb = tenantObjectDb(TENANT)
+    const insert = (id: string, at: number, json: string) =>
+      tenantDb
+        .prepare(
+          `INSERT INTO billing_events
+             (billing_event_id, tenant_id, request_id, provider_attempt_index, occurred_at_unix, event_json)
+           VALUES (?, ?, ?, 0, ?, ?)`,
+        )
+        .bind(id, TENANT, `req_${id}`, at, json)
+    await tenantDb.batch([
+      insert("evt_openai", 1000, filterEventJson({ provider: "openai", model: "gpt-4o", status: 200, group: "g_std" })),
+      insert("evt_anthropic", 2000, filterEventJson({ provider: "anthropic", model: "claude-4", status: 200, group: "g_premium" })),
+      insert("evt_failed", 3000, filterEventJson({ provider: "openai", model: "gpt-4o", status: 429, group: "g_std" })),
+    ])
+  })
+
+  const read = async (query: string) => {
+    const response = await SELF.fetch(`${BASE}/admin/v1/billing-events${query}`, {
+      headers: bearer(TENANT_SECRET),
+    })
+    expect(response.status, await response.clone().text()).toBe(200)
+    return (await response.json()) as { data: { id: string }[]; total: number }
+  }
+
+  it("filters by provider", async () => {
+    const page = await read("?provider=anthropic")
+    expect(page.data.map((e) => e.id)).toEqual(["evt_anthropic"])
+  })
+
+  it("filters by model, accepting either the logical or the provider spelling", async () => {
+    expect((await read("?model=claude-4")).data.map((e) => e.id)).toEqual(["evt_anthropic"])
+    expect((await read("?model=claude-4-snapshot")).data.map((e) => e.id)).toEqual(["evt_anthropic"])
+  })
+
+  it("filters by status code", async () => {
+    expect((await read("?status=429")).data.map((e) => e.id)).toEqual(["evt_failed"])
+  })
+
+  it("filters by billing group", async () => {
+    expect((await read("?billing_group_id=g_premium")).data.map((e) => e.id)).toEqual([
+      "evt_anthropic",
+    ])
+  })
+
+  it("filters by time window, since inclusive and until exclusive", async () => {
+    const window = await read("?since=2000&until=3000")
+    expect(window.data.map((e) => e.id)).toEqual(["evt_anthropic"])
+  })
+
+  it("combines filters with AND", async () => {
+    expect((await read("?provider=openai&status=200")).data.map((e) => e.id)).toEqual(["evt_openai"])
+  })
+
+  it("answers an empty page rather than the whole feed when nothing matches", async () => {
+    const miss = await read("?provider=zzz-nobody")
+    expect(miss.data).toHaveLength(0)
+  })
+})
