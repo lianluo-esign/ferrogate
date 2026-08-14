@@ -502,3 +502,41 @@ describe("the audit trail survives", () => {
     expect(row?.n).toBe(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// A wallet's id is a FOREIGN identity, so it cannot be invented (#965)
+// ---------------------------------------------------------------------------
+
+describe("POST /admin/v1/wallets requires the tenant it belongs to", () => {
+  it("refuses a body with no tenant_id instead of minting an orphan", async () => {
+    const response = await SELF.fetch(`${BASE}/admin/v1/wallets`, jsonRequest(OPERATOR, "POST", {}));
+
+    // 201 here used to create a wallet keyed to a random UUID — a balance for a tenant that does
+    // not exist, unreachable and (there being no wallet DELETE) impossible to remove.
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as { error?: { code?: string } };
+    expect(body.error?.code).toBe("invalid_request_body");
+
+    const list = await SELF.fetch(`${BASE}/admin/v1/wallets`, { headers: bearer(OPERATOR) });
+    expect(((await list.json()) as { data: unknown[] }).data).toHaveLength(0);
+  });
+
+  it("refuses a blank tenant_id for the same reason", async () => {
+    const response = await SELF.fetch(
+      `${BASE}/admin/v1/wallets`,
+      jsonRequest(OPERATOR, "POST", { tenant_id: "   " }),
+    );
+    expect(response.status).toBe(400);
+  });
+
+  it("still creates the wallet the caller actually named", async () => {
+    const created = await createWalletDocument("t-1", 250);
+    expect(created.status).toBe(201);
+
+    const read = await SELF.fetch(`${BASE}/admin/v1/wallets/t-1`, { headers: bearer(OPERATOR) });
+    expect(read.status).toBe(200);
+    expect((await read.json()) as { wallet: { tenant_id: string } }).toMatchObject({
+      wallet: { tenant_id: "t-1" },
+    });
+  });
+});
