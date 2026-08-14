@@ -346,3 +346,39 @@ describe("the billing feed narrows on filters instead of shipping everything", (
     expect(miss.data).toHaveLength(0)
   })
 })
+
+describe("an operator can narrow the fleet feed to one tenant", () => {
+  beforeEach(async () => {
+    await resetD1()
+    await resetBillingState()
+    await registerDurableObjectTenant(TENANT)
+    arm({ store: "d1", staticKeys: [operatorKey], nativeKeys: [tenantKey(TENANT_SECRET, TENANT)] })
+    const tenantDb = tenantObjectDb(TENANT)
+    await tenantDb
+      .prepare(
+        `INSERT INTO billing_events
+           (billing_event_id, tenant_id, request_id, provider_attempt_index, occurred_at_unix, event_json)
+         VALUES (?, ?, ?, 0, 1700, ?)`,
+      )
+      .bind("evt_only_tenant", TENANT, "req_only", eventJson(TENANT))
+      .run()
+  })
+
+  it("returns that tenant's rows for ?tenant_id=", async () => {
+    const response = await SELF.fetch(`${BASE}/admin/v1/billing-events?tenant_id=${TENANT}`, {
+      headers: bearer(operatorKey.secret),
+    })
+    expect(response.status).toBe(200)
+    const body = (await response.json()) as { data: { id: string; tenant_id: string }[] }
+    expect(body.data.map((e) => e.id)).toEqual(["evt_only_tenant"])
+    expect(body.data.every((e) => e.tenant_id === TENANT)).toBe(true)
+  })
+
+  it("returns an empty page for a tenant with no billing rows", async () => {
+    const response = await SELF.fetch(`${BASE}/admin/v1/billing-events?tenant_id=t-nobody`, {
+      headers: bearer(operatorKey.secret),
+    })
+    expect(response.status).toBe(200)
+    expect((await response.json()) as { data: unknown[] }).toMatchObject({ data: [] })
+  })
+})
