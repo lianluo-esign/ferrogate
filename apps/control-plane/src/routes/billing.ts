@@ -54,6 +54,88 @@ const DEAD_LETTERS = "billing-outbox-dead-letters";
 const USAGE_AGGREGATE_TABLE = "usage_aggregate_rollups";
 const BILLING_EVENTS_TABLE = "billing_events";
 
+/**
+ * Server-side narrowing for the billing-event feeds (#967).
+ *
+ * The feed answered `offset`/`limit` but nothing else, so an operator console asking "what did
+ * THIS tenant spend on THAT provider last week" had to pull the fleet's events down and filter
+ * them in the browser — the load a paginated feed exists to avoid, and one that silently truncates
+ * once the page limit is reached (the filtered rows may not be in the page that was fetched).
+ *
+ * `occurred_at_unix` is a real column and carries an index. The rest of the billing decision —
+ * provider, model, status, the billing group that supplied the multiplier — lives inside
+ * `event_json`, so those predicates are `json_extract`. That is a scan, but it runs INSIDE the
+ * tenant fence and only when a filter was asked for, and it replaces shipping the whole feed.
+ */
+export interface BillingEventFilter {
+  readonly sql: string;
+  readonly params: (string | number)[];
+}
+
+export function billingEventFilters(url: URL): BillingEventFilter[] {
+  const out: BillingEventFilter[] = [];
+  const value = (name: string): string | undefined => {
+    const raw = url.searchParams.get(name);
+    const trimmed = raw?.trim();
+    return trimmed === undefined || trimmed === "" ? undefined : trimmed;
+  };
+  const push = (sql: string, ...params: (string | number)[]): void => {
+    out.push({ sql, params });
+  };
+
+  const provider = value("provider");
+  if (provider !== undefined) push("json_extract(event_json, '$.provider') = ?", provider);
+
+  // EITHER spelling, for the same reason the cost feed matches both: the caller knows the model
+  // they asked for, not whether the row recorded the logical name or the provider's snapshot.
+  const model = value("model");
+  if (model !== undefined) {
+    push(
+      "(json_extract(event_json, '$.logical_model') = ? OR json_extract(event_json, '$.provider_model') = ?)",
+      model,
+      model,
+    );
+  }
+
+  const status = value("status");
+  if (status !== undefined) {
+    const parsed = Number.parseInt(status, 10);
+    if (Number.isSafeInteger(parsed)) push("json_extract(event_json, '$.status_code') = ?", parsed);
+  }
+
+  const group = value("billing_group_id") ?? value("group");
+  if (group !== undefined) {
+    push("json_extract(event_json, '$.metadata.billing_group_id') = ?", group);
+  }
+
+  // `since` INCLUSIVE, `until` EXCLUSIVE, so two adjacent windows partition the feed instead of
+  // both claiming the boundary second — the convention the cost feed already documents.
+  const since = value("since");
+  if (since !== undefined) {
+    const parsed = Number.parseInt(since, 10);
+    if (Number.isSafeInteger(parsed)) push("occurred_at_unix >= ?", parsed);
+  }
+  const until = value("until");
+  if (until !== undefined) {
+    const parsed = Number.parseInt(until, 10);
+    if (Number.isSafeInteger(parsed)) push("occurred_at_unix < ?", parsed);
+  }
+
+  return out;
+}
+
+/** Join filter predicates onto a WHERE that may or may not already exist. */
+function withFilters(
+  base: string,
+  baseParams: (string | number)[],
+  filters: readonly BillingEventFilter[],
+): { where: string; params: (string | number)[] } {
+  if (filters.length === 0) return { where: base, params: baseParams };
+  const clauses = filters.map((f) => f.sql).join(" AND ");
+  const params = [...baseParams, ...filters.flatMap((f) => f.params)];
+  return { where: base === "" ? `WHERE ${clauses}` : `${base} AND ${clauses}`, params };
+}
+
 interface UsageAggregateRow {
   readonly id: string;
   readonly tenant?: string;
@@ -165,6 +247,7 @@ async function tenantBillingEventPage(
   deps: ControlPlaneDeps,
   tenantId: string,
   limit: number,
+  filters: readonly BillingEventFilter[] = [],
 ): Promise<{ items: StoreRecord[]; total: number }> {
   const rowsByKey = new Map<string, StoreRecord>();
   let sourceTotal = 0;
@@ -181,22 +264,23 @@ async function tenantBillingEventPage(
     },
   );
   ({ total: sourceTotal, duplicates } = addBillingPage(rowsByKey, legacy));
-  const control = await controlBillingEventPage(deps.controlDatabase, limit, tenantId);
+  const control = await controlBillingEventPage(deps.controlDatabase, limit, tenantId, filters);
   const controlAdded = addBillingPage(rowsByKey, control);
   sourceTotal += controlAdded.total;
   duplicates += controlAdded.duplicates;
   const db = await tenantBillingDatabaseFor(deps, tenantId);
   if (db !== null) {
+    const narrowed = withFilters("WHERE tenant_id = ?", [tenantId], filters);
     const result = await db
       .prepare(
         `SELECT billing_event_id, tenant_id, request_id, provider_attempt_index,
                 occurred_at_unix, event_json, count(*) OVER() AS total
            FROM ${BILLING_EVENTS_TABLE}
-          WHERE tenant_id = ?
+          ${narrowed.where}
           ORDER BY occurred_at_unix DESC, billing_event_id ASC
           LIMIT ? OFFSET 0`,
       )
-      .bind(tenantId, limit)
+      .bind(...narrowed.params, limit)
       .all<BillingEventAuthorityRow>();
     const authority = {
       items: result.results.map(billingEventDocument),
@@ -217,20 +301,24 @@ async function controlBillingEventPage(
   db: D1Database | null,
   limit: number,
   tenantId?: string,
+  filters: readonly BillingEventFilter[] = [],
 ): Promise<{ items: StoreRecord[]; total: number }> {
   if (db === null) return { items: [], total: 0 };
-  const where = tenantId === undefined ? "" : "WHERE tenant_id = ?";
-  const params = tenantId === undefined ? [limit] : [tenantId, limit];
+  const narrowed = withFilters(
+    tenantId === undefined ? "" : "WHERE tenant_id = ?",
+    tenantId === undefined ? [] : [tenantId],
+    filters,
+  );
   const result = await db
     .prepare(
       `SELECT billing_event_id, tenant_id, request_id, provider_attempt_index,
               occurred_at_unix, event_json, count(*) OVER() AS total
          FROM ${BILLING_EVENTS_TABLE}
-        ${where}
+        ${narrowed.where}
         ORDER BY occurred_at_unix DESC, billing_event_id ASC
         LIMIT ? OFFSET 0`,
     )
-    .bind(...params)
+    .bind(...narrowed.params, limit)
     .all<BillingEventAuthorityRow>();
   return {
     items: result.results.map(billingEventDocument),
@@ -327,6 +415,7 @@ async function listBillingAuthority(
   query: ReturnType<typeof parseListQuery>,
   kind: "events" | "outbox",
   tenantOffset = 0,
+  filters: readonly BillingEventFilter[] = [],
 ): Promise<{
   items: StoreRecord[];
   total: number;
@@ -340,7 +429,7 @@ async function listBillingAuthority(
   if (scope.kind === "tenant") {
     const page =
       kind === "events"
-        ? tenantBillingEventPage(deps, scope.tenantId, fetchLimit)
+        ? tenantBillingEventPage(deps, scope.tenantId, fetchLimit, filters)
         : tenantBillingOutboxPage(deps, scope.tenantId, fetchLimit);
     return page.then((result) => ({
       items: result.items.slice(query.offset, query.offset + query.limit),
@@ -374,7 +463,7 @@ async function listBillingAuthority(
   for (const tenantId of tenantPage.tenantIds) {
     const page =
       kind === "events"
-        ? await tenantBillingEventPage(deps, tenantId, fetchLimit)
+        ? await tenantBillingEventPage(deps, tenantId, fetchLimit, filters)
         : await tenantBillingOutboxPage(deps, tenantId, fetchLimit);
     const tenantAdded = addBillingPage(rowsById, page);
     sourceTotal += tenantAdded.total;
@@ -397,7 +486,14 @@ function listBillingAuthorityHandler(
     const scope = scopeOf(c);
     const url = new URL(c.req.url);
     const query = parseListQuery(url, deps.listDefaultLimit, deps.listMaxLimit);
-    const page = await listBillingAuthority(deps, scope, query, kind, tenantFanoutOffset(url));
+    const page = await listBillingAuthority(
+      deps,
+      scope,
+      query,
+      kind,
+      tenantFanoutOffset(url),
+      kind === "events" ? billingEventFilters(url) : [],
+    );
     return json(c, 200, {
       ...adminListPaginated(page.items, page.total, query.offset, query.limit),
       ...(page.tenantPage === undefined
