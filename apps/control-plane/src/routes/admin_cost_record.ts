@@ -472,6 +472,29 @@ function costFilters(url: URL): Predicate[] {
   const tag = param(url, "tag");
   if (tag !== undefined) predicates.push(tagPredicate(tag));
 
+  // #963 — `?search=` / `?q=` free-text narrowing, the same affordance `pageOf` gives every
+  // document collection and which this SQL path dropped: an operator staring at a six-figure
+  // spend table could page but not FIND, so a console had to pull the whole table down to filter
+  // it client-side. Matched case-insensitively across the columns an operator actually types.
+  // Unindexed `LIKE`, so it scans — only when a needle was asked for, and it replaces a scan of
+  // everything. `%`/`_` are escaped so an underscore in an id is a literal, not a wildcard.
+  const search = param(url, "search") ?? param(url, "q");
+  if (search !== undefined && search.trim() !== "") {
+    const needle = `%${search.trim().replace(/[\\%_]/g, (ch) => `\\${ch}`).toLowerCase()}%`;
+    push(
+      "(lower(coalesce(rl.logical_model, '')) LIKE ? ESCAPE '\\'" +
+        " OR lower(coalesce(rl.provider_model, '')) LIKE ? ESCAPE '\\'" +
+        " OR lower(coalesce(rl.provider, '')) LIKE ? ESCAPE '\\'" +
+        " OR lower(coalesce(rl.tenant, '')) LIKE ? ESCAPE '\\'" +
+        " OR lower(rl.request_id) LIKE ? ESCAPE '\\')",
+      needle,
+      needle,
+      needle,
+      needle,
+      needle,
+    );
+  }
+
   return predicates;
 }
 

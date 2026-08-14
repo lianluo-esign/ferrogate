@@ -69,6 +69,31 @@ export function auditTenantFence(scope: CallerScope): { sql: string; params: str
   return { sql: ` WHERE ${AUDIT_TABLE}.tenant = ?`, params: [scope.tenantId] };
 }
 
+/**
+ * `?search=` / `?q=` over the audit trail — the same free-text narrowing the document store gives
+ * every other collection through `pageOf`, which the SQL-backed path silently dropped: an operator
+ * looking at thousands of rows could page but not FIND, so the console had to fetch the lot.
+ *
+ * The needle is matched case-insensitively against `audit_json` (which carries `action`, `target`,
+ * `outcome` and `message`) plus the two identifier columns an operator actually types. `LIKE` is
+ * unindexed, so this is a scan — acceptable because it only runs when a needle was asked for, and it
+ * replaces a client-side scan of the WHOLE table. `%` and `_` in the needle are escaped so a literal
+ * underscore (ubiquitous in ids) is not a wildcard.
+ */
+function auditSearchPredicate(
+  search: string | null,
+): { sql: string; params: string[] } | null {
+  if (search === null || search.trim() === "") return null;
+  const needle = `%${search.trim().replace(/[\\%_]/g, (ch) => `\\${ch}`).toLowerCase()}%`;
+  return {
+    sql:
+      `(lower(${AUDIT_TABLE}.audit_json) LIKE ? ESCAPE '\\'` +
+      ` OR lower(coalesce(${AUDIT_TABLE}.tenant, '')) LIKE ? ESCAPE '\\'` +
+      ` OR lower(${AUDIT_TABLE}.request_id) LIKE ? ESCAPE '\\')`,
+    params: [needle, needle, needle],
+  };
+}
+
 export interface AuditEventRow {
   readonly id: string;
   readonly request_id: string;
@@ -248,15 +273,24 @@ function listAuditEventsHandler(): Handler {
     }
 
     const fence = auditTenantFence(scope);
+    const search = auditSearchPredicate(query.search);
+    // The fence already emits its own ` WHERE …`, so a search clause joins it with AND and only
+    // opens a WHERE of its own when the caller is unfenced (platform operator).
+    const where =
+      search === null
+        ? fence.sql
+        : fence.sql === ""
+          ? ` WHERE ${search.sql}`
+          : `${fence.sql} AND ${search.sql}`;
     const rows = await db
       .prepare(
         `SELECT ${AUDIT_EVENT_COLUMNS},
                 count(*) OVER() AS total
-           FROM ${AUDIT_TABLE}${fence.sql}
+           FROM ${AUDIT_TABLE}${where}
           ORDER BY occurred_at_unix ASC, id ASC
           LIMIT ? OFFSET ?`,
       )
-      .bind(...fence.params, query.limit, query.offset)
+      .bind(...fence.params, ...(search?.params ?? []), query.limit, query.offset)
       .all<AuditEventRow>();
 
     // `count(*) OVER()` is on every row and absent when there are none; an

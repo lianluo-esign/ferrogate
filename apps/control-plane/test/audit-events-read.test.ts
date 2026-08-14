@@ -287,3 +287,65 @@ describe("the pagination envelope matches Rust", () => {
     expect(new Set(ids).size).toBe(3);
   });
 });
+
+// ---------------------------------------------------------------------------
+// `?search=` — narrowing, not just windowing (#963)
+// ---------------------------------------------------------------------------
+
+describe("the trail narrows on ?search=", () => {
+  it("keeps only rows whose audit payload matches the needle", async () => {
+    await createPolicy(operatorKey.secret, "pol_needle");
+    await createPolicy(operatorKey.secret, "pol_other");
+
+    const hit = await readTrail(operatorKey.secret, "?search=pol_needle");
+    expect(hit.total).toBe(1);
+    expect(JSON.stringify(hit.data[0])).toContain("pol_needle");
+  });
+
+  it("accepts ?q= as the same parameter", async () => {
+    await createPolicy(operatorKey.secret, "pol_qparam");
+    await createPolicy(operatorKey.secret, "pol_elsewhere");
+
+    const hit = await readTrail(operatorKey.secret, "?q=pol_qparam");
+    expect(hit.total).toBe(1);
+  });
+
+  it("matches case-insensitively", async () => {
+    await createPolicy(operatorKey.secret, "pol_mixedcase");
+
+    const hit = await readTrail(operatorKey.secret, "?search=POL_MIXEDCASE");
+    expect(hit.total).toBe(1);
+  });
+
+  it("reports an empty page — not the whole table — when nothing matches", async () => {
+    await createPolicy(operatorKey.secret, "pol_present");
+
+    const miss = await readTrail(operatorKey.secret, "?search=zzz-no-such-row");
+    expect(miss.data).toHaveLength(0);
+    expect(miss.total).toBe(0);
+  });
+
+  it("treats an underscore in the needle as a literal, not a wildcard", async () => {
+    await createPolicy(operatorKey.secret, "pol_ab");
+    // `pol_ab` must not be found by `polxab`: were `_` a LIKE wildcard, it would be.
+    const miss = await readTrail(operatorKey.secret, "?search=polxab");
+    expect(miss.total).toBe(0);
+  });
+
+  it("still fences a tenant to its own rows while searching", async () => {
+    await createPolicy(operatorKey.secret, "pol_platform_only");
+
+    const tenant = await readTrail("k-tenant", "?search=pol_platform_only");
+    expect(tenant.total).toBe(0);
+  });
+
+  it("pages the narrowed set, and the total counts only matches", async () => {
+    await createPolicy(operatorKey.secret, "pol_page_1");
+    await createPolicy(operatorKey.secret, "pol_page_2");
+    await createPolicy(operatorKey.secret, "pol_untouched");
+
+    const first = await readTrail(operatorKey.secret, "?search=pol_page&limit=1");
+    expect(first.data).toHaveLength(1);
+    expect(first.total).toBe(2);
+  });
+});

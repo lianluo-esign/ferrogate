@@ -37,6 +37,7 @@ import {
   PlatformBillingGroupStore,
 } from "../store/platform-billing-group.js";
 import { isMissingPlatformCatalogError } from "../store/platform-model-catalog.js";
+import { matchesSearch } from "../store/query.js";
 import {
   TenantCatalogConflictError,
   TenantCatalogNotFoundError,
@@ -146,8 +147,13 @@ async function listBillingGroups(c: Parameters<Handler>[0]): Promise<Response> {
   const deps = depsOf(c);
   const groups = await billingGroupStore(c).listGroups();
   const query = parseListQuery(new URL(c.req.url), deps.listDefaultLimit, deps.listMaxLimit);
-  const page = query.paginate ? groups.slice(query.offset, query.offset + query.limit) : groups;
-  return json(c, 200, listResponse({ items: page, total: groups.length }, query));
+  // #963 — honor `?search=`/`?q=` like every `pageOf`-backed collection. This handler sliced the
+  // raw list, so the parsed needle was silently dropped and a console could only filter by pulling
+  // every group down. `matchesSearch` is the same predicate (id/name/description) the document
+  // store applies, and the total is post-filter so the page count matches what the caller sees.
+  const matched = groups.filter((group) => matchesSearch(group, query.search));
+  const page = query.paginate ? matched.slice(query.offset, query.offset + query.limit) : matched;
+  return json(c, 200, listResponse({ items: page, total: matched.length }, query));
 }
 
 async function createBillingGroup(c: Parameters<Handler>[0]): Promise<Response> {

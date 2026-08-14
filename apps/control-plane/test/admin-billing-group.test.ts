@@ -339,3 +339,62 @@ describe("virtual-key billing_group_id assignment", () => {
     expect(await tenantKeyBillingGroup("vk_bad")).toBeUndefined();
   });
 });
+
+// ---------------------------------------------------------------------------
+// `?search=` — the list handler honored paging but silently dropped the needle (#963)
+// ---------------------------------------------------------------------------
+
+describe("GET /admin/v1/billing-groups narrows on ?search=", () => {
+  it("keeps only groups matching the needle, and totals the matches", async () => {
+    await request(OPERATOR, "POST", "/admin/v1/billing-groups", {
+      id: "bg_needle",
+      name: "anthropic premium",
+      multiplier: 2,
+    });
+    await request(OPERATOR, "POST", "/admin/v1/billing-groups", {
+      id: "bg_other",
+      name: "openai standard",
+      multiplier: 1,
+    });
+
+    const hit = await request(OPERATOR, "GET", "/admin/v1/billing-groups?search=anthropic");
+    expect(hit.status).toBe(200);
+    expect(hit.body).toMatchObject({ total: 1 });
+    expect((hit.body as { data: { id: string }[] }).data.map((g) => g.id)).toEqual(["bg_needle"]);
+  });
+
+  it("accepts ?q=, matches case-insensitively, and pages the narrowed set", async () => {
+    await request(OPERATOR, "POST", "/admin/v1/billing-groups", {
+      id: "bg_p1",
+      name: "promo tier",
+      multiplier: 0,
+    });
+    await request(OPERATOR, "POST", "/admin/v1/billing-groups", {
+      id: "bg_p2",
+      name: "promo extra",
+      multiplier: 0,
+    });
+    await request(OPERATOR, "POST", "/admin/v1/billing-groups", {
+      id: "bg_keep",
+      name: "baseline",
+      multiplier: 1,
+    });
+
+    const page = await request(OPERATOR, "GET", "/admin/v1/billing-groups?q=PROMO&limit=1");
+    expect(page.status).toBe(200);
+    expect(page.body).toMatchObject({ total: 2 });
+    expect((page.body as { data: unknown[] }).data).toHaveLength(1);
+  });
+
+  it("answers an empty page — not every group — when nothing matches", async () => {
+    await request(OPERATOR, "POST", "/admin/v1/billing-groups", {
+      id: "bg_present",
+      name: "present",
+      multiplier: 1,
+    });
+
+    const miss = await request(OPERATOR, "GET", "/admin/v1/billing-groups?search=zzz-nope");
+    expect(miss.body).toMatchObject({ total: 0 });
+    expect((miss.body as { data: unknown[] }).data).toHaveLength(0);
+  });
+});
