@@ -522,9 +522,12 @@ async function listBillingAuthority(
   sourceTotal += legacyAdded.total;
   duplicates += legacyAdded.duplicates;
 
+  // The un-attributed control rows are a SOURCE of this feed like any other, so the filters have
+  // to reach them too. Passing them only to the per-tenant reads left these rows in every narrowed
+  // page: `?provider=zzz-nobody` still answered with the fleet's un-attributed events.
   const control =
     kind === "events"
-      ? await controlBillingEventPage(deps.controlDatabase, fetchLimit)
+      ? await controlBillingEventPage(deps.controlDatabase, fetchLimit, undefined, filters)
       : await controlBillingOutboxPage(deps.controlDatabase, fetchLimit);
   const controlAdded = addBillingPage(rowsById, control);
   sourceTotal += controlAdded.total;
