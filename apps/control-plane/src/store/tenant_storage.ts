@@ -64,18 +64,12 @@ import {
   type TenantJurisdiction,
   type TenantModelCatalogSeedGraph,
   locationHintFromCloudflareSignal,
+  placementSignalFromRequest,
   provisionTenantStorage,
   tenantJurisdictionForResidencyRegions,
 } from "@ferrogate/storage";
 import type { ControlPlaneDeps } from "../ports.js";
 import { PlatformModelCatalogStore } from "./platform-model-catalog.js";
-
-interface CloudflareRequest extends Request {
-  readonly cf?: {
-    readonly continent?: unknown;
-    readonly colo?: unknown;
-  };
-}
 
 interface ResidencyPolicyRow {
   readonly residency_regions_json: string | null;
@@ -159,11 +153,14 @@ export async function provisionTenantStorageFor(
   if (deps.controlDatabase === null) return false;
   const controlDatabase = deps.controlDatabase;
   try {
-    const cf = (request as CloudflareRequest | undefined)?.cf;
-    const placement = locationHintFromCloudflareSignal({
-      continent: cf?.continent,
-      colo: cf?.colo,
-    });
+    // Prefer the request's native `cf`, but fall back to the `x-ferrogate-cf-*` headers a trusted BFF
+    // forwards: a Worker→Worker service-binding hop strips `cf`, so a relayed registration would
+    // otherwise present no signal and fall to the US-West (`wnam`) default. `origin` tags the source
+    // on the roster row so an operator can tell an edge-header placement from a native `cf` one.
+    const { signal, origin } = placementSignalFromRequest(request);
+    const placement = locationHintFromCloudflareSignal(signal);
+    const locationHintSource =
+      origin === "edge-header" ? `edge-header;${placement.source}` : placement.source;
     const jurisdiction = await tenantJurisdictionFromPolicy(controlDatabase, tenantId);
     // The MANAGED platform catalog (#891) is the seed source when this
     // deployment has adopted it. It is read over the CONTROL_DATA facade (the
@@ -178,7 +175,7 @@ export async function provisionTenantStorageFor(
       tenantId,
       {
         locationHint: placement.locationHint,
-        locationHintSource: placement.source,
+        locationHintSource,
         locationHintRecordedAtUnix: Math.floor(Date.now() / 1000),
         ...(jurisdiction === undefined ? {} : { jurisdiction }),
         catalogGraphLoader: () => exportPlatformCatalogSeed(controlDatabase),

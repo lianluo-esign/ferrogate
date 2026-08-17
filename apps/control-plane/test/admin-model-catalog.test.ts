@@ -14,7 +14,7 @@ import type { InferenceBindings } from "../../gateway/src/inference/ports.js";
 import { tenantModelCatalogFromD1 } from "../../gateway/src/inference/tenant-catalog.js";
 import { resolveTenantStorage } from "../src/adapters.js";
 import type { ControlPlaneBindings } from "../src/ports.js";
-import { runScheduledTick } from "../src/schedule/scheduled.js";
+import { CATALOG_RECONCILE_PERIOD_MIN, runScheduledTick } from "../src/schedule/scheduled.js";
 import {
   TenantCatalogConflictError,
   TenantModelCatalogStore,
@@ -561,9 +561,11 @@ describe("tenant model catalog CRUD", () => {
       ),
     ).rejects.toThrow("audit append failed");
 
+    // The catalog-audit backstop sweep now runs only on a coarse cadence; pin the
+    // tick to a reconcile window so this behaviour test exercises the sweep.
     const report = await runScheduledTick(
       env as unknown as ControlPlaneBindings,
-      Math.floor(Date.now() / 1000),
+      CATALOG_RECONCILE_PERIOD_MIN * 60,
     );
     expect(report.tenantCatalogAudit).toMatchObject({
       scanned: 1,
@@ -595,7 +597,8 @@ describe("tenant model catalog CRUD", () => {
 
   it("uses the dispatch router for native-binding tenant audit outboxes", async () => {
     const tenantId = freshTenantId("native-audit-outbox");
-    const now = Math.floor(Date.now() / 1000);
+    // Aligned to a catalog-reconcile window so the coarse-cadence backstop sweep runs.
+    const now = CATALOG_RECONCILE_PERIOD_MIN * 60;
     const nativeDb = tenantDbA();
     await db()
       .prepare(

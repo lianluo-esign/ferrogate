@@ -37,6 +37,62 @@ export interface TenantPlacementSignal {
   readonly colo?: unknown;
 }
 
+/**
+ * Headers a trusted edge (a BFF at its own ingress) forwards so the control plane can recover the
+ * end user's placement signal. A Worker→Worker service-binding hop does NOT carry the caller's
+ * `request.cf`, so a BFF that relays registration reads `cf.continent`/`cf.colo` at its own ingress
+ * and re-emits them here; the control plane reads them as a fallback when `request.cf` is absent.
+ */
+export const CF_CONTINENT_HEADER = "x-ferrogate-cf-continent";
+export const CF_COLO_HEADER = "x-ferrogate-cf-colo";
+
+export type TenantPlacementSignalOrigin = "cf" | "edge-header" | "none";
+
+/**
+ * Minimal request shape needed to derive a placement signal (native `cf` or forwarded headers).
+ * `cf` is `unknown` so any runtime `Request` structurally matches regardless of how its `cf`
+ * generic is parameterised (the Workers `Request<…, CfProperties>` init shape omits continent/colo);
+ * the continent/colo are narrowed at read time.
+ */
+export interface PlacementRequestLike {
+  readonly cf?: unknown;
+  readonly headers?: { get(name: string): string | null };
+}
+
+function nonEmptySignalString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() !== "" ? value : undefined;
+}
+
+/**
+ * Resolve the placement signal for a request, preferring the native Cloudflare `cf` object and
+ * falling back to the forwarded `x-ferrogate-cf-*` headers (see {@link CF_CONTINENT_HEADER}). The
+ * returned `origin` records provenance so callers can distinguish an edge-header placement from a
+ * native `cf` one; `none` means neither was present (caller falls back to the placement default).
+ */
+export function placementSignalFromRequest(request?: PlacementRequestLike): {
+  readonly signal: TenantPlacementSignal;
+  readonly origin: TenantPlacementSignalOrigin;
+} {
+  const cf = request?.cf as { continent?: unknown; colo?: unknown } | undefined;
+  const cfContinent = nonEmptySignalString(cf?.continent);
+  const cfColo = nonEmptySignalString(cf?.colo);
+  if (cfContinent !== undefined || cfColo !== undefined) {
+    return { signal: { continent: cfContinent, colo: cfColo }, origin: "cf" };
+  }
+  const headers = request?.headers;
+  if (headers) {
+    const headerContinent = nonEmptySignalString(headers.get(CF_CONTINENT_HEADER));
+    const headerColo = nonEmptySignalString(headers.get(CF_COLO_HEADER));
+    if (headerContinent !== undefined || headerColo !== undefined) {
+      return {
+        signal: { continent: headerContinent, colo: headerColo },
+        origin: "edge-header",
+      };
+    }
+  }
+  return { signal: {}, origin: "none" };
+}
+
 export interface TenantPlacementDecision {
   readonly locationHint: TenantLocationHint;
   readonly source: string;

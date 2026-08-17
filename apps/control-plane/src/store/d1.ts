@@ -87,6 +87,7 @@ import {
   type StoreMutation,
   type StoreRecord,
 } from "../ports.js";
+import type { AuditSink } from "./audit-sink.js";
 import { isUnfilteredQuery, pageOf } from "./query.js";
 
 /** The generic control-plane document table (`sql/d1-ts/control/`). */
@@ -311,6 +312,13 @@ export interface D1ControlPlaneStoreOptions {
   readonly auditDatabase?: D1Database;
   /** Object-local delete mark prefix; only valid with `isolation: "object"`. */
   readonly tombstoneMarkPrefix?: string;
+  /**
+   * Optional per-request audit deferral. When present AND active, a mutation's
+   * audit-chain append is handed to the sink (to be flushed on `ctx.waitUntil`)
+   * instead of awaited inline. Absent/inactive ⇒ synchronous audit, unchanged.
+   * See {@link AuditSink}.
+   */
+  readonly auditSink?: AuditSink | null;
 }
 
 export class D1ControlPlaneStore implements ControlPlaneStore {
@@ -322,10 +330,12 @@ export class D1ControlPlaneStore implements ControlPlaneStore {
   readonly #requestId: string;
   readonly #now: () => number;
   readonly #newId: () => string;
+  readonly #auditSink: AuditSink | null;
 
   constructor(db: D1Database, options: D1ControlPlaneStoreOptions = {}) {
     this.#db = db;
     this.#auditDb = options.auditDatabase ?? db;
+    this.#auditSink = options.auditSink ?? null;
     this.#resourceTable = options.resourceTable ?? RESOURCE_TABLE;
     const isolation = options.isolation ?? "control";
     if (isolation === "object") {
@@ -567,7 +577,7 @@ export class D1ControlPlaneStore implements ControlPlaneStore {
       .first<{ revision: number }>();
     if (inserted === null) throw new StoreConflictError(collection, stored.id);
 
-    await this.#audit("create", collection, stored, inserted.revision, scope);
+    await this.#appendAudit("create", collection, stored, inserted.revision, scope);
     return stored;
   }
 
@@ -665,7 +675,7 @@ export class D1ControlPlaneStore implements ControlPlaneStore {
         )
         .run();
       if ((result.meta.changes ?? 0) > 0) {
-        await this.#audit("merge", collection, next, existing.revision + 1, scope);
+        await this.#appendAudit("merge", collection, next, existing.revision + 1, scope);
         return { kind: "merged", record: next };
       }
     }
@@ -717,7 +727,7 @@ export class D1ControlPlaneStore implements ControlPlaneStore {
     if (result === undefined) return false;
     if ((result.meta.changes ?? 0) === 0) return false;
 
-    await this.#audit(
+    await this.#appendAudit(
       "remove",
       collection,
       existing?.record ?? { id },
@@ -1012,7 +1022,7 @@ export class D1ControlPlaneStore implements ControlPlaneStore {
       const changes = results.map((result) => result.meta.changes ?? 0);
       if (changes.every((count) => count > 0)) {
         for (const entry of audits) {
-          await this.#audit(entry.action, entry.collection, entry.record, entry.revision, scope);
+          await this.#appendAudit(entry.action, entry.collection, entry.record, entry.revision, scope);
         }
         return next;
       }
@@ -1136,7 +1146,7 @@ export class D1ControlPlaneStore implements ControlPlaneStore {
         )
         .run();
       if ((result.meta.changes ?? 0) > 0) {
-        await this.#audit(action, collection, next, existing.revision + 1, scope);
+        await this.#appendAudit(action, collection, next, existing.revision + 1, scope);
         return next;
       }
     }
@@ -1150,6 +1160,30 @@ export class D1ControlPlaneStore implements ControlPlaneStore {
   // -------------------------------------------------------------------------
   // Audit
   // -------------------------------------------------------------------------
+
+  /**
+   * Route an audit append through the per-request {@link AuditSink} when one is
+   * active, else await it inline (the default for every path and every test).
+   *
+   * Deferral is OPT-IN and handler-scoped: the row INSERT the caller performed
+   * is already durable before this runs (see `create`/`#update`), and the audit
+   * chain is per-tenant, so a latency-critical handler (login mint) may flush
+   * the evidence on `ctx.waitUntil` without weakening any other tenant's chain.
+   */
+  #appendAudit(
+    action: AuditAction,
+    collection: string,
+    record: StoreRecord,
+    revision: number,
+    scope: CallerScope,
+  ): Promise<void> {
+    const sink = this.#auditSink;
+    if (sink !== null && sink.active) {
+      sink.defer(() => this.#audit(action, collection, record, revision, scope));
+      return Promise.resolve();
+    }
+    return this.#audit(action, collection, record, revision, scope);
+  }
 
   /**
    * Append the durable evidence row for an APPLIED mutation, LINKED to the row

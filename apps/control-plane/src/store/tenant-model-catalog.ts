@@ -143,7 +143,7 @@ export interface TenantCatalogAuditSweepReport {
   readonly scanned: number;
   readonly reconciled: number;
   readonly failed: number;
-  readonly skipped: "control_database_unavailable" | null;
+  readonly skipped: "control_database_unavailable" | "cadence_skipped" | null;
 }
 
 export interface TenantModelCatalogStoreOptions {

@@ -196,6 +196,7 @@ export async function revokeAdminConsoleSessionKeys(
   deps: ControlPlaneDeps,
   tenantId: string,
   adminUserId: string,
+  opts?: { readonly exceptKeyId?: string },
 ): Promise<number> {
   const scope = { kind: "tenant", tenantId } as const;
   const page = await deps.store.list(VIRTUAL_KEYS_COLLECTION, scope, LIST_EVERYTHING);
@@ -203,6 +204,11 @@ export async function revokeAdminConsoleSessionKeys(
   let revoked = 0;
   for (const record of page.items) {
     if (record.name !== ADMIN_CONSOLE_SESSION_KEY_NAME) continue;
+    // Spare the freshly-minted key when the sweep runs AFTER the mint (deferred
+    // login path). It carries the same name + user_id, so without this guard the
+    // sweep would revoke the very key just handed to the client. Covers both the
+    // attributed and unattributed-legacy branches below.
+    if (opts?.exceptKeyId !== undefined && String(record.id) === opts.exceptKeyId) continue;
     // Already fully revoked — Rust skips a row that is both revoked and
     // disabled so a repeat sweep is free.
     if (record.revoked === true && record.enabled === false) continue;
@@ -248,13 +254,19 @@ export interface ConsoleKeyMintRequest {
  *  3. the document, then the credential rows in the LOOSEN order (tenant row
  *     first), so a crash leaves a key that cannot yet authenticate.
  *
- * Returns the plaintext secret. It is shown once and is never recoverable,
- * exactly like `POST /admin/v1/virtual-keys`.
+ * Returns the plaintext secret (shown once, never recoverable, exactly like
+ * `POST /admin/v1/virtual-keys`) AND the new key's id, so a caller that defers
+ * the sweep can pass it as `exceptKeyId` to avoid revoking this very key.
+ *
+ * `opts.skipRevokeSweep` lets the login path move step 2 (the prior-session
+ * sweep) OFF the synchronous response path onto `ctx.waitUntil`; the caller
+ * MUST then run the sweep itself with `{ exceptKeyId }` set to the returned id.
  */
 export async function provisionGatewayApiKey(
   deps: ControlPlaneDeps,
   request: ConsoleKeyMintRequest,
-): Promise<string> {
+  opts?: { readonly skipRevokeSweep?: boolean },
+): Promise<{ secret: string; keyId: string }> {
   await requireUsableConsoleTenancy(deps, {
     tenantId: request.tenantId,
     projectId: request.projectId,
@@ -262,7 +274,9 @@ export async function provisionGatewayApiKey(
     userId: request.adminUserId,
   });
 
-  await revokeAdminConsoleSessionKeys(deps, request.tenantId, request.adminUserId);
+  if (opts?.skipRevokeSweep !== true) {
+    await revokeAdminConsoleSessionKeys(deps, request.tenantId, request.adminUserId);
+  }
 
   const secret = mintSecret();
   const now = Math.floor(Date.now() / 1000);
@@ -292,5 +306,5 @@ export async function provisionGatewayApiKey(
     record,
   );
   await project(deps, stored, "loosen");
-  return secret;
+  return { secret, keyId: String(stored.id) };
 }

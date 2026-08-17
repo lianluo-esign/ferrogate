@@ -714,13 +714,15 @@ export class ControlPlaneAdminSessionPort implements AdminSessionPort {
     userId: string;
     role: string;
   }): Promise<string> {
-    return await provisionGatewayApiKey(this.#deps, {
-      tenantId: args.tenantId,
-      projectId: args.projectId,
-      workspaceId: args.workspaceId,
-      adminUserId: args.userId,
-      role: membershipRoleFromStored(args.role),
-    });
+    return (
+      await provisionGatewayApiKey(this.#deps, {
+        tenantId: args.tenantId,
+        projectId: args.projectId,
+        workspaceId: args.workspaceId,
+        adminUserId: args.userId,
+        role: membershipRoleFromStored(args.role),
+      })
+    ).secret;
   }
 
   async mintVirtualApiKeySecret(): Promise<{

@@ -27,6 +27,7 @@ import {
   TENANT_RESOURCE_TABLE,
   TENANT_RESOURCE_TOMBSTONE_MARK_PREFIX,
 } from "./d1.js";
+import type { AuditSink } from "./audit-sink.js";
 import { pageOf } from "./query.js";
 import { backfillTenantResourceKinds } from "./resource-backfill.js";
 import { resourceKindPlacement } from "./resource-kinds.js";
@@ -57,6 +58,14 @@ export interface SplitControlPlaneStoreOptions {
   readonly requestId?: string | null;
   readonly now?: () => number;
   readonly newId?: () => string;
+  /**
+   * Per-request audit-append sink. When present AND active, control/tenant
+   * stores defer audit-chain writes off the synchronous path (login mint). It
+   * flows via `#options` into BOTH the control store and every tenant store
+   * (whose `auditDatabase` is this same control DB), so a single sink governs
+   * deferral across the whole split. Absent for every non-login path/test.
+   */
+  readonly auditSink?: AuditSink | null;
 }
 
 export class SplitControlPlaneStore implements ControlPlaneStore {
@@ -65,6 +74,8 @@ export class SplitControlPlaneStore implements ControlPlaneStore {
   readonly #tenantRouter: TenantDatabaseRouter;
   readonly #registry: ControlDatabaseTenantRegistry;
   readonly #options: SplitControlPlaneStoreOptions;
+  // Per-request memo (this store is constructed per request — `#options.requestId`).
+  readonly #tenantStores = new Map<string, Promise<D1ControlPlaneStore>>();
 
   constructor(
     controlDb: D1Database,
@@ -86,10 +97,26 @@ export class SplitControlPlaneStore implements ControlPlaneStore {
     return scope.kind === "tenant" && scope.tenantId.trim() !== "";
   }
 
-  async #tenantStore(tenantId: string): Promise<D1ControlPlaneStore> {
+  #tenantStore(tenantId: string): Promise<D1ControlPlaneStore> {
     const normalized = tenantId.trim();
     if (normalized === "")
       throw new Error("tenant-private resource requires a non-empty tenant_id");
+    // One admit resolves the SAME declaredTenant up to three times (workspace,
+    // project, tenant-account reads), and the roster fan-out re-touches tenants;
+    // without this memo each resolution re-ran `registry.get` + the
+    // `backfillTenantResourceKinds` probe against the same object. The resolved
+    // store is stateless and this instance is per request, so caching the Promise
+    // (which also collapses concurrent callers onto one build) is safe. A rejected
+    // build is evicted so it never poisons a later reader in the same request.
+    const cached = this.#tenantStores.get(normalized);
+    if (cached !== undefined) return cached;
+    const building = this.#buildTenantStore(normalized);
+    this.#tenantStores.set(normalized, building);
+    building.catch(() => this.#tenantStores.delete(normalized));
+    return building;
+  }
+
+  async #buildTenantStore(normalized: string): Promise<D1ControlPlaneStore> {
     const registration = await this.#registry.get(normalized);
     const address: TenantObjectAddress | undefined =
       registration === undefined

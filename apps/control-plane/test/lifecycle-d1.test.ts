@@ -26,7 +26,13 @@ import { SELF, env as testEnv } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { JsonTenancyLifecycleGate, resolveLifecycle } from "../src/adapters.js";
 import type { ApiOperation } from "../src/contract.js";
-import type { AuthContext, ControlPlaneBindings, ControlPlaneStore } from "../src/ports.js";
+import type {
+  AuthContext,
+  CallerScope,
+  ControlPlaneBindings,
+  ControlPlaneStore,
+  StoreRecord,
+} from "../src/ports.js";
 import { StoreTenancyLifecycleGate } from "../src/store/lifecycle.js";
 import { MemoryControlPlaneStore } from "../src/store/memory.js";
 import { applySchema, db, resetD1, seedD1 } from "./d1.js";
@@ -502,5 +508,166 @@ describe("StoreTenancyLifecycleGate against a failing store", () => {
     // touched and the request is not turned into a 503 by an outage it does not
     // depend on.
     expect(await gate.admit(operatorAuth, operation)).toEqual({ admitted: true });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The chain resolves against the KNOWN tenant's object DIRECTLY, and only
+// widens to the platform-operator scan on a miss. This is the guard for the
+// O(N)-in-fleet-size fan-out that made every `/admin/v1/*` request pay ~8s:
+// a native key whose workspace/project belong to the tenant it declares must
+// touch that one tenant and NEVER read `projects`/`workspaces` under the
+// platform scope (the scan). The defensive case — a row attributed to another
+// tenant — must still fall back to that scan and deny.
+// ---------------------------------------------------------------------------
+
+interface RecordedGet {
+  readonly collection: string;
+  readonly scopeKind: CallerScope["kind"];
+  readonly tenantId: string | null;
+  readonly id: string;
+}
+
+interface OwnedRow {
+  readonly collection: string;
+  readonly id: string;
+  /** The tenant whose object physically holds this row. */
+  readonly owner: string;
+  readonly record: StoreRecord;
+}
+
+/**
+ * A store that models the split store's routing: a `tenant`-scoped read sees a
+ * row only from its OWNER's object (`idFromName` — one object, no scan); a
+ * `platform_operator` read sees every row (the fleet fan-out). Every `get` is
+ * recorded so a test can assert which scope resolved each row.
+ */
+function recordingGate(rows: readonly OwnedRow[]): {
+  gate: StoreTenancyLifecycleGate;
+  calls: RecordedGet[];
+} {
+  const calls: RecordedGet[] = [];
+  const store = new Proxy({} as ControlPlaneStore, {
+    get(_target, property) {
+      if (property !== "get") {
+        return () => Promise.reject(new Error(`unexpected store call: ${String(property)}`));
+      }
+      return (collection: string, scope: CallerScope, id: string): Promise<StoreRecord | null> => {
+        calls.push({
+          collection,
+          scopeKind: scope.kind,
+          tenantId: scope.kind === "tenant" ? scope.tenantId : null,
+          id,
+        });
+        const match = rows.find((row) => row.collection === collection && row.id === id);
+        if (match === undefined) return Promise.resolve(null);
+        if (scope.kind === "tenant") {
+          return Promise.resolve(scope.tenantId === match.owner ? match.record : null);
+        }
+        return Promise.resolve(match.record);
+      };
+    },
+  });
+  return {
+    gate: new StoreTenancyLifecycleGate(store, new JsonTenancyLifecycleGate({})),
+    calls,
+  };
+}
+
+const listWorkspaces = { operationId: "listWorkspaces" } as ApiOperation;
+
+describe("StoreTenancyLifecycleGate addresses the declared tenant before scanning", () => {
+  it("resolves a native key's chain without a single platform-scope scan of projects/workspaces", async () => {
+    const { gate, calls } = recordingGate([
+      {
+        collection: "workspaces",
+        id: "ws_1",
+        owner: "tenant_a",
+        record: { id: "ws_1", tenant_id: "tenant_a", project_id: "pr_1", status: "active" },
+      },
+      {
+        collection: "projects",
+        id: "pr_1",
+        owner: "tenant_a",
+        record: { id: "pr_1", tenant_id: "tenant_a", status: "active" },
+      },
+      {
+        collection: "tenant-accounts",
+        id: "tenant_a",
+        owner: "tenant_a",
+        record: { id: "tenant_a", status: "active" },
+      },
+    ]);
+    const auth = {
+      subject: "k",
+      tenancy: { tenantId: "tenant_a", projectId: "pr_1", workspaceId: "ws_1" },
+      scopes: ["admin.read"],
+      platformOperator: false,
+      source: "durable_native",
+    } as AuthContext;
+
+    expect(await gate.admit(auth, listWorkspaces)).toEqual({ admitted: true });
+
+    // The workspace and project were resolved by a tenant-scoped read of the ONE
+    // declared tenant...
+    expect(
+      calls.filter((c) => c.collection === "workspaces" && c.scopeKind === "tenant"),
+    ).toEqual([{ collection: "workspaces", scopeKind: "tenant", tenantId: "tenant_a", id: "ws_1" }]);
+    expect(
+      calls.filter((c) => c.collection === "projects" && c.scopeKind === "tenant"),
+    ).toEqual([{ collection: "projects", scopeKind: "tenant", tenantId: "tenant_a", id: "pr_1" }]);
+    // ...and the fleet scan (platform-operator read of a non-id-keyed kind) never
+    // fired. `tenant-accounts` is id-keyed and legitimately reads platform-scoped.
+    expect(
+      calls.filter(
+        (c) =>
+          c.scopeKind === "platform_operator" &&
+          (c.collection === "workspaces" || c.collection === "projects"),
+      ),
+    ).toEqual([]);
+  });
+
+  it("falls back to the platform scan for a workspace attributed to ANOTHER tenant, and denies", async () => {
+    const { gate, calls } = recordingGate([
+      // The declared workspace physically lives in tenant_b's object, which is
+      // SUSPENDED — the exact row a tenant-scoped read of tenant_a cannot see.
+      {
+        collection: "workspaces",
+        id: "ws_1",
+        owner: "tenant_b",
+        record: { id: "ws_1", tenant_id: "tenant_b", project_id: "pr_1", status: "active" },
+      },
+      {
+        collection: "tenant-accounts",
+        id: "tenant_a",
+        owner: "tenant_a",
+        record: { id: "tenant_a", status: "active" },
+      },
+      {
+        collection: "tenant-accounts",
+        id: "tenant_b",
+        owner: "tenant_b",
+        record: { id: "tenant_b", status: "suspended" },
+      },
+    ]);
+    const auth = {
+      subject: "k",
+      tenancy: { tenantId: "tenant_a", workspaceId: "ws_1" },
+      scopes: ["admin.read"],
+      platformOperator: false,
+      source: "durable_native",
+    } as AuthContext;
+
+    const decision = await gate.admit(auth, listWorkspaces);
+    // The suspension on the workspace's REAL parent still applies — the gate must
+    // not fail open just because the caller declared the wrong tenant.
+    expect(decision.admitted).toBe(false);
+    // It was the platform-scope fallback that surfaced the cross-tenant row.
+    expect(
+      calls.some(
+        (c) =>
+          c.collection === "workspaces" && c.scopeKind === "platform_operator" && c.id === "ws_1",
+      ),
+    ).toBe(true);
   });
 });

@@ -95,6 +95,7 @@ import {
 import { MemoryControlPlaneStore, type MemoryStoreSeed } from "./store/memory.js";
 import { PlatformModelCatalogStore } from "./store/platform-model-catalog.js";
 import { SplitControlPlaneStore } from "./store/split.js";
+import { DeferredAuditSink, type AuditSink } from "./store/audit-sink.js";
 import { UnprovisionedTenantDatabaseRouter } from "./store/tenancy.js";
 
 // ---------------------------------------------------------------------------
@@ -1143,6 +1144,12 @@ function memoryStore(env: ControlPlaneBindings): MemoryControlPlaneStore {
 export interface RequestContext {
   /** `x-request-id`, stamped onto every audit row this request writes. */
   readonly requestId?: string | null;
+  /**
+   * Per-request audit-append sink. Threaded into the split store so a
+   * latency-critical handler (login mint) can defer audit-chain writes onto
+   * `ctx.waitUntil`. Null/absent everywhere else → synchronous audits.
+   */
+  readonly auditSink?: AuditSink | null;
 }
 
 /**
@@ -1186,6 +1193,7 @@ export function resolveStore(
   }
   return new SplitControlPlaneStore(controlDb, resolveTenantStorage(env, controlDb), {
     requestId: context.requestId ?? null,
+    auditSink: context.auditSink ?? null,
   });
 }
 
@@ -1650,7 +1658,11 @@ export function resolveDeps(
   context: RequestContext = {},
 ): ControlPlaneDeps {
   const controlDatabase = controlDatabaseFor(env);
-  const store = resolveStore(env, context, controlDatabase);
+  // One per-request sink, shared between the store (which defers into it) and
+  // the handler (which activates it around the login mint, then drains onto
+  // `ctx.waitUntil`). Inactive by default, so every other path audits inline.
+  const auditSink = new DeferredAuditSink();
+  const store = resolveStore(env, { ...context, auditSink }, controlDatabase);
   const tenantDatabases = resolveTenantDatabases(env, controlDatabase);
 
   const corsAllowedOrigin = env.ADMIN_CONSOLE_ALLOWED_ORIGIN?.trim();
@@ -1659,6 +1671,7 @@ export function resolveDeps(
     lifecycle: resolveLifecycle(env, store),
     rbac: resolveRbac(env, controlDatabase),
     store,
+    auditSink,
     tenantDatabases,
     tenantStorage: resolveTenantStorage(env, controlDatabase),
     tenantObjectOperator: resolveTenantObjectOperator(env, controlDatabase),

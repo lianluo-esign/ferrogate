@@ -3,6 +3,13 @@ main = "src/worker.ts"
 compatibility_date = "2025-06-01"
 compatibility_flags = ["nodejs_compat"]
 
+# Smart Placement: login is a control-DO-dense path making several serial RPCs to
+# the SINGLE-REGION control ControlDataObject. Placing the worker near that DO trades
+# N cross-region round trips for ~1 WAN leg (user->worker) + intra-region RPCs.
+# Adaptive over ~24h; DO-call awareness must be tail-verified.
+[placement]
+mode = "smart"
+
 # FALLBACK vars for the ports in `src/adapters.ts`.
 #
 # These are no longer the credential path: `resolveApiKeys` resolves operator

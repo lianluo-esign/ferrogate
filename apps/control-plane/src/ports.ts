@@ -26,6 +26,7 @@ import type {
 // node importer of this module's siblings.
 import type { TenantDataNamespace } from "@ferrogate/storage/durable-objects";
 import type { ApiOperation } from "./contract.js";
+import type { ManagedAuditSink } from "./store/audit-sink.js";
 import type { BillingFleetService } from "./store/billing-fleet.js";
 import type { SiteDomainCertificatePort } from "./site_domain_certificates.js";
 import type { SiteDomainTxtResolver } from "./site_domain_txt.js";
@@ -423,6 +424,13 @@ export interface ControlPlaneDeps {
   readonly lifecycle: TenancyLifecycleGatePort;
   readonly rbac: RbacAuthorizerPort;
   readonly store: ControlPlaneStore;
+  /**
+   * Per-request audit-append sink shared with {@link store}. A latency-critical
+   * handler activates it around the writes it wants deferred, then drains the
+   * collected work onto `ctx.waitUntil`. Optional: mock deps in tests omit it,
+   * and an absent/inactive sink audits synchronously as before.
+   */
+  readonly auditSink?: ManagedAuditSink;
   /**
    * `@ferrogate/storage`'s `TenantDatabaseRouter` — the tenantId → per-tenant D1
    * handle seam, and the reason the database-per-tenant directive is in effect

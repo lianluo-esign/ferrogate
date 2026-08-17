@@ -69,6 +69,16 @@ export interface AdminRefreshTokenRow {
 }
 
 /**
+ * The user and ALL their memberships, resolved in ONE control round trip — the
+ * shape `bootstrapLoginByEmail` returns.
+ */
+export interface AdminLoginBootstrap {
+  readonly user: AdminUserRow;
+  /** Oldest-first, byte-for-byte the order `listMembershipsByUser` guarantees. */
+  readonly memberships: readonly AdminMembershipRow[];
+}
+
+/**
  * The narrow persistence surface the session routes talk to.
  *
  * One method per Rust repository call, deliberately: unlike the 211 CRUD
@@ -79,6 +89,16 @@ export interface AdminRefreshTokenRow {
 export interface AdminConsoleSessionStore {
   getUserByEmail(email: string): Promise<AdminUserRow | null>;
   getUserById(id: string): Promise<AdminUserRow | null>;
+  /**
+   * Login's first control read, folded into ONE round trip: the user by email
+   * PLUS all their memberships (oldest first). A single JOIN across the two
+   * co-located control tables replaces the former `getUserByEmail` →
+   * `listMembershipsByUser` serial pair, taking one cross-region round trip off
+   * the <1s login path against the single-region control object. `null` when no
+   * user has that email — indistinguishable, to the caller, from a wrong
+   * password (login must not become an account-enumeration oracle).
+   */
+  bootstrapLoginByEmail(email: string): Promise<AdminLoginBootstrap | null>;
   upsertUser(user: AdminUserRow): Promise<void>;
   listMembershipsByUser(userId: string): Promise<readonly AdminMembershipRow[]>;
   listMembershipsByTenant(tenantId: string): Promise<readonly AdminMembershipRow[]>;
@@ -133,6 +153,29 @@ interface RawMembership {
   tenant_id: string;
   role: string;
   created_at_unix: number;
+}
+
+/**
+ * One row of the `bootstrapLoginByEmail` JOIN: every `admin_users` column
+ * aliased `u_*`, every `admin_user_tenant_memberships` column aliased `m_*`.
+ * The `m_*` fields are nullable because a user with no memberships still
+ * produces a single `LEFT JOIN` row.
+ */
+interface JoinedLoginRow {
+  u_id: string;
+  u_email: string;
+  u_password_hash: string;
+  u_display_name: string;
+  u_superadmin: number;
+  u_created_at_unix: number;
+  u_updated_at_unix: number;
+  u_last_login_at_unix: number | null;
+  u_disabled_at_unix: number | null;
+  m_id: string | null;
+  m_user_id: string | null;
+  m_tenant_id: string | null;
+  m_role: string | null;
+  m_created_at_unix: number | null;
 }
 
 function decodeMembership(row: RawMembership): AdminMembershipRow {
@@ -191,6 +234,61 @@ export class D1AdminConsoleSessionStore implements AdminConsoleSessionStore {
       .bind(id)
       .first<RawUser>();
     return row === null ? null : decodeUser(row);
+  }
+
+  /**
+   * ONE round trip for `getUserByEmail` + `listMembershipsByUser`. A `LEFT JOIN`
+   * (not inner) so a user with zero memberships still returns their row — the
+   * caller distinguishes "no such email" (`null`) from "no membership" (empty
+   * list), the same two 401s the serial pair produced. The `ORDER BY
+   * m.created_at_unix ASC, m.id ASC` is the SAME load-bearing order
+   * `listMembershipsByUser` documents: login takes `memberships[0]` (the user's
+   * OLDEST membership), so an unordered read could change the tier a user lands
+   * in between two identical logins.
+   */
+  async bootstrapLoginByEmail(email: string): Promise<AdminLoginBootstrap | null> {
+    const { results } = await this.#db
+      .prepare(
+        `SELECT
+           u.id AS u_id, u.email AS u_email, u.password_hash AS u_password_hash,
+           u.display_name AS u_display_name, u.superadmin AS u_superadmin,
+           u.created_at_unix AS u_created_at_unix, u.updated_at_unix AS u_updated_at_unix,
+           u.last_login_at_unix AS u_last_login_at_unix, u.disabled_at_unix AS u_disabled_at_unix,
+           m.id AS m_id, m.user_id AS m_user_id, m.tenant_id AS m_tenant_id,
+           m.role AS m_role, m.created_at_unix AS m_created_at_unix
+         FROM admin_users u
+         LEFT JOIN admin_user_tenant_memberships m ON m.user_id = u.id
+         WHERE u.email = ?
+         ORDER BY m.created_at_unix ASC, m.id ASC`,
+      )
+      .bind(email)
+      .all<JoinedLoginRow>();
+    const first = results[0];
+    if (first === undefined) return null;
+    const user = decodeUser({
+      id: first.u_id,
+      email: first.u_email,
+      password_hash: first.u_password_hash,
+      display_name: first.u_display_name,
+      superadmin: first.u_superadmin,
+      created_at_unix: first.u_created_at_unix,
+      updated_at_unix: first.u_updated_at_unix,
+      last_login_at_unix: first.u_last_login_at_unix,
+      disabled_at_unix: first.u_disabled_at_unix,
+    });
+    // A no-membership user yields one row with every `m_*` NULL — drop it.
+    const memberships = results
+      .filter((row): row is JoinedLoginRow & { m_id: string } => row.m_id !== null)
+      .map((row) =>
+        decodeMembership({
+          id: row.m_id,
+          user_id: row.m_user_id as string,
+          tenant_id: row.m_tenant_id as string,
+          role: row.m_role as string,
+          created_at_unix: row.m_created_at_unix as number,
+        }),
+      );
+    return { user, memberships };
   }
 
   async upsertUser(user: AdminUserRow): Promise<void> {

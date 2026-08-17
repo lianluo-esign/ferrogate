@@ -436,7 +436,7 @@ async function handleRegister(c: Ctx): Promise<Response> {
   // #514: a suspended/deleted tenancy is a 403 with the gateway's own code —
   // and, crucially, NOT a live `fg_...` secret. `provisionGatewayApiKey`
   // throws before minting.
-  const gatewayApiKey = await provisionGatewayApiKey(console_.deps, {
+  const { secret: gatewayApiKey } = await provisionGatewayApiKey(console_.deps, {
     tenantId,
     projectId,
     workspaceId,
@@ -458,33 +458,69 @@ async function handleRegister(c: Ctx): Promise<Response> {
   );
 }
 
+/**
+ * Run non-critical work OFF the response path when the platform gives us an
+ * execution context, else inline. `c.executionCtx` THROWS when unset (Hono), so
+ * the try/catch is the presence check — a test harness with no ctx falls back
+ * to awaiting, which keeps the deferred audit/revoke/telemetry synchronous and
+ * observable exactly as the pre-deferral behaviour. Errors are swallowed: every
+ * caller here is eventual-consistency (audit) or redundant (login-path revoke,
+ * lastLogin telemetry), and a settled response has nothing to fail.
+ */
+async function deferWork(c: Ctx, work: () => Promise<void>): Promise<void> {
+  let waitUntil: ((promise: Promise<unknown>) => void) | undefined;
+  try {
+    waitUntil = c.executionCtx.waitUntil.bind(c.executionCtx);
+  } catch {
+    waitUntil = undefined;
+  }
+  if (waitUntil !== undefined) {
+    waitUntil(work().catch(() => {}));
+    return;
+  }
+  await work().catch(() => {});
+}
+
 /** `POST /v1/admin/login` — Rust `handle_admin_login`. */
 async function handleLogin(c: Ctx): Promise<Response> {
   const console_ = consoleOf(c);
   const payload = await readBody(c, loginSchema);
   const email = payload.email.trim().toLowerCase();
 
-  const user = await console_.store.getUserByEmail(email);
+  // ONE control round trip for the user AND their memberships (a single JOIN),
+  // replacing the former getUserByEmail → listMembershipsByUser serial pair —
+  // one fewer cross-region hop to the single-region control object on the <1s
+  // login path.
+  const bootstrap = await console_.store.bootstrapLoginByEmail(email);
   // An unknown email and a wrong password get the SAME answer. Distinguishing
   // them turns this endpoint into an account-enumeration oracle.
-  if (user === null) throw new HttpError(401, "unauthorized", "invalid email or password");
+  if (bootstrap === null) throw new HttpError(401, "unauthorized", "invalid email or password");
+  const user = bootstrap.user;
   if (user.disabledAtUnix !== null) {
     throw new HttpError(401, "unauthorized", "this account has been disabled");
   }
-  if (!(await verifyPassword(payload.password, user.passwordHash))) {
+  // Password FIRST, before any tenant/workspace read: this preserves the prior
+  // posture that those reads only happen for an authenticated caller (no new
+  // pre-auth work), and the JOIN above already bought back the round trip the
+  // old code hid the KDF under.
+  const passwordOk = await verifyPassword(payload.password, user.passwordHash);
+  if (!passwordOk) {
     throw new HttpError(401, "unauthorized", "invalid email or password");
   }
 
-  const memberships = await console_.store.listMembershipsByUser(user.id);
-  const membership = memberships[0];
+  const membership = bootstrap.memberships[0];
   if (membership === undefined) {
     throw new HttpError(401, "unauthorized", "this account has no tenant membership");
   }
-  const tenantAccount = await console_.deps.store.get(
-    TENANT_ACCOUNTS_COLLECTION,
-    PLATFORM,
-    membership.tenantId,
-  );
+  // The tenant account and its default workspace both key off the SAME tenant and
+  // neither has a side effect, so overlap their round trips. Against a remote
+  // (e.g. US-homed) single-region control object these two reads otherwise stack;
+  // parallelising them changes nothing but latency, and the null checks below are
+  // unchanged.
+  const [tenantAccount, workspace] = await Promise.all([
+    console_.deps.store.get(TENANT_ACCOUNTS_COLLECTION, PLATFORM, membership.tenantId),
+    resolveDefaultWorkspace(console_.deps, membership.tenantId),
+  ]);
   if (tenantAccount === null) {
     throw new HttpError(
       500,
@@ -492,7 +528,6 @@ async function handleLogin(c: Ctx): Promise<Response> {
       "tenant account for this membership no longer exists",
     );
   }
-  const workspace = await resolveDefaultWorkspace(console_.deps, membership.tenantId);
   if (workspace === null) {
     throw new HttpError(500, "internal_error", "no workspace found for this tenant");
   }
@@ -502,31 +537,73 @@ async function handleLogin(c: Ctx): Promise<Response> {
   // `viewer`, the least privilege, so a role string that predates the validator
   // can never mint `admin.write`.
   const sessionRole = membershipRoleFromStored(membership.role);
-  // Mints a FRESH key and revokes the caller's prior session keys for this
-  // tenant, which is what makes the ladder retroactive rather than
-  // forward-only. Consequence, deliberately: one browser session per user per
-  // tenant — signing in again displaces the previous tab's GATEWAY key. The
-  // refresh token is untouched, so the console session itself survives.
-  const gatewayApiKey = await provisionGatewayApiKey(console_.deps, {
-    tenantId: membership.tenantId,
-    projectId: String(workspace.project_id ?? ""),
-    workspaceId: String(workspace.id),
-    adminUserId: user.id,
-    role: sessionRole,
-  });
-
-  await console_.store.upsertUser({ ...user, lastLoginAtUnix: Math.floor(Date.now() / 1000) });
+  // Mints a FRESH key; the caller's prior session keys are swept AFTER the
+  // response (see `deferWork` below), which is what makes the ladder retroactive
+  // rather than forward-only. Consequence, deliberately: one browser session per
+  // user per tenant — signing in again displaces the previous tab's GATEWAY key.
+  // The refresh token is untouched, so the console session itself survives.
+  //
+  // Latency (硬验收 <1s): the mint's audit-chain append writes to the SINGLE
+  // remote control object. We open the per-request audit-defer window so that
+  // append is collected, not awaited, then flushed on `ctx.waitUntil`. Only the
+  // directory-projection leg (gateway auth HOP 1) stays synchronous — it is what
+  // makes the returned key resolve. `issueSession` (a refresh-token write, no
+  // audit) overlaps the mint since neither depends on the other.
+  const auditSink = console_.deps.auditSink;
+  auditSink?.activate();
+  let gatewayApiKey: string;
+  let gatewayApiKeyId: string;
+  let session: Awaited<ReturnType<typeof issueSession>>;
+  try {
+    const [mint, issued] = await Promise.all([
+      provisionGatewayApiKey(
+        console_.deps,
+        {
+          tenantId: membership.tenantId,
+          projectId: String(workspace.project_id ?? ""),
+          workspaceId: String(workspace.id),
+          adminUserId: user.id,
+          role: sessionRole,
+        },
+        { skipRevokeSweep: true },
+      ),
+      issueSession(console_, user, membership.tenantId, sessionRole),
+    ]);
+    gatewayApiKey = mint.secret;
+    gatewayApiKeyId = mint.keyId;
+    session = issued;
+  } finally {
+    auditSink?.deactivate();
+  }
 
   // #912: a SUPERADMIN also receives a DISTINCT platform-operator credential —
   // a `static_api_keys` row with `platform_operator = 1`, the only credential
   // that resolves to `platformOperator:true`. It is returned as a SEPARATE
   // field, never folded into `gateway_api_key`, so the tenant path above (an
   // `{kind:"tenant"}` virtual key) is untouched. A non-superadmin gets `null`.
+  // Rare (superadmin-only), so it stays synchronous — the audit window is closed.
   const platformOperatorApiKey = user.superadmin
     ? await provisionPlatformOperatorApiKey(console_.deps, user.id)
     : null;
 
-  const session = await issueSession(console_, user, membership.tenantId, sessionRole);
+  // Everything the response does NOT depend on moves off the critical path:
+  //  - the mint's deferred audit append (drained from the sink);
+  //  - the prior-session sweep, with `exceptKeyId` sparing the key just minted
+  //    (it shares name + user_id, so an un-excepted sweep would revoke it);
+  //  - the lastLogin telemetry write.
+  // The gateway key already resolves (its directory row was written synchronously
+  // in the mint), so none of this gates usability.
+  await deferWork(c, async () => {
+    if (auditSink !== undefined) await auditSink.drain();
+    await revokeAdminConsoleSessionKeys(console_.deps, membership.tenantId, user.id, {
+      exceptKeyId: gatewayApiKeyId,
+    });
+    await console_.store.upsertUser({
+      ...user,
+      lastLoginAtUnix: Math.floor(Date.now() / 1000),
+    });
+  });
+
   return c.json(
     {
       access_token: session.accessToken,
@@ -579,7 +656,15 @@ async function handleRefresh(c: Ctx): Promise<Response> {
   // redemption would be a replayable 30-day credential.
   await console_.store.upsertRefreshToken({ ...stored, revokedAtUnix: now });
 
-  const user = await console_.store.getUserById(stored.userId);
+  // Load the account and its memberships concurrently: both key off the token's
+  // userId, so there is no reason to pay two serial round trips against the
+  // (possibly remote) single-region control object. The rotation write above is
+  // still the strict barrier that spends the presented token first; these two are
+  // pure reads with no ordering between them.
+  const [user, memberships] = await Promise.all([
+    console_.store.getUserById(stored.userId),
+    console_.store.listMembershipsByUser(stored.userId),
+  ]);
   if (user === null) throw new HttpError(401, "unauthorized", "account no longer exists");
   if (user.disabledAtUnix !== null) {
     throw new HttpError(401, "unauthorized", "this account has been disabled");
@@ -596,7 +681,6 @@ async function handleRefresh(c: Ctx): Promise<Response> {
       "this refresh token predates tenant-scoped sessions; please sign in again",
     );
   }
-  const memberships = await console_.store.listMembershipsByUser(user.id);
   // The CURRENT membership in the stamped tenant, not the stamped role: a
   // demotion takes effect on the next refresh, and a revoked membership ends
   // the session entirely.

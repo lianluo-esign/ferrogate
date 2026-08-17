@@ -534,6 +534,39 @@ describe("POST /v1/admin/login", () => {
     expect(errorOf((await after.json()) as Json).code).toBe("invalid_api_key");
   });
 
+  it("SPARES the key it just minted when the prior-session sweep is deferred (exceptKeyId)", async () => {
+    // The sweep now runs AFTER the response (on `ctx.waitUntil`) to keep it off
+    // the <1s login critical path. It matches session keys by name + user_id —
+    // which the FRESHLY minted key also carries — so without the `exceptKeyId`
+    // guard the deferred sweep would revoke the very key this login returned.
+    // This pins that guard: after the sweep settles, the NEW key still works and
+    // only the OLD one is gone.
+    const registered = await register("owner@acme.test");
+    await provisionTenantDatabase(registered.tenant.id);
+    const first = await call("POST", "/v1/admin/login", {
+      body: { email: "owner@acme.test", password: "correct horse battery" },
+    });
+    const firstKey = (first.body as unknown as Session).gateway_api_key;
+
+    const { body } = await call("POST", "/v1/admin/login", {
+      body: { email: "owner@acme.test", password: "correct horse battery" },
+    });
+    const secondKey = (body as unknown as Session).gateway_api_key;
+    expect(secondKey).not.toBe(firstKey);
+
+    // The just-minted key MUST authenticate — the deferred sweep excepted it.
+    const withNew = await SELF.fetch(`${BASE}/admin/v1/status`, {
+      headers: { authorization: `Bearer ${secondKey}` },
+    });
+    expect(withNew.status).toBe(200);
+
+    // ...and the prior key is revoked, so the sweep still did its job.
+    const withOld = await SELF.fetch(`${BASE}/admin/v1/status`, {
+      headers: { authorization: `Bearer ${firstKey}` },
+    });
+    expect(withOld.status).toBe(401);
+  });
+
   it("refuses a SUSPENDED tenancy with 403 and hands back NO key (#514)", async () => {
     const session = await register("owner@acme.test");
     await setTenantAccountStatus(session.tenant.id, "suspended");

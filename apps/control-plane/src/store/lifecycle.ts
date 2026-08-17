@@ -260,7 +260,11 @@ export class StoreTenancyLifecycleGate implements TenancyLifecycleGatePort {
     pushUnique(projectIds, declaredProject);
 
     if (declaredWorkspace !== null) {
-      const workspace = await this.#store.get(WORKSPACES_COLLECTION, GATE_SCOPE, declaredWorkspace);
+      const workspace = await this.#resolveRow(
+        WORKSPACES_COLLECTION,
+        declaredWorkspace,
+        declaredTenant === null ? [] : [declaredTenant],
+      );
       if (workspace !== null) {
         pushUnique(projectIds, workspace.project_id);
         pushUnique(tenantIds, workspace.tenant_id);
@@ -270,7 +274,7 @@ export class StoreTenancyLifecycleGate implements TenancyLifecycleGatePort {
 
     const projects: StoreRecord[] = [];
     for (const projectId of projectIds) {
-      const project = await this.#store.get(PROJECTS_COLLECTION, GATE_SCOPE, projectId);
+      const project = await this.#resolveRow(PROJECTS_COLLECTION, projectId, tenantIds);
       if (project === null) continue;
       pushUnique(tenantIds, project.tenant_id);
       projects.push(project);
@@ -302,5 +306,37 @@ export class StoreTenancyLifecycleGate implements TenancyLifecycleGatePort {
       });
     }
     return chain;
+  }
+
+  /**
+   * Resolve one hierarchy row, addressing the KNOWN owning tenant's object
+   * DIRECTLY before ever widening to the platform-operator scan.
+   *
+   * A tenant-scoped `get` routes straight to that one tenant's Durable Object
+   * (`SplitControlPlaneStore.get`: `idFromName(tenantId)` is O(1), no roster
+   * scan). For a native `fg_` credential the workspace/project it names ALWAYS
+   * belongs to the tenant the same key row declares, so the first candidate hits
+   * and the whole fleet is never touched — this is what removes the O(N)-in-
+   * fleet-size fan-out that made every `/admin/v1/*` request pay ~8s.
+   *
+   * The `GATE_SCOPE` (platform_operator) read is KEPT as the miss fallback, so
+   * the two rows the module docblock names — a workspace's undeclared parent
+   * tenant, and a row written under a DIFFERENT `tenant_id` than the caller
+   * declares — are still resolved exactly as before. Those defensive cases miss
+   * every candidate and fall through to the scan; they are the rare path, not
+   * the hot one. A blank candidate id (a scope with no destination) is skipped
+   * rather than issued as a read.
+   */
+  async #resolveRow(
+    collection: string,
+    id: string,
+    candidateTenantIds: readonly string[],
+  ): Promise<StoreRecord | null> {
+    for (const tenantId of candidateTenantIds) {
+      if (tenantId === "") continue;
+      const row = await this.#store.get(collection, { kind: "tenant", tenantId }, id);
+      if (row !== null) return row;
+    }
+    return this.#store.get(collection, GATE_SCOPE, id);
   }
 }

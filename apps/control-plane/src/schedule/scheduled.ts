@@ -80,7 +80,7 @@ export async function runScheduledTick(
   now: number = Math.floor(Date.now() / 1000),
 ): Promise<ScheduledTickReport> {
   const deps = resolveDeps(env, { requestId: `cron-${now}` });
-  const tenantCatalogAudit = await catalogAuditPass(deps);
+  const tenantCatalogAudit = await catalogAuditPass(deps, now);
   const summary: ScheduleTickSummary = {
     scanned: 0,
     fired: [],
@@ -105,8 +105,24 @@ export async function runScheduledTick(
   };
 }
 
+/**
+ * How often (in minutes) the catalog-audit backstop sweep is allowed to run.
+ *
+ * `reconcileProvisionedTenantCatalogAudits` is an O(N) FLEET sweep: it enumerates
+ * every provisioned tenant, opens each tenant DO, and writes any pending outbox
+ * rows to the SINGLE control DO. Run every minute it was a ~16s control-DO burst
+ * that serialized on the one control-DO thread against the latency-critical login
+ * path (observed login TTFB spiking to ~8s during a tick). It is only a BACKSTOP —
+ * catalog audits are delivered inline at write time; this sweep just drains outbox
+ * rows whose inline delivery failed, and the outbox keeps those rows durable until
+ * a later window delivers them. So a coarse cadence is safe and removes 14 of every
+ * 15 contention windows.
+ */
+export const CATALOG_RECONCILE_PERIOD_MIN = 15;
+
 async function catalogAuditPass(
   deps: Pick<ControlPlaneDeps, "controlDatabase" | "tenantDatabases">,
+  now: number,
 ): Promise<TenantCatalogAuditSweepReport> {
   if (deps.controlDatabase === null) {
     return {
@@ -115,6 +131,12 @@ async function catalogAuditPass(
       failed: 0,
       skipped: "control_database_unavailable",
     };
+  }
+  // Cron ticks land on the minute (`controller.scheduledTime`), so gate on the
+  // minute count rather than raw seconds. A missed tick is harmless — the outbox
+  // is durable and the next eligible window reconciles it.
+  if (Math.floor(now / 60) % CATALOG_RECONCILE_PERIOD_MIN !== 0) {
+    return { scanned: 0, reconciled: 0, failed: 0, skipped: "cadence_skipped" };
   }
   return reconcileProvisionedTenantCatalogAudits(deps.tenantDatabases, deps.controlDatabase);
 }
