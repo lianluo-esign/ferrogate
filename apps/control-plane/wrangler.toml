@@ -302,6 +302,33 @@ binding = "KEY_DIRECTORY"
 id = "PLACEHOLDER_SET_AT_DEPLOY_TIME"
 
 # ---------------------------------------------------------------------------
+# KV: the admin-identity PROJECTION — the LOGIN hot-path bootstrap (#66, Phase B)
+# ---------------------------------------------------------------------------
+#
+# The email→login-bootstrap (`admin_users` JOIN `admin_user_tenant_memberships`)
+# projection `POST /v1/admin/login` reads AHEAD of the single-region control-object
+# RPC, so the login's first control read is a replicated KV read instead of one of
+# the 200–978ms cross-region hops the <1s login SLA cannot afford
+# (`src/session/identity-projection.ts`).
+#
+# UNLIKE `KEY_DIRECTORY` (control writes, gateway reads), this projection is
+# CONTROL-PLANE-PRIVATE: the login handler both reads it and — on the
+# authoritative fallback — populates it, and the team routes (invite / change-role
+# / revoke) DELETE the affected user's entry. The gateway neither binds nor reads
+# it, so it needs its OWN namespace id (do NOT point it at `KEY_DIRECTORY`).
+#
+# The value carries a password hash, so the exposure is bounded on every axis a
+# credential cache must bound — positive-only, a corrupt entry is a miss, a KV hit
+# skips no check (the reader re-runs the disabled gate + KDF + membership tier),
+# invalidate-on-mutation, and a short `expirationTtl` backstop.
+#
+# `id` is a DOCUMENTED PLACEHOLDER — create a NEW namespace at deploy time and
+# substitute it here (and in `wrangler.deploy.toml`).
+[[kv_namespaces]]
+binding = "IDENTITY_DIRECTORY"
+id = "PLACEHOLDER_SET_AT_DEPLOY_TIME"
+
+# ---------------------------------------------------------------------------
 # R2: the tamper-evidence ANCHOR bucket (#684)
 # ---------------------------------------------------------------------------
 #

@@ -1063,12 +1063,25 @@ const CONTROLS: readonly FleetControl[] = [
      * multiplier. An operator who raises a group's multiplier on the control plane
      * must see the gateway bill at the new rate — the authoritative-when-present
      * rule, so both Workers resolve it from the same durable tables.
+     *
+     * `shared_billing_groups` (#960, Phase C step 7b) is the SAME control read
+     * MIRROR-FIRST: the control plane pushes each group's `multiplier`/`enabled`
+     * into the tenant's own read-only `shared_billing_groups` mirror, and the
+     * gateway settlement path (`MirrorFirstBillingGroupSource`) prefers that
+     * mirror row, falling back to `platform_billing_groups` only when the tenant
+     * has not synced the group yet. A present mirror row is authoritative, so a
+     * change to it must bill on both Workers exactly as the control table does —
+     * it belongs to this control, not beside it.
      */
     id: "billing-group-multiplier",
     title: "the platform billing-group cost multipliers",
     required: "self",
     enforcement: /PlatformBillingGroupStore|platformBillingGroupSourceFromControlData/,
-    authorityTables: ["platform_billing_groups", "platform_billing_group_revisions"],
+    authorityTables: [
+      "platform_billing_groups",
+      "platform_billing_group_revisions",
+      "shared_billing_groups",
+    ],
   },
   {
     /**

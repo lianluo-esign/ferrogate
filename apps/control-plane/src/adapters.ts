@@ -51,6 +51,7 @@ import {
   type TenantDatabaseRouter,
   type TenantObjectOperator,
   backfillTenantConfigurationPolicy,
+  coerceTenantLocationHint,
 } from "@ferrogate/storage";
 import type {
   ApiKeyAuthenticatorPort,
@@ -69,6 +70,10 @@ import type {
   TenancyLifecycleGatePort,
 } from "./ports.js";
 import { DEFAULT_ADMIN_LIST_LIMIT, DEFAULT_ADMIN_LIST_MAX_LIMIT } from "./responses.js";
+import {
+  type AdminIdentityProjection,
+  KvAdminIdentityProjection,
+} from "./session/identity-projection.js";
 import { resolveSiteDomainCertificates } from "./site_domain_certificates.js";
 import {
   DEFAULT_DOH_ENDPOINT,
@@ -79,6 +84,7 @@ import {
   UnboundTxtResolver,
 } from "./site_domain_txt.js";
 import { D1ApiKeyAuthenticator, D1NativeApiKeyAuthenticator } from "./store/api_keys.js";
+import { type AuditSink, DeferredAuditSink } from "./store/audit-sink.js";
 import {
   type BillingFleetQueryPort,
   type BillingFleetService,
@@ -95,7 +101,6 @@ import {
 import { MemoryControlPlaneStore, type MemoryStoreSeed } from "./store/memory.js";
 import { PlatformModelCatalogStore } from "./store/platform-model-catalog.js";
 import { SplitControlPlaneStore } from "./store/split.js";
-import { DeferredAuditSink, type AuditSink } from "./store/audit-sink.js";
 import { UnprovisionedTenantDatabaseRouter } from "./store/tenancy.js";
 
 // ---------------------------------------------------------------------------
@@ -1510,6 +1515,22 @@ export function resolveKeyDirectory(env: ControlPlaneBindings): ApiKeyDirectoryP
 }
 
 /**
+ * The login-bootstrap KV projection (#66, Phase B login leg), or `null` when
+ * unbound. This Worker is BOTH the writer and the reader (login populates it, the
+ * team routes invalidate it, login reads it), so unlike {@link resolveKeyDirectory}
+ * an isolate-local stand-in would be almost correct — but a KV binding is still the
+ * only store that is shared across this Worker's isolates and colos, so `null` with
+ * no binding is the honest posture: login takes the authoritative control read.
+ */
+export function resolveIdentityDirectory(
+  env: ControlPlaneBindings,
+): AdminIdentityProjection | null {
+  return env.IDENTITY_DIRECTORY === undefined
+    ? null
+    : new KvAdminIdentityProjection(env.IDENTITY_DIRECTORY);
+}
+
+/**
  * The audit-anchor bucket (#684), or `null` when the deployment binds none.
  *
  * Deliberately NOT gated on `CONTROL_PLANE_STORE`, unlike its siblings above:
@@ -1675,12 +1696,17 @@ export function resolveDeps(
     tenantDatabases,
     tenantStorage: resolveTenantStorage(env, controlDatabase),
     tenantObjectOperator: resolveTenantObjectOperator(env, controlDatabase),
+    // Operator-configured default placement for no-signal registrations. An
+    // unrecognised value coerces to `undefined`, which leaves the built-in
+    // `wnam` fallback in place rather than addressing an object with a bad hint.
+    defaultTenantLocationHint: coerceTenantLocationHint(env.TENANT_DEFAULT_LOCATION_HINT),
     controlDatabase: controlDatabase ?? null,
     // #956 read side. Null unless BILLING_ANALYTICS_{DATASET,ACCOUNT_ID,API_TOKEN}
     // are all bound; the fleet endpoint then answers 503 rather than fabricating.
     billingFleet: resolveBillingFleet(env),
     promptLabels: resolvePromptLabels(env),
     keyDirectory: resolveKeyDirectory(env),
+    identityDirectory: resolveIdentityDirectory(env),
     // Delete-only by construction — see `resolveAssetObjects`.
     assetObjects: resolveAssetObjects(env),
     runtime: new StoreRuntimeStatus(store, "0.0.0", tenantDatabases, controlDatabase ?? null),

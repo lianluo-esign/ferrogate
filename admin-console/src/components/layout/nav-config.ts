@@ -133,6 +133,7 @@ export const NAV_GROUPS: NavGroup[] = [
       { titleKey: "nav.item.telemetryExports", url: APP_ROUTES.operationsObservability },
       { titleKey: "nav.item.staticSites", url: APP_ROUTES.staticSites },
       { titleKey: "nav.item.siteDomains", url: APP_ROUTES.siteDomains },
+      { titleKey: "nav.item.announcements", url: APP_ROUTES.announcements },
     ],
   },
 ];

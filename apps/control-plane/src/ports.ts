@@ -18,6 +18,7 @@ import type { PromptLabelKv } from "@ferrogate/config";
 import type {
   ApiKeyDirectoryProjection,
   TenantDatabaseRouter,
+  TenantLocationHint,
   TenantObjectOperator,
 } from "@ferrogate/storage";
 // TYPE-ONLY, and it must stay that way: `@ferrogate/storage/durable-objects`
@@ -26,10 +27,11 @@ import type {
 // node importer of this module's siblings.
 import type { TenantDataNamespace } from "@ferrogate/storage/durable-objects";
 import type { ApiOperation } from "./contract.js";
-import type { ManagedAuditSink } from "./store/audit-sink.js";
-import type { BillingFleetService } from "./store/billing-fleet.js";
+import type { AdminIdentityProjection } from "./session/identity-projection.js";
 import type { SiteDomainCertificatePort } from "./site_domain_certificates.js";
 import type { SiteDomainTxtResolver } from "./site_domain_txt.js";
+import type { ManagedAuditSink } from "./store/audit-sink.js";
+import type { BillingFleetService } from "./store/billing-fleet.js";
 
 // ---------------------------------------------------------------------------
 // Identity
@@ -466,6 +468,19 @@ export interface ControlPlaneDeps {
    * and why it is not this slice.
    */
   readonly tenantStorage?: TenantDatabaseRouter;
+  /**
+   * The region a new tenant's Durable Object is homed in when the registration
+   * request carries NO Cloudflare geo signal (no native `cf`, no forwarded
+   * `x-ferrogate-cf-*` header). Without it `provisionTenantStorageFor` would take
+   * {@link locationHintFromCloudflareSignal}'s own US-West (`wnam`) fallback, so a
+   * relayed registration that lost its `cf` across a service-binding hop would
+   * home every such tenant in the US regardless of where the user is. A
+   * deployment whose fleet is regional sets `TENANT_DEFAULT_LOCATION_HINT` (e.g.
+   * `apac-ne` for Tokyo) so the no-signal default lands in-region instead. Absent
+   * ⇒ keep the `wnam` fallback. A REAL geo signal always wins over this — a
+   * genuine US user is still homed in the US.
+   */
+  readonly defaultTenantLocationHint?: TenantLocationHint;
   /** Platform-operator-only reads, exports and PITR against a tenant object. */
   readonly tenantObjectOperator?: TenantObjectOperator | null;
   /**
@@ -523,6 +538,19 @@ export interface ControlPlaneDeps {
    * never looser — a stale or absent KV row still resolves through HOP 2.
    */
   readonly keyDirectory: ApiKeyDirectoryProjection | null;
+  /**
+   * The KV projection of the login bootstrap (`admin_users` by email + the
+   * caller's memberships), or `null` when this deployment binds no
+   * `IDENTITY_DIRECTORY` namespace (#66, Phase B login leg).
+   *
+   * Unlike {@link keyDirectory}, this Worker is BOTH the writer and the reader:
+   * `POST /v1/admin/login` reads it ahead of the control object and populates it
+   * on a miss, and the team routes invalidate it. `null` is not a downgrade and
+   * never refuses — login simply takes the authoritative control read on every
+   * request, exactly as before this slice. The cache can make login faster, never
+   * looser: every gate (disabled, password, membership) re-runs on the value.
+   */
+  readonly identityDirectory: AdminIdentityProjection | null;
   /**
    * The delete-only handle on the asset bucket (`ASSETS`), or `null` when this
    * deployment binds none — see {@link AssetObjectReclaimer} for why it is
@@ -624,6 +652,13 @@ export interface ControlPlaneBindings {
   readonly CONTROL_PLANE_STORE?: string;
   readonly ADMIN_LIST_DEFAULT_LIMIT?: string;
   readonly ADMIN_LIST_MAX_LIMIT?: string;
+  /**
+   * The DEFAULT tenant Durable Object placement for registrations that carry no
+   * Cloudflare geo signal — one of the `TENANT_LOCATION_HINTS` (e.g. `apac-ne`
+   * for Tokyo). Absent or unrecognised ⇒ the built-in US-West (`wnam`) fallback
+   * stands. See {@link ControlPlaneDeps.defaultTenantLocationHint}.
+   */
+  readonly TENANT_DEFAULT_LOCATION_HINT?: string;
   /**
    * Which site-domain TXT resolver to build (`src/site_domain_txt.ts`):
    * `"doh"`, `"static"`, or — absent, the DEFAULT — unbound, which verifies
@@ -745,6 +780,14 @@ export interface ControlPlaneBindings {
    * read it. This Worker is the WRITER; the gateway is the reader.
    */
   readonly KEY_DIRECTORY?: KVNamespace;
+  /**
+   * The KV namespace the login-bootstrap projection is written into and read from
+   * (#66, Phase B login leg). UNLIKE {@link KEY_DIRECTORY}, this namespace is
+   * private to the control-plane Worker — it is both writer and reader — so no
+   * other Worker binds it. Absent ⇒ {@link ControlPlaneDeps.identityDirectory} is
+   * `null` and login takes the authoritative control read on every request.
+   */
+  readonly IDENTITY_DIRECTORY?: KVNamespace;
   /**
    * The audit-anchor bucket (`[[r2_buckets]] binding = "AUDIT_ANCHORS"`) — the
    * tamper-evidence half that does not live in the database (#684).

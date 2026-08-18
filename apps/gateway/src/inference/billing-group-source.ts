@@ -1,4 +1,9 @@
 import { controlDatabaseFrom } from "../control-data.js";
+import {
+  type TenancyBindings,
+  type TenantDatabaseResolver,
+  resolverForEnv,
+} from "../tenancy/index.js";
 import type { InferenceBindings, PlatformBillingGroupSource } from "./ports.js";
 
 /**
@@ -99,7 +104,13 @@ export class ControlDataPlatformBillingGroupSource implements PlatformBillingGro
     this.#now = options.now ?? Date.now;
   }
 
-  async multiplierForGroup(env: InferenceBindings, groupId: string | undefined): Promise<number> {
+  async multiplierForGroup(
+    env: InferenceBindings,
+    groupId: string | undefined,
+    _tenantId?: string | undefined,
+  ): Promise<number> {
+    // The control source reads the account-global table directly; `tenantId` is
+    // a hint only the mirror-first source in front of it consumes.
     if (groupId === undefined || groupId === "") return 1;
     try {
       const snapshot = await this.#snapshot(env);
@@ -149,9 +160,109 @@ export class ControlDataPlatformBillingGroupSource implements PlatformBillingGro
   }
 }
 
-/** Construct the production source; the returned object owns isolate-local cache state. */
+/**
+ * A single group's authoritative mirror row: `multiplier` and `enabled` exactly
+ * as {@link ControlDataPlatformBillingGroupSource} reads them from the control
+ * table, but from the tenant's own read-only `shared_billing_groups`.
+ */
+const MIRROR_GROUP_SQL = "SELECT multiplier, enabled FROM shared_billing_groups WHERE id = ?";
+
+interface MirrorGroupRow {
+  readonly multiplier: number | string | null;
+  readonly enabled: number | string | null;
+}
+
+/** Resolve `env`'s tenant-database resolver; the seam a unit test overrides. */
+export type TenantResolverFor = (env: InferenceBindings) => TenantDatabaseResolver;
+
+/**
+ * Mirror-FIRST billing-group multiplier source (#960, Phase C step 7b) — a MONEY
+ * PATH read that prefers the tenant's OWN read-only `shared_billing_groups`
+ * mirror over a cross-region read of the single-threaded control object.
+ *
+ * ## Mirror-first, control-fallback (the chosen posture)
+ *
+ * The shared-config channel (#948) DELETE-then-reinserts EVERY group — enabled
+ * and disabled alike — into each tenant object, so once a tenant has synced, a
+ * group id PRESENT in its mirror is authoritative: an enabled row answers its
+ * multiplier (a `0×` comp included), a disabled or malformed row answers `1.0`
+ * (the official price), byte-identical to the control source. A group id ABSENT
+ * from the mirror means the tenant has not synced that group yet — a group an
+ * operator created and bound within a single push cadence — so the read FALLS
+ * BACK to the control database rather than mis-billing it as `1.0`. That
+ * fallback is the ONLY residual control-plane coupling on this path, and it
+ * fires only for the sync window of a brand-new group.
+ *
+ * ## Fail OPEN on every axis (unchanged contract)
+ *
+ * No tenant id, no tenant router, the mirror table not migrated, the tenant
+ * object unreachable, a read error — none of these bill anything but the
+ * fallback's answer, which itself fails open to `1.0`. The tenant-mirror attempt
+ * is best-effort in front of the control read, never a new way to fail a request.
+ */
+export class MirrorFirstBillingGroupSource implements PlatformBillingGroupSource {
+  readonly #fallback: PlatformBillingGroupSource;
+  readonly #resolverFor: TenantResolverFor;
+
+  constructor(options: {
+    fallback: PlatformBillingGroupSource;
+    resolverFor?: TenantResolverFor;
+  }) {
+    this.#fallback = options.fallback;
+    this.#resolverFor =
+      options.resolverFor ?? ((env) => resolverForEnv(env as unknown as TenancyBindings));
+  }
+
+  async multiplierForGroup(
+    env: InferenceBindings,
+    groupId: string | undefined,
+    tenantId?: string | undefined,
+  ): Promise<number> {
+    if (groupId === undefined || groupId === "") return 1;
+
+    if (tenantId !== undefined && tenantId !== "") {
+      const mirrored = await this.#fromMirror(env, groupId, tenantId);
+      // `undefined` = the mirror could not answer authoritatively (not synced,
+      // unreachable, or unmigrated); only then do we pay the control fallback.
+      if (mirrored !== undefined) return mirrored;
+    }
+
+    return this.#fallback.multiplierForGroup(env, groupId, tenantId);
+  }
+
+  /**
+   * The multiplier the tenant's mirror asserts for `groupId`, or `undefined`
+   * when the mirror has no authoritative answer (row absent, or any read error).
+   * A PRESENT row is authoritative: enabled → its parsed multiplier, otherwise
+   * `1.0`.
+   */
+  async #fromMirror(
+    env: InferenceBindings,
+    groupId: string,
+    tenantId: string,
+  ): Promise<number | undefined> {
+    try {
+      const handle = await this.#resolverFor(env).forTenant(tenantId);
+      const row = await handle.db.prepare(MIRROR_GROUP_SQL).bind(groupId).first<MirrorGroupRow>();
+      if (row === null) return undefined; // not synced yet → let the fallback read it
+      if (!rowIsEnabled(row.enabled)) return 1; // disabled → official price
+      return parseMultiplier(row.multiplier) ?? 1; // malformed → official price
+    } catch {
+      // A missing mirror table or an unreachable tenant object is not a billing
+      // event: defer to the control fallback (which itself fails open to 1.0).
+      return undefined;
+    }
+  }
+}
+
+/**
+ * Construct the production source; the returned object owns isolate-local cache
+ * state. Mirror-FIRST (#960): a tenant reads its own `shared_billing_groups`
+ * mirror and pays the control-plane read only for a group it has not synced yet.
+ */
 export function platformBillingGroupSourceFromControlData(
-  options: { ttlMs?: number; now?: () => number } = {},
+  options: { ttlMs?: number; now?: () => number; resolverFor?: TenantResolverFor } = {},
 ): PlatformBillingGroupSource {
-  return new ControlDataPlatformBillingGroupSource(options);
+  const fallback = new ControlDataPlatformBillingGroupSource(options);
+  return new MirrorFirstBillingGroupSource({ fallback, resolverFor: options.resolverFor });
 }

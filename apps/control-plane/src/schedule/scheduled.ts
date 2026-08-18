@@ -18,6 +18,7 @@ import { anchorAuditChains } from "../audit/anchor.js";
 import { type SpendAnomalyReport, runSpendAnomalyPass } from "../finops/pass.js";
 import type { ControlPlaneBindings, ControlPlaneDeps } from "../ports.js";
 import { type SiemExportReport, runSiemExportPass } from "../siem/pump.js";
+import { type SharedConfigPassReport, fanOutSharedConfig } from "../store/shared-config.js";
 import {
   type TenantCatalogAuditSweepReport,
   reconcileProvisionedTenantCatalogAudits,
@@ -58,6 +59,14 @@ export interface ScheduledTickReport extends ScheduleTickSummary {
   readonly spendAnomaly: SpendAnomalyReport;
   /** What the scheduled tenant-catalog audit pass delivered or retained for retry. */
   readonly tenantCatalogAudit: TenantCatalogAuditSweepReport;
+  /**
+   * What the shared-config push pass (#948) delivered: `skipped: "unchanged"`
+   * on every tick where the platform config revision has not moved past the
+   * fleet watermark — the ordinary answer, since config is edited rarely and an
+   * idle fleet must do zero tenant-object work — and a `pushed`/`failed` count
+   * on the tick after an operator edits a plan/group/announcement.
+   */
+  readonly sharedConfig: SharedConfigPassReport;
 }
 
 /**
@@ -102,7 +111,42 @@ export async function runScheduledTick(
     // report, so it cannot make the platform retry this maintenance pass.
     spendAnomaly: await runSpendAnomalyPass(env, now),
     tenantCatalogAudit,
+    sharedConfig: await sharedConfigPass(deps, now),
   };
+}
+
+/**
+ * How often (in minutes) the shared-config push pass is allowed to fan out.
+ *
+ * The pass first checks the fleet watermark (`shared_config_push_state`) against
+ * the platform config revision and does NOTHING when they match — the common
+ * case — so this cadence only bounds how fast a config EDIT reaches the fleet,
+ * not how often idle ticks cost anything. A few minutes of staleness on
+ * plans/groups/announcements is the eventual-consistency contract the mirror is
+ * built on. Kept coarser than a minute so a burst of edits coalesces into one
+ * fan-out rather than one per edit.
+ */
+export const SHARED_CONFIG_PUSH_PERIOD_MIN = 5;
+
+async function sharedConfigPass(
+  deps: Pick<ControlPlaneDeps, "controlDatabase" | "tenantDatabases" | "tenantStorage">,
+  now: number,
+): Promise<SharedConfigPassReport> {
+  if (deps.controlDatabase === null) {
+    return {
+      revision: 0,
+      scanned: 0,
+      pushed: 0,
+      failed: 0,
+      skipped: "control_database_unavailable",
+    };
+  }
+  // Gate on the minute count like the catalog sweep; a missed tick is harmless
+  // because the watermark makes the next eligible window re-decide from scratch.
+  if (Math.floor(now / 60) % SHARED_CONFIG_PUSH_PERIOD_MIN !== 0) {
+    return { revision: 0, scanned: 0, pushed: 0, failed: 0, skipped: "unchanged" };
+  }
+  return fanOutSharedConfig(deps, now);
 }
 
 /**

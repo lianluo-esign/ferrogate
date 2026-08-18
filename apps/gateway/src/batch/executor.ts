@@ -260,7 +260,11 @@ async function defaultBillingMultiplier(env: unknown, batch: StoredBatch): Promi
       row === null || row.billing_group_id === null || row.billing_group_id === ""
         ? undefined
         : row.billing_group_id;
-    return await isolateBillingGroupSource.multiplierForGroup(env as InferenceBindings, groupId);
+    return await isolateBillingGroupSource.multiplierForGroup(
+      env as InferenceBindings,
+      groupId,
+      batch.tenantId,
+    );
   } catch {
     // MONEY PATH: any read failure bills at the official price (fail open).
     return 1;

@@ -1424,6 +1424,16 @@ export interface PlatformBillingGroupSource {
   /**
    * The multiplier for `groupId`, or `1.0` when it is absent, disabled, or
    * unresolvable. `env` carries the CONTROL_DATA binding the read needs.
+   *
+   * `tenantId`, when known, lets a mirror-first source resolve the multiplier
+   * from THIS tenant's own read-only `shared_billing_groups` mirror (#960 /
+   * Phase C step 7b) instead of a cross-region control-plane read — falling back
+   * to the control database only for a group the mirror has not synced yet. A
+   * source that reads the control database directly ignores it.
    */
-  multiplierForGroup(env: InferenceBindings, groupId: string | undefined): Promise<number>;
+  multiplierForGroup(
+    env: InferenceBindings,
+    groupId: string | undefined,
+    tenantId?: string | undefined,
+  ): Promise<number>;
 }

@@ -20,6 +20,7 @@ import type {
   StoreMutation,
   StoreRecord,
 } from "../ports.js";
+import type { AuditSink } from "./audit-sink.js";
 import {
   D1ControlPlaneStore,
   type D1ControlPlaneStoreOptions,
@@ -27,10 +28,10 @@ import {
   TENANT_RESOURCE_TABLE,
   TENANT_RESOURCE_TOMBSTONE_MARK_PREFIX,
 } from "./d1.js";
-import type { AuditSink } from "./audit-sink.js";
 import { pageOf } from "./query.js";
 import { backfillTenantResourceKinds } from "./resource-backfill.js";
 import { resourceKindPlacement } from "./resource-kinds.js";
+import { getCachedTenantAddress, setCachedTenantAddress } from "./tenant-address-cache.js";
 
 interface TenantStoreMatch {
   readonly tenantId: string;
@@ -117,18 +118,27 @@ export class SplitControlPlaneStore implements ControlPlaneStore {
   }
 
   async #buildTenantStore(normalized: string): Promise<D1ControlPlaneStore> {
-    const registration = await this.#registry.get(normalized);
-    const address: TenantObjectAddress | undefined =
-      registration === undefined
-        ? undefined
-        : {
-            ...(registration.locationHint === undefined
-              ? {}
-              : { locationHint: registration.locationHint }),
-            ...(registration.jurisdiction === undefined
-              ? {}
-              : { jurisdiction: registration.jurisdiction }),
-          };
+    // A tenant's object address (jurisdiction + locationHint) is immutable, so an
+    // isolate-local hit lets us address the object WITHOUT the per-request read of
+    // the single control DO's `tenant_databases` roster — the platform's latency
+    // chokepoint. A miss falls back to that read and memoises the result. Only a
+    // PRESENT registration is cached (see `tenant-address-cache.ts`): the address
+    // a hit yields is byte-identical to the row, so it resolves the same object.
+    let address: TenantObjectAddress | undefined = getCachedTenantAddress(normalized);
+    if (address === undefined) {
+      const registration = await this.#registry.get(normalized);
+      if (registration !== undefined) {
+        address = {
+          ...(registration.locationHint === undefined
+            ? {}
+            : { locationHint: registration.locationHint }),
+          ...(registration.jurisdiction === undefined
+            ? {}
+            : { jurisdiction: registration.jurisdiction }),
+        };
+        setCachedTenantAddress(normalized, address);
+      }
+    }
     const handle = await this.#tenantRouter.forTenant(normalized, address);
     await backfillTenantResourceKinds(this.#controlDb, handle.db, normalized);
     const options: D1ControlPlaneStoreOptions = {
@@ -300,23 +310,14 @@ export class SplitControlPlaneStore implements ControlPlaneStore {
     if (!this.#isTenantPrivate(collection))
       return this.#controlStore().list(collection, scope, query);
     if (scope.kind === "tenant") {
-      // The read fence of the control-isolation reference: a tenant sees its
-      // own rows AND the deployment's un-attributed platform rows.
-      const platformRows = await this.#platformRows(collection, scope, query);
-      if (!this.#hasTenantDestination(scope)) {
-        return pageOf([...platformRows], query);
-      }
-      const local = await (await this.#tenantStore(scope.tenantId)).list(
-        collection,
-        scope,
-        UNPAGED_QUERY(query),
-      );
-      const seen = new Set(local.items.map((record) => String(record.id)));
-      const records = [
-        ...local.items,
-        ...platformRows.filter((record) => !seen.has(String(record.id))),
-      ];
-      return pageOf(records, query);
+      // Full tenant/control isolation (#948): a tenant reads a tenant-private
+      // kind from its OWN object only. Shared config no longer merges in at
+      // read time — it is pushed one-way into the tenant's read-only mirror
+      // tables (`shared_*`) through the async channel, so this hot path never
+      // takes a synchronous round trip to the single control object. A tenant
+      // credential with no destination has its own (empty) object to read.
+      if (!this.#hasTenantDestination(scope)) return pageOf([], query);
+      return (await this.#tenantStore(scope.tenantId)).list(collection, scope, query);
     }
     return this.#listTenantResources(collection, query);
   }
@@ -324,14 +325,12 @@ export class SplitControlPlaneStore implements ControlPlaneStore {
   async get(collection: string, scope: CallerScope, id: string): Promise<StoreRecord | null> {
     if (!this.#isTenantPrivate(collection)) return this.#controlStore().get(collection, scope, id);
     if (scope.kind === "tenant") {
-      if (this.#hasTenantDestination(scope)) {
-        const record = await (await this.#tenantStore(scope.tenantId)).get(collection, scope, id);
-        if (record !== null) return record;
-      }
-      // Same read fence as `list`: an un-attributed platform row stays visible
-      // to a tenant; another tenant's row (or a stale attributed control copy)
-      // does not.
-      return this.#platformRow(collection, scope, id);
+      // Full isolation (#948): a tenant resolves a tenant-private kind from its
+      // OWN object, never from control D1. Shared config reaches the tenant
+      // through the async mirror push, not a read-time fence, so a get miss is
+      // a genuine miss — no synchronous control-object hop on the hot path.
+      if (!this.#hasTenantDestination(scope)) return null;
+      return (await this.#tenantStore(scope.tenantId)).get(collection, scope, id);
     }
     const match = await this.#matchTenantResource(collection, id);
     if (match !== null) return match.record;

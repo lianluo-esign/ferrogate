@@ -51,6 +51,7 @@ const PluginToolsPage = lazy(() => import("@/pages/plugin-tools"));
 const ToolSessionsPage = lazy(() => import("@/pages/tool-sessions"));
 const ModelOfferingsPage = lazy(() => import("@/pages/model-offerings"));
 const BillingGroupsPage = lazy(() => import("@/pages/billing-groups"));
+const AnnouncementsPage = lazy(() => import("@/pages/announcements"));
 const ResourceRoutePage = lazy(() => import("@/pages/resource-route"));
 
 const queryClient = new QueryClient({
@@ -212,6 +213,10 @@ function App() {
                       <Route
                         path={APP_ROUTES.billingGroups}
                         element={routeElement(BillingGroupsPage)}
+                      />
+                      <Route
+                        path={APP_ROUTES.announcements}
+                        element={routeElement(AnnouncementsPage)}
                       />
                       {Object.values(RESOURCE_ROUTE_PATHS).map((path) => (
                         <Route key={path} path={path} element={routeElement(ResourceRoutePage)} />

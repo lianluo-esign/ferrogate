@@ -67,6 +67,45 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/admin/v1/announcements": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List platform announcements shared to tenants. */
+        get: operations["listAnnouncements"];
+        put?: never;
+        /** Create a platform announcement. */
+        post: operations["createAnnouncement"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/v1/announcements/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        /** Get one platform announcement. */
+        get: operations["getAnnouncement"];
+        put?: never;
+        post?: never;
+        /** Delete a platform announcement. */
+        delete: operations["deleteAnnouncement"];
+        options?: never;
+        head?: never;
+        /** Partially update a platform announcement. */
+        patch: operations["patchAnnouncement"];
+        trace?: never;
+    };
     "/healthz": {
         parameters: {
             query?: never;
@@ -9588,6 +9627,27 @@ export interface components {
             description?: string | null;
             enabled?: boolean;
         };
+        /** @description A platform announcement (公告) shared read-only to every tenant. */
+        Announcement: {
+            id: string;
+            /** @constant */
+            scope: "platform";
+            title: string;
+            body: string;
+            level: string;
+            enabled: boolean;
+            starts_at_unix?: number | null;
+            ends_at_unix?: number | null;
+        };
+        AnnouncementMutation: {
+            id?: string;
+            title: string;
+            body: string;
+            level?: string;
+            enabled?: boolean;
+            starts_at_unix?: number | null;
+            ends_at_unix?: number | null;
+        };
         AdminVirtualApiKeyCreateRequest: {
             id?: string | null;
             name?: string | null;
@@ -12362,6 +12422,155 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+        };
+    };
+    listAnnouncements: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Announcement list. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        object?: string;
+                        data?: components["schemas"]["Announcement"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    createAnnouncement: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AnnouncementMutation"];
+            };
+        };
+        responses: {
+            /** @description Created announcement. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        object?: string;
+                        announcement?: components["schemas"]["Announcement"];
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    getAnnouncement: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Announcement. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        object?: string;
+                        announcement?: components["schemas"]["Announcement"];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    deleteAnnouncement: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted announcement. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        object?: string;
+                        id?: string;
+                        deleted?: boolean;
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    patchAnnouncement: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AnnouncementMutation"];
+            };
+        };
+        responses: {
+            /** @description Updated announcement. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        object?: string;
+                        announcement?: components["schemas"]["Announcement"];
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
         };
     };
     getHealthz: {

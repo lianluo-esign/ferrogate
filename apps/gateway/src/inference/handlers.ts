@@ -1635,9 +1635,14 @@ async function billingGroupMeterFields(
 ): Promise<{ billingGroupId?: string; billingMultiplier?: number }> {
   const groupId = caller.billingGroupId;
   if (groupId === undefined) return {};
+  // A tenant-scoped caller lets the mirror-first source read this tenant's own
+  // `shared_billing_groups` mirror; a platform-operator caller has no tenant
+  // mirror, so the source falls through to the control read (tenantId absent).
+  const tenantId = caller.scope.kind === "tenant" ? caller.scope.tenantId : undefined;
   const billingMultiplier = await deps.billingGroups.multiplierForGroup(
     env as InferenceBindings,
     groupId,
+    tenantId,
   );
   return { billingGroupId: groupId, billingMultiplier };
 }

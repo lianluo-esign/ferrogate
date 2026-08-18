@@ -111,6 +111,20 @@ const DELIBERATE_EXCLUSIONS: Readonly<Record<string, DeliberateExclusion>> = {
     reason:
       "download-only surface: it answers a CSV, JSONL or binary Parquet attachment rather than a renderable document, so it is a button on the cost-records panel above rather than a page — deferred, needs UI",
   },
+  // Read-only cross-tenant fleet billing AGGREGATE (#956 read side, shipped by
+  // #960): a single GET that rolls per-tenant spend up into a fleet total over
+  // Analytics Engine (sample-corrected). No write verbs — the figures are
+  // derived from metered usage, never authored here — so a CRUD page would imply
+  // controls the surface cannot honor. It answers the fleet-wide view of the
+  // very same spend the per-tenant wallets/metering cockpit already owns, so its
+  // operator UI belongs as the roll-up header on that cockpit rather than a
+  // standalone page. Deferred, needs UI — tracked on the #313 chain as the #956
+  // fleet-billing follow-up; delete this entry when that panel lands.
+  "billing-fleet": {
+    owner: "billing/ops cockpit (#956 read side / #960, #313 chain)",
+    reason:
+      "read-only cross-tenant fleet billing aggregate over Analytics Engine; the figures are derived from metered usage, not authored through this API, so it belongs as the fleet roll-up on the wallets/metering spend cockpit rather than a standalone CRUD page — deferred, needs UI",
+  },
   // (`observed-agent-activity` used to be excluded here as "deferred, needs UI".
   // #464 shipped that UI as the Unattributed tab on `src/pages/agent-runs.tsx`,
   // so the exclusion was DELETED: the group is now covered by a real call site
