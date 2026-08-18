@@ -61,6 +61,7 @@ import {
   requestId,
 } from "../src/middleware/errors.js";
 import type { ControlPlaneEnv } from "../src/ports.js";
+import { KvAdminIdentityProjection } from "../src/session/identity-projection.js";
 import {
   ADMIN_CONSOLE_SESSION_KEY_NAME,
   ADMIN_SESSION_ACCESS_TOKEN_TTL_SECS,
@@ -72,6 +73,7 @@ import {
   parseMembershipRole,
   signAdminAccessToken,
 } from "../src/session/index.js";
+import type { AdminLoginBootstrap, AdminUserRow } from "../src/session/store.js";
 import { applySchema, db, resetD1 } from "./d1.js";
 import { BASE, arm } from "./harness.js";
 import { applyTenantSchema, resetTenantD1 } from "./tenant-db.js";
@@ -293,6 +295,17 @@ beforeEach(async () => {
     // so a prior test's key cannot survive into the next.
     db().prepare("DELETE FROM static_api_keys"),
   ]);
+  // #66: the login-bootstrap projection is a REAL KV namespace in the pool and,
+  // unlike D1, is not reset by resetD1(). Tests reuse fixed emails
+  // (owner@acme.test), so a bootstrap one test populated would resolve in the
+  // next — where D1 was wiped and that email now maps to a FRESH tenant — and the
+  // stale membership would point at a vanished tenant. Clear it so each test
+  // starts with a cold cache, exactly as a fresh colo would.
+  const identityKv = (env as { IDENTITY_DIRECTORY?: KVNamespace }).IDENTITY_DIRECTORY;
+  if (identityKv !== undefined) {
+    const listed = await identityKv.list();
+    await Promise.all(listed.keys.map((entry) => identityKv.delete(entry.name)));
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -1261,5 +1274,186 @@ describe("an unconfigured deployment", () => {
     });
     expect(result.status).toBe(503);
     expect(errorOf(result.body).code).toBe("admin_console_unconfigured");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #66 (Phase B, login leg): the KV login-bootstrap PROJECTION, write-through
+// ---------------------------------------------------------------------------
+//
+// `identity-projection.test.ts` pins the projection in isolation. Here it is
+// exercised through the REAL login + team routes over the REAL `IDENTITY_DIRECTORY`
+// binding the pool provides (composed by `resolveDeps`), so the four behaviours
+// that only exist at the WIRING are proved end-to-end:
+//
+//  - a cold login POPULATES the cache (positive, on the authoritative fallback);
+//  - a subsequent login READS AHEAD of the control object (a cached tier decides
+//    the session — a value a DO read would have contradicted);
+//  - a STALE cached tenant (the delete + re-register race) falls through to
+//    authority rather than 500ing, and re-warms the cache with the truth;
+//  - invite / change-role / revoke INVALIDATE the affected user's entry.
+describe("#66 login-bootstrap KV projection (write-through)", () => {
+  function identityKv(): KVNamespace {
+    const ns = (env as { IDENTITY_DIRECTORY?: KVNamespace }).IDENTITY_DIRECTORY;
+    if (ns === undefined) {
+      throw new Error(
+        "no KV binding `IDENTITY_DIRECTORY` — add [[kv_namespaces]] to apps/control-plane/wrangler.toml",
+      );
+    }
+    return ns;
+  }
+
+  /** The projection over the pool's real binding — the same one `resolveDeps` builds. */
+  function projection(): KvAdminIdentityProjection {
+    return new KvAdminIdentityProjection(identityKv());
+  }
+
+  /** The cached bootstrap for `email`, or `null` — decoded through the real validator. */
+  async function cached(email: string): Promise<AdminLoginBootstrap | null> {
+    return await projection().read(email);
+  }
+
+  /** The authoritative user row shaped as the projection stores it, for seeding. */
+  async function userForCache(email: string): Promise<AdminUserRow> {
+    const row = await adminUserRow(email);
+    if (row === null) throw new Error(`no admin_users row for ${email}`);
+    const num = (v: unknown): number => Number(v);
+    const nullableNum = (v: unknown): number | null =>
+      v === null || v === undefined ? null : Number(v);
+    return {
+      id: String(row.id),
+      email: String(row.email),
+      passwordHash: String(row.password_hash),
+      displayName: String(row.display_name ?? ""),
+      superadmin: row.superadmin === 1,
+      createdAtUnix: num(row.created_at_unix),
+      updatedAtUnix: num(row.updated_at_unix),
+      lastLoginAtUnix: nullableNum(row.last_login_at_unix),
+      disabledAtUnix: nullableNum(row.disabled_at_unix),
+    };
+  }
+
+  const PASSWORD = "correct horse battery";
+
+  async function login(email: string): Promise<{ status: number; body: Json }> {
+    return await call("POST", "/v1/admin/login", { body: { email, password: PASSWORD } });
+  }
+
+  it("a cold login POPULATES the projection — register alone does not", async () => {
+    const owner = await register("owner@acme.test");
+    // Registration issues a session directly; it does not read the login path, so
+    // it must NOT seed the cache (positive-only is on the login FALLBACK).
+    expect(await cached("owner@acme.test")).toBeNull();
+
+    const result = await login("owner@acme.test");
+    expect(result.status, JSON.stringify(result.body)).toBe(200);
+
+    const entry = await cached("owner@acme.test");
+    expect(entry).not.toBeNull();
+    expect(entry?.user.id).toBe(owner.user.id);
+    // The password hash is cached deliberately — that is what makes login DO-free.
+    expect((entry?.user.passwordHash ?? "").length).toBeGreaterThan(0);
+    expect(entry?.memberships[0]?.tenantId).toBe(owner.tenant.id);
+  });
+
+  it("READS AHEAD of the control object — a cached tier decides the session", async () => {
+    const owner = await register("owner@acme.test");
+    // The DB says `owner`; seed the cache with the SAME user but a DOWNGRADED tier.
+    // If login reads the DO the session is owner; if it reads ahead it is viewer.
+    await projection().write("owner@acme.test", {
+      user: await userForCache("owner@acme.test"),
+      memberships: [
+        {
+          id: "mem_cached",
+          userId: owner.user.id,
+          tenantId: owner.tenant.id,
+          role: "viewer",
+          createdAtUnix: 1,
+        },
+      ],
+    });
+
+    const result = await login("owner@acme.test");
+    expect(result.status, JSON.stringify(result.body)).toBe(200);
+    // viewer — from the CACHE. A DO read would have said owner.
+    expect((result.body as unknown as Session).tenant.role).toBe("viewer");
+  });
+
+  it("a STALE cached tenant (delete + re-register race) falls through to authority, not a 500", async () => {
+    const owner = await register("owner@acme.test");
+    // A membership pointing at a tenant that no longer exists — what a hard delete
+    // of the tenant/user + a re-register under the same email leaves in the cache
+    // until the TTL lapses. No team route saw that deletion, so nothing invalidated.
+    await projection().write("owner@acme.test", {
+      user: await userForCache("owner@acme.test"),
+      memberships: [
+        {
+          id: "mem_ghost",
+          userId: owner.user.id,
+          tenantId: "tenant_ghost",
+          role: "owner",
+          createdAtUnix: 1,
+        },
+      ],
+    });
+
+    const result = await login("owner@acme.test");
+    // Heals immediately rather than 500ing for up to a TTL.
+    expect(result.status, JSON.stringify(result.body)).toBe(200);
+    expect((result.body as unknown as Session).tenant.id).toBe(owner.tenant.id);
+    // …and the poisoned entry is replaced by the AUTHORITATIVE tenant, not the ghost.
+    expect((await cached("owner@acme.test"))?.memberships[0]?.tenantId).toBe(owner.tenant.id);
+  });
+
+  it("INVITE invalidates the invited user's cached bootstrap", async () => {
+    const owner = await register("owner@acme.test");
+    await register("mate@other.test", PASSWORD, "Other");
+    // mate logs in → their bootstrap is cached.
+    expect((await login("mate@other.test")).status).toBe(200);
+    expect(await cached("mate@other.test")).not.toBeNull();
+
+    // owner invites mate into the owner tenant → mate's stale entry is dropped, so
+    // the new membership cannot be masked by a cached login for a TTL.
+    const invited = await call("POST", "/v1/admin/team/invite", {
+      token: owner.access_token,
+      body: { email: "mate@other.test", role: "member" },
+    });
+    expect(invited.status, JSON.stringify(invited.body)).toBe(201);
+    expect(await cached("mate@other.test")).toBeNull();
+  });
+
+  it("CHANGE-ROLE invalidates the demoted teammate's cached bootstrap (#517)", async () => {
+    const owner = await register("owner@acme.test");
+    const mate = await register("mate@other.test", PASSWORD, "Other");
+    await call("POST", "/v1/admin/team/invite", {
+      token: owner.access_token,
+      body: { email: "mate@other.test", role: "admin" },
+    });
+    expect((await login("mate@other.test")).status).toBe(200);
+    expect(await cached("mate@other.test")).not.toBeNull();
+
+    const demote = await call("POST", `/v1/admin/team/members/${mate.user.id}`, {
+      token: owner.access_token,
+      body: { role: "viewer" },
+    });
+    expect(demote.status, JSON.stringify(demote.body)).toBe(200);
+    expect(await cached("mate@other.test")).toBeNull();
+  });
+
+  it("REVOKE invalidates the removed teammate's cached bootstrap (#517)", async () => {
+    const owner = await register("owner@acme.test");
+    const mate = await register("mate@other.test", PASSWORD, "Other");
+    await call("POST", "/v1/admin/team/invite", {
+      token: owner.access_token,
+      body: { email: "mate@other.test", role: "admin" },
+    });
+    expect((await login("mate@other.test")).status).toBe(200);
+    expect(await cached("mate@other.test")).not.toBeNull();
+
+    const removed = await call("DELETE", `/v1/admin/team/members/${mate.user.id}`, {
+      token: owner.access_token,
+    });
+    expect(removed.status, JSON.stringify(removed.body)).toBe(200);
+    expect(await cached("mate@other.test")).toBeNull();
   });
 });

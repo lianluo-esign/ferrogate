@@ -462,8 +462,22 @@ const REFUSAL = "tenant_data_object";
  * Role bindings and their local catalog are an operator projection. Letting a
  * tenant-facing SQL caller write either half would allow it to manufacture its
  * own permission grant, so those writes require the separate privileged RPC.
+ *
+ * The shared-config mirror (#948) joins them for the same reason: those rows are
+ * a one-way projection PUSHED down from the control plane (billing groups,
+ * announcements, and the sync cursor that stamps them), read-only inside the
+ * tenant. A tenant that could write `shared_billing_groups` could mint its own
+ * billing multiplier, and one that could write `shared_announcements` could
+ * forge platform notices, so only the privileged push RPC may write them;
+ * ordinary `query`/`batch` traffic may SELECT them and nothing more.
  */
-const PRIVILEGED_WRITE_TABLES = ["tenant_role_bindings", "tenant_role_catalog"] as const;
+const PRIVILEGED_WRITE_TABLES = [
+  "tenant_role_bindings",
+  "tenant_role_catalog",
+  "shared_config_cursor",
+  "shared_billing_groups",
+  "shared_announcements",
+] as const;
 
 function stripSqlCommentsAndStrings(sql: string): string {
   let output = "";

@@ -123,9 +123,10 @@ export const SUPPORTED_CONTRACT_VERSION = 1;
  * off the merged `docs/openapi/runtime-api-contract.json` (which is also the
  * number `packages/schemas`' `OPENAPI_OPERATION_COUNT` pins) rather than
  * incremented. 312 -> 313 with #892's `POST /admin/v1/config/import-model-catalog`,
- * the platform-catalog bootstrap import.
+ * the platform-catalog bootstrap import. 322 -> 327 with #948's five
+ * `admin_announcement` operations, all under `/admin/v1/announcements`.
  */
-export const EXPECTED_TOTAL_OPERATION_COUNT = 322;
+export const EXPECTED_TOTAL_OPERATION_COUNT = 327;
 
 /**
  * Operations `ROUTE-MAP.md` assigns to `apps/control-plane`: `/admin/v1/**`
@@ -165,8 +166,11 @@ export const EXPECTED_TOTAL_OPERATION_COUNT = 322;
  * 241 -> 248 -> 249 with #943's seven `admin_billing_group` operations, all under
  * `/admin/v1/billing-groups`. CORRECT for main + this slice ALONE; #944's
  * parallel operation is reconciled by the integrator.
+ *
+ * 250 -> 255 with #948's five `admin_announcement` operations, all under
+ * `/admin/v1/announcements` (the 公告 shared-config domain's operator surface).
  */
-export const EXPECTED_CONTROL_PLANE_OPERATION_COUNT = 250;
+export const EXPECTED_CONTROL_PLANE_OPERATION_COUNT = 255;
 
 // ---------------------------------------------------------------------------
 // Ownership predicate

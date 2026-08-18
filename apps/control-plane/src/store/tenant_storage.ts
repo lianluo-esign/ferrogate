@@ -63,6 +63,7 @@
 import {
   type TenantJurisdiction,
   type TenantModelCatalogSeedGraph,
+  type TenantObjectAddress,
   locationHintFromCloudflareSignal,
   placementSignalFromRequest,
   provisionTenantStorage,
@@ -70,6 +71,7 @@ import {
 } from "@ferrogate/storage";
 import type { ControlPlaneDeps } from "../ports.js";
 import { PlatformModelCatalogStore } from "./platform-model-catalog.js";
+import { seedSharedConfigForTenant } from "./shared-config.js";
 
 interface ResidencyPolicyRow {
   readonly residency_regions_json: string | null;
@@ -159,8 +161,21 @@ export async function provisionTenantStorageFor(
     // on the roster row so an operator can tell an edge-header placement from a native `cf` one.
     const { signal, origin } = placementSignalFromRequest(request);
     const placement = locationHintFromCloudflareSignal(signal);
-    const locationHintSource =
-      origin === "edge-header" ? `edge-header;${placement.source}` : placement.source;
+    // When the registration carried NO geo signal at all (no native `cf`, no
+    // forwarded `x-ferrogate-cf-*` header), `locationHintFromCloudflareSignal`
+    // returns its own US-West (`wnam`) fallback. A regional deployment must not
+    // home its no-signal tenants in the US, so honor the operator-configured
+    // default region instead. A REAL signal (origin `cf`/`edge-header`) always
+    // wins — a genuine US user is still homed in the US.
+    const useOperatorDefault = origin === "none" && deps.defaultTenantLocationHint !== undefined;
+    const locationHint = useOperatorDefault
+      ? deps.defaultTenantLocationHint
+      : placement.locationHint;
+    const locationHintSource = useOperatorDefault
+      ? `operator-default;${deps.defaultTenantLocationHint}`
+      : origin === "edge-header"
+        ? `edge-header;${placement.source}`
+        : placement.source;
     const jurisdiction = await tenantJurisdictionFromPolicy(controlDatabase, tenantId);
     // The MANAGED platform catalog (#891) is the seed source when this
     // deployment has adopted it. It is read over the CONTROL_DATA facade (the
@@ -174,13 +189,45 @@ export async function provisionTenantStorageFor(
       deps.tenantStorage ?? deps.tenantDatabases,
       tenantId,
       {
-        locationHint: placement.locationHint,
+        locationHint,
         locationHintSource,
         locationHintRecordedAtUnix: Math.floor(Date.now() / 1000),
         ...(jurisdiction === undefined ? {} : { jurisdiction }),
         catalogGraphLoader: () => exportPlatformCatalogSeed(controlDatabase),
       },
     );
+    // One structured line per provisioning attempt. The module docblock notes
+    // that a tenant's provisioning outcome does not surface SYNCHRONOUSLY beyond
+    // the roster row; this is the observability projection of it. It also makes
+    // the placement DECISION auditable from `wrangler tail` / Workers Logs — the
+    // location hint a tenant's Durable Object was FIRST addressed with is
+    // permanent, so recording which signal chose it (native `cf`, a forwarded
+    // edge header, or the operator default) is the difference between an audited
+    // placement and one inferred after the fact.
+    console.log(
+      JSON.stringify({
+        event: "tenant_storage_provision",
+        tenantId,
+        status: outcome.status,
+        locationHint,
+        locationHintSource,
+        placementOrigin: origin,
+      }),
+    );
+    // Seed the shared control-plane config (分组/套餐/公告) DOWN into the new
+    // tenant's object so its first authenticated request reads that config
+    // LOCALLY, never reaching back into the control DB (#948). Addressed with
+    // the same jurisdiction/locationHint the object was just provisioned at, so
+    // the push lands in exactly the object the tenant reads from. Best-effort:
+    // `seedSharedConfigForTenant` swallows its own failures, and the cron pass
+    // re-delivers idempotently, so a seed fault never fails tenant creation.
+    if (outcome.status === "ready") {
+      const address: TenantObjectAddress = {
+        locationHint,
+        ...(jurisdiction === undefined ? {} : { jurisdiction }),
+      };
+      await seedSharedConfigForTenant(deps, tenantId, address);
+    }
     return outcome.status === "ready";
   } catch {
     // `provisionTenantStorage` has already written `failed` and the refusal's

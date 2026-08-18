@@ -148,6 +148,12 @@ export const SENSE_EXCEPTIONS: Readonly<Partial<Record<TranslationKey, string>>>
   "resource.quotaPolicies.option.scopeType.key":
     "Quota scope 'key' means an API KEY (密钥); the sibling scopes are tenant/project/workspace.",
 
+  // "Published" — a boolean state vs a timestamp.
+  "resource.announcements.col.enabled":
+    "Announcement PUBLISHED flag — boolean 已发布; staticSites 'Published' is a publish TIMESTAMP (发布时间).",
+  "resource.announcements.field.enabled":
+    "Announcement PUBLISHED flag — boolean 已发布; staticSites 'Published' is a publish TIMESTAMP (发布时间).",
+
   // "Latest" / "Versions" / "Total" — count vs referent.
   "page.assets.col.latest":
     "Column shows the latest VERSION string (最新版本); the worker card shows the latest TIMESTAMP.",

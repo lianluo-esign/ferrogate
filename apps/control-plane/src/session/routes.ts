@@ -72,6 +72,7 @@ import {
   requireUsableConsoleTenancy,
   revokeAdminConsoleSessionKeys,
 } from "./gateway_key.js";
+import type { AdminIdentityProjection } from "./identity-projection.js";
 import {
   type MembershipRole,
   acceptedMembershipRoles,
@@ -82,6 +83,7 @@ import {
 import { provisionPlatformOperatorApiKey, revokePlatformOperatorApiKey } from "./operator_key.js";
 import {
   type AdminConsoleSessionStore,
+  type AdminLoginBootstrap,
   type AdminMembershipRow,
   type AdminUserRow,
   D1AdminConsoleSessionStore,
@@ -113,6 +115,12 @@ interface ConsoleContext {
   readonly deps: ControlPlaneDeps;
   readonly store: AdminConsoleSessionStore;
   readonly jwtSecret: string;
+  /**
+   * The login-bootstrap KV projection (#66), or `null` when unbound. Read ahead of
+   * the control object by {@link handleLogin}, populated by it on a miss, and
+   * invalidated by the team routes. `null` ⇒ every login takes the control read.
+   */
+  readonly identityDirectory: AdminIdentityProjection | null;
 }
 
 /**
@@ -143,7 +151,12 @@ function consoleOf(c: Ctx): ConsoleContext {
       "admin console sessions require the control database binding DB",
     );
   }
-  return { deps, store: new D1AdminConsoleSessionStore(deps.controlDatabase), jwtSecret };
+  return {
+    deps,
+    store: new D1AdminConsoleSessionStore(deps.controlDatabase),
+    jwtSecret,
+    identityDirectory: deps.identityDirectory,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -481,56 +494,183 @@ async function deferWork(c: Ctx, work: () => Promise<void>): Promise<void> {
   await work().catch(() => {});
 }
 
+/**
+ * Resolve the login bootstrap through the KV projection, then the control object
+ * (#66). READ-AHEAD: a positive KV hit is returned as-is (every login gate re-runs
+ * on it upstream). On a miss, the authoritative `bootstrapLoginByEmail` answers and
+ * a POSITIVE result populates the cache for the next login — an unknown email is
+ * never written, so an email-spray cannot seed it. Both KV legs are best-effort: a
+ * read failure falls through to the control read, and a write failure is swallowed.
+ * With no projection bound this is exactly the former single control read.
+ */
+/**
+ * A login bootstrap plus WHERE it came from. `fromCache` lets {@link handleLogin}
+ * distinguish a stale KV hit — whose tenant may have been hard-deleted out of band
+ * (no team route saw it, so no invalidation fired) — from an authoritative read
+ * that is stale for no recoverable reason. Only the former is worth retrying.
+ */
+interface LoginBootstrapResult {
+  readonly bootstrap: AdminLoginBootstrap | null;
+  readonly fromCache: boolean;
+}
+
+async function loginBootstrap(
+  console_: ConsoleContext,
+  email: string,
+): Promise<LoginBootstrapResult> {
+  const projection = console_.identityDirectory;
+  if (projection !== null) {
+    const cached = await projection.read(email).catch(() => null);
+    if (cached !== null) return { bootstrap: cached, fromCache: true };
+  }
+  const bootstrap = await console_.store.bootstrapLoginByEmail(email);
+  if (bootstrap !== null && projection !== null) {
+    await projection.write(email, bootstrap).catch(() => {});
+  }
+  return { bootstrap, fromCache: false };
+}
+
+/**
+ * Re-read the bootstrap from the AUTHORITATIVE control object after a cached one
+ * proved stale, dropping the poisoned entry first. Used only by the login
+ * stale-tenant fall-through; keeps the cache warm with the fresh value on the way
+ * back so the next login is fast again.
+ */
+async function authoritativeBootstrapReload(
+  console_: ConsoleContext,
+  email: string,
+): Promise<AdminLoginBootstrap | null> {
+  await invalidateIdentityByEmail(console_, email);
+  const bootstrap = await console_.store.bootstrapLoginByEmail(email);
+  const projection = console_.identityDirectory;
+  if (bootstrap !== null && projection !== null) {
+    await projection.write(email, bootstrap).catch(() => {});
+  }
+  return bootstrap;
+}
+
+/**
+ * Invalidate the login-bootstrap projection for `email` (#66) — best effort, and
+ * only when a projection is bound. A KV delete failure must never fail the mutation
+ * that triggered it; the short TTL is the backstop.
+ */
+async function invalidateIdentityByEmail(console_: ConsoleContext, email: string): Promise<void> {
+  const projection = console_.identityDirectory;
+  if (projection === null) return;
+  await projection.delete(email).catch(() => {});
+}
+
+/**
+ * Invalidate by USER ID (#66): a membership mutation knows the user id, not the
+ * email the projection is keyed by. Resolve the email ONLY when a projection is
+ * bound — so this adds no control read to a deployment with no KV — then delete.
+ * Best effort throughout; never throws into the caller.
+ */
+async function invalidateIdentityByUserId(console_: ConsoleContext, userId: string): Promise<void> {
+  const projection = console_.identityDirectory;
+  if (projection === null) return;
+  const user = await console_.store.getUserById(userId).catch(() => null);
+  if (user === null) return;
+  await projection.delete(user.email).catch(() => {});
+}
+
+/** The validated login context — every gate passed, tenant + workspace present. */
+interface ResolvedLogin {
+  readonly user: AdminUserRow;
+  readonly membership: AdminMembershipRow;
+  readonly tenantAccount: StoreRecord;
+  readonly workspace: StoreRecord;
+}
+
+/**
+ * Resolve the bootstrap and run every login gate against it — disabled, password
+ * KDF, membership, then the tenant account + default workspace.
+ *
+ * #66 (Phase B login leg): the bootstrap — the user AND their memberships in ONE
+ * JOIN — comes from the replicated KV projection when present, falling back to the
+ * authoritative single-region control object on a miss. The KV read is a same-colo
+ * O(1) lookup; the control read is one of the 200–978ms cross-region hops the <1s
+ * login SLA cannot afford. The projection is POSITIVE-ONLY (an unknown email is
+ * never cached) and EVERY gate here re-runs on whatever value we got, so a KV hit
+ * is faster, never looser.
+ *
+ * If a CACHED bootstrap proves stale — its tenant/workspace vanished out of band
+ * (a tenant or user hard-deleted and the email re-registered, a mutation no team
+ * route saw so no invalidation fired) — we drop the poisoned entry and re-resolve
+ * ONCE from authority, re-running every gate. The password-changed variant of that
+ * same race is left to the short TTL backstop instead: retrying on a password MISS
+ * would make every wrong password pay an authoritative read, the exact hot-path
+ * cost this projection exists to remove.
+ */
+async function resolveLoginContext(
+  console_: ConsoleContext,
+  email: string,
+  password: string,
+): Promise<ResolvedLogin> {
+  let { bootstrap, fromCache } = await loginBootstrap(console_, email);
+  for (let attempt = 0; ; attempt += 1) {
+    // An unknown email and a wrong password get the SAME answer. Distinguishing
+    // them turns this endpoint into an account-enumeration oracle.
+    if (bootstrap === null) throw new HttpError(401, "unauthorized", "invalid email or password");
+    const user = bootstrap.user;
+    if (user.disabledAtUnix !== null) {
+      throw new HttpError(401, "unauthorized", "this account has been disabled");
+    }
+    // Password FIRST, before any tenant/workspace read: this preserves the prior
+    // posture that those reads only happen for an authenticated caller (no new
+    // pre-auth work), and the JOIN above already bought back the round trip the
+    // old code hid the KDF under.
+    const passwordOk = await verifyPassword(password, user.passwordHash);
+    if (!passwordOk) {
+      throw new HttpError(401, "unauthorized", "invalid email or password");
+    }
+
+    const membership = bootstrap.memberships[0];
+    if (membership === undefined) {
+      throw new HttpError(401, "unauthorized", "this account has no tenant membership");
+    }
+    // The tenant account and its default workspace both key off the SAME tenant and
+    // neither has a side effect, so overlap their round trips. Against a remote
+    // (e.g. US-homed) single-region control object these two reads otherwise stack;
+    // parallelising them changes nothing but latency, and the null checks below are
+    // unchanged.
+    const [tenantAccount, workspace] = await Promise.all([
+      console_.deps.store.get(TENANT_ACCOUNTS_COLLECTION, PLATFORM, membership.tenantId),
+      resolveDefaultWorkspace(console_.deps, membership.tenantId),
+    ]);
+    // A stale KV hit whose tenant vanished: drop it and re-resolve from authority
+    // once, so ops flows like a tenant/user delete + re-register heal immediately
+    // rather than 500-ing until the TTL lapses.
+    if ((tenantAccount === null || workspace === null) && fromCache && attempt === 0) {
+      bootstrap = await authoritativeBootstrapReload(console_, email);
+      fromCache = false;
+      continue;
+    }
+    if (tenantAccount === null) {
+      throw new HttpError(
+        500,
+        "internal_error",
+        "tenant account for this membership no longer exists",
+      );
+    }
+    if (workspace === null) {
+      throw new HttpError(500, "internal_error", "no workspace found for this tenant");
+    }
+    return { user, membership, tenantAccount, workspace };
+  }
+}
+
 /** `POST /v1/admin/login` — Rust `handle_admin_login`. */
 async function handleLogin(c: Ctx): Promise<Response> {
   const console_ = consoleOf(c);
   const payload = await readBody(c, loginSchema);
   const email = payload.email.trim().toLowerCase();
 
-  // ONE control round trip for the user AND their memberships (a single JOIN),
-  // replacing the former getUserByEmail → listMembershipsByUser serial pair —
-  // one fewer cross-region hop to the single-region control object on the <1s
-  // login path.
-  const bootstrap = await console_.store.bootstrapLoginByEmail(email);
-  // An unknown email and a wrong password get the SAME answer. Distinguishing
-  // them turns this endpoint into an account-enumeration oracle.
-  if (bootstrap === null) throw new HttpError(401, "unauthorized", "invalid email or password");
-  const user = bootstrap.user;
-  if (user.disabledAtUnix !== null) {
-    throw new HttpError(401, "unauthorized", "this account has been disabled");
-  }
-  // Password FIRST, before any tenant/workspace read: this preserves the prior
-  // posture that those reads only happen for an authenticated caller (no new
-  // pre-auth work), and the JOIN above already bought back the round trip the
-  // old code hid the KDF under.
-  const passwordOk = await verifyPassword(payload.password, user.passwordHash);
-  if (!passwordOk) {
-    throw new HttpError(401, "unauthorized", "invalid email or password");
-  }
-
-  const membership = bootstrap.memberships[0];
-  if (membership === undefined) {
-    throw new HttpError(401, "unauthorized", "this account has no tenant membership");
-  }
-  // The tenant account and its default workspace both key off the SAME tenant and
-  // neither has a side effect, so overlap their round trips. Against a remote
-  // (e.g. US-homed) single-region control object these two reads otherwise stack;
-  // parallelising them changes nothing but latency, and the null checks below are
-  // unchanged.
-  const [tenantAccount, workspace] = await Promise.all([
-    console_.deps.store.get(TENANT_ACCOUNTS_COLLECTION, PLATFORM, membership.tenantId),
-    resolveDefaultWorkspace(console_.deps, membership.tenantId),
-  ]);
-  if (tenantAccount === null) {
-    throw new HttpError(
-      500,
-      "internal_error",
-      "tenant account for this membership no longer exists",
-    );
-  }
-  if (workspace === null) {
-    throw new HttpError(500, "internal_error", "no workspace found for this tenant");
-  }
+  const { user, membership, tenantAccount, workspace } = await resolveLoginContext(
+    console_,
+    email,
+    payload.password,
+  );
 
   // The tier is derived from the caller's membership in THIS tenant (#517).
   // `membershipRoleFromStored` resolves an unrecognised legacy value to
@@ -837,6 +977,9 @@ async function handleTeamInvite(c: Ctx): Promise<Response> {
     role,
     createdAtUnix: Math.floor(Date.now() / 1000),
   });
+  // #66: the invited user's cached bootstrap now omits this membership; drop it so
+  // their next login resolves the current set from the control object.
+  await invalidateIdentityByEmail(console_, invited.email);
   return c.json(
     { user_id: invited.id, email: invited.email, display_name: invited.displayName, role },
     201,
@@ -883,6 +1026,10 @@ async function handleTeamChangeRole(c: Ctx): Promise<Response> {
   // membership and every owner-gated route re-resolves it per request, so the
   // JWT's `role` claim is not a standing grant. The gateway key IS.
   await revokeAdminConsoleSessionKeys(console_.deps, target.tenantId, targetUserId);
+  // #66: the login projection would otherwise re-issue the OLD tier on the next
+  // login (login reads `memberships[0]` off the cached bootstrap). Drop it so a
+  // demotion takes effect on login as promptly as it does on the gateway key.
+  await invalidateIdentityByUserId(console_, targetUserId);
   return c.json({ object: "membership", user_id: targetUserId, role }, 200);
 }
 
@@ -912,6 +1059,10 @@ async function handleTeamRevoke(c: Ctx): Promise<Response> {
   // gateway authenticates on its own, and it would have kept working — an
   // ex-teammate holding `admin.write` on a tenant they were just removed from.
   await revokeAdminConsoleSessionKeys(console_.deps, membership.tenantId, targetUserId);
+  // #66: a stale cached bootstrap could still list this tenant as the removed
+  // user's `memberships[0]` and mint them a fresh session for it on next login.
+  // Drop it so revocation is prompt on the login path, not TTL-bounded.
+  await invalidateIdentityByUserId(console_, targetUserId);
   return c.json({ object: "membership", removed: true }, 200);
 }
 

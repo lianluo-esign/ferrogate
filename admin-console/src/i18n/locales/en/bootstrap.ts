@@ -147,6 +147,7 @@ export const enBootstrap = {
   "nav.item.telemetryExports": "Telemetry Exports",
   "nav.item.staticSites": "Static Sites",
   "nav.item.siteDomains": "Site Domains",
+  "nav.item.announcements": "Announcements",
 
   // Shared Worker-ops building blocks (src/components/worker-ops/
   // worker-ops-primitives.tsx): the reported-trust badge + the

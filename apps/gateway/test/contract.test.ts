@@ -124,8 +124,10 @@ describe("contract table", () => {
     // reads at `admin.read`, five writes at `admin.write`), taking bearer
     // 299 -> 306. CORRECT for main + this slice alone; #944's parallel op is
     // reconciled at integration.
+    // #948 adds five bearer-guarded `admin_announcement` operations (two reads
+    // at `admin.read`, three writes at `admin.write`), taking bearer 308 -> 313.
     expect(census(OPERATIONS.map<AuthKind>((operation) => operation.auth.kind))).toEqual({
-      bearer: 308,
+      bearer: 313,
       internal: 6,
       anonymous: 7,
       method_dependent: 1,
@@ -158,7 +160,9 @@ describe("contract table", () => {
       // taking admin 236 -> 237.
       // #943 adds seven admin-visible `admin_billing_group` operations, taking
       // admin 237 -> 244 (main + this slice alone; #944 reconciled later).
-      admin: 246,
+      // #948 adds five admin-visible `admin_announcement` operations, taking
+      // admin 246 -> 251.
+      admin: 251,
       // 51 -> 52 with `countMessageTokens` (issue #671): a data-plane
       // operation, publicly reachable, bearer-guarded; then 52 -> 53 with
       // `getModel` (issue #670), public for the same reason as `listModels`.
@@ -231,7 +235,8 @@ describe("contract table", () => {
       // #813 adds three reads: provider/model item reads and offering lists.
       // #892's bootstrap import is a POST (see below); GET is unchanged.
       // #943 adds two GETs (billing-group list + item read), 140 -> 142.
-      GET: 143,
+      // #948 adds two GETs (announcement list + item read), 143 -> 145.
+      GET: 145,
       // 78 -> 79 with `POST /v1/messages/count_tokens` (issue #671), then
       // 79 -> 81 with the two #695 semantic-cache-policy POSTs, then 82 with
       // #676's `/v1/rerank` and 85 with #703's three audio POSTs, then 86 with
@@ -242,10 +247,13 @@ describe("contract table", () => {
       // (billing-group delete + provider unbind, 33 -> 35), one PUT (provider
       // bind, 24 -> 25) and one PATCH (billing-group patch, 19 -> 20). CORRECT
       // for main + this slice alone; #944 reconciled at integration.
-      POST: 99,
-      DELETE: 35,
+      // #948 adds one POST (announcement create, 99 -> 100), one DELETE
+      // (announcement delete, 35 -> 36) and one PATCH (announcement patch,
+      // 20 -> 21). GET is handled above (+2).
+      POST: 100,
+      DELETE: 36,
       PUT: 25,
-      PATCH: 20,
+      PATCH: 21,
     });
   });
 

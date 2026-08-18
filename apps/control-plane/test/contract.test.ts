@@ -92,7 +92,9 @@ describe("contract document", () => {
     // #698's `batches` group, counted off the merged document the same way.
     // 47 -> 48 with #943's `admin_billing_group` group (main + this slice
     // alone; #944 adds no new group). 48 -> 49 with #956's `admin_billing_fleet`.
-    expect(new Set(RAW.route_patterns.map((pattern) => pattern.group)).size).toBe(49);
+    // 49 -> 50 with #948's `admin_announcement` group (its two route patterns
+    // share the one group, so the group count grows by one, not two).
+    expect(new Set(RAW.route_patterns.map((pattern) => pattern.group)).size).toBe(50);
   });
 
   it("ownership predicate agrees with the raw document, path by path", () => {

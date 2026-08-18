@@ -138,10 +138,23 @@ export const CONTROL_BACKFILL_TABLES: readonly ControlBackfillTable[] = Object.f
   table("online_eval_scores", ["projection_key"]),
   table("permissions", ["id"]),
   table("plans", ["id"]),
+  // Announcements (公告), migration 0030. `platform_announcements` and its
+  // single-row revision stamp have no FK, so placement is free.
+  table("platform_announcements", ["id"]),
+  table("platform_announcement_revisions", ["id"]),
+  // Billing groups (分组), migration 0028. `platform_billing_groups` and its
+  // single-row revision stamp have no FK; the provider junction below FK →
+  // BOTH platform_billing_groups AND platform_provider_channels, so it is
+  // ordered after both parents (see the junction entry further down).
+  table("platform_billing_groups", ["id"]),
+  table("platform_billing_group_revisions", ["id"]),
   // Parents before child: platform_catalog_offerings FK → platform_catalog_models
   // AND platform_provider_channels, migration 0025.
   table("platform_catalog_models", ["id"]),
   table("platform_provider_channels", ["id"]),
+  // FK → platform_billing_groups (above) AND platform_provider_channels (above),
+  // migration 0028 — so the junction copies after both its parents.
+  table("platform_billing_group_providers", ["group_id", "provider_id"]),
   table("platform_catalog_offerings", ["id"]),
   table("platform_catalog_revisions", ["id"]),
   table("quota_policies", ["id"]),
@@ -154,6 +167,11 @@ export const CONTROL_BACKFILL_TABLES: readonly ControlBackfillTable[] = Object.f
   table("self_hosted_worker_registrations", ["id"]),
   table("self_hosted_worker_telemetry_events", ["id"]),
   table("semantic_cache_policies_legacy", ["scope_type", "scope_id"]),
+  // Shared-config push watermark (#948), migration 0029. No FK; one row per
+  // shared-config domain. Net-new and control-owned, so it has no legacy D1
+  // source rows to copy — but the manifest-parity guard still requires every
+  // live control table to be classified here or in the excluded ledgers.
+  table("shared_config_push_state", ["domain"]),
   table("siem_export_cursors", ["sink_id", "stream"]),
   table("site_domain_verifications", ["tenant_id", "hostname"]),
   table("site_domains", ["hostname"]),

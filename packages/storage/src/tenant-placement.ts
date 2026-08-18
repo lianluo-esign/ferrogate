@@ -23,6 +23,23 @@ export const TENANT_LOCATION_HINTS = [
 
 export type TenantLocationHint = (typeof TENANT_LOCATION_HINTS)[number];
 
+/**
+ * Coerce an operator-supplied value (typically an env var) to a legal
+ * {@link TenantLocationHint}, or `undefined` when it is absent or not one of the
+ * known hints. Used to read a deployment's DEFAULT tenant-object placement — the
+ * region a new tenant's object is homed in when the request carries no
+ * Cloudflare geo signal — without letting a typo silently select a nonexistent
+ * region. An unrecognised value returns `undefined` so the caller keeps its own
+ * fallback rather than addressing an object with an invalid hint.
+ */
+export function coerceTenantLocationHint(value: unknown): TenantLocationHint | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return (TENANT_LOCATION_HINTS as readonly string[]).includes(trimmed)
+    ? (trimmed as TenantLocationHint)
+    : undefined;
+}
+
 export const TENANT_JURISDICTIONS = ["eu", "us", "fedramp"] as const;
 
 export type TenantJurisdiction = (typeof TENANT_JURISDICTIONS)[number];

@@ -13,8 +13,12 @@
  * failure, a swallowed disabled flag, an ignored revision bump).
  */
 import { describe, expect, it } from "vitest";
-import { ControlDataPlatformBillingGroupSource } from "../../src/inference/billing-group-source.js";
-import type { InferenceBindings } from "../../src/inference/ports.js";
+import {
+  ControlDataPlatformBillingGroupSource,
+  MirrorFirstBillingGroupSource,
+} from "../../src/inference/billing-group-source.js";
+import type { InferenceBindings, PlatformBillingGroupSource } from "../../src/inference/ports.js";
+import type { TenantDatabaseResolver } from "../../src/tenancy/index.js";
 import { controlNamespaceOverD1 } from "../support/control-namespace.js";
 
 interface GroupRow {
@@ -200,5 +204,193 @@ describe("ControlDataPlatformBillingGroupSource", () => {
     db.revision = 2;
     expect(await source.multiplierForGroup(env, "premium")).toBe(3);
     expect(db.groupReads).toBe(groupReadsAfterFirst + 1);
+  });
+});
+
+/** One tenant's `shared_billing_groups` mirror, addressed by tenant id. */
+interface MirrorRow {
+  readonly multiplier: number | string | null;
+  readonly enabled: number | string | null;
+}
+
+interface FakeMirror {
+  resolverFor: () => TenantDatabaseResolver;
+  reads: string[];
+  fail: boolean;
+  missing: boolean;
+}
+
+/**
+ * A fake tenant resolver whose `forTenant` yields a handle whose `db` answers the
+ * single-group mirror SELECT. `fail` makes `forTenant` reject (unreachable object);
+ * `missing` makes the SELECT throw (mirror table not migrated). Both must defer to
+ * the fallback, never bill.
+ */
+function fakeMirror(rowsByTenant: Record<string, Record<string, MirrorRow>>): FakeMirror {
+  const state: FakeMirror = {
+    resolverFor: () => resolver,
+    reads: [],
+    fail: false,
+    missing: false,
+  };
+  const dbFor = (tenantId: string): D1Database => {
+    const chainFor = (groupId: string) => ({
+      async first<T>() {
+        state.reads.push(`${tenantId}:${groupId}`);
+        if (state.missing) throw new Error("D1_ERROR: no such table: main.shared_billing_groups");
+        const row = rowsByTenant[tenantId]?.[groupId];
+        return (row ?? null) as T;
+      },
+    });
+    return {
+      prepare: () => ({
+        bind: (groupId: string) => chainFor(groupId),
+      }),
+    } as unknown as D1Database;
+  };
+  const resolver = {
+    async forTenant(tenantId: string) {
+      if (state.fail) throw new Error("tenant object unreachable");
+      return { db: dbFor(tenantId) };
+    },
+  } as unknown as TenantDatabaseResolver;
+  return state;
+}
+
+/** A fallback that records every call and answers a sentinel, so the mirror-first
+ *  decision (mirror hit vs fallback) is observable. */
+function recordingFallback(answer: number): {
+  source: PlatformBillingGroupSource;
+  calls: Array<{ groupId: string | undefined; tenantId: string | undefined }>;
+} {
+  const calls: Array<{ groupId: string | undefined; tenantId: string | undefined }> = [];
+  const source: PlatformBillingGroupSource = {
+    async multiplierForGroup(_env, groupId, tenantId) {
+      calls.push({ groupId, tenantId });
+      return answer;
+    },
+  };
+  return { source, calls };
+}
+
+describe("MirrorFirstBillingGroupSource", () => {
+  const env = {} as InferenceBindings;
+
+  it("serves the tenant mirror when the group row is present (authoritative)", async () => {
+    const mirror = fakeMirror({ "tnt-1": { premium: { multiplier: 1.5, enabled: 1 } } });
+    const fallback = recordingFallback(99);
+    const source = new MirrorFirstBillingGroupSource({
+      fallback: fallback.source,
+      resolverFor: mirror.resolverFor,
+    });
+
+    expect(await source.multiplierForGroup(env, "premium", "tnt-1")).toBe(1.5);
+    // A mirror hit never pays the cross-region control read.
+    expect(fallback.calls).toHaveLength(0);
+    expect(mirror.reads).toEqual(["tnt-1:premium"]);
+  });
+
+  it("honours an ENABLED comp 0 from the mirror", async () => {
+    const mirror = fakeMirror({ "tnt-1": { comp: { multiplier: 0, enabled: 1 } } });
+    const fallback = recordingFallback(99);
+    const source = new MirrorFirstBillingGroupSource({
+      fallback: fallback.source,
+      resolverFor: mirror.resolverFor,
+    });
+
+    expect(await source.multiplierForGroup(env, "comp", "tnt-1")).toBe(0);
+    expect(fallback.calls).toHaveLength(0);
+  });
+
+  it("reads a DISABLED mirror row as the official 1.0 (never the comp 0)", async () => {
+    const mirror = fakeMirror({ "tnt-1": { off: { multiplier: 0, enabled: 0 } } });
+    const fallback = recordingFallback(99);
+    const source = new MirrorFirstBillingGroupSource({
+      fallback: fallback.source,
+      resolverFor: mirror.resolverFor,
+    });
+
+    // A present-but-disabled row is authoritative → 1.0, WITHOUT a control read.
+    expect(await source.multiplierForGroup(env, "off", "tnt-1")).toBe(1);
+    expect(fallback.calls).toHaveLength(0);
+  });
+
+  it("reads a malformed mirror multiplier as the official 1.0", async () => {
+    const mirror = fakeMirror({ "tnt-1": { bad: { multiplier: "oops", enabled: 1 } } });
+    const fallback = recordingFallback(99);
+    const source = new MirrorFirstBillingGroupSource({
+      fallback: fallback.source,
+      resolverFor: mirror.resolverFor,
+    });
+
+    expect(await source.multiplierForGroup(env, "bad", "tnt-1")).toBe(1);
+    expect(fallback.calls).toHaveLength(0);
+  });
+
+  it("falls back to control when the group is ABSENT from the mirror (not synced yet)", async () => {
+    const mirror = fakeMirror({ "tnt-1": {} });
+    const fallback = recordingFallback(2.5);
+    const source = new MirrorFirstBillingGroupSource({
+      fallback: fallback.source,
+      resolverFor: mirror.resolverFor,
+    });
+
+    // The sync-window gap: an operator's brand-new group the tenant has not
+    // mirrored yet must be read from control, not mis-billed as 1.0.
+    expect(await source.multiplierForGroup(env, "fresh", "tnt-1")).toBe(2.5);
+    expect(fallback.calls).toEqual([{ groupId: "fresh", tenantId: "tnt-1" }]);
+  });
+
+  it("falls back to control when the tenant object is unreachable", async () => {
+    const mirror = fakeMirror({ "tnt-1": { premium: { multiplier: 1.5, enabled: 1 } } });
+    mirror.fail = true;
+    const fallback = recordingFallback(2.5);
+    const source = new MirrorFirstBillingGroupSource({
+      fallback: fallback.source,
+      resolverFor: mirror.resolverFor,
+    });
+
+    expect(await source.multiplierForGroup(env, "premium", "tnt-1")).toBe(2.5);
+    expect(fallback.calls).toEqual([{ groupId: "premium", tenantId: "tnt-1" }]);
+  });
+
+  it("falls back to control when the mirror table is not migrated", async () => {
+    const mirror = fakeMirror({ "tnt-1": { premium: { multiplier: 1.5, enabled: 1 } } });
+    mirror.missing = true;
+    const fallback = recordingFallback(2.5);
+    const source = new MirrorFirstBillingGroupSource({
+      fallback: fallback.source,
+      resolverFor: mirror.resolverFor,
+    });
+
+    expect(await source.multiplierForGroup(env, "premium", "tnt-1")).toBe(2.5);
+    expect(fallback.calls).toEqual([{ groupId: "premium", tenantId: "tnt-1" }]);
+  });
+
+  it("falls back to control (never touches a mirror) when no tenant id is known", async () => {
+    const mirror = fakeMirror({ "tnt-1": { premium: { multiplier: 1.5, enabled: 1 } } });
+    const fallback = recordingFallback(2.5);
+    const source = new MirrorFirstBillingGroupSource({
+      fallback: fallback.source,
+      resolverFor: mirror.resolverFor,
+    });
+
+    // A platform-operator caller has no tenant mirror.
+    expect(await source.multiplierForGroup(env, "premium", undefined)).toBe(2.5);
+    expect(mirror.reads).toHaveLength(0);
+    expect(fallback.calls).toEqual([{ groupId: "premium", tenantId: undefined }]);
+  });
+
+  it("short-circuits to 1.0 for an unbound group, touching neither mirror nor control", async () => {
+    const mirror = fakeMirror({ "tnt-1": { premium: { multiplier: 1.5, enabled: 1 } } });
+    const fallback = recordingFallback(2.5);
+    const source = new MirrorFirstBillingGroupSource({
+      fallback: fallback.source,
+      resolverFor: mirror.resolverFor,
+    });
+
+    expect(await source.multiplierForGroup(env, undefined, "tnt-1")).toBe(1);
+    expect(mirror.reads).toHaveLength(0);
+    expect(fallback.calls).toHaveLength(0);
   });
 });

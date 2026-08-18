@@ -17,7 +17,7 @@ class Operation(TypedDict):
     security: SecurityRequirements
     tags: tuple[str, ...]
 
-OPENAPI_OPERATION_COUNT: Final[int] = 322
+OPENAPI_OPERATION_COUNT: Final[int] = 327
 
 OPERATIONS: Final[dict[str, Operation]] = {
     "abortAssetUpload": {
@@ -211,6 +211,12 @@ OPERATIONS: Final[dict[str, Operation]] = {
         "path": "/v1/agent-runs",
         "security": ((("bearerAuth", ()),),),
         "tags": ("gateway",),
+    },
+    "createAnnouncement": {
+        "method": "POST",
+        "path": "/admin/v1/announcements",
+        "security": ((("bearerAuth", ()),),),
+        "tags": ("admin-write",),
     },
     "createAssetUploadIntent": {
         "method": "POST",
@@ -445,6 +451,12 @@ OPERATIONS: Final[dict[str, Operation]] = {
         "path": "/admin/v1/skill-packages/{id}",
         "security": ((("AdminBearerAuth", ()),), (("ApiKeyAuth", ()),)),
         "tags": ("Admin",),
+    },
+    "deleteAnnouncement": {
+        "method": "DELETE",
+        "path": "/admin/v1/announcements/{id}",
+        "security": ((("bearerAuth", ()),),),
+        "tags": ("admin-write",),
     },
     "deleteAsset": {
         "method": "DELETE",
@@ -769,6 +781,12 @@ OPERATIONS: Final[dict[str, Operation]] = {
         "path": "/v1/skills/{id}",
         "security": ((("BearerAuth", ()),), (("ApiKeyAuth", ()),)),
         "tags": ("Agent",),
+    },
+    "getAnnouncement": {
+        "method": "GET",
+        "path": "/admin/v1/announcements/{id}",
+        "security": ((("bearerAuth", ()),),),
+        "tags": ("admin-read",),
     },
     "getAsset": {
         "method": "GET",
@@ -1232,6 +1250,12 @@ OPERATIONS: Final[dict[str, Operation]] = {
         "security": ((("BearerAuth", ()),), (("ApiKeyAuth", ()),)),
         "tags": ("Agent",),
     },
+    "listAnnouncements": {
+        "method": "GET",
+        "path": "/admin/v1/announcements",
+        "security": ((("bearerAuth", ()),),),
+        "tags": ("admin-read",),
+    },
     "listAssetChannels": {
         "method": "GET",
         "path": "/v1/assets/{asset_type}/{name}/channels",
@@ -1519,6 +1543,12 @@ OPERATIONS: Final[dict[str, Operation]] = {
         "path": "/admin/v1/skill-packages/{id}",
         "security": ((("AdminBearerAuth", ()),), (("ApiKeyAuth", ()),)),
         "tags": ("Admin",),
+    },
+    "patchAnnouncement": {
+        "method": "PATCH",
+        "path": "/admin/v1/announcements/{id}",
+        "security": ((("bearerAuth", ()),),),
+        "tags": ("admin-write",),
     },
     "patchBillingGroup": {
         "method": "PATCH",
@@ -1978,6 +2008,7 @@ ADMIN_OPERATION_IDS: Final[tuple[str, ...]] = (
     "createAdminPromptTemplate",
     "createAdminProvider",
     "createAdminSkillPackage",
+    "createAnnouncement",
     "createBillingGroup",
     "createGuardrailPolicyRevision",
     "createNextGuardrailPolicyRevision",
@@ -2005,6 +2036,7 @@ ADMIN_OPERATION_IDS: Final[tuple[str, ...]] = (
     "deleteAdminPromptTemplateLabel",
     "deleteAdminProvider",
     "deleteAdminSkillPackage",
+    "deleteAnnouncement",
     "deleteBillingGroup",
     "deletePaymentMethod",
     "deletePermission",
@@ -2044,6 +2076,7 @@ ADMIN_OPERATION_IDS: Final[tuple[str, ...]] = (
     "getAdminSkillPackage",
     "getAdminStatus",
     "getAdminToolApproval",
+    "getAnnouncement",
     "getAssetRetentionPolicy",
     "getBillingGroup",
     "getEffectiveX402SpendPolicy",
@@ -2106,6 +2139,7 @@ ADMIN_OPERATION_IDS: Final[tuple[str, ...]] = (
     "listAdminToolSessionEvents",
     "listAdminTools",
     "listAdminUsageAggregates",
+    "listAnnouncements",
     "listBillingGroups",
     "listBillingOutboxDeadLetters",
     "listFleetAssets",
@@ -2145,6 +2179,7 @@ ADMIN_OPERATION_IDS: Final[tuple[str, ...]] = (
     "patchAdminPromptTemplate",
     "patchAdminProvider",
     "patchAdminSkillPackage",
+    "patchAnnouncement",
     "patchBillingGroup",
     "putAdminAgentSchedule",
     "putAdminAgentUpstream",

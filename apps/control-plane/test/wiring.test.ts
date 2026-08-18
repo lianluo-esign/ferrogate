@@ -294,6 +294,11 @@ const GROUP_PROBES: readonly (readonly [string, string, HttpMethod, string, numb
   ["admin_agent_schedule", "listAdminAgentSchedules", "GET", "/admin/v1/agent-schedules", 200],
   ["admin_agent_upstream", "listAdminAgentUpstreams", "GET", "/admin/v1/agent-upstreams", 200],
   ["admin_agent_workflow", "listAdminAgentWorkflows", "GET", "/admin/v1/agent-workflows", 200],
+  // 503, not 200, for the SAME reason `admin_billing_group` below is (issue
+  // #948): platform announcements live in the control database, and this probe
+  // runs against the MEMORY store, so the route refuses with 503 rather than an
+  // empty list it cannot support. `isRouterMiss` still proves the mount.
+  ["admin_announcement", "listAnnouncements", "GET", "/admin/v1/announcements", 503],
   ["admin_api_key", "listAdminApiKeys", "GET", "/admin/v1/api-keys", 200],
   // 403, not 200, and — like `admin_provider_credential` below — that IS the
   // mounted behaviour (issue #743). This probe drives a PLATFORM OPERATOR key

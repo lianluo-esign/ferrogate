@@ -559,6 +559,21 @@ export const enRest = {
   "resource.billingGroups.field.description": "Description",
   "resource.billingGroups.field.enabled": "Enabled",
 
+  // Platform announcements (公告, #948). Resource row/column/field copy; the
+  // bespoke page copy lives under page.announcements.*.
+  "resource.announcements.title": "Announcements",
+  "resource.announcements.description":
+    "Operator-authored notices shared read-only to every tenant. Each notice is mirrored into a tenant's own storage, so it renders with no control-plane call.",
+  "resource.announcements.col.title": "Title",
+  "resource.announcements.col.level": "Level",
+  "resource.announcements.col.enabled": "Published",
+  "resource.announcements.field.title": "Title",
+  "resource.announcements.field.body": "Body",
+  "resource.announcements.field.level": "Level",
+  "resource.announcements.field.enabled": "Published",
+  "resource.announcements.field.startsAt": "Starts",
+  "resource.announcements.field.endsAt": "Ends",
+
   "resource.models.title": "Models",
   "resource.models.description": "Logical model routes exposed by the gateway.",
   "resource.models.col.name": "Name",
@@ -2201,6 +2216,27 @@ export const enRest = {
     "Toggle a provider channel to bind or unbind it from this group. Changes apply immediately.",
   "page.billingGroups.providers.empty": "No providers available in this scope.",
   "page.billingGroups.providers.toggleLabel": "Bind provider {provider}",
+
+  // Platform announcements page copy (公告, #948).
+  "page.announcements.platformHint":
+    "Announcements are a platform-operator surface. Flip to platform scope to author them.",
+  "page.announcements.loadError": "Failed to load announcements: {message}",
+  "page.announcements.empty": "No announcements yet.",
+  "page.announcements.create.title": "New announcement",
+  "page.announcements.edit.title": "Edit announcement",
+  "page.announcements.delete.title": "Delete announcement?",
+  "page.announcements.delete.description":
+    "This removes the notice from every tenant on the next config sync. This cannot be undone.",
+  "page.announcements.field.level.hint":
+    "Display severity the tenant UI maps to a colour, e.g. info, warning or critical. An unknown value renders as neutral.",
+  "page.announcements.field.window.hint":
+    "Optional display window. Leave a field blank to leave that end unbounded.",
+  "page.announcements.toast.created": "Announcement created.",
+  "page.announcements.toast.updated": "Announcement updated.",
+  "page.announcements.toast.deleted": "Announcement deleted.",
+  "page.announcements.validation.titleRequired": "Title is required.",
+  "page.announcements.validation.bodyRequired": "Body is required.",
+  "page.announcements.validation.windowInvalid": "The start must be on or before the end.",
 
   // Self-hosted run inspector (src/pages/self-hosted-runs.tsx).
   "page.selfHostedRuns.title": "Self-hosted runs",

@@ -15,8 +15,22 @@
  */
 import type { CallerScope, ListPage, ListQuery, StoreRecord } from "../ports.js";
 
-/** Fields a `?search=` scans, in the order Rust's `matches_search` receives them. */
-export const SEARCH_FIELDS = ["id", "name", "hostname", "status", "description", "kind", "type"];
+/**
+ * Fields a `?search=` scans, in the order Rust's `matches_search` receives them.
+ * `title` is the tail entry (#948): the announcement (公告) surface labels a row
+ * by `title`, not `name`, so without it a console could only filter notices by
+ * id. Additive — a record without a string `title` simply never matches on it.
+ */
+export const SEARCH_FIELDS = [
+  "id",
+  "name",
+  "hostname",
+  "status",
+  "description",
+  "kind",
+  "type",
+  "title",
+];
 
 export function matchesSearch(record: StoreRecord, search: string | null): boolean {
   if (search === null) return true;

@@ -242,6 +242,7 @@ export const zhCN = {
   "nav.item.telemetryExports": "遥测导出",
   "nav.item.staticSites": "静态站点",
   "nav.item.siteDomains": "站点域名",
+  "nav.item.announcements": "公告",
 
   // 生成的资源 CRUD 框架界面文案（#348）。
   "resource.action.new": "新建",
@@ -596,6 +597,20 @@ export const zhCN = {
   "resource.billingGroups.field.multiplier": "倍率",
   "resource.billingGroups.field.description": "描述",
   "resource.billingGroups.field.enabled": "已启用",
+
+  // 平台公告 (#948)。
+  "resource.announcements.title": "公告",
+  "resource.announcements.description":
+    "由运营方撰写、只读下发给每个租户的通知。每条通知都会镜像到租户自己的存储中,因此无需访问控制面即可渲染。",
+  "resource.announcements.col.title": "标题",
+  "resource.announcements.col.level": "级别",
+  "resource.announcements.col.enabled": "已发布",
+  "resource.announcements.field.title": "标题",
+  "resource.announcements.field.body": "正文",
+  "resource.announcements.field.level": "级别",
+  "resource.announcements.field.enabled": "已发布",
+  "resource.announcements.field.startsAt": "开始",
+  "resource.announcements.field.endsAt": "结束",
 
   "resource.models.title": "模型",
   "resource.models.description": "网关对外暴露的逻辑模型路由。",
@@ -2164,9 +2179,29 @@ export const zhCN = {
   "page.billingGroups.validation.nameRequired": "名称为必填项。",
   "page.billingGroups.validation.multiplierInvalid": "倍率必须是大于或等于 0 的数字。",
   "page.billingGroups.providers.title": "已绑定的提供商",
-  "page.billingGroups.providers.description": "切换某个提供商渠道以将其绑定或从此分组解绑。更改会立即生效。",
+  "page.billingGroups.providers.description":
+    "切换某个提供商渠道以将其绑定或从此分组解绑。更改会立即生效。",
   "page.billingGroups.providers.empty": "此范围内没有可用的提供商。",
   "page.billingGroups.providers.toggleLabel": "绑定提供商 {provider}",
+
+  // 平台公告页面文案 (#948)。
+  "page.announcements.platformHint": "公告是平台运营方界面。请切换到平台范围以撰写公告。",
+  "page.announcements.loadError": "加载公告失败:{message}",
+  "page.announcements.empty": "暂无公告。",
+  "page.announcements.create.title": "新建公告",
+  "page.announcements.edit.title": "编辑公告",
+  "page.announcements.delete.title": "删除公告?",
+  "page.announcements.delete.description":
+    "下次配置同步时会将该通知从每个租户中移除。此操作无法撤销。",
+  "page.announcements.field.level.hint":
+    "租户界面据此映射颜色的展示级别,例如 info、warning 或 critical。未知取值按中性样式渲染。",
+  "page.announcements.field.window.hint": "可选的展示时间窗口。留空表示该端不设边界。",
+  "page.announcements.toast.created": "公告已创建。",
+  "page.announcements.toast.updated": "公告已更新。",
+  "page.announcements.toast.deleted": "公告已删除。",
+  "page.announcements.validation.titleRequired": "标题为必填项。",
+  "page.announcements.validation.bodyRequired": "正文为必填项。",
+  "page.announcements.validation.windowInvalid": "开始时间必须早于或等于结束时间。",
 
   // Self-hosted run inspector (src/pages/self-hosted-runs.tsx).
   "page.selfHostedRuns.title": "自托管运行",

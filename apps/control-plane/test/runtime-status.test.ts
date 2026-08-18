@@ -32,8 +32,15 @@ async function dropPlatformTables(): Promise<() => Promise<void>> {
   const handle = db();
   const objects = await handle
     .prepare(
+      // ONLY migration 0025's catalog family, not every `platform_`-prefixed
+      // table: later migrations add unrelated platform tables in the same
+      // namespace (0028 billing groups, 0030 announcements — the #948
+      // shared-config channel), and a bare `platform!_%` would sweep those in
+      // and make this "is 0025 applied?" probe count the wrong four.
       `SELECT type, name, sql FROM sqlite_master
-        WHERE sql IS NOT NULL AND tbl_name LIKE 'platform!_%' ESCAPE '!'
+        WHERE sql IS NOT NULL
+          AND (tbl_name LIKE 'platform!_catalog!_%' ESCAPE '!'
+               OR tbl_name = 'platform_provider_channels')
         ORDER BY CASE type WHEN 'table' THEN 0 ELSE 1 END, name`,
     )
     .all<{ type: string; name: string; sql: string }>();

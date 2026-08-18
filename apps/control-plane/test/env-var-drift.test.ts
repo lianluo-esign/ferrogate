@@ -359,10 +359,24 @@ const DOCUMENTED_BUT_UNDECLARED = [
 const UNDOCUMENTED = [
   "ADMIN_LIST_DEFAULT_LIMIT",
   "ADMIN_LIST_MAX_LIMIT",
+  // The Workers Analytics Engine query bindings `src/adapters.ts` reads to back
+  // the billing-analytics surface: an account id, an API token and a dataset
+  // name. The token is a real credential and the account id a real resource id,
+  // so like the `SITE_DOMAIN_CF_*` ids they are NEVER committed to `[vars]`;
+  // they are supplied at deploy time and named in no config file, which is
+  // exactly what lands them here rather than in DOCUMENTED_BUT_UNDECLARED.
+  "BILLING_ANALYTICS_ACCOUNT_ID",
+  "BILLING_ANALYTICS_API_TOKEN",
+  "BILLING_ANALYTICS_DATASET",
   "SITE_DOMAIN_RESOLVER",
   "SITE_DOMAIN_RESOLVER_ENDPOINT",
   "SITE_DOMAIN_RESOLVER_TIMEOUT_MS",
   "SITE_DOMAIN_TXT_ANSWERS",
+  // The regional tenant-DO placement default (`src/adapters.ts` →
+  // `defaultTenantLocationHint`). A deployment whose fleet is regional sets it
+  // at deploy time (e.g. `apac-ne` for a Tokyo-homed fleet); absent, tenant DOs
+  // take Cloudflare's default placement. Supplied per-deploy, in no config file.
+  "TENANT_DEFAULT_LOCATION_HINT",
 ] as const;
 
 /**
@@ -439,6 +453,10 @@ describe("the env-var drift gate itself", () => {
       // projection this Worker WRITES and `apps/gateway` reads on the auth hot
       // path. Declared right after PROMPT_LABELS, so kv order is preserved.
       "KEY_DIRECTORY",
+      // `IDENTITY_DIRECTORY` (#66) is the THIRD KV namespace: the login-bootstrap
+      // projection this Worker both writes and reads (CONTROL-PLANE-PRIVATE — the
+      // gateway neither binds nor reads it). Declared right after KEY_DIRECTORY.
+      "IDENTITY_DIRECTORY",
       "AUDIT_ANCHORS",
       "SIEM_EXPORTS",
       "ASSETS",

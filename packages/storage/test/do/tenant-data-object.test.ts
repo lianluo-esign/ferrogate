@@ -130,6 +130,12 @@ const TENANT_TABLES = [
   "self_hosted_worker_identities",
   "self_hosted_worker_telemetry_events",
   "semantic_cache_policies",
+  // #948 — the read-only shared-config mirror the control plane pushes into.
+  // `0027_shared_config_mirror` added billing groups + the cursor;
+  // `0028_shared_announcements_mirror` added announcements. Plans next.
+  "shared_announcements",
+  "shared_billing_groups",
+  "shared_config_cursor",
   "spend_anomaly_episodes",
   "sso_provider_configs",
   "storage_schema_migrations",
@@ -341,12 +347,17 @@ describe("the statement splitter", () => {
       // re-running, and they more than doubled. Then two more tenant migrations
       // landed: `0023_online_eval_leg_index` (#894, +1 `CREATE INDEX`) and
       // `0025_request_log_routing_decision` (#699, +1 `ALTER TABLE … ADD COLUMN`).
-      files: 25,
-      statements: 433,
-      createTable: 74,
-      createIndex: 95,
+      // Then `0026_api_key_billing_group` (+1 `ALTER TABLE … ADD COLUMN`) and
+      // `0027_shared_config_mirror` (#948, +2 tables, +1 `CREATE INDEX`), the
+      // read-only shared-config mirror this channel pushes into. Then
+      // `0028_shared_announcements_mirror` (#948, +1 table, +1 `CREATE INDEX`)
+      // extended that mirror with the announcements domain.
+      files: 28,
+      statements: 439,
+      createTable: 77,
+      createIndex: 97,
       createUniqueIndex: 6,
-      alterTable: 22,
+      alterTable: 23,
       insert: 6,
     });
 
@@ -377,8 +388,10 @@ describe("the statement splitter", () => {
       "0021_tenant_backfill_fence": 1,
       "0024_batch_execution": 1,
       "0025_request_log_routing_decision": 1,
+      "0026_api_key_billing_group": 1,
+      "0027_shared_config_mirror": 4,
     });
-    expect(Object.values(commentSemicolons).reduce((total, n) => total + n, 0)).toBe(39);
+    expect(Object.values(commentSemicolons).reduce((total, n) => total + n, 0)).toBe(44);
 
     // Ordinary statements still have their terminator removed, while each
     // trigger stays whole because its body contains internal terminators.
@@ -400,7 +413,7 @@ describe("a fresh tenant object", () => {
     expect(status.latest).toBe(TENANT_SCHEMA_VERSION);
     // A guard on the fixture: if `TENANT_MIGRATIONS` were ever empty the
     // version assertions above would both read 0 and pass vacuously.
-    expect(TENANT_MIGRATIONS.length).toBe(25);
+    expect(TENANT_MIGRATIONS.length).toBe(28);
     expect(status.appliedThisWake).toEqual(TENANT_MIGRATIONS.map((m) => m.name));
 
     const tables = await object.query({
