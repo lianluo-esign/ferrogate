@@ -347,38 +347,38 @@ export class SplitControlPlaneStore implements ControlPlaneStore {
    * N-tenant Durable Object fan-out `#listTenantResources` does. One control-DO
    * query replaces the wave, so wall-clock collapses to a single round trip.
    *
-   * Correctness — reproduces the fan-out exactly:
-   *  - MEMBERSHIP + ORDER: we iterate `provisionedTenants()` and keep only ids
-   *    that have a mirror document. `tenant-accounts` is id-keyed (the doc id IS
-   *    the tenant id), so the old fan-out yielded exactly one doc per roster
-   *    entry in roster order — iterating the roster reproduces both. This also
-   *    hides an out-of-band deprovisioned tenant (dropped from the roster, its
-   *    `tenants` row RETAINED) that a bare `SELECT` would resurrect.
+   * Correctness — reproduces the fan-out exactly, in ONE control-DO query:
+   *  - MEMBERSHIP + ORDER: an INNER JOIN of `tenants` against the `tenant_databases`
+   *    ROSTER is the SQL form of "keep only ids that are provisioned". That roster
+   *    is exactly what `provisionedTenants()` reads (`ControlDatabaseTenantRegistry.list`
+   *    = `SELECT … FROM tenant_databases ORDER BY tenant_id`), so `ORDER BY
+   *    td.tenant_id` reproduces roster order and — `tenant-accounts` being id-keyed
+   *    (the doc id IS the tenant id) — the fan-out's one-doc-per-roster-entry order.
+   *    Folding the roster into the JOIN both drops the second round trip AND hides
+   *    an out-of-band deprovisioned tenant (its `tenant_databases` row deleted, its
+   *    `tenants` row RETAINED) that a bare `SELECT * FROM tenants` would resurrect.
    *  - SEARCH/FILTER/PAGINATE/TOTAL: the SAME `pageOf(records, query)` the
    *    fan-out ends with, over the SAME parsed records (`JSON.parse` matches
    *    `parseDocument` + object-store `#objectRecord`, which is identity here).
    *  - NO platform-row union: `tenant-accounts` never has un-attributed control
    *    rows (`#ownerForRecord` falls back to the doc id, so `#isPlatformRow` is
    *    always false), so `#platformRows` contributes nothing for this kind.
-   *  - A NULL `document_json` (pre-backfill) is skipped by the `WHERE`, so a
+   *  - A NULL `document_json` (pre-backfill) is excluded by the `WHERE`, so a
    *    not-yet-mirrored tenant is simply absent until backfill/next write-through.
    */
   async #listTenantAccountsMirror(query: ListQuery): Promise<ListPage> {
-    const [roster, rows] = await Promise.all([
-      this.#tenantRouter.provisionedTenants(),
-      this.#controlDb
-        .prepare("SELECT id, document_json FROM tenants WHERE document_json IS NOT NULL")
-        .all<{ id: string; document_json: string }>(),
-    ]);
-    const byId = new Map<string, StoreRecord>();
-    for (const row of rows.results) {
-      byId.set(String(row.id), JSON.parse(row.document_json) as StoreRecord);
-    }
-    const records: StoreRecord[] = [];
-    for (const tenantId of roster) {
-      const record = byId.get(tenantId);
-      if (record !== undefined) records.push(record);
-    }
+    const rows = await this.#controlDb
+      .prepare(
+        `SELECT t.id AS id, t.document_json AS document_json
+           FROM tenant_databases td
+           JOIN tenants t ON t.id = td.tenant_id
+          WHERE t.document_json IS NOT NULL
+          ORDER BY td.tenant_id`,
+      )
+      .all<{ id: string; document_json: string }>();
+    const records: StoreRecord[] = rows.results.map(
+      (row) => JSON.parse(row.document_json) as StoreRecord,
+    );
     return pageOf(records, query);
   }
 
