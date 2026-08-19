@@ -193,6 +193,36 @@ describe("POST /admin/v1/tenant-accounts", () => {
     expect(await router().provisionedTenants()).toContain(tenantId);
   });
 
+  it("populates the control document mirror so the operator LIST serves it without a DO fan-out", async () => {
+    const tenantId = freshTenantId("mirror");
+    await SELF.fetch(`${BASE}/admin/v1/tenant-accounts`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${OPERATOR}`, "content-type": "application/json" },
+      body: JSON.stringify({ id: tenantId, name: "Mirror", slug: `mirror-${tenantId}` }),
+    });
+
+    // The write-through hook filled `tenants.document_json` with the full admin
+    // document as part of the create — no backfill, no deploy, no second write.
+    const mirrorRow = await db()
+      .prepare("SELECT document_json FROM tenants WHERE id = ?")
+      .bind(tenantId)
+      .first<{ document_json: string | null }>();
+    expect(mirrorRow?.document_json).not.toBeNull();
+    expect(JSON.parse(mirrorRow?.document_json ?? "null")).toMatchObject({
+      id: tenantId,
+      name: "Mirror",
+    });
+
+    // The operator LIST is now served from that single control-DO query. The
+    // onboarded tenant appears in it, end to end through the real route stack.
+    const listed = await SELF.fetch(`${BASE}/admin/v1/tenant-accounts`, {
+      headers: { authorization: `Bearer ${OPERATOR}` },
+    });
+    expect(listed.status).toBe(200);
+    const body = (await listed.json()) as { data: { id: string }[] };
+    expect(body.data.map((row) => row.id)).toContain(tenantId);
+  });
+
   it("a PATCH re-runs provisioning as a no-op that does not clobber a catalog edit", async () => {
     const tenantId = freshTenantId("patch");
     await SELF.fetch(`${BASE}/admin/v1/tenant-accounts`, {

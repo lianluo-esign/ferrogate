@@ -20,6 +20,10 @@ import type { ControlPlaneBindings, ControlPlaneDeps } from "../ports.js";
 import { type SiemExportReport, runSiemExportPass } from "../siem/pump.js";
 import { type SharedConfigPassReport, fanOutSharedConfig } from "../store/shared-config.js";
 import {
+  type TenantAccountMirrorBackfillReport,
+  backfillTenantAccountMirror,
+} from "../store/tenant-account-mirror-backfill.js";
+import {
   type TenantCatalogAuditSweepReport,
   reconcileProvisionedTenantCatalogAudits,
 } from "../store/tenant-model-catalog.js";
@@ -67,6 +71,14 @@ export interface ScheduledTickReport extends ScheduleTickSummary {
    * on the tick after an operator edits a plan/group/announcement.
    */
   readonly sharedConfig: SharedConfigPassReport;
+  /**
+   * What the one-time tenant-account mirror backfill (#75) did: `skipped:
+   * "complete"` on every tick once the fleet's pre-migration `tenants` rows have
+   * had their `document_json` filled from each object — the steady-state answer,
+   * a single indexed control-DO SELECT that opens no objects — and a
+   * `mirrored`/`failed` count on the few ticks after deploy while it converges.
+   */
+  readonly tenantAccountMirror: TenantAccountMirrorBackfillReport;
 }
 
 /**
@@ -112,7 +124,36 @@ export async function runScheduledTick(
     spendAnomaly: await runSpendAnomalyPass(env, now),
     tenantCatalogAudit,
     sharedConfig: await sharedConfigPass(deps, now),
+    tenantAccountMirror: await tenantAccountMirrorPass(deps, now),
   };
+}
+
+/**
+ * How often (in minutes) the one-time tenant-account mirror backfill is allowed
+ * to open objects.
+ *
+ * It shares the catalog sweep's contention profile — up to a batch of tenant
+ * objects opened, each feeding the SINGLE control DO — so it rides the SAME
+ * coarse cadence rather than every minute. It is convergent: once every
+ * pre-migration `tenants` row has a `document_json`, the pass opens zero objects
+ * and returns `"complete"`, so this cadence only bounds how fast the fleet is
+ * back-filled right after deploy, then costs one indexed SELECT per window.
+ */
+export const TENANT_ACCOUNT_MIRROR_BACKFILL_PERIOD_MIN = 15;
+
+async function tenantAccountMirrorPass(
+  deps: Pick<ControlPlaneDeps, "controlDatabase" | "tenantDatabases">,
+  now: number,
+): Promise<TenantAccountMirrorBackfillReport> {
+  if (deps.controlDatabase === null) {
+    return { scanned: 0, mirrored: 0, failed: 0, skipped: "control_database_unavailable" };
+  }
+  // Gate on the minute count like the catalog sweep; a missed tick is harmless
+  // because the NULL-filter makes the next eligible window resume from scratch.
+  if (Math.floor(now / 60) % TENANT_ACCOUNT_MIRROR_BACKFILL_PERIOD_MIN !== 0) {
+    return { scanned: 0, mirrored: 0, failed: 0, skipped: "complete" };
+  }
+  return backfillTenantAccountMirror(deps.tenantDatabases, deps.controlDatabase, now);
 }
 
 /**

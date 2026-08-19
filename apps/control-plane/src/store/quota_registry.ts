@@ -413,15 +413,25 @@ export async function projectTenantAccount(
   try {
     await db
       .prepare(
+        // `document_json` carries the WHOLE admin document verbatim so the
+        // operator LIST (`GET /admin/v1/tenant-accounts`) is served from ONE
+        // control-DO query instead of a per-tenant Durable Object fan-out (#75).
+        // The typed columns above stay authoritative for the data plane's
+        // `JOIN plans`; the reader (`split.ts` `#listTenantAccountsMirror`) reads
+        // this column back with a plain `JSON.parse`, so the listed row is
+        // byte-identical to what the tenant object returns. `record` is the same
+        // stored object the tenant DO persisted at every sync site, so no field
+        // is lost (incl. `plan_effective_at` from `assignTenantPlan`).
         `INSERT INTO ${TENANTS_TABLE}
-           (id, name, slug, status, plan_id, created_at_unix, updated_at_unix)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
+           (id, name, slug, status, plan_id, created_at_unix, updated_at_unix, document_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (id) DO UPDATE SET
            name = excluded.name,
            slug = excluded.slug,
            status = excluded.status,
            plan_id = excluded.plan_id,
-           updated_at_unix = excluded.updated_at_unix`,
+           updated_at_unix = excluded.updated_at_unix,
+           document_json = excluded.document_json`,
       )
       .bind(
         id,
@@ -431,6 +441,7 @@ export async function projectTenantAccount(
         typeof planId === "string" && planId.trim() !== "" ? planId.trim() : NO_PLAN_ID,
         nowUnix,
         nowUnix,
+        JSON.stringify(record),
       )
       .run();
   } catch (error) {

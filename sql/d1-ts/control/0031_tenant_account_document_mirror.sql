@@ -1,0 +1,23 @@
+-- ===========================================================================
+-- Full tenant-account document mirror on the control `tenants` row (#75)
+--
+-- The operator LIST `GET /admin/v1/tenant-accounts` used to fan out one Durable
+-- Object read PER provisioned tenant (each `tenant-accounts` document lives in
+-- its owning tenant's object). Even parallelized that wave's floor is the
+-- slowest single tenant object — over the 1s SLA on the live fleet. This column
+-- carries the WHOLE admin document alongside the typed projection columns so the
+-- operator LIST is served from ONE control-DO query with no fan-out at all.
+--
+-- The typed `id`/`name`/`slug`/`status`/`plan_id` columns stay load-bearing for
+-- the data plane's `JOIN plans` (they apply `NOT NULL`/default fallbacks); this
+-- column is the RAW document, read back verbatim so the LIST is byte-identical
+-- to what the tenant object returned. It is control-only — the tenant object
+-- remains the authority for GET-by-id, which is unchanged.
+--
+-- Nullable on purpose: the `ALTER` is safe on existing rows, and a NULL means
+-- "not yet mirrored" — the reader SKIPS those, and either the one-time backfill
+-- or the next write-through re-projection fills them. No hot reader does
+-- `SELECT *` on `tenants` (gateway/mcp/agent-runtime/storage all select narrow
+-- columns or JOIN on `plan_id`), so a wide column adds nothing to their reads.
+-- ===========================================================================
+ALTER TABLE tenants ADD COLUMN document_json TEXT;

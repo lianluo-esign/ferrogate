@@ -334,7 +334,52 @@ export class SplitControlPlaneStore implements ControlPlaneStore {
       if (!this.#hasTenantDestination(scope)) return pageOf([], query);
       return (await this.#tenantStore(scope.tenantId)).list(collection, scope, query);
     }
+    // Operator `tenant-accounts` LIST is served from the control-DO full-document
+    // mirror in ONE query — no per-tenant fan-out (#75). Every other tenant-private
+    // kind still fans out via `#listTenantResources`.
+    if (collection === "tenant-accounts") return this.#listTenantAccountsMirror(query);
     return this.#listTenantResources(collection, query);
+  }
+
+  /**
+   * Serve the operator `tenant-accounts` LIST from the control-DO `tenants`
+   * mirror (`document_json`, written by `projectTenantAccount`) instead of the
+   * N-tenant Durable Object fan-out `#listTenantResources` does. One control-DO
+   * query replaces the wave, so wall-clock collapses to a single round trip.
+   *
+   * Correctness — reproduces the fan-out exactly:
+   *  - MEMBERSHIP + ORDER: we iterate `provisionedTenants()` and keep only ids
+   *    that have a mirror document. `tenant-accounts` is id-keyed (the doc id IS
+   *    the tenant id), so the old fan-out yielded exactly one doc per roster
+   *    entry in roster order — iterating the roster reproduces both. This also
+   *    hides an out-of-band deprovisioned tenant (dropped from the roster, its
+   *    `tenants` row RETAINED) that a bare `SELECT` would resurrect.
+   *  - SEARCH/FILTER/PAGINATE/TOTAL: the SAME `pageOf(records, query)` the
+   *    fan-out ends with, over the SAME parsed records (`JSON.parse` matches
+   *    `parseDocument` + object-store `#objectRecord`, which is identity here).
+   *  - NO platform-row union: `tenant-accounts` never has un-attributed control
+   *    rows (`#ownerForRecord` falls back to the doc id, so `#isPlatformRow` is
+   *    always false), so `#platformRows` contributes nothing for this kind.
+   *  - A NULL `document_json` (pre-backfill) is skipped by the `WHERE`, so a
+   *    not-yet-mirrored tenant is simply absent until backfill/next write-through.
+   */
+  async #listTenantAccountsMirror(query: ListQuery): Promise<ListPage> {
+    const [roster, rows] = await Promise.all([
+      this.#tenantRouter.provisionedTenants(),
+      this.#controlDb
+        .prepare("SELECT id, document_json FROM tenants WHERE document_json IS NOT NULL")
+        .all<{ id: string; document_json: string }>(),
+    ]);
+    const byId = new Map<string, StoreRecord>();
+    for (const row of rows.results) {
+      byId.set(String(row.id), JSON.parse(row.document_json) as StoreRecord);
+    }
+    const records: StoreRecord[] = [];
+    for (const tenantId of roster) {
+      const record = byId.get(tenantId);
+      if (record !== undefined) records.push(record);
+    }
+    return pageOf(records, query);
   }
 
   async get(collection: string, scope: CallerScope, id: string): Promise<StoreRecord | null> {
