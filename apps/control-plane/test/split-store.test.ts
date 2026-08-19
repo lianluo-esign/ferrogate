@@ -1,7 +1,7 @@
 import { env } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { resolveTenantStorage } from "../src/adapters.js";
-import type { ControlPlaneBindings } from "../src/ports.js";
+import type { ControlPlaneBindings, ListQuery, StoreRecord } from "../src/ports.js";
 import {
   D1ControlPlaneStore,
   RESOURCE_TABLE,
@@ -9,11 +9,14 @@ import {
   TENANT_RESOURCE_TOMBSTONE_MARK_PREFIX,
   tenantResourceTombstoneMark,
 } from "../src/store/d1.js";
+import { pageOf } from "../src/store/query.js";
+import { projectTenantAccount } from "../src/store/quota_registry.js";
 import {
   RESOURCE_BACKFILL_BATCH_SIZE,
   backfillTenantResourceKinds,
 } from "../src/store/resource-backfill.js";
 import { SplitControlPlaneStore } from "../src/store/split.js";
+import { backfillTenantAccountMirror } from "../src/store/tenant-account-mirror-backfill.js";
 import { applySchema, db, resetD1 } from "./d1.js";
 import {
   TENANT_A,
@@ -249,6 +252,156 @@ describe("SplitControlPlaneStore", () => {
     await expect(
       store().get("tenant-accounts", { kind: "tenant", tenantId: TENANT_A }, TENANT_A),
     ).resolves.toMatchObject({ id: TENANT_A, tenant_id: TENANT_A });
+  });
+
+  describe("operator tenant-accounts LIST (served from the control mirror)", () => {
+    // Seed a tenant-account into its OBJECT (via the split store) AND into the
+    // control `tenants` mirror (via `projectTenantAccount`, the route-layer sync
+    // hook), exactly as a real create does. Returns the stored document.
+    async function seed(
+      split: SplitControlPlaneStore,
+      id: string,
+      extra: Record<string, unknown>,
+    ): Promise<StoreRecord> {
+      const stored = await split.create("tenant-accounts", PLATFORM, { id, ...extra });
+      await projectTenantAccount(db(), stored, 1000);
+      return stored;
+    }
+
+    // The fan-out's observable result is `pageOf(docs, query)` over one document
+    // per provisioned tenant in roster order. Build that reference from the
+    // captured stored docs (byte-equal to each object's row via JSON round-trip)
+    // so an equality assertion pins mirror-read == fan-out-read.
+    async function fanoutReference(seededById: Map<string, StoreRecord>, query: ListQuery) {
+      const roster = await router().provisionedTenants();
+      const docs = roster
+        .map((id) => seededById.get(id))
+        .filter((doc): doc is StoreRecord => doc !== undefined);
+      return pageOf(docs, query);
+    }
+
+    it("matches the fan-out across search, filter and pagination", async () => {
+      const split = store();
+      const a = await seed(split, TENANT_A, {
+        name: "Ärzte Klinik",
+        status: "active",
+        plan_id: "pro",
+        // A field the typed projection columns DROP — proves the reader returns
+        // the raw document, not a reconstruction from `id/name/slug/status/plan_id`.
+        plan_effective_at: 1234567890,
+        contact_email: "ops@aerzte.example",
+      });
+      const b = await seed(split, TENANT_B, {
+        name: "Beta Corp",
+        status: "suspended",
+        plan_id: "free",
+      });
+      const seeded = new Map([
+        [TENANT_A, a],
+        [TENANT_B, b],
+      ]);
+
+      // Write-through fidelity: the mirror row is the document, verbatim.
+      const mirrorRow = await db()
+        .prepare("SELECT document_json FROM tenants WHERE id = ?")
+        .bind(TENANT_A)
+        .first<{ document_json: string }>();
+      expect(JSON.parse(mirrorRow?.document_json ?? "null")).toEqual(a);
+
+      // Unicode case-fold search — a SQLite `LIKE` prefilter would DROP this.
+      const search: ListQuery = {
+        offset: 0,
+        limit: 100,
+        paginate: true,
+        search: "ärzte",
+        filters: {},
+      };
+      const cases: ListQuery[] = [
+        { offset: 0, limit: 100, paginate: false, search: null, filters: {} },
+        search,
+        { offset: 0, limit: 100, paginate: true, search: null, filters: { status: "active" } },
+        { offset: 1, limit: 1, paginate: true, search: null, filters: {} },
+      ];
+      for (const query of cases) {
+        const page = await split.list("tenant-accounts", PLATFORM, query);
+        expect(page).toEqual(await fanoutReference(seeded, query));
+      }
+
+      // Concretely: the raw field survives and search matched the right tenant.
+      const searchPage = await split.list("tenant-accounts", PLATFORM, search);
+      expect(searchPage.items.map((i) => i.id)).toEqual([TENANT_A]);
+      expect(searchPage.items[0]).toMatchObject({ plan_effective_at: 1234567890 });
+
+      // Idempotent re-projection (the ON CONFLICT DO UPDATE branch, not INSERT):
+      // a later mutation's document replaces the mirror in place, verbatim.
+      const updated = { ...a, status: "suspended", plan_effective_at: 999 };
+      await projectTenantAccount(db(), updated, 2000);
+      const reread = await split.list("tenant-accounts", PLATFORM, QUERY);
+      expect(reread.items.find((i) => i.id === TENANT_A)).toEqual(updated);
+    });
+
+    it("hides an out-of-band deprovisioned tenant whose mirror row is retained", async () => {
+      const split = store();
+      await seed(split, TENANT_A, { name: "A", status: "active" });
+      await seed(split, TENANT_B, { name: "B", status: "active" });
+
+      // Deprovision drops the roster row but RETAINS object/mirror data.
+      await db().prepare("DELETE FROM tenant_databases WHERE tenant_id = ?").bind(TENANT_B).run();
+
+      const page = await split.list("tenant-accounts", PLATFORM, QUERY);
+      expect(page.items.map((i) => i.id)).toEqual([TENANT_A]);
+      expect(page.total).toBe(1);
+    });
+
+    it("skips a tenant row whose document_json is not yet mirrored, then lists it after backfill", async () => {
+      const split = store();
+      await seed(split, TENANT_A, { name: "A", status: "active" });
+      // TENANT_B: object has the doc, but its mirror row is pre-migration NULL.
+      const b = await split.create("tenant-accounts", PLATFORM, {
+        id: TENANT_B,
+        name: "B",
+        status: "active",
+      });
+      await db()
+        .prepare(
+          `INSERT INTO tenants (id, name, slug, status, plan_id, created_at_unix, updated_at_unix)
+           VALUES (?, 'B', 'b', 'active', 'free', 1, 1)`,
+        )
+        .bind(TENANT_B)
+        .run();
+
+      const before = await split.list("tenant-accounts", PLATFORM, QUERY);
+      expect(before.items.map((i) => i.id)).toEqual([TENANT_A]);
+
+      // The one-time backfill fills the NULL row from TENANT_B's object.
+      const report = await backfillTenantAccountMirror(router(), db(), 2000);
+      expect(report).toMatchObject({ mirrored: 1, failed: 0 });
+
+      const after = await split.list("tenant-accounts", PLATFORM, QUERY);
+      expect(after.items.map((i) => i.id).sort()).toEqual([TENANT_A, TENANT_B]);
+      expect(after.items.find((i) => i.id === TENANT_B)).toEqual(b);
+
+      // Idempotent + convergent: a second pass opens nothing and reports complete.
+      expect(await backfillTenantAccountMirror(router(), db(), 3000)).toMatchObject({
+        scanned: 0,
+        skipped: "complete",
+      });
+    });
+
+    it("keeps GET-by-id on the tenant object, unaffected by the mirror", async () => {
+      const split = store();
+      const a = await seed(split, TENANT_A, { name: "A", status: "active" });
+
+      // Operator GET-by-id reads the object, not the mirror.
+      await expect(split.get("tenant-accounts", PLATFORM, TENANT_A)).resolves.toEqual(a);
+
+      // A stale mirror row for a tenant whose object doc is gone must NOT surface
+      // on GET-by-id (it reads the object → null), even though the row lingers.
+      await (await router().forTenant(TENANT_A)).db
+        .prepare(`DELETE FROM ${TENANT_RESOURCE_TABLE} WHERE resource_kind = 'tenant-accounts'`)
+        .run();
+      await expect(split.get("tenant-accounts", PLATFORM, TENANT_A)).resolves.toBeNull();
+    });
   });
 
   it("fans out platform reads across provisioned tenants without weakening object isolation", async () => {
