@@ -1,5 +1,5 @@
 /**
- * Contract group `billing` (7 operations) — six read-only feeds plus the one
+ * Contract group `billing` (8 operations) — seven read-only feeds plus the one
  * write: replaying a dead-lettered outbox report.
  *
  * ```
@@ -8,6 +8,7 @@
  *   GET  /admin/v1/metering-export-status
  *   GET  /admin/v1/usage-aggregates
  *   GET  /admin/v1/usage-reports
+ *   GET  /admin/v1/shared-billing-groups          (tenant DO mirror; real multipliers)
  *   GET  /admin/v1/billing-outbox-dead-letters
  *   POST /admin/v1/billing-outbox-dead-letters/{report_id}/replay   admin.write
  * ```
@@ -33,6 +34,7 @@ import type { Context } from "hono";
 import { HttpError } from "../middleware/errors.js";
 import type { CallerScope, ControlPlaneDeps, ControlPlaneEnv, StoreRecord } from "../ports.js";
 import {
+  adminList,
   adminListPaginated,
   adminListPaginatedWithMetadata,
   derivedControlProjectionMetadata,
@@ -1158,6 +1160,83 @@ async function replayOutboxReportRow(
 }
 
 /**
+ * A row of the tenant Durable Object `shared_billing_groups` mirror
+ * (`sql/d1-ts/tenant/0027_shared_config_mirror.sql`). The mirror is projected
+ * DOWN from the platform `platform_billing_groups` by the control-plane fan-out
+ * (`store/shared-config.ts`); the gateway settles a request at the multiplier of
+ * the group its API key is bound to, reading THIS table first. The tenant read
+ * below exposes the SAME rows so a tenant console can offer the real,
+ * multiplier-bearing group list when minting a key.
+ */
+interface SharedBillingGroupRow {
+  id: string;
+  name: string;
+  multiplier: number;
+  description: string | null;
+  enabled: number;
+  provider_ids_json: string;
+}
+
+/** Parse the mirror's `provider_ids_json`, degrading a corrupted push to `[]`. */
+function parseProviderIds(raw: string | null): string[] {
+  if (raw === null) return [];
+  try {
+    const value = JSON.parse(raw);
+    return Array.isArray(value) ? value.filter((x): x is string => typeof x === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function sharedBillingGroupDocument(row: SharedBillingGroupRow): StoreRecord {
+  return {
+    id: row.id,
+    name: row.name,
+    multiplier: row.multiplier,
+    description: row.description,
+    enabled: row.enabled === 1,
+    provider_ids: parseProviderIds(row.provider_ids_json),
+  };
+}
+
+/**
+ * `GET /admin/v1/shared-billing-groups` — the calling tenant's enabled billing
+ * groups, read from its OWN Durable Object `shared_billing_groups` mirror.
+ *
+ * This is a TENANT surface (uses {@link scopeOf}, not the platform 404-fence):
+ * the mirror is the tenant's own projected copy, and the vega create-key dialog
+ * uses it to show real group names + multipliers. Contrast the platform-operator
+ * `GET /admin/v1/billing-groups` (`admin_billing_group.ts`), which reads the
+ * authoritative control-DB `platform_billing_groups`.
+ *
+ * Edge cases: an un-fanned-out or native/unprovisioned tenant has no DO mirror →
+ * empty list (never an error); a provisioned-but-unreachable DO surfaces the
+ * router's `503 tenant_database_unavailable`. A platform-operator caller carries
+ * no single tenant mirror, so it may narrow with `?tenant_id=` (else `[]`).
+ */
+async function listSharedBillingGroupsHandler(
+  c: Context<ControlPlaneEnv>,
+): Promise<Response> {
+  const deps = c.get("deps");
+  const scope = scopeOf(c);
+  const tenantId =
+    scope.kind === "tenant"
+      ? scope.tenantId
+      : (new URL(c.req.url).searchParams.get("tenant_id")?.trim() ?? "");
+  const db = tenantId === "" ? null : await tenantBillingDatabaseFor(deps, tenantId);
+  if (db === null) return json(c, 200, adminList([]));
+  const result = await db
+    .prepare(
+      `SELECT id, name, multiplier, description, enabled, provider_ids_json
+         FROM shared_billing_groups
+        WHERE enabled = 1
+        ORDER BY name`,
+    )
+    .all<SharedBillingGroupRow>();
+  return json(c, 200, adminList(result.results.map(sharedBillingGroupDocument)));
+}
+
+/**
  * Billing feeds read typed authority first. Tenant-scoped calls address one
  * tenant Durable Object; platform calls perform a full-key fan-out over the
  * provisioned tenant roster and merge legacy control compatibility rows. The
@@ -1182,6 +1261,7 @@ export const billingRoutes: GroupModule = crudGroup(
   ],
   {
     listAdminUsageAggregates: listAdminUsageAggregates(),
+    listSharedBillingGroups: listSharedBillingGroupsHandler,
     listAdminMeteringEvents: listBillingAuthorityHandler("events"),
     listBillingOutboxDeadLetters: listBillingAuthorityHandler("outbox"),
     /**

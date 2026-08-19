@@ -156,7 +156,7 @@ describe("OPENAPI_OPERATION_COUNT is checked against the committed contract", ()
 
 describe("wireSchemas registry", () => {
   test("exposes the OpenAPI operation count", () => {
-    expect(OPENAPI_OPERATION_COUNT).toBe(327);
+    expect(OPENAPI_OPERATION_COUNT).toBe(328);
   });
 
   test("resolves the seeded cross-plane + ferrogate-core schemas by name", () => {
@@ -338,6 +338,10 @@ describe("PORT-TODO STATE PIN — the registry seeds only cross-plane shapes", (
     // #948 adds five `admin_announcement` operations, none of which seed a wire
     // schema either (their response is the admin envelope, described in the
     // OpenAPI, not a cross-plane Zod shape): 322 - 10 = 312 becomes 327 - 10 = 317.
-    expect(OPENAPI_OPERATION_COUNT - seeded).toBe(317);
+    // The tenant-scoped `GET /admin/v1/shared-billing-groups` is the same shape —
+    // its response is the admin `list` envelope described in the OpenAPI, not a
+    // cross-plane Zod schema — so `seeded` is unchanged: 327 - 10 = 317 becomes
+    // 328 - 10 = 318.
+    expect(OPENAPI_OPERATION_COUNT - seeded).toBe(318);
   });
 });

@@ -599,6 +599,10 @@
       "group": "billing"
     },
     {
+      "pattern": "/admin/v1/shared-billing-groups",
+      "group": "billing"
+    },
+    {
       "pattern": "/admin/v1/billing-outbox-dead-letters",
       "group": "billing"
     },
@@ -1837,6 +1841,17 @@
       "path": "/admin/v1/metering-events",
       "method": "get",
       "operation_id": "listAdminMeteringEvents",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.read"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/shared-billing-groups",
+      "method": "get",
+      "operation_id": "listSharedBillingGroups",
       "visibility": "admin",
       "auth": {
         "kind": "bearer",

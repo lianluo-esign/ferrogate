@@ -7257,6 +7257,90 @@
         }
       }
     },
+    "/admin/v1/shared-billing-groups": {
+      "get": {
+        "operationId": "listSharedBillingGroups",
+        "tags": [
+          "admin-read"
+        ],
+        "summary": "List the calling tenant's enabled billing groups (multipliers) from its Durable Object mirror.",
+        "responses": {
+          "200": {
+            "description": "The tenant's enabled shared billing groups.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "object",
+                    "data"
+                  ],
+                  "properties": {
+                    "object": {
+                      "type": "string",
+                      "enum": [
+                        "list"
+                      ]
+                    },
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": [
+                          "id",
+                          "name",
+                          "multiplier",
+                          "enabled",
+                          "provider_ids"
+                        ],
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "name": {
+                            "type": "string"
+                          },
+                          "multiplier": {
+                            "type": "number"
+                          },
+                          "description": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "enabled": {
+                            "type": "boolean"
+                          },
+                          "provider_ids": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.read"
+          },
+          "rbac_action": null
+        }
+      }
+    },
     "/admin/v1/gateway-configs": {
       "parameters": [
         {

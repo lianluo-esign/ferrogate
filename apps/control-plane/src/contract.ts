@@ -125,8 +125,11 @@ export const SUPPORTED_CONTRACT_VERSION = 1;
  * incremented. 312 -> 313 with #892's `POST /admin/v1/config/import-model-catalog`,
  * the platform-catalog bootstrap import. 322 -> 327 with #948's five
  * `admin_announcement` operations, all under `/admin/v1/announcements`.
+ * 327 -> 328 with the tenant-scoped `GET /admin/v1/shared-billing-groups`
+ * (`billing` group): the calling tenant's own `shared_billing_groups` DO mirror,
+ * so a tenant console can offer the real multiplier-bearing group list.
  */
-export const EXPECTED_TOTAL_OPERATION_COUNT = 327;
+export const EXPECTED_TOTAL_OPERATION_COUNT = 328;
 
 /**
  * Operations `ROUTE-MAP.md` assigns to `apps/control-plane`: `/admin/v1/**`
@@ -169,8 +172,10 @@ export const EXPECTED_TOTAL_OPERATION_COUNT = 327;
  *
  * 250 -> 255 with #948's five `admin_announcement` operations, all under
  * `/admin/v1/announcements` (the 公告 shared-config domain's operator surface).
+ * 255 -> 256 with the tenant-scoped `GET /admin/v1/shared-billing-groups`, a
+ * `/admin/v1/**` read this app owns.
  */
-export const EXPECTED_CONTROL_PLANE_OPERATION_COUNT = 255;
+export const EXPECTED_CONTROL_PLANE_OPERATION_COUNT = 256;
 
 // ---------------------------------------------------------------------------
 // Ownership predicate

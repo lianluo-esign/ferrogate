@@ -126,8 +126,10 @@ describe("contract table", () => {
     // reconciled at integration.
     // #948 adds five bearer-guarded `admin_announcement` operations (two reads
     // at `admin.read`, three writes at `admin.write`), taking bearer 308 -> 313.
+    // The tenant-scoped `GET /admin/v1/shared-billing-groups` is one more bearer
+    // read (`admin.read`), taking bearer 313 -> 314.
     expect(census(OPERATIONS.map<AuthKind>((operation) => operation.auth.kind))).toEqual({
-      bearer: 313,
+      bearer: 314,
       internal: 6,
       anonymous: 7,
       method_dependent: 1,
@@ -162,7 +164,9 @@ describe("contract table", () => {
       // admin 237 -> 244 (main + this slice alone; #944 reconciled later).
       // #948 adds five admin-visible `admin_announcement` operations, taking
       // admin 246 -> 251.
-      admin: 251,
+      // The tenant-scoped `GET /admin/v1/shared-billing-groups` is one more
+      // admin-visible read, taking admin 251 -> 252.
+      admin: 252,
       // 51 -> 52 with `countMessageTokens` (issue #671): a data-plane
       // operation, publicly reachable, bearer-guarded; then 52 -> 53 with
       // `getModel` (issue #670), public for the same reason as `listModels`.
@@ -236,7 +240,9 @@ describe("contract table", () => {
       // #892's bootstrap import is a POST (see below); GET is unchanged.
       // #943 adds two GETs (billing-group list + item read), 140 -> 142.
       // #948 adds two GETs (announcement list + item read), 143 -> 145.
-      GET: 145,
+      // The tenant-scoped `GET /admin/v1/shared-billing-groups` is one more GET,
+      // 145 -> 146.
+      GET: 146,
       // 78 -> 79 with `POST /v1/messages/count_tokens` (issue #671), then
       // 79 -> 81 with the two #695 semantic-cache-policy POSTs, then 82 with
       // #676's `/v1/rerank` and 85 with #703's three audio POSTs, then 86 with
