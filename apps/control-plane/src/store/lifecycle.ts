@@ -184,6 +184,18 @@ function pushUnique(ids: string[], candidate: unknown): void {
 }
 
 /**
+ * Does a row's stored parent id AGREE with what the caller declared? True when
+ * the stored value is absent/blank (the row names no such parent — nothing to
+ * union) or equals the declared id. A `false` means the row points at an
+ * ancestor the caller did NOT declare, which the serial walk must union and
+ * read — so the parallel fast path below refuses that case and falls through.
+ */
+function parentAgrees(stored: unknown, declared: string): boolean {
+  const value = trimmed(stored);
+  return value === null || value === declared;
+}
+
+/**
  * The durable gate: {@link TenancyLifecycleGatePort} over the hierarchy rows the
  * admin surface writes, with a declarative fallback.
  *
@@ -252,6 +264,65 @@ export class StoreTenancyLifecycleGate implements TenancyLifecycleGatePort {
     declaredProject: string | null,
     declaredWorkspace: string | null,
   ): Promise<readonly LifecycleRef[]> {
+    // Fast path — the FULLY-declared chain (the console login mint, and any
+    // native key that names tenant AND project AND workspace). The serial walk
+    // below is sequential ONLY because each row it reads can reveal an
+    // undeclared ancestor to union in; when all three ids are already declared
+    // it discovers nothing new, so its three reads (workspace, project,
+    // tenant-account) are independent and can run concurrently. Collapsing them
+    // from three STACKED control-DO round trips (each ~200-978ms cross-region)
+    // into one is the login-latency win (#514 gate is on the login hot path,
+    // #92). This reads the SAME rows, at the SAME scopes, and builds the SAME
+    // shallowest-first chain as the serial walk — it only overlaps the awaits.
+    //
+    // Correctness is preserved by TAKING this result only when every fetched
+    // row's stored parentage AGREES with the declaration (so the serial walk
+    // would have unioned in no extra ancestor). On any disagreement — a row
+    // written under a different tenant_id, or a caller declaring a mismatched
+    // parent — we fall through to the unchanged serial walk, which unions and
+    // reads the extra id. That is the rare, defensive path; login is not it.
+    if (declaredTenant !== null && declaredProject !== null && declaredWorkspace !== null) {
+      const [workspace, project, account] = await Promise.all([
+        this.#resolveRow(WORKSPACES_COLLECTION, declaredWorkspace, [declaredTenant]),
+        this.#resolveRow(PROJECTS_COLLECTION, declaredProject, [declaredTenant]),
+        this.#store.get(TENANT_ACCOUNTS_COLLECTION, GATE_SCOPE, declaredTenant),
+      ]);
+      const agrees =
+        (workspace === null ||
+          (parentAgrees(workspace.project_id, declaredProject) &&
+            parentAgrees(workspace.tenant_id, declaredTenant))) &&
+        (project === null || parentAgrees(project.tenant_id, declaredTenant));
+      if (agrees) {
+        // Shallowest-first, byte-identical order to the serial walk: tenant,
+        // then project, then workspace. A row that resolved to null contributes
+        // nothing (absence is not suspension — see the module docblock).
+        const chain: LifecycleRef[] = [];
+        if (account !== null) {
+          chain.push({
+            kind: "tenant",
+            id: String(account.id),
+            status: parseLifecycleStatus(account.status),
+          });
+        }
+        if (project !== null) {
+          chain.push({
+            kind: "project",
+            id: String(project.id),
+            status: parseLifecycleStatus(project.status),
+          });
+        }
+        if (workspace !== null) {
+          chain.push({
+            kind: "workspace",
+            id: String(workspace.id),
+            status: parseLifecycleStatus(workspace.status),
+          });
+        }
+        return chain;
+      }
+      // Disagreement: fall through to the serial walk (unchanged) below.
+    }
+
     const tenantIds: string[] = [];
     const projectIds: string[] = [];
     const workspaces: StoreRecord[] = [];

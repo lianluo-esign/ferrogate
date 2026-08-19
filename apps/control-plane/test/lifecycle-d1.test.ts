@@ -671,3 +671,156 @@ describe("StoreTenancyLifecycleGate addresses the declared tenant before scannin
     ).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// The fully-declared chain (the console login mint's shape: tenant AND project
+// AND workspace) resolves its three reads CONCURRENTLY, not stacked. The serial
+// walk exists to discover undeclared ancestors; when all three are declared it
+// discovers nothing, so the reads are independent. This is the login-latency
+// win (#92) — three cross-region control-DO round trips collapse into one — and
+// it must be byte-for-byte equivalent to the serial walk: same rows, same
+// scopes, same shallowest-first decision, same O(1) (no fleet scan). A caller
+// whose declared parent DISAGREES with a row's stored parent must still fall
+// through to the serial walk and be denied by the undeclared suspended ancestor.
+// ---------------------------------------------------------------------------
+
+describe("StoreTenancyLifecycleGate parallelizes the fully-declared chain", () => {
+  const allDeclared = {
+    subject: "k",
+    tenancy: { tenantId: "tenant_a", projectId: "pr_1", workspaceId: "ws_1" },
+    scopes: ["admin.read"],
+    platformOperator: false,
+    source: "durable_native",
+  } as AuthContext;
+
+  it("issues the workspace, project and tenant-account reads concurrently (peak in-flight = 3)", async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const pending: Array<() => void> = [];
+    const rowFor = (collection: string, id: string): StoreRecord | null => {
+      if (collection === "workspaces" && id === "ws_1")
+        return { id: "ws_1", tenant_id: "tenant_a", project_id: "pr_1", status: "active" };
+      if (collection === "projects" && id === "pr_1")
+        return { id: "pr_1", tenant_id: "tenant_a", status: "active" };
+      if (collection === "tenant-accounts" && id === "tenant_a")
+        return { id: "tenant_a", status: "active" };
+      return null;
+    };
+    const store = new Proxy({} as ControlPlaneStore, {
+      get(_target, property) {
+        if (property !== "get") {
+          return () => Promise.reject(new Error(`unexpected store call: ${String(property)}`));
+        }
+        return (collection: string, _scope: CallerScope, id: string): Promise<StoreRecord | null> => {
+          inFlight += 1;
+          maxInFlight = Math.max(maxInFlight, inFlight);
+          return new Promise<StoreRecord | null>((resolve) => {
+            pending.push(() => {
+              inFlight -= 1;
+              resolve(rowFor(collection, id));
+            });
+          });
+        };
+      },
+    });
+    const gate = new StoreTenancyLifecycleGate(store, new JsonTenancyLifecycleGate({}));
+
+    const decision = gate.admit(allDeclared, listWorkspaces);
+    // The eager Promise.all issues all three reads before any resolves; a
+    // microtask flush is only insurance. Serial resolution would peak at 1.
+    await Promise.resolve();
+    expect(maxInFlight).toBe(3);
+
+    for (const resolve of pending) resolve();
+    expect((await decision).admitted).toBe(true);
+  });
+
+  it("denies a suspended tenant on the fast path, naming the root cause, with no fleet scan", async () => {
+    const { gate, calls } = recordingGate([
+      {
+        collection: "workspaces",
+        id: "ws_1",
+        owner: "tenant_a",
+        record: { id: "ws_1", tenant_id: "tenant_a", project_id: "pr_1", status: "active" },
+      },
+      {
+        collection: "projects",
+        id: "pr_1",
+        owner: "tenant_a",
+        record: { id: "pr_1", tenant_id: "tenant_a", status: "active" },
+      },
+      {
+        collection: "tenant-accounts",
+        id: "tenant_a",
+        owner: "tenant_a",
+        record: { id: "tenant_a", status: "suspended" },
+      },
+    ]);
+
+    const decision = await gate.admit(allDeclared, listWorkspaces);
+    expect(decision.admitted).toBe(false);
+    // Shallowest-first: the suspended TENANT is named, not the active workspace.
+    if (decision.admitted === false) {
+      expect(decision.code).toBe("tenancy_suspended");
+      expect(decision.message).toContain("tenant tenant_a is suspended");
+    }
+    // Still O(1): the workspace/project resolved by the ONE declared tenant's
+    // object — the fast path did NOT widen to the platform-operator fleet scan.
+    expect(
+      calls.filter(
+        (c) =>
+          c.scopeKind === "platform_operator" &&
+          (c.collection === "workspaces" || c.collection === "projects"),
+      ),
+    ).toEqual([]);
+  });
+
+  it("refuses the fast path when a declared parent disagrees with the row, and the serial walk denies the undeclared suspended ancestor", async () => {
+    const { gate, calls } = recordingGate([
+      // The declared workspace ws_1 physically belongs to tenant_b (SUSPENDED),
+      // not the declared tenant_a. A fast path that trusted the declaration would
+      // build [tenant_a(active), project, workspace] and ADMIT — the bypass. The
+      // parentAgrees guard must reject it and fall through to the serial walk,
+      // which unions tenant_b and denies.
+      {
+        collection: "workspaces",
+        id: "ws_1",
+        owner: "tenant_b",
+        record: { id: "ws_1", tenant_id: "tenant_b", project_id: "pr_1", status: "active" },
+      },
+      {
+        collection: "projects",
+        id: "pr_1",
+        owner: "tenant_b",
+        record: { id: "pr_1", tenant_id: "tenant_b", status: "active" },
+      },
+      {
+        collection: "tenant-accounts",
+        id: "tenant_a",
+        owner: "tenant_a",
+        record: { id: "tenant_a", status: "active" },
+      },
+      {
+        collection: "tenant-accounts",
+        id: "tenant_b",
+        owner: "tenant_b",
+        record: { id: "tenant_b", status: "suspended" },
+      },
+    ]);
+
+    const decision = await gate.admit(allDeclared, listWorkspaces);
+    expect(decision.admitted).toBe(false);
+    if (decision.admitted === false) {
+      expect(decision.code).toBe("tenancy_suspended");
+      expect(decision.message).toContain("tenant tenant_b is suspended");
+    }
+    // The disagreement forced the serial fallback, which surfaced the real
+    // parent via the platform-operator scan.
+    expect(
+      calls.some(
+        (c) =>
+          c.collection === "workspaces" && c.scopeKind === "platform_operator" && c.id === "ws_1",
+      ),
+    ).toBe(true);
+  });
+});
