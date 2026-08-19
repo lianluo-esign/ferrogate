@@ -213,7 +213,17 @@ export class D1ApiKeyAuthenticator implements ApiKeyAuthenticatorPort {
       };
     }
     if (row === null) return this.#fallback.authenticate(presentedKey);
+    return this.resolveStaticRow(row);
+  }
 
+  /**
+   * Decide a PRE-FETCHED `static_api_keys` row (one that WAS found). Extracted so
+   * {@link D1ControlDbApiKeyAuthenticator} can coalesce this table's read with
+   * the directory read into a SINGLE control-DO round trip and still apply the
+   * IDENTICAL enabled / expiry / operator semantics. "No row" stays in
+   * `authenticate` — it is a fall-through to the var, not a decision about a row.
+   */
+  resolveStaticRow(row: StaticKeyRow): ApiKeyResolution {
     if (row.enabled === 0) return { outcome: "static_key_disabled" };
     if (row.expires_at_unix !== null && row.expires_at_unix <= this.#now()) {
       return { outcome: "static_key_expired" };
@@ -371,7 +381,19 @@ export class D1NativeApiKeyAuthenticator implements ApiKeyAuthenticatorPort {
     // Not a durable key. The static/operator leg and the declarative vars are
     // next, preserving Rust's `authenticate_with_admission` source ordering.
     if (directory === null) return this.#fallback.authenticate(presentedKey);
+    return this.resolveDirectoryHit(directory, keyHash);
+  }
 
+  /**
+   * Decide a PRE-FETCHED `api_key_directory` row (one that WAS found): the
+   * lifecycle gate, then the second-hop read of the TENANT database that is the
+   * authority for the key's scopes. Extracted so {@link
+   * D1ControlDbApiKeyAuthenticator} can coalesce the directory read with the
+   * static-table read into a SINGLE control-DO round trip and still run the
+   * IDENTICAL native-leg semantics. `keyHash` is threaded in because the tenant
+   * lookup keys on the same digest.
+   */
+  async resolveDirectoryHit(directory: DirectoryRow, keyHash: string): Promise<ApiKeyResolution> {
     if (this.#retired(directory))
       return { outcome: "key_suspended", reason: this.#reason(directory) };
 
@@ -452,5 +474,94 @@ export class D1NativeApiKeyAuthenticator implements ApiKeyAuthenticatorPort {
     if (row.revoked_at_unix !== null) return "revoked";
     if (row.enabled === 0) return "disabled";
     return "expired";
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Both durable control-database legs, folded into one round trip
+// ---------------------------------------------------------------------------
+
+/**
+ * The two DURABLE control-database lookups — `api_key_directory` (the native
+ * leg) and `static_api_keys` (the operator/static leg) — folded into ONE
+ * control-DO round trip via `batch()`, instead of two chained authenticators
+ * that each pay their own round trip to the single-threaded control object.
+ *
+ * ## Why (latency)
+ *
+ * On the operator hot path the presented credential is a break-glass var key
+ * that is ABSENT from both tables, so the old chain issued two always-miss
+ * cross-region reads to the control DO — serialized, because the second only
+ * ran once the first fell back — before resolving from the vars. Those two reads
+ * are the difference between the `tenant-accounts` LIST landing under 1s and
+ * not. `batch()` fetches both rows in a single `transactionSync` inside the
+ * object (see `packages/storage/src/control-do.ts`), one round trip.
+ *
+ * ## Ordering and durable-wins are preserved EXACTLY
+ *
+ * With both rows in hand this decides them in the SAME source order the chain
+ * did — the directory (native) row first, INCLUDING its second-hop tenant read
+ * on a hit, then the static row, then the declarative vars only when NEITHER
+ * table had the key — by delegating to the very methods the standalone
+ * authenticators use ({@link D1NativeApiKeyAuthenticator.resolveDirectoryHit},
+ * {@link D1ApiKeyAuthenticator.resolveStaticRow}). Because both durable rows are
+ * still read and the directory is still consulted ahead of the static row and
+ * the var, a durable disable/revoke still wins over a stale var — the invariant
+ * `api-keys-d1.test.ts` pins. The only thing removed is a network round trip;
+ * the standalone chain remains behaviourally identical and is still what the
+ * memory store and the no-`DB` deployment build.
+ */
+export class D1ControlDbApiKeyAuthenticator implements ApiKeyAuthenticatorPort {
+  readonly #controlDb: D1Database;
+  readonly #native: D1NativeApiKeyAuthenticator;
+  readonly #static: D1ApiKeyAuthenticator;
+  readonly #fallback: ApiKeyAuthenticatorPort;
+
+  constructor(
+    controlDb: D1Database,
+    native: D1NativeApiKeyAuthenticator,
+    staticAuth: D1ApiKeyAuthenticator,
+    fallback: ApiKeyAuthenticatorPort,
+  ) {
+    this.#controlDb = controlDb;
+    this.#native = native;
+    this.#static = staticAuth;
+    this.#fallback = fallback;
+  }
+
+  async authenticate(presentedKey: string): Promise<ApiKeyResolution> {
+    const trimmed = presentedKey.trim();
+    if (trimmed === "") return this.#fallback.authenticate(presentedKey);
+    const keyHash = await hashApiKeySecret(trimmed);
+
+    let directory: DirectoryRow | null;
+    let staticRow: StaticKeyRow | null;
+    try {
+      const results = await this.#controlDb.batch([
+        this.#controlDb.prepare(DIRECTORY_SQL).bind(keyHash),
+        this.#controlDb.prepare(STATIC_KEY_SQL).bind(keyHash),
+      ]);
+      // Statement order in, result order out: [0] is the directory, [1] the
+      // static table. Optional-chain the row so a short/empty result set is a
+      // clean miss (fall through) rather than a throw.
+      directory = (results[0]?.results[0] as DirectoryRow | undefined) ?? null;
+      staticRow = (results[1]?.results[0] as StaticKeyRow | undefined) ?? null;
+    } catch (error) {
+      // 503, never 401 — an outage on EITHER durable table must not be
+      // indistinguishable from a revoked credential, and must not fall through
+      // to a var that may still list a key the database revoked. `batch()` is
+      // atomic, so the two reads share one outage rather than one masking the
+      // other.
+      return {
+        outcome: "unavailable",
+        detail: `api key control lookup failed: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+
+    // Source order, unchanged: native directory first (with its own tenant-DB
+    // authority read on a hit), then the static/operator table, then the vars.
+    if (directory !== null) return this.#native.resolveDirectoryHit(directory, keyHash);
+    if (staticRow !== null) return this.#static.resolveStaticRow(staticRow);
+    return this.#fallback.authenticate(presentedKey);
   }
 }

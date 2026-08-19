@@ -83,7 +83,11 @@ import {
   StaticAnswersTxtResolver,
   UnboundTxtResolver,
 } from "./site_domain_txt.js";
-import { D1ApiKeyAuthenticator, D1NativeApiKeyAuthenticator } from "./store/api_keys.js";
+import {
+  D1ApiKeyAuthenticator,
+  D1ControlDbApiKeyAuthenticator,
+  D1NativeApiKeyAuthenticator,
+} from "./store/api_keys.js";
 import { type AuditSink, DeferredAuditSink } from "./store/audit-sink.js";
 import {
   type BillingFleetQueryPort,
@@ -1287,11 +1291,18 @@ export function resolveApiKeys(
   // in its own tenant's database; `resolveTenantDatabases` is the SAME
   // construction the admin routes take, so the two cannot disagree about which
   // database a tenant is.
-  return new D1NativeApiKeyAuthenticator(
+  // Both durable legs read the SAME single-threaded control object, so folding
+  // their two lookups into one `batch()` round trip halves the control-DO reads
+  // an operator request serializes — the standalone `native`/`staticAuth` here
+  // supply the per-row decision logic (their `resolve*Row`), unchanged. See
+  // {@link D1ControlDbApiKeyAuthenticator}.
+  const native = new D1NativeApiKeyAuthenticator(
     controlDb,
     resolveTenantDatabases(env, controlDb),
-    new D1ApiKeyAuthenticator(controlDb, declarative),
+    declarative,
   );
+  const staticAuth = new D1ApiKeyAuthenticator(controlDb, declarative);
+  return new D1ControlDbApiKeyAuthenticator(controlDb, native, staticAuth, declarative);
 }
 
 /**
