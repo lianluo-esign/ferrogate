@@ -265,25 +265,40 @@ export class SplitControlPlaneStore implements ControlPlaneStore {
   }
 
   async #listTenantResources(collection: string, query: ListQuery): Promise<ListPage> {
+    const tenantIds = await this.#tenantRouter.provisionedTenants();
+    // Fan the per-tenant reads out CONCURRENTLY. Each tenant owns a SEPARATE
+    // Durable Object, so N independent round trips overlap — wall-clock collapses
+    // to the slowest single object instead of the sum of all N. The sequential
+    // form paid N × the per-object RPC latency and pushed an operator
+    // `tenant-accounts` list to ~9s on the live fleet (>1s = FAILURE). The single
+    // control-D1 `#platformRows` read is independent of the tenant objects, so it
+    // rides the same wave. `Promise.all` preserves input order, so the first-seen
+    // dedup below yields byte-identical output to the serial loop. Concurrent
+    // `#tenantStore` callers collapse onto one memoised build (see :105-111), so
+    // the fan-out never re-resolves the same object.
+    const [perTenant, platformRows] = await Promise.all([
+      Promise.all(
+        tenantIds.map(async (tenantId) =>
+          (await this.#tenantStore(tenantId)).list(
+            collection,
+            { kind: "platform_operator" },
+            UNPAGED_QUERY(query),
+          ),
+        ),
+      ),
+      this.#platformRows(collection, { kind: "platform_operator" }, query),
+    ]);
+
     const seen = new Set<string>();
     const records: StoreRecord[] = [];
-    for (const tenantId of await this.#tenantRouter.provisionedTenants()) {
-      const local = await (await this.#tenantStore(tenantId)).list(
-        collection,
-        { kind: "platform_operator" },
-        UNPAGED_QUERY(query),
-      );
+    for (const local of perTenant) {
       for (const record of local.items) {
         if (seen.has(String(record.id))) continue;
         seen.add(String(record.id));
         records.push(record);
       }
     }
-    for (const record of await this.#platformRows(
-      collection,
-      { kind: "platform_operator" },
-      query,
-    )) {
+    for (const record of platformRows) {
       if (seen.has(String(record.id))) continue;
       seen.add(String(record.id));
       records.push(record);
