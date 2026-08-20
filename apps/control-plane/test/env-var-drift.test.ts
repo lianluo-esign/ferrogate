@@ -343,6 +343,25 @@ const DOCUMENTED_BUT_UNDECLARED = [
 ] as const;
 
 /**
+ * CLOUDFLARE PRODUCT BINDINGS the source reads that this Worker does not declare
+ * in the committed template — so the code path behind each is UNREACHABLE in
+ * production today.
+ *
+ * `CONTROL_D1` (control-plane-d1 §Step2) is the control-plane's D1 database. As
+ * the SINGLE control writer this Worker holds the PLAIN binding (primary
+ * reads/writes, read-your-writes with no bookmark plumbing). `src/control-data.ts`
+ * reads `env.CONTROL_D1` under the `"d1"` posture, but the committed default is
+ * `CONTROL_PLANE_CONTROL_STORAGE = "durable_object"`, so that branch is never
+ * taken and the read is dead in production while the dual-capability code ships
+ * ahead of the cutover. The real binding is DEPLOY-TIME state in
+ * wrangler.deploy.toml (a live `[[d1_databases]]` here would break the hermetic
+ * miniflare load), so the template carries only a commented stanza + PORT-TODO.
+ * When the posture flips to `"d1"` this graduates into a committed binding and
+ * leaves this list.
+ */
+const UNDECLARED_BINDINGS = ["CONTROL_D1"] as const;
+
+/**
  * Reads that `wrangler.toml` does not declare AND does not even mention.
  *
  * The honest residue, and the reason this file is worth more than a rename
@@ -372,11 +391,6 @@ const UNDOCUMENTED = [
   "SITE_DOMAIN_RESOLVER_ENDPOINT",
   "SITE_DOMAIN_RESOLVER_TIMEOUT_MS",
   "SITE_DOMAIN_TXT_ANSWERS",
-  // The regional tenant-DO placement default (`src/adapters.ts` →
-  // `defaultTenantLocationHint`). A deployment whose fleet is regional sets it
-  // at deploy time (e.g. `apac-ne` for a Tokyo-homed fleet); absent, tenant DOs
-  // take Cloudflare's default placement. Supplied per-deploy, in no config file.
-  "TENANT_DEFAULT_LOCATION_HINT",
 ] as const;
 
 /**
@@ -416,6 +430,7 @@ describe("the env-var drift gate itself", () => {
       "SPEND_ANOMALY_WEBHOOK_TIMEOUT_SECS",
       "SPEND_ANOMALY_WEBHOOK_URL",
       "TENANCY_LIFECYCLE",
+      "TENANT_DEFAULT_LOCATION_HINT",
       "TENANT_RBAC_ACTIONS",
     ]);
     // `PROMPT_LABELS` is the KV namespace the prompt deployment labels (#694)
@@ -502,7 +517,22 @@ describe("every var the source reads is declared or explicitly excepted", () => 
   const undeclared = [...READS.named.keys()].filter((n) => !declaredNames.has(n)).sort();
 
   it("has no undeclared read outside the exception table", () => {
-    expect(undeclared).toEqual([...SECRETS, ...DOCUMENTED_BUT_UNDECLARED, ...UNDOCUMENTED].sort());
+    expect(undeclared).toEqual(
+      [...SECRETS, ...DOCUMENTED_BUT_UNDECLARED, ...UNDECLARED_BINDINGS, ...UNDOCUMENTED].sort(),
+    );
+  });
+
+  it("records each undeclared BINDING as an open PORT-TODO, not an oversight", () => {
+    // Not vacuous: one entry today (`CONTROL_D1`).
+    expect(UNDECLARED_BINDINGS.length).toBeGreaterThan(0);
+    for (const name of UNDECLARED_BINDINGS) {
+      expect(mentionedInToml(name)).toBe(true);
+      expect(
+        documentedNear(name, /PORT-TODO/, 6),
+        `${name} is read by src/ with no binding declared and no PORT-TODO explaining it`,
+      ).toBe(true);
+      expect(DECLARED.bindings.has(name)).toBe(false);
+    }
   });
 
   it("documents every secret in wrangler.toml, next to its name", () => {
@@ -588,7 +618,8 @@ describe("which committed [vars] values this runner can actually observe", () =>
     // (six since #683's `SIEM_EXPORT_SINKS`). Re-derived by counting the
     // committed `[vars]` table, not by incrementing the old number.
     // #879 added `CONTROL_PLANE_CONTROL_STORAGE` (Zero-D1 S3 posture) ⇒ 9.
-    expect(rows.length).toBe(9);
+    // Tokyo-forced tenant placement added `TENANT_DEFAULT_LOCATION_HINT` ⇒ 10.
+    expect(rows.length).toBe(10);
   });
 
   it("explains every overridden var with an explicit pin in vitest.config.ts", () => {
@@ -617,6 +648,6 @@ describe("which committed [vars] values this runner can actually observe", () =>
     // reads the RUNTIME values, so it also fails if `env` stopped resolving.
     const observable = rows.filter((r) => r.runtime === r.committed).map((r) => r.name);
     expect(observable.sort()).toEqual([...DECLARED.vars.keys()].sort());
-    expect(observable.length).toBe(9);
+    expect(observable.length).toBe(10);
   });
 });

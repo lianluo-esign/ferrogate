@@ -17,7 +17,7 @@ class Operation(TypedDict):
     security: SecurityRequirements
     tags: tuple[str, ...]
 
-OPENAPI_OPERATION_COUNT: Final[int] = 327
+OPENAPI_OPERATION_COUNT: Final[int] = 329
 
 OPERATIONS: Final[dict[str, Operation]] = {
     "abortAssetUpload": {
@@ -73,6 +73,12 @@ OPERATIONS: Final[dict[str, Operation]] = {
         "path": "/v1/mcp/identity/{server}/authorize",
         "security": ((("bearerAuth", ()),),),
         "tags": ("gateway",),
+    },
+    "backfillControlStorage": {
+        "method": "POST",
+        "path": "/admin/v1/control-backfill",
+        "security": ((("bearerAuth", ()),),),
+        "tags": ("admin-write",),
     },
     "bindBillingGroupProvider": {
         "method": "PUT",
@@ -1394,6 +1400,12 @@ OPERATIONS: Final[dict[str, Operation]] = {
         "security": ((("bearerAuth", ()),),),
         "tags": ("admin-read",),
     },
+    "listSharedBillingGroups": {
+        "method": "GET",
+        "path": "/admin/v1/shared-billing-groups",
+        "security": ((("bearerAuth", ()),),),
+        "tags": ("admin-read",),
+    },
     "listSiteDomains": {
         "method": "GET",
         "path": "/admin/v1/site-domains",
@@ -1991,6 +2003,7 @@ ADMIN_OPERATION_IDS: Final[tuple[str, ...]] = (
     "archiveAdminPromptTemplate",
     "archiveGuardrailPolicyRevision",
     "assignTenantPlan",
+    "backfillControlStorage",
     "bindBillingGroupProvider",
     "bindSiteDomain",
     "bindTenantRole",
@@ -2157,6 +2170,7 @@ ADMIN_OPERATION_IDS: Final[tuple[str, ...]] = (
     "listQuotaPolicies",
     "listRoles",
     "listSemanticCachePolicies",
+    "listSharedBillingGroups",
     "listSiteDomains",
     "listTenantAccounts",
     "listTenantRoles",

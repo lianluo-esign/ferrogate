@@ -26,6 +26,14 @@ import {
   tenancyPostureWarnings,
   validateConfigAsync,
 } from "@ferrogate/config";
+import {
+  CONTROL_BACKFILL_TABLES,
+  type ControlDataNamespaceLike,
+  backfillControlData,
+  compareTableReceipts,
+  controlBackfillReceipts,
+  controlDataObjectDatabase,
+} from "@ferrogate/storage";
 import { z } from "zod";
 import { modelCatalogInputsFromEnv } from "../../../gateway/src/inference/catalog.js";
 import { HttpError } from "../middleware/errors.js";
@@ -97,6 +105,34 @@ export const configImportModelCatalogRequestSchema = z
     cloudflare: z.union([z.string(), z.record(z.unknown())]).optional(),
     /** Also import `withDefaultRateCard()` as platform-kind price rows. Default `true`. */
     include_default_rate_card: z.boolean().optional(),
+  })
+  .strict();
+
+/**
+ * `POST /admin/v1/control-backfill` body — the operator-only one-shot DO→D1
+ * control-database copy (control-plane-D1 migration, Step 3).
+ *
+ * `.strict()` for the same reason every other body here is: a misspelled knob
+ * fails loudly rather than being silently ignored on a migration an operator
+ * runs once and trusts the receipt of.
+ */
+export const controlBackfillRequestSchema = z
+  .object({
+    /**
+     * `do_to_d1` (default) is the cut-over direction — copy the singleton
+     * `ControlDataObject` INTO the new `CONTROL_D1`. `d1_to_do` is the rollback
+     * direction the design's reversibility note relies on; the copier is
+     * backend-agnostic and idempotent by primary key either way.
+     */
+    direction: z.enum(["do_to_d1", "d1_to_do"]).optional(),
+    /** Rows read per page and statements per destination batch (default 100). */
+    page_size: z.number().int().min(1).max(1000).optional(),
+    /**
+     * Skip the copy and only re-compute + compare the per-table row-count +
+     * checksum receipts on both backends — the parity gate an operator re-runs
+     * after a copy (or before a cut-over) WITHOUT moving a single row.
+     */
+    verify_only: z.boolean().optional(),
   })
   .strict();
 
@@ -439,6 +475,109 @@ export const adminConfigOpsRoutes: GroupModule = crudGroup("admin_config_ops", [
       inserted: result.inserted,
       counts: result.counts,
       revision: result.revision,
+    });
+  },
+
+  /**
+   * Run the one-shot DO→D1 control-database backfill (control-plane-D1
+   * migration, Step 3) — PLATFORM-OPERATOR ONLY, idempotent, re-runnable, and
+   * reversible.
+   *
+   * ## Why it lives here and why it is platform-operator only
+   *
+   * The control database is a deployment-wide singleton: this copies EVERY
+   * control row (every tenant's directory, plans, RBAC, billing) from the
+   * `ControlDataObject` into the new `CONTROL_D1`. Like {@link setAdminDrain}
+   * and {@link importModelCatalog} it is deployment-wide state a tenant
+   * credential must never touch, so the SAME fence guards it: a non-platform
+   * caller is `403 tenant_scope_denied` and never reaches a database.
+   *
+   * ## Why THIS Worker
+   *
+   * The control-plane is the only Worker that binds BOTH `CONTROL_DATA` (the DO
+   * source) and `CONTROL_D1` (the D1 destination), so it is the only place the
+   * copy can read one and write the other in-process. A node CLI cannot hold
+   * either live binding; it drives this endpoint over HTTP instead.
+   *
+   * ## Idempotent + verifiable by construction
+   *
+   * The copy is {@link backfillControlData}: `INSERT OR IGNORE` by primary key
+   * (a re-run copies zero rows), FK-dependency ordered, with a per-table
+   * row-count + streaming-checksum receipt compared on both backends. `ok` is
+   * the single boolean a cut-over gates on. `verify_only` re-runs just the
+   * receipt comparison — the parity gate — without moving a row, scoped to the
+   * tables the SOURCE actually has so a freshly-migrated destination's extra
+   * empty tables are not spuriously reported.
+   *
+   * The response reports rows READ and rows actually INSERTED per table (`0` on
+   * a re-run), the tables skipped because the source predates them, and any
+   * receipt mismatches — the count + parity shape an operator gates the cut-over
+   * on, mirroring {@link importModelCatalog}'s `attempted`/`inserted` receipt.
+   */
+  backfillControlStorage: async (c) => {
+    const scope = scopeOf(c);
+    if (scope.kind !== "platform_operator") {
+      throw new HttpError(
+        403,
+        "tenant_scope_denied",
+        "the control backfill copies the whole deployment's control database; a tenant-scoped credential cannot run it",
+      );
+    }
+    const namespace = c.env.CONTROL_DATA;
+    const d1 = c.env.CONTROL_D1;
+    if (namespace === undefined || d1 === undefined) {
+      throw new HttpError(
+        503,
+        "control_database_unavailable",
+        "the control backfill needs BOTH the CONTROL_DATA object namespace (the DO source) and the CONTROL_D1 binding (the D1 destination) bound to this Worker",
+      );
+    }
+
+    const body = await readJson(c, controlBackfillRequestSchema);
+    const direction = body.direction ?? "do_to_d1";
+    const objectDb = controlDataObjectDatabase(namespace as unknown as ControlDataNamespaceLike);
+    // do_to_d1 (cut-over): DO is the source, D1 the destination. d1_to_do
+    // (rollback): the reverse. The copier is symmetric and idempotent either way.
+    const [source, destination] = direction === "do_to_d1" ? [objectDb, d1] : [d1, objectDb];
+
+    if (body.verify_only === true) {
+      // Parity gate only: compare receipts, move no rows. Scope to the tables the
+      // SOURCE has (mirroring the copy path) so the destination's extra empty
+      // tables are not reported as `missing_source`.
+      const sourceReceipts = await controlBackfillReceipts(source);
+      const presentSpecs = CONTROL_BACKFILL_TABLES.filter((spec) =>
+        sourceReceipts.some((receipt) => receipt.table === spec.name),
+      );
+      const destinationReceipts = await controlBackfillReceipts(destination, presentSpecs);
+      const comparison = compareTableReceipts(sourceReceipts, destinationReceipts);
+      return json(c, 200, {
+        object: "control_backfill",
+        direction,
+        mode: "verify_only",
+        ok: comparison.ok,
+        source_tables: sourceReceipts.length,
+        destination_tables: destinationReceipts.length,
+        mismatches: comparison.mismatches,
+      });
+    }
+
+    const report = await backfillControlData(
+      source,
+      destination,
+      body.page_size !== undefined ? { pageSize: body.page_size } : {},
+    );
+    return json(c, 200, {
+      object: "control_backfill",
+      direction,
+      mode: "copy",
+      ok: report.ok,
+      tables: report.tables.map((entry) => ({
+        table: entry.table,
+        source_rows: entry.sourceRows,
+        copied: entry.copied,
+      })),
+      skipped: report.skipped,
+      mismatches: report.comparison.mismatches,
     });
   },
 });

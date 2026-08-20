@@ -679,6 +679,53 @@ export function d1QuotaPolicySource(
   };
 }
 
+export const DEFAULT_QUOTA_POLICY_CACHE_TTL_MS = 5_000;
+export const DEFAULT_QUOTA_POLICY_CACHE_MAX_ENTRIES = 1_000;
+
+/**
+ * Isolate-local TTL cache in front of a durable {@link QuotaPolicySource}.
+ *
+ * Quota rows change rarely relative to request rate, and the control object
+ * (or D1 primary) is on the admission hot path of every authenticated call.
+ * Caching a successful snapshot for a few seconds drops that hop to a map
+ * lookup; a failure is never cached so an outage cannot become a TTL-long
+ * "no policies" / unlimited-traffic window.
+ */
+export function cachedQuotaPolicySource(
+  inner: QuotaPolicySource,
+  options: { readonly ttlMs?: number; readonly maxEntries?: number; readonly now?: () => number } = {},
+): QuotaPolicySource {
+  const ttlMs = options.ttlMs ?? DEFAULT_QUOTA_POLICY_CACHE_TTL_MS;
+  const maxEntries = options.maxEntries ?? DEFAULT_QUOTA_POLICY_CACHE_MAX_ENTRIES;
+  const now = options.now ?? Date.now;
+  const entries = new Map<string, { expiresAtMs: number; snapshot: QuotaPolicySnapshot }>();
+  return {
+    async policiesFor(subject: QuotaSubject): Promise<QuotaPolicySnapshot> {
+      const key = [
+        subject.apiKeyId,
+        subject.chain.tenantId ?? "",
+        subject.chain.projectId ?? "",
+        subject.chain.workspaceId ?? "",
+        subject.chain.keyId ?? "",
+      ].join("\0");
+      const hit = entries.get(key);
+      if (hit !== undefined && now() < hit.expiresAtMs) return hit.snapshot;
+      if (hit !== undefined) entries.delete(key);
+      const snapshot = await inner.policiesFor(subject);
+      if (snapshot.ok) {
+        entries.delete(key);
+        entries.set(key, { expiresAtMs: now() + ttlMs, snapshot });
+        while (entries.size > maxEntries) {
+          const oldest = entries.keys().next();
+          if (oldest.done === true) break;
+          entries.delete(oldest.value);
+        }
+      }
+      return snapshot;
+    },
+  };
+}
+
 /**
  * The {@link QuotaPolicySource} the composition root gets.
  *
@@ -687,10 +734,15 @@ export function d1QuotaPolicySource(
  * `quota_policies` rows must not have them silently widened (or narrowed) by a
  * stale `GATEWAY_QUOTA_POLICIES` var left over from before the migration. One
  * source of truth per deployment, chosen by which binding exists.
+ *
+ * Durable lookups are wrapped in {@link cachedQuotaPolicySource} so the
+ * control-object hop is not paid on every authenticated request.
  */
 export function quotaPolicySourceFromEnv(env: QuotaBindings): QuotaPolicySource {
   const db = controlDatabaseFrom(env);
-  return db === undefined ? quotaPolicySourceFromVars(env) : d1QuotaPolicySource(db);
+  return db === undefined
+    ? quotaPolicySourceFromVars(env)
+    : cachedQuotaPolicySource(d1QuotaPolicySource(db));
 }
 
 // ---------------------------------------------------------------------------

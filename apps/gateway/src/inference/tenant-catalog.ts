@@ -23,8 +23,8 @@ import type {
  * the env registry.
  */
 
-/** Five seconds bounds staleness when an editor forgets to bump a revision. */
-export const DEFAULT_TENANT_MODEL_CATALOG_CACHE_TTL_MS = 5_000;
+/** Thirty seconds bounds staleness when an editor forgets to bump a revision. */
+export const DEFAULT_TENANT_MODEL_CATALOG_CACHE_TTL_MS = 30_000;
 
 const REVISION_SQL = "SELECT revision FROM catalog_revisions WHERE tenant_id = ? AND id = 1";
 const OFFERING_ROLES = new Set(["primary", "fallback", "canary", "shadow"]);

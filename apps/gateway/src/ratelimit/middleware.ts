@@ -701,41 +701,14 @@ export function rateLimit(deps: RateLimitDeps = {}): MiddlewareHandler<GatewayEn
       }
     }
 
-    // 3. Prepaid-credit wallet balance (issue #169) — enforced INDEPENDENTLY of
-    //    the budget above: a wallet tracks money actually paid, while
-    //    `monthly_budget_usd` is a configured throttle, so neither implies the
-    //    other and a tenant can be denied by either alone.
-    //
-    //    Opt-in per tenant: a tenant with no wallet row is never denied, which
-    //    is what keeps this purely additive for everyone who has not adopted
-    //    prepaid billing.
-    //
-    //    COST, stated because it is on the hot path: this is one D1 `batch()`
-    //    per authenticated request that carries a tenant, whether or not that
-    //    tenant has a wallet. Rust pays the same point lookup unconditionally
-    //    in `finalize_auth` (issue #373 awaits `get_wallet` inline), so this is
-    //    parity rather than a regression — but if it ever needs to be cheaper,
-    //    the answer is a negative cache of "this tenant has no wallet" keyed on
-    //    the isolate (the same shape as `src/keys/cache.ts`), NOT skipping the
-    //    read, which would make the gate depend on request order.
+    // 3. Prepaid-credit wallet. The READ (step 3) used to be a separate tenant
+    //    DO RPC before the no-oversell RESERVE (step 3b). The reserve's
+    //    in-statement guard is strictly stronger — it refuses a zero/overdrawn
+    //    wallet AND races — so the extra read was a hot-path round trip that
+    //    could not refuse a request the reserve would admit. Skip it; step 3b
+    //    below is the gate. A tenant with no wallet row is still
+    //    `not_applicable` (never denied).
     const walletTenantId = subject.chain.tenantId;
-    if (walletTenantId !== undefined && walletTenantId !== "") {
-      const balance = await spend.walletBalanceCredits(walletTenantId);
-      if (!balance.ok) {
-        throw new HttpError(
-          503,
-          "quota_resolution_unavailable",
-          `wallet balance lookup failed: ${balance.detail}`,
-        );
-      }
-      // `<= 0` on the AVAILABLE balance (funded minus live holds), so a tenant
-      // whose in-flight requests have already committed the balance is refused
-      // here rather than admitted to race the ones already dispatched.
-      if (balance.availableCredits !== null && balance.availableCredits <= 0) {
-        const refusal = RATE_LIMIT_REFUSALS.wallet_balance_exhausted;
-        throw new HttpError(refusal.status, refusal.code, refusal.message());
-      }
-    }
 
     /**
      * Every reservation this request took, released in the `finally` below.
@@ -756,26 +729,31 @@ export function rateLimit(deps: RateLimitDeps = {}): MiddlewareHandler<GatewayEn
       //     one instance per scope, single-threaded, so the Nth caller sees the
       //     N-1 holds ahead of it (`durable-object.ts::reserveMonthlyBudget`).
       //
-      //     Both gates are kept, exactly as step 3 and step 3b are for the
-      //     wallet: step 2 bounds CUMULATIVE spend against the settled rollup,
-      //     this bounds CONCURRENT admission against what is still unsettled.
-      //     Neither substitutes for the other.
-      //
-      //     The hold is a flat configured amount, not a price — see
-      //     `DEFAULT_BUDGET_HOLD_USD`. It is released in the `finally` below.
+      //     Rungs address DIFFERENT counter keys (different DO instances), so
+      //     the holds are independent and run together. A failure still
+      //     releases every hold that landed, via `holds` + `finally`.
       const holdUsd = budgetHoldUsdFromEnv(env);
-      for (const [index, charge] of budgetCharges.entries()) {
-        const committed = budgetSpend[index];
-        // Unreachable: step 2 threw on any reading that was missing or failed.
-        if (committed === undefined || !committed.ok) continue;
-        const reserved = await limiter.reserveMonthlyBudget(
-          charge.counterKey,
-          committed.committedSpendUsd,
-          charge.limitUsd,
-          holdUsd,
-        );
+      const budgetReservations = await Promise.all(
+        budgetCharges.map((charge, index) => {
+          const committed = budgetSpend[index];
+          if (committed === undefined || !committed.ok) {
+            return Promise.resolve(undefined);
+          }
+          return limiter.reserveMonthlyBudget(
+            charge.counterKey,
+            committed.committedSpendUsd,
+            charge.limitUsd,
+            holdUsd,
+          );
+        }),
+      );
+      for (const reserved of budgetReservations) {
+        if (reserved === undefined) continue;
+        if (reserved.outcome === "reserved") holds.push(reserved.reservation);
+      }
+      for (const reserved of budgetReservations) {
+        if (reserved === undefined) continue;
         if (reserved.outcome === "unavailable") {
-          // A counter outage has not proven the caller is over budget: 503.
           const refusal = RATE_LIMIT_REFUSALS.governance_counter_unavailable;
           throw new HttpError(refusal.status, refusal.code, refusal.message(reserved.detail));
         }
@@ -783,7 +761,6 @@ export function rateLimit(deps: RateLimitDeps = {}): MiddlewareHandler<GatewayEn
           const refusal = RATE_LIMIT_REFUSALS.monthly_budget_exceeded;
           throw new HttpError(refusal.status, refusal.code, refusal.message());
         }
-        if (reserved.outcome === "reserved") holds.push(reserved.reservation);
       }
 
       // 3b. THE NO-OVERSELL GUARD — `@ferrogate/storage`'s `D1WalletStore`

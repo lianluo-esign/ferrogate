@@ -128,8 +128,11 @@ describe("contract table", () => {
     // at `admin.read`, three writes at `admin.write`), taking bearer 308 -> 313.
     // The tenant-scoped `GET /admin/v1/shared-billing-groups` is one more bearer
     // read (`admin.read`), taking bearer 313 -> 314.
+    // The control-plane-D1 migration's `POST /admin/v1/control-backfill` is one
+    // more bearer write (`admin.write`, like the config ops beside it), taking
+    // bearer 314 -> 315.
     expect(census(OPERATIONS.map<AuthKind>((operation) => operation.auth.kind))).toEqual({
-      bearer: 314,
+      bearer: 315,
       internal: 6,
       anonymous: 7,
       method_dependent: 1,
@@ -166,7 +169,9 @@ describe("contract table", () => {
       // admin 246 -> 251.
       // The tenant-scoped `GET /admin/v1/shared-billing-groups` is one more
       // admin-visible read, taking admin 251 -> 252.
-      admin: 252,
+      // The control-plane-D1 migration's `POST /admin/v1/control-backfill` is one
+      // more admin-visible op, taking admin 252 -> 253.
+      admin: 253,
       // 51 -> 52 with `countMessageTokens` (issue #671): a data-plane
       // operation, publicly reachable, bearer-guarded; then 52 -> 53 with
       // `getModel` (issue #670), public for the same reason as `listModels`.
@@ -256,7 +261,9 @@ describe("contract table", () => {
       // #948 adds one POST (announcement create, 99 -> 100), one DELETE
       // (announcement delete, 35 -> 36) and one PATCH (announcement patch,
       // 20 -> 21). GET is handled above (+2).
-      POST: 100,
+      // The control-plane-D1 migration's `POST /admin/v1/control-backfill` is one
+      // more POST, taking POST 100 -> 101.
+      POST: 101,
       DELETE: 36,
       PUT: 25,
       PATCH: 21,

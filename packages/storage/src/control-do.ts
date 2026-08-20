@@ -65,7 +65,11 @@ export function controlDataObjectDatabase(namespace: ControlDataNamespaceLike): 
   // this by resolving a new handle per request via `forTenant`; the singleton
   // control facade has no such per-request resolution, so it lazies here.
   const fresh = (): D1Database => {
-    const stub = namespace.get(namespace.idFromName(CONTROL_DATA_ADDRESS));
+    // Hint is honored only on first creation. This fleet's control object is
+    // Tokyo-homed so login and quota reads are in-region for APAC clients.
+    const stub = namespace.get(namespace.idFromName(CONTROL_DATA_ADDRESS), {
+      locationHint: "apac-ne",
+    });
     return new DurableObjectD1Database(CONTROL_DATA_ADDRESS, stub).asD1Database();
   };
   return new Proxy({} as D1Database, {
@@ -77,4 +81,29 @@ export function controlDataObjectDatabase(namespace: ControlDataNamespaceLike): 
         : value;
     },
   });
+}
+
+/**
+ * Wrap a real `CONTROL_D1` binding as the replica-reading handle for the
+ * READ-ONLY control consumers (gateway/agent-runtime/mcp).
+ *
+ * `first-unconstrained` lets the first (and every) read land on ANY replica
+ * consistent with the session bookmark, so a globally-distributed reader gets a
+ * colo-local replica instead of a cross-region hop to the single Tokyo primary.
+ * These consumers never write control rows, so eventual consistency with a
+ * just-committed control-plane write is acceptable — the same posture the
+ * per-colo `api_key_directory` KV projection (#882) already runs under.
+ *
+ * The single writer (control-plane) does NOT go through here: it holds the
+ * plain `env.CONTROL_D1` binding, which routes to the primary, so it reads its
+ * own writes unconditionally with no bookmark plumbing.
+ *
+ * A `D1DatabaseSession` exposes exactly the `prepare`/`batch` surface every
+ * control consumer uses; `exec`/`dump`/`withSession` are never called on a
+ * control handle (verified across `apps/*` and `packages/storage`), so
+ * presenting the session as a `D1Database` is sound — mirroring how the DO
+ * facade's own `exec`/`dump`/`withSession` throw rather than being reachable.
+ */
+export function controlD1ReplicaDatabase(db: D1Database): D1Database {
+  return db.withSession("first-unconstrained") as unknown as D1Database;
 }

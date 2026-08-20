@@ -469,16 +469,12 @@ export interface ControlPlaneDeps {
    */
   readonly tenantStorage?: TenantDatabaseRouter;
   /**
-   * The region a new tenant's Durable Object is homed in when the registration
-   * request carries NO Cloudflare geo signal (no native `cf`, no forwarded
-   * `x-ferrogate-cf-*` header). Without it `provisionTenantStorageFor` would take
-   * {@link locationHintFromCloudflareSignal}'s own US-West (`wnam`) fallback, so a
-   * relayed registration that lost its `cf` across a service-binding hop would
-   * home every such tenant in the US regardless of where the user is. A
-   * deployment whose fleet is regional sets `TENANT_DEFAULT_LOCATION_HINT` (e.g.
-   * `apac-ne` for Tokyo) so the no-signal default lands in-region instead. Absent
-   * ⇒ keep the `wnam` fallback. A REAL geo signal always wins over this — a
-   * genuine US user is still homed in the US.
+   * The region a new tenant's Durable Object is homed in. When set (this
+   * fleet: Tokyo `apac-ne`), it WINS over the request geo signal so every new
+   * tenant object lands next to the control database rather than in US-West.
+   * Absent ⇒ `locationHintFromCloudflareSignal` (Tokyo fallback when `cf` is
+   * missing). Location hints only apply on first `get()`; existing objects stay
+   * where they were created.
    */
   readonly defaultTenantLocationHint?: TenantLocationHint;
   /** Platform-operator-only reads, exports and PITR against a tenant object. */
@@ -653,10 +649,11 @@ export interface ControlPlaneBindings {
   readonly ADMIN_LIST_DEFAULT_LIMIT?: string;
   readonly ADMIN_LIST_MAX_LIMIT?: string;
   /**
-   * The DEFAULT tenant Durable Object placement for registrations that carry no
-   * Cloudflare geo signal — one of the `TENANT_LOCATION_HINTS` (e.g. `apac-ne`
-   * for Tokyo). Absent or unrecognised ⇒ the built-in US-West (`wnam`) fallback
-   * stands. See {@link ControlPlaneDeps.defaultTenantLocationHint}.
+   * The DEFAULT tenant Durable Object placement for every new tenant — one of
+   * the `TENANT_LOCATION_HINTS` (this fleet: `apac-ne` for Tokyo). When set it
+   * is forced, not merely a no-signal fallback. Absent or unrecognised ⇒ the
+   * built-in Tokyo (`apac-ne`) fallback in `locationHintFromCloudflareSignal`.
+   * See {@link ControlPlaneDeps.defaultTenantLocationHint}.
    */
   readonly TENANT_DEFAULT_LOCATION_HINT?: string;
   /**
@@ -743,6 +740,21 @@ export interface ControlPlaneBindings {
    * The gateway's singleton `ControlDataObject` namespace, bound CROSS-SCRIPT.
    */
   readonly CONTROL_DATA?: ControlDataNamespace;
+  /**
+   * The Cloudflare D1 control database (Tokyo primary + global read replicas),
+   * selected by `CONTROL_PLANE_CONTROL_STORAGE = "d1"`. The control-plane is the
+   * SINGLE writer, so it holds the plain binding (primary reads/writes) and reads
+   * its own writes with no bookmark plumbing; the read-only twins open a
+   * `withSession("first-unconstrained")` replica session instead.
+   *
+   * Bound at deploy via `wrangler.deploy.toml`; the committed `wrangler.toml`
+   * carries only the commented placeholder (a live `[[d1_databases]]` stanza
+   * would break the hermetic vitest miniflare load). Also the DESTINATION of the
+   * one-shot DO→D1 backfill (`POST /admin/v1/control-backfill`), which the
+   * control-plane Worker can run because it alone binds both CONTROL_DATA (the
+   * DO source) and CONTROL_D1 (the D1 destination).
+   */
+  readonly CONTROL_D1?: D1Database;
   /**
    * The gateway's `TenantDataObject` namespace, bound CROSS-SCRIPT (#820).
    *

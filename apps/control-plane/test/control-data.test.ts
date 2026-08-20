@@ -38,6 +38,7 @@ describe("control-plane CONTROL storage seam", () => {
     expect(controlDatabaseFrom({})).toBeUndefined();
 
     for (const mode of ["d1_compat", "invalid"]) {
+      // (d1 is now a legal posture, so it must NOT appear here.)
       let error: unknown;
       try {
         controlDatabaseFrom({ CONTROL_PLANE_CONTROL_STORAGE: mode });
@@ -49,6 +50,19 @@ describe("control-plane CONTROL storage seam", () => {
         code: CONTROL_STORAGE_MISCONFIGURED,
       });
     }
+  });
+
+  it("returns the plain CONTROL_D1 binding under the d1 posture (primary, read-your-writes)", () => {
+    // The control-plane is the SINGLE writer: it holds the plain binding so its
+    // reads hit the primary and see its own writes with no bookmark plumbing.
+    // No `withSession` wrapping here — that is reserved for the read-only twins.
+    const CONTROL_D1 = { prepare() {}, batch() {}, withSession() {} } as unknown as D1Database;
+    const resolved = controlDatabaseFrom({ CONTROL_PLANE_CONTROL_STORAGE: "d1", CONTROL_D1 });
+    expect(resolved).toBe(CONTROL_D1);
+
+    // d1 posture with no CONTROL_D1 bound ⇒ undefined (a unit env), same shape
+    // as the DO leg with no CONTROL_DATA.
+    expect(controlDatabaseFrom({ CONTROL_PLANE_CONTROL_STORAGE: "d1" })).toBeUndefined();
   });
 
   it("makes resolveStore construct over the resolved CONTROL_DATA facade", () => {

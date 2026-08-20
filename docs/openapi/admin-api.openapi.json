@@ -7031,6 +7031,169 @@
         }
       }
     },
+    "/admin/v1/control-backfill": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ClientActionIdHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientFingerprintHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientClockUnverifiedHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientTimeTokenHeader"
+        },
+        {
+          "$ref": "#/components/parameters/ClientReportedIpHeader"
+        }
+      ],
+      "post": {
+        "operationId": "backfillControlStorage",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Copy the singleton control database between its Durable Object home and the Cloudflare D1 mirror (or, with verify_only, compare row-count + checksum receipts without moving rows). Platform-operator only; idempotent INSERT OR IGNORE by primary key, so re-runs are safe.",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "direction": {
+                    "type": "string",
+                    "enum": [
+                      "do_to_d1",
+                      "d1_to_do"
+                    ],
+                    "description": "Copy direction. `do_to_d1` (default) is the cut-over direction; `d1_to_do` reverses it for rollback drills."
+                  },
+                  "page_size": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1000,
+                    "description": "Rows streamed per page; bounds peak memory to a single page. Defaults to the copier's internal page size when omitted."
+                  },
+                  "verify_only": {
+                    "type": "boolean",
+                    "description": "Compare source vs destination receipts and move no rows. Use as the parity gate before flipping a read source."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Backfill result. In copy mode: per-table source/copied counts, skipped tables, and any receipt mismatches. In verify_only mode: source/destination table counts and receipt mismatches. `ok` is the single parity boolean a cut-over gates on.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "object": {
+                      "type": "string"
+                    },
+                    "direction": {
+                      "type": "string",
+                      "enum": [
+                        "do_to_d1",
+                        "d1_to_do"
+                      ]
+                    },
+                    "mode": {
+                      "type": "string",
+                      "enum": [
+                        "copy",
+                        "verify_only"
+                      ]
+                    },
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "tables": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "table": {
+                            "type": "string"
+                          },
+                          "source_rows": {
+                            "type": "integer"
+                          },
+                          "copied": {
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "table",
+                          "source_rows",
+                          "copied"
+                        ]
+                      }
+                    },
+                    "skipped": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "source_tables": {
+                      "type": "integer"
+                    },
+                    "destination_tables": {
+                      "type": "integer"
+                    },
+                    "mismatches": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    }
+                  },
+                  "required": [
+                    "object",
+                    "direction",
+                    "mode",
+                    "ok",
+                    "mismatches"
+                  ]
+                }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.write"
+          },
+          "rbac_action": null
+        }
+      }
+    },
     "/admin/v1/drain": {
       "parameters": [
         {

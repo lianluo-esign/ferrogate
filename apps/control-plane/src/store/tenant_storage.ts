@@ -64,6 +64,8 @@ import {
   type TenantJurisdiction,
   type TenantModelCatalogSeedGraph,
   type TenantObjectAddress,
+  LOCATION_HINT_HEADER,
+  coerceTenantLocationHint,
   locationHintFromCloudflareSignal,
   placementSignalFromRequest,
   provisionTenantStorage,
@@ -157,25 +159,26 @@ export async function provisionTenantStorageFor(
   try {
     // Prefer the request's native `cf`, but fall back to the `x-ferrogate-cf-*` headers a trusted BFF
     // forwards: a Worker→Worker service-binding hop strips `cf`, so a relayed registration would
-    // otherwise present no signal and fall to the US-West (`wnam`) default. `origin` tags the source
+    // otherwise present no signal and fall to the Tokyo (`apac-ne`) default. `origin` tags the source
     // on the roster row so an operator can tell an edge-header placement from a native `cf` one.
     const { signal, origin } = placementSignalFromRequest(request);
     const placement = locationHintFromCloudflareSignal(signal);
-    // When the registration carried NO geo signal at all (no native `cf`, no
-    // forwarded `x-ferrogate-cf-*` header), `locationHintFromCloudflareSignal`
-    // returns its own US-West (`wnam`) fallback. A regional deployment must not
-    // home its no-signal tenants in the US, so honor the operator-configured
-    // default region instead. A REAL signal (origin `cf`/`edge-header`) always
-    // wins — a genuine US user is still homed in the US.
-    const useOperatorDefault = origin === "none" && deps.defaultTenantLocationHint !== undefined;
-    const locationHint = useOperatorDefault
-      ? deps.defaultTenantLocationHint
-      : placement.locationHint;
-    const locationHintSource = useOperatorDefault
-      ? `operator-default;${deps.defaultTenantLocationHint}`
-      : origin === "edge-header"
-        ? `edge-header;${placement.source}`
-        : placement.source;
+    const requestedHint = coerceTenantLocationHint(
+      request?.headers?.get(LOCATION_HINT_HEADER) ?? undefined,
+    );
+    // Explicit tenant-console choice wins. Otherwise a real geo signal homes
+    // the object near the user. Only a request with NO signal falls back to
+    // the operator default (Tokyo `apac-ne` for this fleet).
+    let locationHint = placement.locationHint;
+    let locationHintSource =
+      origin === "edge-header" ? `edge-header;${placement.source}` : placement.source;
+    if (requestedHint !== undefined) {
+      locationHint = requestedHint;
+      locationHintSource = `tenant-console;${requestedHint}`;
+    } else if (origin === "none" && deps.defaultTenantLocationHint !== undefined) {
+      locationHint = deps.defaultTenantLocationHint;
+      locationHintSource = `operator-default;${deps.defaultTenantLocationHint}`;
+    }
     const jurisdiction = await tenantJurisdictionFromPolicy(controlDatabase, tenantId);
     // The MANAGED platform catalog (#891) is the seed source when this
     // deployment has adopted it. It is read over the CONTROL_DATA facade (the

@@ -128,8 +128,11 @@ export const SUPPORTED_CONTRACT_VERSION = 1;
  * 327 -> 328 with the tenant-scoped `GET /admin/v1/shared-billing-groups`
  * (`billing` group): the calling tenant's own `shared_billing_groups` DO mirror,
  * so a tenant console can offer the real multiplier-bearing group list.
+ * 328 -> 329 with the control-plane-D1 migration's `POST /admin/v1/control-backfill`
+ * (`admin_config_ops` group): the operator-only one-shot DO→D1 control backfill
+ * trigger, a sibling of `importModelCatalog` in the same group.
  */
-export const EXPECTED_TOTAL_OPERATION_COUNT = 328;
+export const EXPECTED_TOTAL_OPERATION_COUNT = 329;
 
 /**
  * Operations `ROUTE-MAP.md` assigns to `apps/control-plane`: `/admin/v1/**`
@@ -174,8 +177,11 @@ export const EXPECTED_TOTAL_OPERATION_COUNT = 328;
  * `/admin/v1/announcements` (the 公告 shared-config domain's operator surface).
  * 255 -> 256 with the tenant-scoped `GET /admin/v1/shared-billing-groups`, a
  * `/admin/v1/**` read this app owns.
+ *
+ * 256 -> 257 with `POST /admin/v1/control-backfill` (`admin_config_ops`), the
+ * operator-only one-shot DO→D1 control backfill trigger this app owns.
  */
-export const EXPECTED_CONTROL_PLANE_OPERATION_COUNT = 256;
+export const EXPECTED_CONTROL_PLANE_OPERATION_COUNT = 257;
 
 // ---------------------------------------------------------------------------
 // Ownership predicate

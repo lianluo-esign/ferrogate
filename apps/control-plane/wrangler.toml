@@ -3,12 +3,12 @@ main = "src/worker.ts"
 compatibility_date = "2025-06-01"
 compatibility_flags = ["nodejs_compat"]
 
-# Smart Placement: login is a control-DO-dense path making several serial RPCs to
-# the SINGLE-REGION control ControlDataObject. Placing the worker near that DO trades
-# N cross-region round trips for ~1 WAN leg (user->worker) + intra-region RPCs.
-# Adaptive over ~24h; DO-call awareness must be tail-verified.
+# Pin the Worker in Tokyo. Smart Placement previously followed the IAD-homed
+# CONTROL_DATA Durable Object (first created without a location hint) and kept
+# login in US-East. Control writes now go to the Tokyo `ferrogate-control` D1.
 [placement]
-mode = "smart"
+mode = "targeted"
+region = "aws:ap-northeast-1"
 
 # FALLBACK vars for the ports in `src/adapters.ts`.
 #
@@ -170,11 +170,33 @@ mode = "smart"
 # ---------------------------------------------------------------------------
 
 [vars]
-# Zero-D1 S5 (#881): the backfill has populated CONTROL_DATA and the cut-over is
-# done. `durable_object` is the only resolvable posture — the legacy `DB`
-# fallback and its `[[d1_databases]]` stanza are gone. There is no `d1_compat`
-# leg to fall back to.
+# Zero-D1 S5 (#881): CONTROL_DATA (the singleton ControlDataObject) is the
+# default control-plane backend. The D1 migration re-adds a "d1" posture: set
+# CONTROL_PLANE_CONTROL_STORAGE = "d1" to make this Worker — the SINGLE control
+# writer — read/write the real CONTROL_D1 database. It holds the PLAIN binding
+# (primary reads/writes), so it reads its own writes with no bookmark plumbing;
+# only the read-only twins (gateway/agent-runtime/mcp) open replica sessions.
+# The live CONTROL_D1 stanza is DEPLOY-TIME state, kept out of this hermetic
+# template (a real `[[d1_databases]]` here would break vitest/`dev --local`) and
+# carried by wrangler.deploy.toml instead:
+#
+# PORT-TODO(control-plane-d1 §Step2): `src/control-data.ts` reads `env.CONTROL_D1`
+# under the "d1" posture, but while CONTROL_PLANE_CONTROL_STORAGE stays
+# "durable_object" that branch is never taken, so the read is UNREACHABLE in
+# production and the binding is deploy-time-only. env-var-drift parks it in
+# UNDECLARED_BINDINGS until the posture flips to "d1", when the stanza below
+# graduates into a committed binding.
+#
+#   [[d1_databases]]
+#   binding = "CONTROL_D1"
+#   database_name = "ferrogate-control"
+#   database_id = "replace-at-deploy"             # PLACEHOLDER — never a real uuid
+#   migrations_dir = "../../sql/d1-ts/control"
+#
 CONTROL_PLANE_CONTROL_STORAGE = "durable_object"
+# Home every NEW tenant Durable Object in Tokyo. Location hints only apply on
+# first get(); existing objects stay where they were created.
+TENANT_DEFAULT_LOCATION_HINT = "apac-ne"
 CONTROL_PLANE_NATIVE_API_KEYS = "[]"
 CONTROL_PLANE_STATIC_API_KEYS = "[]"
 TENANCY_LIFECYCLE = "{}"

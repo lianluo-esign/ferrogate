@@ -12,10 +12,23 @@ import { type ControlDataNamespaceLike, controlDataObjectDatabase } from "@ferro
 import type { ControlDataNamespace } from "@ferrogate/storage/durable-objects";
 import { HttpError } from "./middleware/errors.js";
 
-/** Supported CONTROL storage postures. Since Zero-D1 S5 the DO is the only one. */
-export type ControlStorageMode = "durable_object";
+/**
+ * Supported CONTROL storage postures.
+ *
+ * - `durable_object` (default): the singleton `CONTROL_DATA` Durable Object.
+ * - `d1`: a real Cloudflare D1 database (`CONTROL_D1`), Tokyo primary + global
+ *   read replicas. The control-plane is the SINGLE writer and holds the plain
+ *   binding (primary reads/writes) so it reads its own writes unconditionally;
+ *   the read-only twins use `withSession("first-unconstrained")` for replica
+ *   reads. Selected per-worker via the posture var so each can flip/roll back
+ *   independently without a code redeploy.
+ */
+export type ControlStorageMode = "durable_object" | "d1";
 
-export const CONTROL_STORAGE_MODES: readonly ControlStorageMode[] = ["durable_object"] as const;
+export const CONTROL_STORAGE_MODES: readonly ControlStorageMode[] = [
+  "durable_object",
+  "d1",
+] as const;
 
 /** Stable 503 code for an absent or invalid CONTROL storage configuration. */
 export const CONTROL_STORAGE_MISCONFIGURED = "control_storage_misconfigured";
@@ -24,6 +37,7 @@ export const CONTROL_STORAGE_MISCONFIGURED = "control_storage_misconfigured";
 export interface ControlDataBindings {
   readonly CONTROL_PLANE_CONTROL_STORAGE?: string;
   readonly CONTROL_DATA?: ControlDataNamespace;
+  readonly CONTROL_D1?: D1Database;
 }
 
 /** Parse `CONTROL_PLANE_CONTROL_STORAGE`; empty and absent select the DO posture. */
@@ -58,6 +72,13 @@ export function controlDatabaseFrom(env: unknown): D1Database | undefined {
       `CONTROL_PLANE_CONTROL_STORAGE = "${bindings.CONTROL_PLANE_CONTROL_STORAGE}" is not one of ` +
         `${CONTROL_STORAGE_MODES.join(", ")}; refusing to guess a control-storage posture`,
     );
+  }
+
+  // D1 posture: the control-plane is the SINGLE writer, so it holds the plain
+  // `CONTROL_D1` binding (primary reads/writes) and reads its own writes with no
+  // bookmark plumbing. Absent binding (a unit env) falls through to undefined.
+  if (mode === "d1") {
+    return (env as ControlDataBindings).CONTROL_D1;
   }
 
   // Read via `(env as T).X` so the env-var-drift scanner sees a genuine source

@@ -36,8 +36,8 @@ import { type CatalogJoinRow, projectCatalog } from "./tenant-catalog.js";
  * TTL-long one). This mirrors `residency/source.ts` and the tenant loader.
  */
 
-/** Five seconds bounds staleness when an editor forgets to bump a revision. */
-export const DEFAULT_PLATFORM_MODEL_CATALOG_CACHE_TTL_MS = 5_000;
+/** Thirty seconds bounds staleness when an editor forgets to bump a revision. */
+export const DEFAULT_PLATFORM_MODEL_CATALOG_CACHE_TTL_MS = 30_000;
 
 const REVISION_SQL = "SELECT revision FROM platform_catalog_revisions WHERE id = 1";
 

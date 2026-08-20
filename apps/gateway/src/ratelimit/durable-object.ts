@@ -221,5 +221,8 @@ export class RateLimiterDurableObject extends DurableObject {
  */
 export interface RateLimiterNamespace {
   idFromName(name: string): DurableObjectId;
-  get(id: DurableObjectId): DurableObjectStub<RateLimiterDurableObject>;
+  get(
+    id: DurableObjectId,
+    options?: { locationHint?: string },
+  ): DurableObjectStub<RateLimiterDurableObject>;
 }

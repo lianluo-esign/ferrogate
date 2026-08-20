@@ -340,7 +340,16 @@ const DOCUMENTED_BUT_UNDECLARED = [
  * CLOUDFLARE PRODUCT BINDINGS the source reads that this Worker does not
  * declare — so the code path behind each one is UNREACHABLE in production.
  *
- * **EMPTY as of issue #673, and the entry that used to be here was `AI`.**
+ * `CONTROL_D1` (control-plane-d1 §Step2) is the control-plane's D1 database.
+ * `src/control-data.ts` reads `env.CONTROL_D1` under the `"d1"` posture, but the
+ * committed default is `GATEWAY_CONTROL_STORAGE = "durable_object"`, so that
+ * branch is never taken and the read is dead in production TODAY — the dual-
+ * capability code ships ahead of the cutover. Like every tenant D1, the real
+ * binding is DEPLOY-TIME state injected by wrangler.deploy.toml (a live
+ * `[[d1_databases]]` here would break the hermetic miniflare load, #821), so
+ * wrangler.toml carries only a commented stanza + PORT-TODO. When the posture
+ * flips to `"d1"` this graduates into a committed binding and moves OUT of this
+ * list — exactly the path `AI` took in #673, described next.
  *
  * The old note said `src/guardrails/config.ts` reads `env.AI` for the Workers AI
  * Llama-Guard detector while `wrangler.toml` carried only a PORT-TODO, and it
@@ -360,7 +369,7 @@ const DOCUMENTED_BUT_UNDECLARED = [
  * path is dead in production, and issue #673 is the work that made it live.
  * Leaving the claim standing would have been the lie.
  */
-const UNDECLARED_BINDINGS: readonly string[] = [];
+const UNDECLARED_BINDINGS: readonly string[] = ["CONTROL_D1"];
 
 /**
  * Reads that `wrangler.toml` does not declare AND does not even mention.

@@ -342,6 +342,24 @@ const DOCUMENTED_BUT_UNDECLARED: readonly string[] = [];
 const UNDOCUMENTED = ["FG_DEV_MCP_DURABLE_UPSTREAMS"] as const;
 
 /**
+ * CLOUDFLARE PRODUCT BINDINGS the source reads that this Worker does not declare
+ * in the committed template — so the code path behind each is UNREACHABLE in
+ * production today.
+ *
+ * `CONTROL_D1` (control-plane-d1 §Step2) is the control-plane's D1 database. mcp
+ * is a READ-ONLY control consumer, so under the `"d1"` posture
+ * `src/control-data.ts` opens a `withSession("first-unconstrained")` replica
+ * session on `env.CONTROL_D1`. But the committed default is
+ * `MCP_CONTROL_STORAGE = "durable_object"`, so that branch is never taken and the
+ * read is dead in production while the dual-capability code ships ahead of the
+ * cutover. The real binding is DEPLOY-TIME state in wrangler.deploy.toml (a live
+ * `[[d1_databases]]` here would break the hermetic miniflare load), so the
+ * template carries only a PORT-TODO. When the posture flips to `"d1"` this
+ * graduates into a committed binding and leaves this list.
+ */
+const UNDECLARED_BINDINGS = ["CONTROL_D1"] as const;
+
+/**
  * Declared names read through a renamed parameter, invisible to the
  * `env`-anchored scanner. Zero-D1 S5 (#881) deleted the `BILLING_DB` D1 stanza
  * (control billing compatibility): every control read now resolves the
@@ -445,7 +463,22 @@ describe("every var the source reads is declared or explicitly excepted", () => 
   const undeclared = [...READS.named.keys()].filter((n) => !declaredNames.has(n)).sort();
 
   it("has no undeclared read outside the exception table", () => {
-    expect(undeclared).toEqual([...SECRETS, ...DOCUMENTED_BUT_UNDECLARED, ...UNDOCUMENTED].sort());
+    expect(undeclared).toEqual(
+      [...SECRETS, ...DOCUMENTED_BUT_UNDECLARED, ...UNDECLARED_BINDINGS, ...UNDOCUMENTED].sort(),
+    );
+  });
+
+  it("records each undeclared BINDING as an open PORT-TODO, not an oversight", () => {
+    // Not vacuous: one entry today (`CONTROL_D1`).
+    expect(UNDECLARED_BINDINGS.length).toBeGreaterThan(0);
+    for (const name of UNDECLARED_BINDINGS) {
+      expect(mentionedInToml(name)).toBe(true);
+      expect(
+        documentedNear(name, /PORT-TODO/, 6),
+        `${name} is read by src/ with no binding declared and no PORT-TODO explaining it`,
+      ).toBe(true);
+      expect(DECLARED.bindings.has(name)).toBe(false);
+    }
   });
 
   it("documents every secret in wrangler.toml, next to its name", () => {

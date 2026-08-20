@@ -1707,9 +1707,9 @@ export function resolveDeps(
     tenantDatabases,
     tenantStorage: resolveTenantStorage(env, controlDatabase),
     tenantObjectOperator: resolveTenantObjectOperator(env, controlDatabase),
-    // Operator-configured default placement for no-signal registrations. An
-    // unrecognised value coerces to `undefined`, which leaves the built-in
-    // `wnam` fallback in place rather than addressing an object with a bad hint.
+    // Operator-configured default placement for every new tenant (this fleet:
+    // Tokyo). An unrecognised value coerces to `undefined`, which leaves the
+    // built-in `apac-ne` fallback rather than addressing an object with a bad hint.
     defaultTenantLocationHint: coerceTenantLocationHint(env.TENANT_DEFAULT_LOCATION_HINT),
     controlDatabase: controlDatabase ?? null,
     // #956 read side. Null unless BILLING_ANALYTICS_{DATASET,ACCOUNT_ID,API_TOKEN}

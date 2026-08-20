@@ -156,7 +156,7 @@ describe("OPENAPI_OPERATION_COUNT is checked against the committed contract", ()
 
 describe("wireSchemas registry", () => {
   test("exposes the OpenAPI operation count", () => {
-    expect(OPENAPI_OPERATION_COUNT).toBe(328);
+    expect(OPENAPI_OPERATION_COUNT).toBe(329);
   });
 
   test("resolves the seeded cross-plane + ferrogate-core schemas by name", () => {
@@ -342,6 +342,13 @@ describe("PORT-TODO STATE PIN — the registry seeds only cross-plane shapes", (
     // its response is the admin `list` envelope described in the OpenAPI, not a
     // cross-plane Zod schema — so `seeded` is unchanged: 327 - 10 = 317 becomes
     // 328 - 10 = 318.
-    expect(OPENAPI_OPERATION_COUNT - seeded).toBe(318);
+    //
+    // The control-plane-D1 migration's `POST /admin/v1/control-backfill`
+    // (`admin_config_ops`) is the same story yet again: the operator-only DO→D1
+    // backfill trigger's request/response are inline Zod / a plain report object
+    // at the config-ops route, not a cross-plane wire shape, so `seeded` is
+    // unchanged and the shortfall moves 318 -> 319 purely because the operation
+    // count moved 328 -> 329.
+    expect(OPENAPI_OPERATION_COUNT - seeded).toBe(319);
   });
 });

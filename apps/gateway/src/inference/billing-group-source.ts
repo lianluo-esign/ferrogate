@@ -37,8 +37,8 @@ import type { InferenceBindings, PlatformBillingGroupSource } from "./ports.js";
  * is left intact and the next request retries.
  */
 
-/** Five seconds bounds staleness when an editor forgets to bump a revision. */
-export const DEFAULT_BILLING_GROUP_CACHE_TTL_MS = 5_000;
+/** Thirty seconds bounds staleness when an editor forgets to bump a revision. */
+export const DEFAULT_BILLING_GROUP_CACHE_TTL_MS = 30_000;
 
 const REVISION_SQL = "SELECT revision FROM platform_billing_group_revisions WHERE id = 1";
 

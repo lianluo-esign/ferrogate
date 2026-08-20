@@ -62,6 +62,8 @@ export interface TenantPlacementSignal {
  */
 export const CF_CONTINENT_HEADER = "x-ferrogate-cf-continent";
 export const CF_COLO_HEADER = "x-ferrogate-cf-colo";
+/** Tenant-console / BFF explicit Durable Object location hint (e.g. `apac-ne`). */
+export const LOCATION_HINT_HEADER = "x-ferrogate-location-hint";
 
 export type TenantPlacementSignalOrigin = "cf" | "edge-header" | "none";
 
@@ -204,7 +206,9 @@ export function locationHintFromCloudflareSignal(
   } else if (continent === "AS") {
     locationHint = "apac";
   } else {
-    locationHint = "wnam";
+    // Token4AI's control and tenant data live in Tokyo. A missing CF geo
+    // signal (service-binding hops strip `cf`) must not fall back to US-West.
+    locationHint = "apac-ne";
   }
 
   return { locationHint, source };

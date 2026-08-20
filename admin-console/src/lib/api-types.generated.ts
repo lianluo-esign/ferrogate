@@ -2109,6 +2109,34 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/admin/v1/control-backfill": {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Client-minted identifier of one operator action (issue #548). Sent by the FerroGate CLI on every request it issues, reads included, and identical across every page of an --all-pages walk and across retries of the same logical action. It is an identifier, not a claim: the client is the authority on it. Distinct from an idempotency key, which governs whether an effect may be applied twice. */
+                "x-ferrogate-action-id"?: components["parameters"]["ClientActionIdHeader"];
+                /** @description Client-asserted descriptor of where an action came from (issue #548), rendered as a v1 semicolon-delimited list of `cli`, `os`, `arch`, `context`, `cred` and `host` fields; `host` is present only when the operator sets FERROGATE_CLIENT_HOST_LABEL, and other optional fields are omitted rather than sent empty. Values are percent-encoded, so the blob is always printable ASCII and a value can never introduce a delimiter. Never carries credential material -- `cred` names the credential SOURCE (env:VAR, stdin, inline, none) and never the token. This is NOT the canonical_target_sha256 action fingerprint, which digests the target of a call rather than the client and is a sha256: digest; this one is not a digest at all. */
+                "x-ferrogate-client-fingerprint"?: components["parameters"]["ClientFingerprintHeader"];
+                /** @description The client's own clock, in seconds since the Unix epoch, as read on the machine that issued the request (issue #548). Client-asserted and untrusted: it must never be used as the event time, nor read by any authorization or ordering decision. Its only purpose is to be compared against the server-issued instant so client clock skew is measurable. */
+                "x-ferrogate-client-clock-unverified"?: components["parameters"]["ClientClockUnverifiedHeader"];
+                /** @description A short-lived, server-issued time token echoed verbatim by the client (issue #548), rendered as a v1 semicolon-delimited list of issued_at (unix seconds), ttl (seconds), action_id and sig fields. It is the authoritative client_sent_at: the client never fills that field from its own clock. A token outside its TTL, or presented with an action id other than the one it was issued for, is refused. The server also records its own receive time; the two together bound the action. */
+                "x-ferrogate-time-token"?: components["parameters"]["ClientTimeTokenHeader"];
+                /** @description An address the operator chose to disclose about the client (issue #548). Client-asserted, opt-in and trivially forged: it is stored and rendered as client-reported and must never be merged with the source IP the server observes, which is the authoritative record. */
+                "x-ferrogate-client-reported-ip"?: components["parameters"]["ClientReportedIpHeader"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Copy the singleton control database between its Durable Object home and the Cloudflare D1 mirror (or, with verify_only, compare row-count + checksum receipts without moving rows). Platform-operator only; idempotent INSERT OR IGNORE by primary key, so re-runs are safe. */
+        post: operations["backfillControlStorage"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/admin/v1/drain": {
         parameters: {
             query?: never;
@@ -2186,6 +2214,23 @@ export interface paths {
         };
         /** List retained token metering events. */
         get: operations["listAdminMeteringEvents"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/v1/shared-billing-groups": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List the calling tenant's enabled billing groups (multipliers) from its Durable Object mirror. */
+        get: operations["listSharedBillingGroups"];
         put?: never;
         post?: never;
         delete?: never;
@@ -16100,6 +16145,72 @@ export interface operations {
             503: components["responses"]["ServiceUnavailable"];
         };
     };
+    backfillControlStorage: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Client-minted identifier of one operator action (issue #548). Sent by the FerroGate CLI on every request it issues, reads included, and identical across every page of an --all-pages walk and across retries of the same logical action. It is an identifier, not a claim: the client is the authority on it. Distinct from an idempotency key, which governs whether an effect may be applied twice. */
+                "x-ferrogate-action-id"?: components["parameters"]["ClientActionIdHeader"];
+                /** @description Client-asserted descriptor of where an action came from (issue #548), rendered as a v1 semicolon-delimited list of `cli`, `os`, `arch`, `context`, `cred` and `host` fields; `host` is present only when the operator sets FERROGATE_CLIENT_HOST_LABEL, and other optional fields are omitted rather than sent empty. Values are percent-encoded, so the blob is always printable ASCII and a value can never introduce a delimiter. Never carries credential material -- `cred` names the credential SOURCE (env:VAR, stdin, inline, none) and never the token. This is NOT the canonical_target_sha256 action fingerprint, which digests the target of a call rather than the client and is a sha256: digest; this one is not a digest at all. */
+                "x-ferrogate-client-fingerprint"?: components["parameters"]["ClientFingerprintHeader"];
+                /** @description The client's own clock, in seconds since the Unix epoch, as read on the machine that issued the request (issue #548). Client-asserted and untrusted: it must never be used as the event time, nor read by any authorization or ordering decision. Its only purpose is to be compared against the server-issued instant so client clock skew is measurable. */
+                "x-ferrogate-client-clock-unverified"?: components["parameters"]["ClientClockUnverifiedHeader"];
+                /** @description A short-lived, server-issued time token echoed verbatim by the client (issue #548), rendered as a v1 semicolon-delimited list of issued_at (unix seconds), ttl (seconds), action_id and sig fields. It is the authoritative client_sent_at: the client never fills that field from its own clock. A token outside its TTL, or presented with an action id other than the one it was issued for, is refused. The server also records its own receive time; the two together bound the action. */
+                "x-ferrogate-time-token"?: components["parameters"]["ClientTimeTokenHeader"];
+                /** @description An address the operator chose to disclose about the client (issue #548). Client-asserted, opt-in and trivially forged: it is stored and rendered as client-reported and must never be merged with the source IP the server observes, which is the authoritative record. */
+                "x-ferrogate-client-reported-ip"?: components["parameters"]["ClientReportedIpHeader"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    /**
+                     * @description Copy direction. `do_to_d1` (default) is the cut-over direction; `d1_to_do` reverses it for rollback drills.
+                     * @enum {string}
+                     */
+                    direction?: "do_to_d1" | "d1_to_do";
+                    /** @description Rows streamed per page; bounds peak memory to a single page. Defaults to the copier's internal page size when omitted. */
+                    page_size?: number;
+                    /** @description Compare source vs destination receipts and move no rows. Use as the parity gate before flipping a read source. */
+                    verify_only?: boolean;
+                };
+            };
+        };
+        responses: {
+            /** @description Backfill result. In copy mode: per-table source/copied counts, skipped tables, and any receipt mismatches. In verify_only mode: source/destination table counts and receipt mismatches. `ok` is the single parity boolean a cut-over gates on. */
+            200: {
+                headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        object: string;
+                        /** @enum {string} */
+                        direction: "do_to_d1" | "d1_to_do";
+                        /** @enum {string} */
+                        mode: "copy" | "verify_only";
+                        ok: boolean;
+                        tables?: {
+                            table: string;
+                            source_rows: number;
+                            copied: number;
+                        }[];
+                        skipped?: string[];
+                        source_tables?: number;
+                        destination_tables?: number;
+                        mismatches: Record<string, never>[];
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
     getAdminDrain: {
         parameters: {
             query?: never;
@@ -16236,6 +16347,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TokenMeteringEventList"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    listSharedBillingGroups: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The tenant's enabled shared billing groups. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @enum {string} */
+                        object: "list";
+                        data: {
+                            id: string;
+                            name: string;
+                            multiplier: number;
+                            description?: string | null;
+                            enabled: boolean;
+                            provider_ids: string[];
+                        }[];
+                    };
                 };
             };
             401: components["responses"]["Unauthorized"];

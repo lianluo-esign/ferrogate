@@ -53,8 +53,21 @@ FG_DEV_IN_MEMORY_PORTS = "1"
 FG_DEV_MCP_GUARDRAILS = ""
 
 # Control-plane storage posture. Zero-D1 S5 (#881) backfilled the
-# ControlDataObject and cut over: `durable_object` is the only resolvable
-# posture, the legacy CONTROL_DB/BILLING_DB fallback is gone.
+# ControlDataObject and cut over: `durable_object` is the default resolvable
+# posture, the legacy CONTROL_DB/BILLING_DB fallback is gone. The D1 migration
+# re-adds a "d1" posture: set MCP_CONTROL_STORAGE = "d1" to read control rows
+# from the real CONTROL_D1 database instead — mcp is a READ-ONLY control
+# consumer, so the seam opens a `withSession("first-unconstrained")` replica
+# session (colo-local reads, not a cross-region hop to the Tokyo primary).
+#
+# PORT-TODO(control-plane-d1 §Step2): `src/control-data.ts` reads `env.CONTROL_D1`
+# under the "d1" posture, but while MCP_CONTROL_STORAGE stays "durable_object"
+# that branch is never taken, so the read is UNREACHABLE in production and the
+# binding is deploy-time-only. The live CONTROL_D1 `[[d1_databases]]` stanza
+# (binding = "CONTROL_D1", database_name "ferrogate-control") is DEPLOY-TIME
+# state carried by wrangler.deploy.toml — a real stanza here would break the
+# hermetic vitest/`dev --local` load. env-var-drift parks CONTROL_D1 in
+# UNDECLARED_BINDINGS until the posture flips to "d1".
 MCP_CONTROL_STORAGE = "durable_object"
 
 # ---------------------------------------------------------------------------

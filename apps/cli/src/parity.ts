@@ -357,6 +357,19 @@ export const REVIEWED_EXCLUSIONS: readonly ReviewedExclusion[] = [
     reason:
       "one-shot platform-catalog bootstrap import; its verb takes the env-pair JSON from a file/stdin rather than argv and lands with the #893 catalog surface — tracked as the #892 CLI follow-up",
   },
+  // ---------------------------------------------------------------------
+  // control-plane-D1 migration — the one-shot DO→D1 control backfill
+  // (`POST /admin/v1/control-backfill`). A deployment-wide operator action run
+  // once at cut-over, whose natural home is a `ctl ops control-backfill` verb
+  // whose flag grammar (`--direction`, `--verify-only`, `--page-size`) settles
+  // alongside the cut-over runbook, not this parity slice. Delete this row when
+  // that verb lands; `buildReport` flags a stale exclusion.
+  {
+    operationId: "backfillControlStorage",
+    owner: "control-plane D1 migration (Zero-D1 S5 follow-up, #365 parity chain)",
+    reason:
+      "one-shot operator DO→D1 control backfill run once at cut-over; its `ctl ops control-backfill` verb (direction / verify-only / page-size flags) lands with the migration runbook rather than argv-driven here — tracked as the control-plane-D1 CLI follow-up",
+  },
 ];
 
 /** The coverable and non-coverable operation sets parsed from an OpenAPI document. */

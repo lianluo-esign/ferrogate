@@ -9,14 +9,31 @@
  * module that reads `env.CONTROL_DATA`. There is no longer a `d1_compat`
  * fallback to `CONTROL_DB` / `BILLING_DB`: the object is the only backend.
  */
-import { type ControlDataNamespaceLike, controlDataObjectDatabase } from "@ferrogate/storage";
+import {
+  type ControlDataNamespaceLike,
+  controlD1ReplicaDatabase,
+  controlDataObjectDatabase,
+} from "@ferrogate/storage";
 import type { ControlDataNamespace } from "@ferrogate/storage/durable-objects";
 import { HttpError } from "./middleware/errors.js";
 
-/** Supported CONTROL storage postures. Since Zero-D1 S5 the DO is the only one. */
-export type ControlStorageMode = "durable_object";
+/**
+ * Supported CONTROL storage postures.
+ *
+ * - `durable_object` (default): the singleton `CONTROL_DATA` Durable Object.
+ * - `d1`: a real Cloudflare D1 database (`CONTROL_D1`). The gateway is a
+ *   READ-ONLY control consumer, so it reads through a
+ *   `withSession("first-unconstrained")` replica session — a colo-local replica
+ *   instead of a cross-region hop to the Tokyo primary. Eventual consistency is
+ *   already the posture here (the per-colo `api_key_directory` KV projection,
+ *   #882, sits ahead of this read and lags too).
+ */
+export type ControlStorageMode = "durable_object" | "d1";
 
-export const CONTROL_STORAGE_MODES: readonly ControlStorageMode[] = ["durable_object"] as const;
+export const CONTROL_STORAGE_MODES: readonly ControlStorageMode[] = [
+  "durable_object",
+  "d1",
+] as const;
 
 /** Stable 503 code for an absent or invalid CONTROL storage configuration. */
 export const CONTROL_STORAGE_MISCONFIGURED = "control_storage_misconfigured";
@@ -25,6 +42,7 @@ export const CONTROL_STORAGE_MISCONFIGURED = "control_storage_misconfigured";
 export interface ControlDataBindings {
   readonly GATEWAY_CONTROL_STORAGE?: string;
   readonly CONTROL_DATA?: ControlDataNamespace;
+  readonly CONTROL_D1?: D1Database;
 }
 
 /** Parse `GATEWAY_CONTROL_STORAGE`; empty and absent select the DO posture. */
@@ -83,6 +101,13 @@ export function controlDatabaseFrom(env: unknown): D1Database | undefined {
       `GATEWAY_CONTROL_STORAGE = "${bindings.GATEWAY_CONTROL_STORAGE}" is not one of ` +
         `${CONTROL_STORAGE_MODES.join(", ")}; refusing to guess a control-storage posture`,
     );
+  }
+
+  // D1 posture: read-only consumer → replica session (colo-local reads). Absent
+  // binding (a unit env) falls through to undefined, same as the DO leg.
+  if (mode === "d1") {
+    const d1 = (env as ControlDataBindings).CONTROL_D1;
+    return d1 !== undefined ? controlD1ReplicaDatabase(d1) : undefined;
   }
 
   if (bindings.CONTROL_DATA !== undefined) {

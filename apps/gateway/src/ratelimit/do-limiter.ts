@@ -44,7 +44,9 @@ export class DurableObjectRateLimiter implements RateLimiter {
    */
   #stub(counterKey: string): DurableObjectStub<RateLimiterDurableObject> {
     assertNamespacedCounterKey(counterKey);
-    return this.namespace.get(this.namespace.idFromName(counterKey));
+    return this.namespace.get(this.namespace.idFromName(counterKey), {
+      locationHint: "apac-ne",
+    });
   }
 
   async consumeRequest(windows: readonly CounterWindow[]): Promise<RateLimitOutcome> {

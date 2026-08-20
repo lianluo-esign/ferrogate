@@ -73,6 +73,22 @@ tag = "v1"
 new_sqlite_classes = ["AgentRunState", "WorkerPlane"]
 
 [vars]
+# The D1 migration re-adds a "d1" posture: set AGENT_RUNTIME_CONTROL_STORAGE =
+# "d1" to read control rows from the real CONTROL_D1 database instead. agent-
+# runtime is a READ-ONLY control consumer, so the seam opens a
+# `withSession("first-unconstrained")` replica session (colo-local reads, not a
+# cross-region hop to the Tokyo primary).
+#
+# PORT-TODO(control-plane-d1 §Step2): `src/control-data.ts` reads `env.CONTROL_D1`
+# under the "d1" posture, but while AGENT_RUNTIME_CONTROL_STORAGE stays
+# "durable_object" that branch is never taken, so the read is UNREACHABLE in
+# production and the binding is deploy-time-only. The live CONTROL_D1
+# `[[d1_databases]]` stanza (binding = "CONTROL_D1", database_name
+# "ferrogate-control", against the shared control migrations) is DEPLOY-TIME
+# state carried by wrangler.deploy.toml — a real stanza here would break the
+# hermetic vitest/`dev --local` load AND trip the "declares NO D1 binding" gate
+# below. env-var-drift parks CONTROL_D1 in UNDECLARED_BINDINGS until the posture
+# flips to "d1".
 AGENT_RUNTIME_CONTROL_STORAGE = "durable_object"
 # DEV / TEST ONLY. Installs the in-memory port bundle from `src/ports.ts`.
 # Production MUST NOT set this: without it the Worker fails CLOSED — every

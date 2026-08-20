@@ -9,6 +9,13 @@ main = "src/worker.ts"
 compatibility_date = "2025-06-01"
 compatibility_flags = ["nodejs_compat"]
 
+# Pin the data-plane Worker in Tokyo next to the `ferrogate-control` D1 primary
+# and APAC tenant objects. Do not use Smart Placement — it followed the IAD
+# CONTROL_DATA object.
+[placement]
+mode = "targeted"
+region = "aws:ap-northeast-1"
+
 # ===========================================================================
 # Bindings for `ferrogate-gateway`
 #
@@ -626,9 +633,30 @@ GATEWAY_CACHE_DISABLED_PROFILES = "[]"
 #
 # ---------------------------------------------------------------------------
 GATEWAY_TENANT_DB_ROUTING = "durable_object"
-# CONTROL_DATA is the default control-plane read backend. Set this to
-# "d1_compat" only for an explicitly retained legacy deployment; the latter's
-# CONTROL_DB/BILLING_DB fallback is never selected implicitly.
+# CONTROL_DATA (the singleton control DO) is the default control-plane read
+# backend. Set GATEWAY_CONTROL_STORAGE to "d1" to read control rows from the
+# real CONTROL_D1 database instead — the gateway is a READ-ONLY control consumer,
+# so the seam opens a `withSession("first-unconstrained")` replica session
+# (colo-local reads, not a cross-region hop to the Tokyo primary). This requires
+# a live CONTROL_D1 stanza; like every tenant D1 that is DEPLOY-TIME state, it is
+# NOT committed here (a real `[[d1_databases]]` in this template would break the
+# hermetic `wrangler dev --local` / vitest miniflare load — see #821). The real
+# stanza lives in wrangler.deploy.toml:
+#
+# PORT-TODO(control-plane-d1 §Step2): `src/control-data.ts` reads `env.CONTROL_D1`
+# under the "d1" posture, but while GATEWAY_CONTROL_STORAGE stays "durable_object"
+# that branch is never taken, so the read is UNREACHABLE in production and the
+# binding is intentionally deploy-time-only (declared in wrangler.deploy.toml, not
+# here). It is parked in env-var-drift's UNDECLARED_BINDINGS until the posture
+# flips to "d1" — at which point the stanza below moves into a committed binding,
+# exactly as `AI` graduated out of that list in #673.
+#
+#   [[d1_databases]]
+#   binding = "CONTROL_D1"
+#   database_name = "ferrogate-control"
+#   database_id = "replace-at-deploy"             # PLACEHOLDER — never a real uuid
+#   migrations_dir = "../../sql/d1-ts/control"
+#
 GATEWAY_CONTROL_STORAGE = "durable_object"
 
 # Read by `readiness` (src/routes/readiness.ts). `"true"` — and nothing else —

@@ -59,7 +59,7 @@ describe("tenant placement", () => {
 
   test("records the signal used and has an explicit fallback for missing CF data", () => {
     expect(locationHintFromCloudflareSignal({}).source).toBe("cf.unavailable");
-    expect(locationHintFromCloudflareSignal({}).locationHint).toBe("wnam");
+    expect(locationHintFromCloudflareSignal({}).locationHint).toBe("apac-ne");
     expect(locationHintFromCloudflareSignal({ continent: "EU", colo: "FRA" }).source).toBe(
       "cf.continent=EU;cf.colo=FRA",
     );
