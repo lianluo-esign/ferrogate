@@ -23,7 +23,8 @@
     "@ferrogate/policy": "workspace:*",
     "@ferrogate/guardrails": "workspace:*",
     "@ferrogate/routing": "workspace:*",
-    "@ferrogate/billing": "workspace:*"
+    "@ferrogate/billing": "workspace:*",
+    "@ferrogate/provider-types": "workspace:*"
   },
   "devDependencies": {
     "hyparquet": "^1.27.1"

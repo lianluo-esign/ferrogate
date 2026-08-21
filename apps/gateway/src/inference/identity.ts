@@ -125,7 +125,16 @@ export function callerFromAuth(
     ...(allowedModels !== undefined && allowedModels.length > 0 ? { allowedModels } : {}),
     // Same rule, same direction: an empty `allowed_providers` is "no allowlist"
     // in Rust (`allowed_providers.is_empty() || ...`), never "no provider".
-    ...(allowedProviders !== undefined && allowedProviders.length > 0 ? { allowedProviders } : {}),
+    // A group-bound key routes through the group's provider-id edges. Its
+    // historical `allowed_providers` value may contain a provider TYPE (for
+    // example `openai`) rather than a provider row name, so applying both gates
+    // would incorrectly reject the provider selected by the group. Keep the
+    // legacy per-key name allowlist only for ungrouped credentials.
+    ...(auth.billingGroupId === undefined &&
+    allowedProviders !== undefined &&
+    allowedProviders.length > 0
+      ? { allowedProviders }
+      : {}),
     // #681 — the TENANT residency policy, resolved by `residency/middleware.ts`
     // on the OUTER app and handed in by `route-module.ts`. It is a PARAMETER
     // rather than something read off `auth` because it is not a property of the

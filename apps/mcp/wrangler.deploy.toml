@@ -1,0 +1,98 @@
+# DEPLOY config for ferrogate-mcp — carries DEPLOY-TIME state the committed
+# wrangler.toml omits: real account-resource ids (KV, R2), the CONTROL_D1
+# [[d1_databases]] stanza, and [vars] pinned to LIVE PROD values.
+#
+# CONTROL_D1 → ferrogate-control (4a2f6a84): the ONE global control D1 (Tokyo
+# primary). mcp is a READ-ONLY control consumer; the seam opens a
+# withSession("first-unconstrained") colo-local replica session. Live mcp
+# previously read control only via the CONTROL_DATA DO facade (frozen since the
+# control-plane D1 cutover), so posture=d1 moves it onto the fresh authoritative
+# store — matching the plan's "readers use control-D1 replicas" design.
+#
+# POSTURE NOTE: FG_DEV_IN_MEMORY_PORTS="1" mirrors LIVE — mcp currently runs the
+# in-memory dev port bundle (removing it fails the Worker closed: 503
+# mcp_auth_unavailable, /readyz 503). Preserved verbatim so this deploy changes
+# ONLY the code bundle + CONTROL_D1 binding + the control-storage posture.
+#
+# DEPLOY ferrogate-gateway FIRST: TENANT_DATA/CONTROL_DATA/RATE_LIMIT are
+# script_name cross-bindings to it (already deployed). No shared-tenant-D1 `DB`
+# binding is dropped here (mcp never had one), so no tenant-cutover gate applies.
+name = "ferrogate-mcp"
+main = "src/worker.ts"
+
+compatibility_date = "2025-06-01"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+FG_DEV_IN_MEMORY_PORTS = "1"
+FG_DEV_MCP_GUARDRAILS = ""
+MCP_CONTROL_STORAGE = "d1"
+
+# --- KV: per-user MCP OAuth flow state (real live id) ------------------------
+[[kv_namespaces]]
+binding = "MCP_OAUTH_KV"
+id = "0c2bc7e26b6f4d55a4accc2f8d9b8acb"
+
+# --- CONTROL_D1: the shared global control database (deploy-time only) --------
+[[d1_databases]]
+binding = "CONTROL_D1"
+database_name = "ferrogate-control"
+database_id = "4a2f6a84-5fff-4759-af1b-49caa21f4be2"
+migrations_dir = "../../sql/d1-ts/control"
+
+# --- Durable Objects (self) --------------------------------------------------
+[[durable_objects.bindings]]
+name = "MCP_OAUTH_FLOWS"
+class_name = "McpOauthFlowClaim"
+
+[[durable_objects.bindings]]
+name = "MCP_SESSION"
+class_name = "FerroGateMcpSession"
+
+[[durable_objects.bindings]]
+name = "MCP_CLIENT_SESSION"
+class_name = "FerroGateMcpUnifiedSession"
+
+# --- Durable Objects (cross-script to ferrogate-gateway) ---------------------
+[[durable_objects.bindings]]
+name = "TENANT_DATA"
+class_name = "TenantDataObject"
+script_name = "ferrogate-gateway"
+
+[[durable_objects.bindings]]
+name = "CONTROL_DATA"
+class_name = "ControlDataObject"
+script_name = "ferrogate-gateway"
+
+[[durable_objects.bindings]]
+name = "RATE_LIMIT"
+class_name = "RateLimiterDurableObject"
+script_name = "ferrogate-gateway"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["McpOauthFlowClaim"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["FerroGateMcpSession"]
+
+[[migrations]]
+tag = "v3"
+new_sqlite_classes = ["FerroGateMcpUnifiedSession"]
+
+# --- R2: asset object storage (real live bucket) -----------------------------
+[[r2_buckets]]
+binding = "ASSETS"
+bucket_name = "ferrogate-assets"
+
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+[observability.logs]
+enabled = true
+invocation_logs = true
+
+[observability.traces]
+enabled = true

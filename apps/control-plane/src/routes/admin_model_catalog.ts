@@ -1,4 +1,6 @@
 import { PriceBook } from "@ferrogate/billing";
+import { PROVIDER_TYPE_IDS } from "@ferrogate/provider-types";
+import type { SeedProviderChannel } from "@ferrogate/storage";
 import { z } from "zod";
 import { providerSecretRefusal, resolveProviderSecret } from "../../../gateway/src/keys/index.js";
 import { HttpError } from "../middleware/errors.js";
@@ -8,6 +10,11 @@ import {
   PlatformModelCatalogStore,
   isMissingPlatformCatalogError,
 } from "../store/platform-model-catalog.js";
+import {
+  ProviderConnectivityError,
+  listProviderConnectivityModels,
+  testProviderConnectivity,
+} from "../store/platform-provider-connectivity.js";
 import {
   ProviderModelSyncError,
   syncProviderModelsIntoCatalog,
@@ -30,6 +37,7 @@ const providerCreateSchema = z
     id: z.string().trim().min(1).optional(),
     tenant_id: z.string().trim().min(1).optional(),
     name: z.string().trim().min(1),
+    provider_type_id: z.enum(PROVIDER_TYPE_IDS).optional(),
     kind: z.string().trim().min(1),
     base_url: z.string().trim().url(),
     api_key_var: z.string().trim().min(1).nullable().optional(),
@@ -45,6 +53,16 @@ const providerCreateSchema = z
   .strict();
 
 const providerUpdateSchema = providerCreateSchema.partial();
+
+const providerConnectivitySchema = z.discriminatedUnion("action", [
+  z.object({ action: z.literal("models") }).strict(),
+  z
+    .object({
+      action: z.literal("chat"),
+      model: z.string().trim().min(1),
+    })
+    .strict(),
+]);
 
 const modelCreateSchema = z
   .object({
@@ -371,6 +389,7 @@ function providerInput(body: Body, id: string): ProviderChannelInput {
   return {
     id,
     name: body.name as string,
+    provider_type_id: body.provider_type_id as string | undefined,
     kind: body.kind as string,
     base_url: body.base_url as string,
     api_key_var: body.api_key_var as string | null | undefined,
@@ -704,21 +723,7 @@ async function providerSyncModels(c: Parameters<Handler>[0]): Promise<Response> 
   const provider = await store.getProviderSeed(id);
   if (provider === null) throw new TenantCatalogNotFoundError(`provider ${id} not found`);
 
-  let apiKey: string | undefined;
-  if (provider.api_key_var !== null && provider.api_key_var !== undefined) {
-    const resolution = resolveProviderSecret(
-      c.env as unknown as Readonly<Record<string, unknown>>,
-      provider.api_key_var,
-    );
-    if (!resolution.ok) {
-      throw new HttpError(
-        502,
-        "provider_credential_unresolved",
-        providerSecretRefusal(provider.name, "api_key_var", provider.api_key_var, resolution),
-      );
-    }
-    apiKey = resolution.value;
-  }
+  const apiKey = providerApiKey(c, provider);
 
   let result: Awaited<ReturnType<typeof syncProviderModelsIntoCatalog>>;
   try {
@@ -749,6 +754,75 @@ async function providerSyncModels(c: Parameters<Handler>[0]): Promise<Response> 
   });
 }
 
+function providerApiKey(
+  c: Parameters<Handler>[0],
+  provider: SeedProviderChannel,
+): string | undefined {
+  if (provider.api_key_var === null || provider.api_key_var === undefined) return undefined;
+  const resolution = resolveProviderSecret(
+    c.env as unknown as Readonly<Record<string, unknown>>,
+    provider.api_key_var,
+  );
+  if (!resolution.ok) {
+    throw new HttpError(
+      502,
+      "provider_credential_unresolved",
+      providerSecretRefusal(provider.name, "api_key_var", provider.api_key_var, resolution),
+    );
+  }
+  return resolution.value;
+}
+
+/** List live models or send a fixed `hi` through one platform provider. */
+async function providerConnectivity(c: Parameters<Handler>[0]): Promise<Response> {
+  const scope = scopeOf(c);
+  if (scope.kind !== "platform_operator") {
+    throw new HttpError(
+      403,
+      "tenant_scope_denied",
+      "provider connectivity tests require a platform operator",
+    );
+  }
+  const body = await readJson(c, providerConnectivitySchema);
+  const id = pathParam(c, "id");
+  const provider = await platformCatalogStore(c).getProviderSeed(id);
+  if (provider === null) throw new TenantCatalogNotFoundError(`provider ${id} not found`);
+  const apiKey = providerApiKey(c, provider);
+
+  try {
+    if (body.action === "models") {
+      const models = await listProviderConnectivityModels({ provider, apiKey, fetchImpl: fetch });
+      return json(c, 200, {
+        object: "provider_connectivity_models",
+        scope: "platform",
+        provider_id: id,
+        models,
+      });
+    }
+    const result = await testProviderConnectivity({
+      provider,
+      apiKey,
+      model: body.model,
+      fetchImpl: fetch,
+    });
+    return json(c, 200, {
+      object: "provider_connectivity_test",
+      scope: "platform",
+      provider_id: id,
+      ok: true,
+      model: result.model,
+      latency_ms: result.latencyMs,
+      upstream_status: result.status,
+      response: result.response,
+    });
+  } catch (error) {
+    if (error instanceof ProviderConnectivityError || error instanceof ProviderModelSyncError) {
+      throw new HttpError(error.status, error.code, error.message);
+    }
+    throw error;
+  }
+}
+
 function wrapped(handler: Handler): Handler {
   return catalogHandler(handler);
 }
@@ -762,6 +836,7 @@ export function providerCatalogOverrides(): Readonly<Record<string, Handler>> {
     patchAdminProvider: wrapped((c) => providerUpdate(c, "merge")),
     deleteAdminProvider: wrapped(providerDelete),
     syncProviderModels: wrapped(providerSyncModels),
+    testProviderConnectivity: wrapped(providerConnectivity),
   };
 }
 

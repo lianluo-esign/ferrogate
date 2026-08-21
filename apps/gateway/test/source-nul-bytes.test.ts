@@ -327,6 +327,7 @@ describe("source hygiene", () => {
       "observability",
       "payments",
       "policy",
+      "provider-types",
       "providers",
       "routing",
       "schemas",

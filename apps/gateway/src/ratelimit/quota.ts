@@ -693,7 +693,11 @@ export const DEFAULT_QUOTA_POLICY_CACHE_MAX_ENTRIES = 1_000;
  */
 export function cachedQuotaPolicySource(
   inner: QuotaPolicySource,
-  options: { readonly ttlMs?: number; readonly maxEntries?: number; readonly now?: () => number } = {},
+  options: {
+    readonly ttlMs?: number;
+    readonly maxEntries?: number;
+    readonly now?: () => number;
+  } = {},
 ): QuotaPolicySource {
   const ttlMs = options.ttlMs ?? DEFAULT_QUOTA_POLICY_CACHE_TTL_MS;
   const maxEntries = options.maxEntries ?? DEFAULT_QUOTA_POLICY_CACHE_MAX_ENTRIES;

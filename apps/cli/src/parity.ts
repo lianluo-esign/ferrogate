@@ -370,6 +370,81 @@ export const REVIEWED_EXCLUSIONS: readonly ReviewedExclusion[] = [
     reason:
       "one-shot operator DO→D1 control backfill run once at cut-over; its `ctl ops control-backfill` verb (direction / verify-only / page-size flags) lands with the migration runbook rather than argv-driven here — tracked as the control-plane-D1 CLI follow-up",
   },
+  // Polaris and Vega application workflows. These operations are deliberately
+  // served through authenticated dashboard BFFs: support chat is interactive,
+  // announcements are console content, provider connectivity uses a fixed
+  // server-side probe, and virtual-key/group changes belong to tenant UX.
+  {
+    operationId: "listAnnouncements",
+    owner: "Polaris announcements console",
+    reason: "dashboard content workflow; no operator CLI surface is planned",
+  },
+  {
+    operationId: "createAnnouncement",
+    owner: "Polaris announcements console",
+    reason: "dashboard content workflow; no operator CLI surface is planned",
+  },
+  {
+    operationId: "getAnnouncement",
+    owner: "Polaris announcements console",
+    reason: "dashboard content workflow; no operator CLI surface is planned",
+  },
+  {
+    operationId: "patchAnnouncement",
+    owner: "Polaris announcements console",
+    reason: "dashboard content workflow; no operator CLI surface is planned",
+  },
+  {
+    operationId: "deleteAnnouncement",
+    owner: "Polaris announcements console",
+    reason: "dashboard content workflow; no operator CLI surface is planned",
+  },
+  {
+    operationId: "listSupportConversations",
+    owner: "Polaris support console",
+    reason: "interactive support-chat workflow consumed through the dashboard BFF",
+  },
+  {
+    operationId: "getSupportConversation",
+    owner: "Polaris support console",
+    reason: "interactive support-chat workflow consumed through the dashboard BFF",
+  },
+  {
+    operationId: "listSupportConversationMessages",
+    owner: "Polaris support console",
+    reason: "interactive support-chat workflow consumed through the dashboard BFF",
+  },
+  {
+    operationId: "createSupportMessage",
+    owner: "Vega support chat",
+    reason: "tenant chat write consumed through the authenticated Vega BFF",
+  },
+  {
+    operationId: "createOperatorSupportMessage",
+    owner: "Polaris support console",
+    reason: "operator chat write consumed through the authenticated Polaris BFF",
+  },
+  {
+    operationId: "heartbeatSupportOperator",
+    owner: "Polaris support console",
+    reason: "ephemeral operator-presence heartbeat belongs to the interactive dashboard",
+  },
+  {
+    operationId: "listSharedBillingGroups",
+    owner: "Vega API-key workflow",
+    reason: "tenant-facing selector data consumed through the authenticated Vega BFF",
+  },
+  {
+    operationId: "updateVirtualKey",
+    owner: "Vega API-key workflow",
+    reason: "tenant-facing key/group update consumed through the authenticated Vega BFF",
+  },
+  {
+    operationId: "testProviderConnectivity",
+    owner: "Polaris provider console",
+    reason:
+      "fixed server-side connectivity probe uses stored provider credentials and is exposed through the Polaris drawer",
+  },
 ];
 
 /** The coverable and non-coverable operation sets parsed from an OpenAPI document. */

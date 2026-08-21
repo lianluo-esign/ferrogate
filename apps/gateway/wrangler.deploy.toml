@@ -1,0 +1,1731 @@
+name = "ferrogate-gateway"
+main = "src/worker.ts"
+
+# Unchanged from the scaffold: nothing declared below needs a newer runtime.
+# R2 bucket bindings and plain vars have been stable since long before this
+# date, and `nodejs_compat` is what `hono` + the WebCrypto/SigV4 code in
+# `src/assets/sigv4.ts` expect. Raise the date only for a binding that demands
+# it (e.g. containers / `enable_ctx_exports`, which this Worker does not use).
+compatibility_date = "2025-06-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Pin the data-plane Worker in Tokyo next to the `ferrogate-control` D1 primary
+# and APAC tenant objects. Do not use Smart Placement — it followed the IAD
+# CONTROL_DATA object.
+[placement]
+mode = "targeted"
+region = "aws:ap-northeast-1"
+
+# ===========================================================================
+# Bindings for `ferrogate-gateway`
+#
+# Every entry below is read by code in `src/**`. The rule this file follows is
+# "declare what the Worker reads, and nothing else": an undeclared binding the
+# code reads is a runtime failure in production that no test sees, and a
+# declared binding nothing reads is dead configuration that drifts. The
+# not-yet-declared set is written out at the bottom, with the PORT-TODO that
+# will introduce each one, so neither mistake is possible silently.
+#
+# Values that identify an ACCOUNT RESOURCE (`bucket_name`, `id`,
+# `database_id`, …) are PLACEHOLDERS. The deploy step fills them from the real
+# Cloudflare account — do not commit real resource ids here.
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# [vars] — the bootstrap identity/tenancy tables
+#
+# `src/adapters.ts` implements every port in `src/ports.ts` on top of these
+# five JSON strings, so the entire 401-vs-403 auth taxonomy runs in `workerd`
+# with no account resources at all. Each is parsed with `parseJsonVar`, which
+# falls back to "nothing configured" on absent OR malformed JSON — a typo can
+# never widen access, only close it.
+#
+# The values here are the FAIL-CLOSED empties. A real deployment overrides them
+# (a `[env.<name>.vars]` section, or — for anything secret — `wrangler secret
+# put`, which lands in the same `env` namespace and wins over a var).
+#
+# TWO OF THE FIVE now have a DURABLE leg in front of them and are only the
+# fallback: `GATEWAY_NATIVE_API_KEYS` (behind the `DB` `api_keys` table) and
+# `TENANT_RBAC_ACTIONS` (behind the `CONTROL_DB` Permission -> Role ->
+# TenantRoleBinding graph). In both cases the fallback is consulted on a durable
+# NOT-FOUND and never on a durable FAILURE, so an outage answers 503 rather than
+# quietly reverting to config.
+#
+# PORT-TODO(inventory-edge-control §5.2): the remaining three —
+# `GATEWAY_STATIC_API_KEYS` (the operator config-key table, which the Rust also
+# has as `config.api_keys`, so it is parity, not a gap), `TENANCY_LIFECYCLE` and
+# `SELF_HOSTED_WORKER_REGISTRY`. The last is the only one carrying a SECRET and
+# is the one that wants Cloudflare Secrets Store; see the marker at the top of
+# `src/adapters.ts` for why that binding cannot be exercised locally.
+# ---------------------------------------------------------------------------
+[vars]
+
+# Read by `ConfiguredApiKeyAuthenticator.fromEnv` (src/adapters.ts).
+# JSON array of durable/native virtual keys. Empty ⇒ no native key resolves,
+# so every bearer credential falls through to the static table and then to
+# `401 invalid_api_key`. The Worker still serves `/healthz`, `/readyz` and the
+# other anonymous operations.
+# --- Request-log retention (#664) -------------------------------------------
+# Read by `requestLogRetentionFromEnv` (src/requestlog/retention.ts) from the
+# `[triggers] crons` tick, which is the only thing in the fleet that ever calls
+# a `@ferrogate/storage` retention planner.
+#
+# `REQUEST_LOG_RETENTION_DAYS` is the fleet-wide window and is NOT a
+# placeholder — it deploys as written. 400 days (13 months) is chosen ABOVE,
+# not at, the six-month floor an EU AI Act Art. 12 record-keeping obligation
+# implies: a window equal to the obligation deletes the evidence on a day it is
+# still owed.
+#
+# `0` or a blank value means KEEP FOREVER, never "delete everything": a
+# mistyped number must not be the one that erases an audit trail. That is also
+# why the sweep is age-only — see the module docblock for why `keep_last_n` is
+# refused rather than approximated.
+REQUEST_LOG_RETENTION_DAYS = "400"
+
+# Per-tenant overrides, for a customer whose residency or DPA terms differ from
+# the fleet's: `{"acme": {"days": 30}, "gov-eu": {"days": 2555}}`. A tenant with
+# no entry is governed by `REQUEST_LOG_RETENTION_DAYS`. A malformed table is
+# ignored (the fleet default still sweeps) rather than fatal, because this is
+# read from a Cron handler where throwing would stop retention entirely.
+REQUEST_LOG_RETENTION_POLICIES = "{}"
+
+GATEWAY_NATIVE_API_KEYS = "[]"
+
+# Read by `ConfiguredApiKeyAuthenticator.fromEnv` (src/adapters.ts).
+# JSON array of operator-authored static config keys. Note the asymmetry this
+# table carries: a static key with no `scopes` means ALL access (wildcard),
+# while a native key with no scopes means data-plane scopes only. Leaving this
+# empty is the safe default — a populated entry is effectively a root
+# credential and belongs in `wrangler secret put`, not in this file.
+GATEWAY_STATIC_API_KEYS = "[]"
+
+# Read by `ConfiguredInternalTransport.fromEnv` (src/adapters.ts).
+# JSON array of self-hosted worker registrations (`worker_id`, `tenant_id`,
+# `workspace_id`, `identity_fingerprint`, `transport_secret`). This is the ONLY
+# credential source for `auth.kind: "internal"` operations, so an empty table
+# means every worker-plane callback answers
+# `401 invalid_self_hosted_worker_identity` — it is never reachable with a
+# tenant bearer key (ROUTE-MAP invariant 2).
+# It carries real transport secrets: set it with `wrangler secret put`, never
+# as a plaintext var, in any deployment that registers workers.
+SELF_HOSTED_WORKER_REGISTRY = "[]"
+
+# Read by `ConfiguredTenancyLifecycleGate.fromEnv` (src/adapters.ts).
+# JSON map tenant id → "active" | "suspended" | "deleted" | "disabled". Absent
+# entries admit. Without it a suspended tenant keeps serving traffic: the
+# `403 tenancy_suspended` / `tenancy_deleted` refusals have no source.
+TENANCY_LIFECYCLE = "{}"
+
+# Read by `ConfiguredRbacAuthorizer.fromEnv` (src/adapters.ts).
+# JSON map tenant id → granted `rbac_action` list (`"*"` grants all). Empty ⇒
+# every operation carrying an `rbac_action` answers `403 rbac_denied` for a
+# tenant credential. Platform-operator credentials are waved through
+# regardless, so an empty map cannot lock the operator out.
+TENANT_RBAC_ACTIONS = "{}"
+
+# ---------------------------------------------------------------------------
+# Local-development credential gate — read by `developmentApiKeys`
+# (src/adapters.ts).
+#
+# `"false"` here is the production posture and is what a plain `wrangler deploy`
+# ships, because top-level `[vars]` is the deployed var set. The development key
+# path needs ALL THREE of:
+#
+#   1. GATEWAY_DEV_AUTH == "true"      (this var — an explicit, reviewable edit)
+#   2. GATEWAY_DEV_API_KEY bound       (a SECRET, ≥30 chars, never a var)
+#   3. that key starting with `fg_dev_`
+#
+# so it cannot be switched on by forgetting something. `test/auth.test.ts`
+# ("development key path") holds each condition, including that the shipped
+# default answers 401 for a well-formed dev key.
+#
+# Locally: put the key in `apps/gateway/.dev.vars` (gitignored, never committed)
+#
+#     GATEWAY_DEV_AUTH = "true"
+#     GATEWAY_DEV_API_KEY = "fg_dev_<32 random chars you generate>"
+#
+# and `wrangler dev --local` picks both up. The key grants the six inference
+# scopes and nothing else — never `admin.*`.
+# ---------------------------------------------------------------------------
+GATEWAY_DEV_AUTH = "false"
+
+# Exact browser origin allowed to call gateway data-plane paths from a
+# separately deployed Workers Static Assets Admin Console. Empty disables CORS
+# entirely; never use a wildcard here. Container deployments keep the browser
+# same-origin through nginx and do not need this var.
+GATEWAY_CORS_ALLOWED_ORIGIN = ""
+
+# `GATEWAY_DEV_API_KEY` and `GATEWAY_DEV_TENANT_ID` are deliberately NOT
+# declared with values. The first is a secret; the second defaults to
+# `tenant_local_dev` in code.
+
+# ---------------------------------------------------------------------------
+# [vars] — the PRE-AUTHENTICATION network gate (`[network_access]`, issue #166)
+#
+# Read by `networkAccessPolicyFromEnv` (src/middleware/network.ts), which
+# `createGatewayApp` mounts BEFORE the auth guard. All four are shipped EMPTY,
+# which is the Rust default: no allowlist, no unauthenticated flood limit, the
+# forwarded-for chain distrusted. An unconfigured deployment behaves exactly as
+# it did before the gate existed.
+#
+# Unlike every other var in this file, a MALFORMED value here does NOT degrade
+# to "nothing configured" — that would turn a typo in an allowlist into an open
+# gateway. A declared-but-unusable value answers `503
+# network_access_misconfigured` on every request, which is the Workers stand-in
+# for `ferrogate check` refusing to start the Rust process on the same input.
+# ---------------------------------------------------------------------------
+
+# JSON array of CIDR/IP entries (a bare comma-separated list is also accepted):
+#
+#   GATEWAY_IP_ALLOWLIST = '["203.0.113.0/24", "2001:db8::/32"]'
+#
+# Empty ⇒ no allowlist. Non-empty ⇒ every request whose client IP is outside
+# every entry answers `403 ip_denied`, INCLUDING one whose IP cannot be
+# resolved at all (fail closed, verbatim Rust).
+GATEWAY_IP_ALLOWLIST = ""
+
+# `"true"` — and nothing else — trusts `X-Forwarded-For` / `X-Real-IP` over the
+# edge-set `CF-Connecting-IP`. Leave it off unless a FURTHER operator proxy sits
+# in front of this Worker: `CF-Connecting-IP` is set by the Cloudflare edge and
+# strips any client copy, while a forwarded chain is client-writable.
+GATEWAY_TRUST_FORWARDED_FOR = "false"
+
+# How many hops from the RIGHT of `X-Forwarded-For` the real client sits, when
+# the chain is trusted. Selection is from the right (appending proxies) and
+# fails closed when the chain is shorter, so a spoofed leftmost entry can never
+# bypass the allowlist. Positive integer; defaults to 1.
+GATEWAY_TRUSTED_PROXY_HOPS = "1"
+
+# Fixed one-minute window per source IP, charged BEFORE any credential lookup.
+# Empty ⇒ unlimited. NOTE the platform caveat recorded in
+# `packages/config/src/network-access.ts`: the counter is ISOLATE-LOCAL, so N
+# isolates admit up to N x this number. It is a coarse flood gate; the
+# billing-accurate per-tenant limiter is the `RATE_LIMIT` Durable Object, which
+# runs after auth where a tenant identity exists to key on.
+GATEWAY_UNAUTHENTICATED_RATE_LIMIT_PER_MINUTE = ""
+
+# ---------------------------------------------------------------------------
+# [vars] — the provider table and the logical model registry
+#
+# Read by `modelCatalogFromEnv` (src/inference/catalog.ts), which is the port of
+# the Rust config's `[[providers]]` + `[[models]]` tables. `GATEWAY_MODELS` maps
+# a LOGICAL model name (what a client sends) to a provider plus that provider's
+# own physical model id — the client's string is never forwarded as-is.
+#
+# Both default to the empty table, which is the fail-closed posture: an empty
+# registry answers `400 model_not_found` for every model and dispatches nowhere.
+# A malformed or internally inconsistent table (duplicate model name, unknown
+# provider reference, unknown adapter family, unbound `api_key_var`) is refused
+# WHOLE and behaves identically to the empty one — a typo can only close the
+# gateway, never widen it, exactly as the auth vars above.
+#
+# CREDENTIALS ARE NOT IN THESE VARS. A provider names the Worker SECRET binding
+# holding its key in `api_key_var`, mirroring `api_key_env` in the Rust config:
+#
+#   GATEWAY_PROVIDERS = '''
+#   [{ "name": "anthropic",
+#       "kind": "anthropic",
+#       "base_url": "https://api.anthropic.com/v1",
+#       "api_key_var": "ANTHROPIC_AUTH_TOKEN" }]
+#   '''
+#   GATEWAY_MODELS = '''
+#   [{ "name": "best-reasoning",
+#       "provider": "anthropic",
+#       "provider_model": "claude-3-5-sonnet-latest",
+#       "capabilities": ["chat", "streaming", "tools"] }]
+#   '''
+#
+# then `wrangler secret put ANTHROPIC_AUTH_TOKEN` (or a `.dev.vars` line for
+# local runs). The secret's NAME appears here; its value never does.
+#
+# `auth_scheme` (optional, `"bearer"` | `"x-api-key"`) overrides the credential
+# header for one provider. Omit it and the adapter family's Rust hard-coding is
+# used verbatim — `x-api-key` for `anthropic`, `Authorization: Bearer` for the
+# OpenAI-compatible family. Set it to `"bearer"` for an Anthropic-Messages
+# COMPATIBLE relay, which speaks the Anthropic body grammar but authenticates
+# like OpenAI.
+#
+# PORT-TODO(inventory-request-path §1.6 "Provider secrets"): the credential
+# lookup moves from a named binding to Cloudflare Secrets Store via
+# `@ferrogate/secrets`, and the tables to D1 via `@ferrogate/routing`, once
+# those packages land. The join semantics do not change.
+# ---------------------------------------------------------------------------
+GATEWAY_PROVIDERS = "[]"
+GATEWAY_MODELS = "[]"
+
+# ---------------------------------------------------------------------------
+# [vars] — the account-level Cloudflare block (issue #672)
+#
+# The port of the Rust config's top-level `[cloudflare]` section, read by
+# `modelCatalogFromEnv` (src/inference/catalog.ts). It supplies the ACCOUNT half
+# of Cloudflare AI Gateway routing; the per-provider half is the
+# `cloudflare_ai_gateway` key on a `GATEWAY_PROVIDERS` row:
+#
+#   GATEWAY_CLOUDFLARE = '{ "account_id": "<account>" }'
+#   GATEWAY_PROVIDERS = '''
+#   [{ "name": "openai",
+#       "kind": "openai",
+#       "base_url": "https://api.openai.com/v1",
+#       "api_key_var": "OPENAI_API_KEY",
+#       "cloudflare_ai_gateway": { "gateway_id": "<gateway>",
+#                                  "aig_token_var": "CF_AIG_TOKEN" } }]
+#   '''
+#
+# With both halves present, every chat / responses / embeddings request that
+# provider serves is re-addressed onto
+# `https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/<slug>/...` — the AI
+# Gateway's caching, rate limiting, analytics and unified billing — with the
+# vendor credential passed through untouched. `mode = "unified"` selects the
+# account REST surface instead; `provider_slug` is REQUIRED for families other
+# than openai/anthropic, which have no derivable Cloudflare slug.
+#
+# EMPTY, the shipped default, is the OFF posture: no provider can be routed,
+# because a `cloudflare_ai_gateway` block with no account block refuses the whole
+# provider table rather than quietly dialling the vendor direct. `account_id` is
+# an ACCOUNT RESOURCE ID, so it is a deploy-time value and stays out of the repo
+# (see the header note at the top of this file).
+# ---------------------------------------------------------------------------
+GATEWAY_CLOUDFLARE = ""
+
+# ---------------------------------------------------------------------------
+# [vars] — quota policies and plan floors
+#
+# Read by `quotaPolicySourceFromEnv` (src/ratelimit/quota.ts), the port of the
+# Rust quota policy rows + plan defaults. `GATEWAY_QUOTA_POLICIES` is a JSON
+# array of `{ scope_type, scope_id, rpm_limit?, tpm_limit?, enabled? }`;
+# `GATEWAY_PLANS` maps plan slug → `{ slug, default_rpm_limit?,
+# default_tpm_limit? }`; `GATEWAY_TENANT_PLANS` maps tenant id → plan slug.
+#
+# A plan value is a FLOOR, not an override (issue #168): a field takes the plan
+# default only when NO policy in the tenant→project→workspace→key chain set it.
+#
+# All three default EMPTY, which means "no window governs any caller" — the
+# limiter admits. That is the Rust posture (`request_windows()` returns an empty
+# vec when nothing is configured), not a fail-open hole: a policy row that
+# EXISTS and is `enabled: false` answers 403 `quota_scope_disabled`, and a
+# policy source that fails to parse is refused whole rather than partially
+# applied.
+# ---------------------------------------------------------------------------
+GATEWAY_QUOTA_POLICIES = "[]"
+GATEWAY_PLANS = "{}"
+GATEWAY_TENANT_PLANS = "{}"
+
+# ---------------------------------------------------------------------------
+# [vars] — required attribution tags (#678)
+#
+# Read by `attributionPolicySourceFromEnv` (src/attribution/source.ts) ONLY when
+# no control database is bound. The DURABLE source is `CONTROL_DB`'s
+# `quota_policies.required_tags_json` + `on_missing_tags`, written through
+# `PUT /admin/v1/quota-policies/tenant/{tenant_id}` — so on a deployment with
+# `CONTROL_DB` (which is every real one) this var is never consulted, exactly
+# like `GATEWAY_QUOTA_POLICIES` beside it.
+#
+# A JSON array of `{ tenant_id, required_tags, on_missing }`, where `on_missing`
+# is `"reject"` or `"default_from_key"`:
+#
+#   GATEWAY_ATTRIBUTION_POLICIES = '''
+#   [{ "tenant_id": "tenant_acme",
+#      "required_tags": ["team", "cost_center"],
+#      "on_missing": "default_from_key" }]
+#   '''
+#
+# EMPTY, the shipped default, is the OFF posture: no tenant requires tags and
+# every request is served exactly as before. There is no implicit default for
+# `on_missing` — an entry that lists required tags without naming an action
+# enforces NOTHING, because the point of the control is that the operator
+# chooses refusal or defaulting explicitly.
+# ---------------------------------------------------------------------------
+GATEWAY_ATTRIBUTION_POLICIES = "[]"
+
+# ---------------------------------------------------------------------------
+# [vars] - data residency and zero data retention (#681)
+#
+# Read by `residencyPolicySourceFromEnv` (src/residency/source.ts) ONLY when no
+# control database is bound. The DURABLE source is `CONTROL_DB`'s
+# `quota_policies.residency_regions_json` + `require_zero_data_retention` +
+# `log_residency` (sql/d1-ts/control/0007_residency_policy.sql) - so on a
+# deployment with `CONTROL_DB` this var is never consulted, exactly like
+# `GATEWAY_ATTRIBUTION_POLICIES` above it.
+#
+# A JSON array of `{ tenant_id, residency_regions, require_zero_data_retention,
+# log_residency }`:
+#
+#   GATEWAY_RESIDENCY_POLICIES = """
+#   [{ "tenant_id": "tenant_acme",
+#      "residency_regions": ["eu-west-1", "eu-central-1"],
+#      "require_zero_data_retention": true,
+#      "log_residency": "in_region" }]
+#   """
+#
+# EMPTY, the shipped default, is the OFF posture: no tenant is governed and
+# every request routes exactly as before. A governed tenant's request is
+# REFUSED - never quietly served elsewhere - when no candidate route declares a
+# listed `region`, or when `require_zero_data_retention` is set and no route
+# ASSERTS `zero_data_retention = true` on its provider/model row.
+# ---------------------------------------------------------------------------
+GATEWAY_RESIDENCY_POLICIES = "[]"
+
+# ---------------------------------------------------------------------------
+# [vars] - where THIS deployment's durable request log physically lives (#681)
+#
+# An ASSERTION by the operator, verified by `residency/middleware.ts` against a
+# tenant whose policy says `log_residency = "in_region"`. Cloudflare exposes no
+# runtime property for it - a D1 binding does not report the `location_hint` it
+# was created with - so the honest modelling is the same one ZDR uses: the
+# operator asserts, the policy verifies, and an ABSENT assertion CANNOT satisfy
+# an in-region log policy. Every such tenant's governed requests are then
+# refused `403 log_residency_unsatisfiable` rather than served while their
+# evidence row lands somewhere the policy forbids.
+#
+# EMPTY, the shipped default, is correct for every deployment no tenant has
+# asked for log residency from; set it to the region `CONTROL_DB` and the
+# `REQUEST_LOG` queue were provisioned in (e.g. "eu-west-1") before enabling
+# `log_residency = "in_region"` for anyone.
+# ---------------------------------------------------------------------------
+GATEWAY_LOG_REGION = ""
+
+# ---------------------------------------------------------------------------
+# [vars] — Responses API conversation state (issue #689)
+#
+# `GATEWAY_RESPONSES_STORE` is read by `resolveDeps` (src/inference/defaults.ts)
+# and decides what `POST /v1/responses` may persist for `previous_response_id`
+# and `GET`/`DELETE /v1/responses/{id}`:
+#
+#   "opt_in"     (the shipped default) — persist ONLY when the request says
+#                `store: true`.
+#   "default_on" — OpenAI parity: persist unless the request says
+#                `store: false`.
+#   "off"        — persist nothing, and REFUSE a request that asks for it
+#                (`403 response_store_disabled`) rather than accept and ignore.
+#
+# The default is deliberately NOT OpenAI's `store: true`. Conversation state is
+# prompt CONTENT — unlike the #664 request log and the #677 cost rows, which
+# hold none — so inheriting OpenAI's default would start persisting prompts on
+# every deployment the day this shipped, under a data-handling posture nobody
+# opted into. A tenant whose #681 residency policy requires zero data retention
+# is never stored whatever this is set to, and an explicit `store: true` from
+# such a tenant is refused rather than silently dropped.
+#
+# `GATEWAY_RESPONSES_RETENTION` is retention in HOURS. A bare number is the
+# fleet-wide window (what ships); a JSON object adds per-tenant overrides —
+# `{"default": 24, "acme": 2}`. A tenant entry of `0` means "never persist" and
+# is honoured as a hard zero, not rounded up to the default. An unreadable value
+# falls back to 24 hours, which is the tightest reading and cannot silently
+# extend anyone's window.
+#
+# Expired rows are refused ON READ and reclaimed by the Cron sweep
+# (`gatewayScheduled` → `sweepResponseConversations`), so state is bounded even
+# on a deployment whose Cron is not firing.
+# ---------------------------------------------------------------------------
+GATEWAY_RESPONSES_STORE = "opt_in"
+GATEWAY_RESPONSES_RETENTION = "24"
+
+# ---------------------------------------------------------------------------
+# [vars] — online evaluation of sampled traffic, the OPT-IN table (#692)
+#
+# Read by `onlineEvalPolicySourceFromEnv` (src/evals/source.ts) ONLY when no
+# control database is bound. The DURABLE source is `CONTROL_DB`'s
+# `quota_policies.online_eval_*` columns
+# (sql/d1-ts/control/0009_online_eval.sql), so on a deployment with
+# `CONTROL_DB` this var is never consulted — exactly like the two policy tables
+# above it.
+#
+# A JSON array of `{ tenant_id, enabled, sample_rate, sampling_unit,
+# judge_model, criteria, regression_drop, regression_min_samples }`:
+#
+#   GATEWAY_ONLINE_EVAL_POLICIES = """
+#   [{ "tenant_id": "tenant_acme",
+#      "enabled": true,
+#      "sample_rate": 0.05,
+#      "sampling_unit": "conversation",
+#      "judge_model": "judge-small",
+#      "criteria": [{ "id": "answer_relevance",
+#                     "definition": "Does the answer address the question asked?" }] }]
+#   """
+#
+# EMPTY, the shipped default, is the OFF posture and it is the ONLY safe
+# default: evaluating a tenant's traffic copies their prompts and their model's
+# responses to a judge model, so it is a per-tenant opt-in and never a fleet
+# switch. A ZERO-DATA-RETENTION tenant (`GATEWAY_RESIDENCY_POLICIES` /
+# `require_zero_data_retention`) is NEVER sampled even if listed here.
+#
+# `sample_rate` is required for an enabled entry and is not defaulted: a tenant
+# who switched evaluation on without saying how much of their traffic to copy
+# has not expressed a policy. Same for `judge_model` — the judge IS the
+# measuring instrument, and a default would make the meaning of their scores
+# depend on a choice they never made.
+#
+# Nothing is evaluated without the `ONLINE_EVAL` queue binding below: the judge
+# runs in the queue consumer, never in the request's own `waitUntil`.
+# ---------------------------------------------------------------------------
+GATEWAY_ONLINE_EVAL_POLICIES = "[]"
+
+# ---------------------------------------------------------------------------
+# [vars] — deny/allow policy rules and the prepaid-wallet hold
+#
+# GATEWAY_POLICY_RULES is read by `policyRulesFromEnv` (src/ratelimit/policy.ts):
+# a JSON array of `@ferrogate/policy` rules (model / provider / request-size
+# allow-deny), evaluated inside the same admission middleware as the counters
+# so a denied model never reaches a provider. Empty ⇒ nothing is denied, which
+# is the Rust posture for an unconfigured policy table.
+#
+# GATEWAY_WALLET_HOLD_CREDITS is read by `walletHoldCreditsFromEnv`
+# (src/ratelimit/wallet.ts): the credits reserved per in-flight request against
+# `wallets` minus live `wallet_reservations`, which is what makes concurrent
+# requests unable to oversell a prepaid balance. The hold is released on
+# settle; unset ⇒ DEFAULT_WALLET_HOLD_CREDITS.
+#
+# GATEWAY_BUDGET_HOLD_USD is read by `budgetHoldUsdFromEnv`
+# (src/ratelimit/quota.ts): the USD reserved on the RATE_LIMIT Durable Object
+# per in-flight request against EACH rung of a nested monthly budget
+# (org → project → workspace → key, #679). It is what stops concurrent requests
+# from all passing the same `usage_monthly_rollups` read; a budget with H
+# dollars of headroom admits at most H/hold of them, and none once the budget is
+# spent. Released when the request finishes. Unset or not a positive finite
+# number ⇒ DEFAULT_BUDGET_HOLD_USD (one cent) — it is IGNORED rather than
+# applied, because a 0 hold would silently disable the guard.
+# ---------------------------------------------------------------------------
+GATEWAY_POLICY_RULES = "[]"
+GATEWAY_WALLET_HOLD_CREDITS = ""
+GATEWAY_BUDGET_HOLD_USD = ""
+
+# ---------------------------------------------------------------------------
+# [vars] — the batch executor's recovery sweep (#698, slice 2)
+#
+# GATEWAY_BATCH_SWEEP_LIMIT is read by `batchSweepLimitFromEnv`
+# (src/batch/sweep.ts): how many claimable batch jobs ONE tenant may be advanced
+# by on ONE Cron tick. It bounds the worst case of the recovery path, which is
+# the leg that can dispatch paid provider calls with no client waiting — a
+# tenant with 500 stalled jobs must not turn one minute's Cron into 500
+# sequential job ticks inside a single Worker invocation.
+#
+# It is a CEILING on jobs, not on lines: each job is separately bounded to
+# `DEFAULT_MAX_LINES_PER_TICK` lines by the executor, and the queue leg (which
+# re-enqueues itself) is what actually drives throughput. Unset or not a
+# positive integer ⇒ DEFAULT_BATCH_SWEEP_PER_TENANT (5) — a bad value is
+# IGNORED rather than applied, because a 0 would silently disable recovery for
+# every tenant and strand exactly the jobs whose queue message was lost.
+# ---------------------------------------------------------------------------
+GATEWAY_BATCH_SWEEP_LIMIT = ""
+
+# ---------------------------------------------------------------------------
+# [vars] — provider reliability (circuit breaker + retry), the `PROVIDER_CIRCUIT`
+# companion
+#
+# Read by `reliabilitySettingsFromEnv` (src/inference/reliability.ts). A single
+# JSON object so the three fields stay one atomic setting:
+#
+#   provider_circuit_breaker_failure_threshold  consecutive failures that OPEN
+#   provider_circuit_breaker_cooldown_secs      half-open re-probe delay
+#   provider_dispatch_max_retries               same-provider retry attempts
+#
+# EMPTY IS "NO BREAKER", deliberately: the Rust reproduces "both fields unset ⇒
+# the breaker is not constructed", so the committed default below leaves the
+# ladder in its pre-wave-9 behaviour and an operator opts in. The reference
+# setting is:
+#
+#   GATEWAY_RELIABILITY = '''
+#   {"provider_circuit_breaker_failure_threshold": 5,
+#    "provider_circuit_breaker_cooldown_secs": 30,
+#    "provider_dispatch_max_retries": 1}
+#   '''
+#
+# The breaker is only CROSS-ISOLATE when the `PROVIDER_CIRCUIT` Durable Object
+# below is bound; without it `providerCircuitFor` falls back to a per-isolate
+# map, which counts failures per isolate and is not a correct breaker.
+# ---------------------------------------------------------------------------
+GATEWAY_RELIABILITY = "{}"
+
+# ---------------------------------------------------------------------------
+# [vars] — the exact-match AI response cache (`src/cache/`)
+#
+# The Worker spelling of the `[cache]` section `packages/config` has validated
+# since wave 1 and nothing read. `GATEWAY_CACHE_ENABLED` is the global switch
+# and defaults FALSE exactly as the Zod schema does — an unconfigured
+# deployment caches nothing — and the three DISABLED_* tables are the
+# per-model / per-key / per-profile opt-outs of Rust `ai_cache_enabled`'s
+# four-level ladder (any level saying `false` wins).
+#
+# A malformed value here DISABLES the cache and reports `x-ferrogate-cache:
+# bypass`; it does not 503. That is the opposite of the network gate above, on
+# purpose: degrading "no allowlist" is an open gateway, degrading "no cache"
+# costs only latency.
+#
+# BOTH modes are now ported. `semantic` (wave 14, `src/cache/semantic.ts`) needs
+# NO new binding: the Rust `SemanticResponseCache` is in-tree cosine similarity
+# over a deterministic, network-free FNV-1a-64 feature-hashing embedder, so
+# there is no Vectorize namespace and no Workers AI call to declare — the
+# earlier note here claiming otherwise was inferred from the words "embedding"
+# and "cosine similarity" rather than from the Rust, and is corrected.
+#
+# The residual difference is REACH, not behaviour: Rust held one cache in a
+# process, a Worker has no process, so the semantic store is a module-scope
+# per-isolate singleton. That costs hit rate on a cold isolate and can never
+# serve a wrong body — the scope bucket carries the same tenant/credential
+# material the exact key does.
+#
+# `GATEWAY_CACHE_SEMANTIC_THRESHOLD` is the cosine cut-off, committed at the
+# Rust default (`default_cache_semantic_similarity_threshold()`), which is also
+# the value `CACHE_DISABLED_POLICY` falls back to when the var is absent — so
+# declaring it here changes no behaviour, it only makes the knob discoverable
+# next to the mode it belongs to. It is range-checked to (0.0, 1.0] ONLY in
+# semantic mode: cosine similarity maxes out at 1.0, so a larger threshold can
+# never be met and would leave the layer silently inert.
+# ---------------------------------------------------------------------------
+GATEWAY_CACHE_ENABLED = "false"
+GATEWAY_CACHE_TTL_SECONDS = "300"
+GATEWAY_CACHE_MAX_RECORDS = "1000"
+GATEWAY_CACHE_MODE = "exact_match"
+GATEWAY_CACHE_SEMANTIC_THRESHOLD = "0.92"
+GATEWAY_CACHE_DISABLED_MODELS = "[]"
+GATEWAY_CACHE_DISABLED_API_KEYS = "[]"
+GATEWAY_CACHE_DISABLED_PROFILES = "[]"
+
+# ---------------------------------------------------------------------------
+# [vars] — tenant data routing
+#
+# Read by `resolverForEnv` (src/tenancy/resolver.ts), mounted ahead of
+# `rateLimit()` in `GATEWAY_MIDDLEWARE`. Modes:
+#
+#   durable_object      THE COMMITTED DEFAULT (#819). One SQLite-backed Durable
+#                       Object per tenant, addressed
+#                       `TENANT_DATA.idFromName(tenant_id)`. No deploy per
+#                       tenant, no binding ceiling, and `batch()` is one real
+#                       SQLite transaction, so the 13 `requireAtomicBatch()`
+#                       money paths RUN.
+#   off                 no routing; handlers that ask for a tenant handle are
+#                       refused. For a deploy that binds no TENANT_DATA.
+#   binding             route on `tenant_databases.binding_name` → `env[name]`,
+#                       resolved lazily at first use. Self-hosted/single-tenant.
+#   binding_strict      same, but resolved BEFORE the request is served, so an
+#                       un-provisioned tenant is refused at the door.
+#   shared_development  every tenant on `DB`. LOCAL ONLY.
+#
+# WHY THE DEFAULT MOVED OFF `"off"`. Per-tenant storage that has to be switched
+# on is a setting every deployment forgets: this var sat at `"off"` while the
+# whole of `src/tenancy/` was mounted, and `tenantDatabaseOf(c)` had zero
+# production call sites, so the isolation was decoration. Under the D1 topology
+# that was defensible — turning it on meant a `wrangler d1 create` and a
+# redeploy PER TENANT. Under `durable_object` it costs nothing: the object
+# materialises on first address. So the safe posture is no longer the opt-in one.
+#
+# It NEVER falls back to the shared `DB`. Under `durable_object` an unresolvable
+# tenant is a blank tenant id (refused here) or an object that refuses its own
+# admission — a stub that adopted a different tenant, or a schema that stopped
+# mid-migration. Both are `503 tenant_database_unavailable`, neither is retried,
+# and neither reaches for a second database. A fallback is a silent cross-tenant
+# read.
+#
+# CONTROL_DB is still required, and NOT as a routing table: `durable_object`
+# resolution reads nothing. It backs `control()` and `provisionedTenants()`,
+# which is the only way to enumerate the fleet — a Durable Object namespace
+# cannot be listed in production.
+#
+# The two `binding*` modes route on CONTROL_DB's `tenant_databases`,
+# and each native-binding tenant then needs its own stanza, which is DEPLOY-TIME
+# state and therefore not committed with real ids:
+#
+#   [[d1_databases]]
+#   binding = "TENANT_DB_ACME"                    # == tenant_databases.binding_name
+#   database_name = "ferrogate-tenant-acme"
+#   database_id = "replace-at-deploy"             # PLACEHOLDER — never a real uuid
+#   migrations_dir = "../../sql/d1-ts/tenant"
+#
+# ---------------------------------------------------------------------------
+GATEWAY_TENANT_DB_ROUTING = "durable_object"
+# Control-plane read backend posture. "durable_object" reads the CONTROL_DATA
+# DO facade; "d1" opens a colo-local read-replica session on CONTROL_D1
+# (withSession "first-unconstrained", src/control-data.ts). Set to "d1" as part
+# of the control-plane DO->D1 migration: control-plane is the sole writer on the
+# `ferrogate-control` D1, and the gateway is a read-only replica consumer.
+GATEWAY_CONTROL_STORAGE = "d1"
+
+# Read by `readiness` (src/routes/readiness.ts). `"true"` — and nothing else —
+# makes `/readyz` answer 503 while `/healthz` stays 200, which is the
+# deploy-time approximation of the Rust drain flag: flip it, redeploy, let the
+# load balancer take the version out, then roll.
+GATEWAY_DRAIN = "false"
+
+# Read by `agentUpstreamsFromEnv` (src/routes/agent-discovery.ts). JSON map of
+# agent id → upstream descriptor for the agent-discovery route. Empty ⇒ nothing
+# is discoverable, which is the unconfigured posture.
+GATEWAY_AGENT_UPSTREAMS = "{}"
+
+# ---------------------------------------------------------------------------
+# [vars] — the OPERATOR SKILL-PACKAGE and PROMPT-TEMPLATE tables
+#
+# Direct ports of the Rust `[[skill_packages]]` / `[[prompt_templates]]` config
+# tables, read by `src/routes/skills.ts` and `src/routes/prompts.ts`. Both used
+# to be 501 stubs whose note claimed a dependency on a control-plane read model;
+# the Rust handlers read `state.config`, so they are pure projections of
+# operator config with no I/O — the same shape `GATEWAY_AGENT_UPSTREAMS` has.
+#
+# EMPTY IS THE COMMITTED POSTURE, and it must stay empty here: `test/auth.test.ts`
+# asserts `/v1/skills` answers `{"object":"list","data":[]}` for a scoped key,
+# and vitest loads THIS FILE. A non-empty placeholder would turn >1 test red on
+# a correct tree. A real deployment overrides via `[env.<name>.vars]`.
+#
+# Both parse fail-closed (`parseSkillPackages` / `parsePromptTemplates`):
+# malformed JSON yields the empty table, so a typo can only hide a skill or a
+# template, never invent one.
+# ---------------------------------------------------------------------------
+GATEWAY_SKILL_PACKAGES = "[]"
+GATEWAY_PROMPT_TEMPLATES = "[]"
+
+# ---------------------------------------------------------------------------
+# [vars] — the STATIC-SITE BINDINGS (issue #737)
+#
+# Read by `siteBindingsFromEnv` (src/sites/registry.ts): a JSON map of URL slug
+# → `{ tenant_id, asset_name?, channel?, anonymous?, spa?, not_found_document? }`
+# that binds `/sites/{slug}` to one tenant's published `static_site` bundle.
+#
+# It exists because `/sites/{slug}` is a GLOBAL path namespace over a per-tenant
+# asset namespace — two tenants may each own a `static_site` called `docs`, and
+# an ANONYMOUS request carries nothing that says which one it means. A slug with
+# no entry here is still fully serveable: it resolves inside the CREDENTIAL's
+# own tenant, which is the private-by-default posture and needs no config.
+#
+# `anonymous: true` on an entry is the ONLY thing that lets a site be read with
+# no credential, per site and per channel. That is why it is an operator var and
+# not a tenant-writable table: a self-service claim on a global name is a
+# land-grab and a phishing surface (`/sites/acme-login`).
+#
+# EMPTY IS THE COMMITTED POSTURE — every site private, none anonymously
+# readable — and it must stay empty here, because vitest loads THIS FILE and a
+# placeholder binding would publish a site the suite never asked for. Parsing is
+# fail-closed: malformed JSON binds NOTHING rather than binding everything.
+GATEWAY_SITES = "{}"
+
+# ---------------------------------------------------------------------------
+# [vars] — the ASSET PUBLISHER-SIGNATURE policy (wave 13; Rust
+# `screen_asset_push` stage 2)
+#
+# Read by `withSignatureVerification` / `PublisherKeyRegistry.fromEnv`
+# (src/assets/signature-screener.ts, src/assets/signature.ts), which
+# `src/assets/handlers.ts` composes IN FRONT of whichever scanner screener is
+# active. Declared here because the rule at the top of this file is "declare
+# what the Worker reads": an operator who mistypes one of these three gets
+# silence, and silence in a signature gate is the failure that matters.
+#
+# These are PUBLIC verification keys, not secrets — `ED25519` is a comma list of
+# `key-id=<base64 raw public key>`, `MINISIGN` a newline list of minisign public
+# keys. They belong in a var, not in `wrangler secret put`; there is no private
+# key anywhere in this Worker (it verifies, it never signs).
+#
+# EMPTY/OFF IS THE COMMITTED POSTURE and it must stay that way: with all three
+# blank `withSignatureVerification` returns the inner screener BY IDENTITY, so
+# every asset audit line and manifest is byte for byte what it was before this
+# stage existed — which is what keeps `test/assets/*` green, since vitest loads
+# THIS FILE. A non-empty placeholder here would refuse or relabel real pushes in
+# the unit suite.
+#
+# The switch is fail-CLOSED once an operator touches it:
+# `FERROGATE_ASSET_REQUIRE_SIGNATURE=1` with NO keys configured refuses every
+# push with `asset_signature_required` (422) rather than admitting unsigned
+# uploads. Setting keys alone (requirement off) is the audit-only posture:
+# signed pushes are verified and labeled, unsigned ones are still admitted.
+# ---------------------------------------------------------------------------
+FERROGATE_ASSET_REQUIRE_SIGNATURE = ""
+FERROGATE_ASSET_PUBLISHER_ED25519_KEYS = ""
+FERROGATE_ASSET_PUBLISHER_MINISIGN_KEYS = ""
+
+# ---------------------------------------------------------------------------
+# [vars] — the OPERATOR REVERSE-PROXY table (Rust step 12, §1.3; the F9 finding
+# in `docs/rewrite/parity-audit-request-path.md`).
+#
+# Read by `routeTableFromEnv` (src/routes/reverse-proxy.ts), which
+# `createGatewayApp` mounts as the LAST `app.all("*")` — after all 264 contract
+# operations and after `/health`, so nothing it does can shadow a contract
+# route.
+#
+# `GATEWAY_ROUTES` is a JSON array of `[[routes]]` entries (`routeRuleSchema`);
+# `GATEWAY_UPSTREAMS` a JSON array of `[[upstreams]]` (`upstreamSchema`). They
+# are the direct port of the Rust TOML tables of the same names — operator
+# configuration, so a var is the faithful port rather than a stub.
+#
+# EMPTY IS INERT, and that is the committed posture: with no route claimed, the
+# fall-through calls `c.notFound()` and an undocumented path gets the gateway's
+# own `404 not_found` envelope, exactly as before this handler existed. A table
+# that fails to parse is NOT ignored — `RuntimeRouteTableInvalid` renders 503,
+# so a typo cannot silently open or silently close the proxy.
+#
+# Header mutations carrying an unresolvable `{env.NAME}` placeholder are
+# SKIPPED rather than forwarded literally (Rust `compile_header_mutations`), so
+# a missing upstream credential never leaves as the string `{env.…}`.
+# ---------------------------------------------------------------------------
+GATEWAY_ROUTES = "[]"
+GATEWAY_UPSTREAMS = "[]"
+
+# ---------------------------------------------------------------------------
+# [vars] — guardrail policies
+#
+# Read by `guardrailDepsFromEnv` (src/guardrails/config.ts).
+# `GATEWAY_GUARDRAIL_POLICIES` is a JSON array of `PolicyRevision`;
+# `GATEWAY_GUARDRAIL_BINDINGS` a JSON array of `{ policy_id, active_revision }`.
+# Empty ⇒ no policy selects for any request and the middleware passes straight
+# through. A BOUND policy fails CLOSED: a detector timeout or error selects the
+# policy's `on_error`, whose default is `block` ⇒ 403
+# `guardrail_provider_unavailable` (see the fail-posture block in
+# `src/guardrails/index.ts`, with the Rust citations).
+#
+# GUARDRAIL_EVIDENCE_HMAC_KEY is deliberately NOT declared: it is the keyed-HMAC
+# secret for the evidence `input_fingerprint` and belongs in
+# `wrangler secret put`, never in a committed var. Without it fingerprints are
+# unkeyed; no plaintext is written either way (`matched_text` never crosses the
+# evidence boundary).
+# ---------------------------------------------------------------------------
+GATEWAY_GUARDRAIL_POLICIES = "[]"
+GATEWAY_GUARDRAIL_BINDINGS = "[]"
+
+# ---------------------------------------------------------------------------
+# PER-TENANT BYOK (issue #682) — FERROGATE_BYOK_MASTER_KEY
+# ---------------------------------------------------------------------------
+# The FLEET-WIDE AES-256 key that seals every tenant's own provider credential
+# in the control database's `tenant_provider_credentials` table. It is a SECRET
+# and is deliberately NOT declared here — set it with
+#
+#   head -c 32 /dev/urandom | base64 | wrangler secret put FERROGATE_BYOK_MASTER_KEY
+#
+# (or `@ferrogate/secrets`' `generateByokMasterKey()`), or bind it through
+# Cloudflare Secrets Store; `byokPortsFromEnv` reads either shape.
+#
+# THIS IS ONE BINDING FOR THE WHOLE FLEET, NOT ONE PER TENANT. That is the
+# entire design: Secrets Store bindings resolve at DEPLOY time, so a per-tenant
+# binding would mean a deploy per tenant and a deploy per rotation. Instead the
+# binding set is fixed and the tenant-visible `alias -> credential` mapping is
+# ROW DATA — onboarding a tenant is an INSERT and rotating their key is an
+# UPDATE, neither of which is a deploy.
+#
+# Rotating THIS key (rare — an operator event, not a tenant one) adds
+# FERROGATE_BYOK_MASTER_KEY_V2 and keeps the v1 secret bound until every row has
+# been re-sealed; rows record the version that sealed them.
+#
+# Absent ⇒ BYOK is simply OFF: `byokPortsFromEnv` returns null, provider
+# credentials resolve exactly as they did before #682, and a request that
+# explicitly asks for an alias is refused 503 `byok_not_configured` rather than
+# being served — and billed — on the platform's own provider key.
+#
+# Requires the CONTROL_DB binding (declared below) and migration
+# `sql/d1-ts/control/0003_tenant_provider_credentials.sql`.
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# AGENT DELEGATION CHAIN (issue #691) — DELEGATION_SIGNING_KEY
+# ---------------------------------------------------------------------------
+# The HMAC-SHA-256 shared key a delegation link is signed and verified with. It
+# is a SECRET and is deliberately NOT declared here — set it with
+#
+#   head -c 32 /dev/urandom | base64 | wrangler secret put DELEGATION_SIGNING_KEY
+#
+# or, preferably, bind it through Cloudflare Secrets Store;
+# `delegationVerifierFromEnv` (src/delegation/source.ts) reads either shape,
+# because at the point of use both are a plain string on `env`. A committed
+# value would let anyone mint a chain naming any principal as ultimately
+# responsible, which is exactly the forgery the whole slice exists to refuse.
+#
+# ONE BINDING FOR THE WHOLE FLEET, and the same key signs and verifies. Secrets
+# Store bindings resolve at DEPLOY time, so per-agent private keys would mean a
+# deploy per agent; the mint therefore signs on behalf of a delegator it has
+# already authenticated (the RFC 8693 token-exchange shape). What that buys and
+# what it does not is written out at the top of
+# `packages/identity/src/delegation/link.ts`. The consequence for deployment is
+# concrete: any Worker holding this binding can MINT as well as verify, so bind
+# it only to the gateway and to the delegation authority.
+#
+# Rejected at import if shorter than 32 bytes — a shorter shared secret is
+# recoverable offline from one captured link, and every forgery after that
+# verifies perfectly.
+#
+# Absent ⇒ delegation is simply OFF. A request carrying no
+# `x-ferrogate-delegation` header is untouched (one header read and `next()`),
+# and a request that PRESENTS one is refused 503
+# `delegation_verification_unavailable` rather than served with the header
+# ignored — otherwise deleting this binding would bypass the whole verifier.
+#
+# Revocation additionally needs the CONTROL_DB binding (declared below) and
+# migration `sql/d1-ts/control/0008_delegation_chain.sql`. With no control
+# database bound nothing can hold a revocation, so chains verify and nothing is
+# revocable; with one bound but unreadable, a delegated request is refused 503
+# rather than admitted.
+# ---------------------------------------------------------------------------
+
+# Read by `apiKeyCacheTtlSeconds` (src/keys/resolver.ts). Seconds a positive or
+# negative D1 key resolution may be reused inside one isolate. `"0"` (the
+# default) caches positive outcomes for 30 seconds, which bounds the control
+# object read rate. A key revoked in the control plane may therefore continue
+# working for at most the TTL; set this to "0" only with that tradeoff understood.
+GATEWAY_API_KEY_CACHE_TTL_SECONDS = "30"
+
+# Read by `entitlementsFromEnv` (src/assets/handlers.ts).
+# JSON map tenant id → { asset_hosting_enabled, asset_storage_quota_bytes,
+# asset_max_object_bytes }. Fail-closed: a tenant with no row may NOT publish
+# assets (`NO_ASSET_HOSTING`), though what it already published stays readable.
+# Without it every `assets.write` push is refused for lack of a hosting grant.
+# PORT-TODO(inventory-request-path.md §1.6 "Asset hosting"): moves to D1
+# (`StoredPlan` + role bindings) via `@ferrogate/storage`.
+ASSET_ENTITLEMENTS = "{}"
+
+# Read by `tenantRequiresDeclaredActionId` (src/assets/handlers.ts) — the Rust
+# `FG_REQUIRE_AGENT_RUN_ID` operator switch (#522), name kept verbatim because
+# the Rust deliberately keeps it out of the config schema (it adds no OpenAPI
+# surface) and operator runbooks already name it.
+#
+#   ""                     ⇒ OFF for every tenant — the Rust default posture,
+#                            and what is shipped here
+#   "1"|"true"|"yes"|"on"|"all"|"*"
+#                          ⇒ ON for every tenant
+#   "tenant_a, tenant_b"   ⇒ ON only for those authenticated tenant keys
+#
+# ON means a governed asset request arriving with no `x-ferrogate-agent-run-id`
+# is refused `400 agent_run_id_required` instead of being recorded as an
+# unjoinable action. The tenant key is derived from the AUTHENTICATED identity
+# only (`governedActionTenantKey`), never from anything the client declares.
+FG_REQUIRE_AGENT_RUN_ID = ""
+
+# ---------------------------------------------------------------------------
+# R2 **S3 API** credentials — the PRESIGNED upload/download family only
+#
+# Read by `sigV4PresignerFromEnv` (src/assets/handlers.ts). All four required
+# values must be bound or the presigner is not built at all and the presign
+# family keeps answering `503 asset_bucket_unavailable`; a half-configured set
+# must never mint a URL the bucket will reject.
+#
+# WHY THESE EXIST ALONGSIDE THE BUCKET BINDING ABOVE. The Workers `R2Bucket`
+# binding has NO presign method — presigned URLs are an S3-API feature, signed
+# with SigV4 over `https://<account_id>.r2.cloudflarestorage.com`. There is no
+# way to derive an S3 access key pair from a bucket binding, so the two are
+# genuinely separate credentials for the same bucket. `src/assets/sigv4.ts`
+# implements the signing; this block is where the inputs come from.
+#
+# ONLY THE FIRST TWO ARE VARS. `ASSET_S3_ACCESS_KEY_ID`,
+# `ASSET_S3_SECRET_ACCESS_KEY` and the optional `ASSET_S3_SESSION_TOKEN` are
+# SECRETS (`wrangler secret put`, or a gitignored `.dev.vars` line locally) and
+# are deliberately NOT declared with values here. `ASSET_S3_REGION` defaults to
+# `auto` in code, which is what R2 requires; it is a var only for an
+# S3-compatible target that needs a real region.
+#
+# The empty defaults below are the fail-closed posture and are what a plain
+# `wrangler deploy` ships: no presigning until an operator opts in.
+# ---------------------------------------------------------------------------
+ASSET_S3_ENDPOINT = ""
+ASSET_S3_BUCKET = ""
+
+# ---------------------------------------------------------------------------
+# Malware-scan backend for hosted assets (src/assets/scan.ts)
+#
+# Read by `assetScreenerFromEnv`, the port of the Rust
+# `AssetScanConfig::from_env` (`FERROGATE_ASSET_SCANNER*`). All four are OFF by
+# default and the unconfigured deployment keeps the offline builtin EICAR
+# screener, which is exactly the Rust default (`ScanBackend::Eicar`,
+# fail-closed, no async threshold).
+#
+#   ASSET_SCANNER                     "http" selects the hosted-scanner backend.
+#                                     Anything else — including "http" with no
+#                                     endpoint — keeps the builtin.
+#   ASSET_SCANNER_ENDPOINT            URL the raw bytes are POSTed to as
+#                                     application/octet-stream. The reply is
+#                                     {"verdict":"clean|infected",
+#                                      "signature":"…"}; anything else is
+#                                     UNAVAILABLE, never a pass.
+#   ASSET_SCANNER_TIMEOUT_SECS        per-scan deadline; default 30.
+#   ASSET_SCANNER_UNAVAILABLE         "quarantine" admits-and-withholds when the
+#                                     scanner is down; the default (and any
+#                                     other value) REFUSES the push.
+#   ASSET_SCANNER_ASYNC_THRESHOLD_BYTES
+#                                     objects strictly larger than this are
+#                                     stored `pending_scan` — invisible to every
+#                                     read surface until `promoteAssetVisibility`
+#                                     records an out-of-band clean scan. Works
+#                                     with the builtin backend too.
+#
+# The endpoint is a plain URL and is a VAR; a scanner that needs a credential
+# should be fronted by a Worker/Access, since this backend sends no bearer.
+# ---------------------------------------------------------------------------
+ASSET_SCANNER = ""
+ASSET_SCANNER_ENDPOINT = ""
+
+# ---------------------------------------------------------------------------
+# Guardrail screening of PUBLISHED assets (src/assets/guardrail-screener.ts,
+# issue #740)
+#
+# The stage runs only when this deployment HAS guardrail policies — either
+# `GATEWAY_GUARDRAIL_POLICIES` above or the durable revisions in `CONTROL_DB`.
+# With neither, the asset screener chain is byte-for-byte what it was.
+#
+#   ASSET_GUARDRAIL_MODES             per-asset-type enforcement. JSON:
+#                                       { "default": { "static_site": "block" },
+#                                         "tenants": { "t_1": { "config_file": "off" } } }
+#                                     Values: "off" | "flag" | "block".
+#                                     `block` QUARANTINES — the version is
+#                                     stored, withheld from every read surface
+#                                     and listed on GET /v1/assets/withheld with
+#                                     the evidence; it is not a 422.
+#                                     MERGED over the shipped defaults, which are
+#                                     `block` for `mcp_manifest` and
+#                                     `skill_bundle` (both EXECUTE on the
+#                                     consumer), `flag` for `config_file` and
+#                                     `static_site`, and `off` for everything
+#                                     else. A malformed value is a HARD boot
+#                                     error, never a silently skipped policy.
+#   ASSET_GUARDRAIL_MAX_SCREEN_BYTES  how much text one evaluation will decode
+#                                     and hand a detector; default 1048576, the
+#                                     same figure the inference request stage
+#                                     uses. ABOVE it nothing is read and the
+#                                     outcome is `undecidable`, which under
+#                                     `block` withholds — "too big to check"
+#                                     must not become "checked".
+#
+# Both empty ⇒ the documented defaults. Which asset types have a readable text
+# surface at all (and which honestly do not) is stated in the module header of
+# `src/assets/guardrail-screener.ts`.
+# ---------------------------------------------------------------------------
+ASSET_GUARDRAIL_MODES = ""
+ASSET_GUARDRAIL_MAX_SCREEN_BYTES = ""
+
+# Telemetry egress (`src/telemetry/`). The TRANSPORT is the
+# `[[services]] TELEMETRY_COLLECTOR` binding declared further down; these two
+# are the knobs that ride with it. `TELEMETRY_TOKEN` is deliberately ABSENT —
+# it is a secret (`wrangler secret put`), and with no token every emit is a
+# no-op, which is what keeps `wrangler dev` and the E2E harness from talking to
+# anything. `TELEMETRY_ENDPOINT` (empty here) is the fallback HTTPS transport
+# for a collector that is not a service binding.
+TELEMETRY_ENDPOINT = ""
+TELEMETRY_SERVICE_NAME = "ferrogate-gateway"
+TELEMETRY_SIGNALS = "metric,trace,log"
+# #669 — which attribute vocabulary spans and metrics carry.
+#
+#   dual       (DEFAULT) `ferrogate.*` AND the OTel GenAI conventions
+#              (`gen_ai.system`, `gen_ai.provider.name`, `gen_ai.request.model`,
+#              `gen_ai.response.model`, `gen_ai.usage.*`, `gen_ai.operation.name`,
+#              plus `gen_ai.client.token.usage` / `.operation.duration`).
+#              The span NAME stays `ferrogate.gateway.request`.
+#   genai      `gen_ai.*` only, and the semconv `{operation} {model}` span name.
+#              Opt into this once nothing reads the legacy attributes.
+#   ferrogate  Exactly the pre-#669 wire. The escape hatch, not a destination.
+#
+# Written out rather than left to the default so the knob is discoverable; the
+# VALUE is the default, so deleting this line changes nothing.
+TELEMETRY_ATTRIBUTE_PROFILE = "dual"
+
+# ---------------------------------------------------------------------------
+# Budget-threshold alert delivery (#170/#228) — Rust `[billing_alerts]`
+#
+# Read by `budgetAlertConfigFromEnv` (src/metering/budget-alerts.ts) and
+# resolved per request by `MeteringUsageSink` (src/metering/sink.ts), which
+# compares post-charge spend against `EffectiveQuota.alertThresholdPcts` and
+# POSTs one signed notification per (scope, period, threshold) crossing. The
+# once-per-period arbiter is the D1 table `budget_alert_notifications` in
+# `CONTROL_DB` — an `INSERT` whose UNIQUE violation IS the "already sent"
+# answer, so a concurrent second isolate cannot double-notify.
+#
+# WIRING STATE — LIVE with no composition-root edit. The sink reads these off
+# the REQUEST's own bindings exactly as it already reads `BILLING_DB`,
+# `BILLING` and `DB`; `src/index.ts` is untouched. What the operator switches
+# on is the URL.
+#
+# PLACEHOLDER, and empty is the OFF posture: `budgetAlertConfigFromEnv`
+# requires a non-empty `http://`/`https://` URL and answers `undefined`
+# otherwise, so with `""` no crossing is detected, no row is written and no
+# request pays two D1 round trips. Substitute the receiver's URL at deploy
+# time. This does NOT affect the 429 `monthly_budget_exceeded` hard stop at
+# 100%, which is enforced on the request path either way.
+#
+# A malformed value never throws: alert delivery runs after the response is
+# served, and a configuration typo must not become a lost metering write.
+#
+# BILLING_ALERTS_WEBHOOK_SIGNING_SECRET is deliberately NOT declared here — it
+# is the HMAC-SHA256 key every receiver authenticates the alert with
+# (`X-FerroGate-Signature` over `"<timestamp>.<body>"`), so a committed value
+# would be a leaked credential that lets anyone forge a budget alert. It is a
+# deploy-time secret:
+#
+#     bunx wrangler secret put BILLING_ALERTS_WEBHOOK_SIGNING_SECRET
+#
+# With the URL set and the secret unset the notification is sent UNSIGNED,
+# which is the documented Rust behaviour for an operator who configured no key.
+# ---------------------------------------------------------------------------
+BILLING_ALERTS_WEBHOOK_URL = ""
+BILLING_ALERTS_WEBHOOK_TIMEOUT_SECS = "5"
+
+# ---------------------------------------------------------------------------
+# R2 — asset object storage
+#
+# Read as `env.ASSETS`, the production `AssetObjectStore` (src/assets/ports.ts:
+# that port is deliberately R2-SHAPED, so a live `R2Bucket` satisfies it
+# structurally). It holds the bytes of every hosted asset — the object a
+# presigned upload stages, the committed object under
+# `assets/v1/t/{tenant}/obj/…`, and the source of every inline pull.
+#
+# What breaks without it: `src/assets/handlers.ts` falls back to
+# `InMemoryAssetObjectStore`, whose contents vanish with the isolate, so a push
+# appears to succeed and a later read 404s. The presign family additionally
+# answers `503 asset_bucket_unavailable` (`AssetLimits.presignEnabled` is
+# `false` by default) — the correct unconfigured posture, and the reason the
+# gateway never silently routes large object bytes through the Worker.
+#
+# WIRING STATE — LIVE. `src/index.ts` mounts
+# `assetRouteModule({ depsFromEnv: assetDepsFromEnv })`, and
+# `assetDepsFromEnv` (src/assets/handlers.ts) reads `env.ASSETS` off the
+# REQUEST's bindings and memoizes the built `AssetService` on the env object.
+# `test/assets/r2.test.ts` drives a push and a pull through `SELF.fetch` and
+# asserts the bytes are in this bucket, so an unwired composition root fails the
+# suite rather than shipping.
+#
+# `bucket_name` / `preview_bucket_name` are PLACEHOLDERS; the deploy step
+# substitutes the account's real buckets. R2 names are lowercase alphanumerics
+# and hyphens, 3–63 chars.
+# ---------------------------------------------------------------------------
+[[r2_buckets]]
+binding = "ASSETS"
+bucket_name = "ferrogate-assets"
+
+# ---------------------------------------------------------------------------
+# KV — prompt deployment labels, `label -> revision` (#694)
+# ---------------------------------------------------------------------------
+#
+# READ-ONLY here. `apps/control-plane` owns the writes
+# (`PUT /admin/v1/prompt-templates/{id}/labels/{label}`); this Worker only
+# resolves the pointer, on the request path, for a caller that referenced a
+# prompt by label — `src/prompts/labels.ts`, reached from
+# `src/routes/prompts.ts` and from the inference `prompt` reference expander.
+#
+# The key derivation is `promptLabelPointerKey` in `@ferrogate/config`, shared
+# with the writer so a rename cannot silently turn every lookup into a miss. The
+# caller's SCOPE is part of the key, which is what stops one tenant's
+# `production` from ever resolving to another tenant's revision.
+#
+# An ABSENT binding is not a silent degradation: `readPromptLabelPointer` throws
+# `unavailable` and the request is refused, because "no label storage" must
+# never collapse into "render the default prompt".
+#
+# `id` is a DOCUMENTED PLACEHOLDER; it must be substituted with the SAME
+# namespace `apps/control-plane` writes to.
+[[kv_namespaces]]
+binding = "PROMPT_LABELS"
+id = "b6596d54318642ce96618c949f757c9c"
+
+# ---------------------------------------------------------------------------
+# KV: the api_key_directory PROJECTION — the auth hot-path READ side (#882)
+# ---------------------------------------------------------------------------
+#
+# Zero-D1 S6. `src/keys/resolver.ts` reads this namespace AHEAD of the
+# control-object RPC in HOP 1 (`credential -> tenant`), so a cold-isolate or
+# cross-region cache miss is served from a per-colo KV read instead of an RPC to
+# the single-threaded CONTROL_DATA object. It is a cache of the ROUTING hop only:
+# a KV hit STILL runs HOP 2 (the tenant object's `api_keys` row) and every
+# lifecycle check, so this binding can make authentication faster, NEVER looser.
+#
+# `apps/control-plane` binds the SAME namespace and is its only WRITER: it upserts
+# a positive routing row on create/enable and DELETEs it on revoke/disable/rotate,
+# in lockstep with the directory dual write. Both sides key the entry with
+# `keyDirectoryProjectionKey` from `@ferrogate/storage`, so the ONLY way to break
+# the link is to bind two different namespace ids at deploy time — hence this note.
+#
+# ABSENT IS SUPPORTED and fail-closed: with no namespace bound HOP 1 takes the RPC
+# on every miss (the pre-#882 behaviour). A stale or corrupt KV row can never
+# authenticate on its own — HOP 2 owns authorization, and each positive write
+# carries an `expirationTtl` backstop.
+#
+# `id` is a DOCUMENTED PLACEHOLDER; substitute the SAME namespace
+# `apps/control-plane` writes to.
+[[kv_namespaces]]
+binding = "KEY_DIRECTORY"
+id = "76c175ed441048a0924fa4bc95e33740"
+
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Zero-D1 #821 PR2-delete: the tenant `[[d1_databases]] DB` stanza is DELETED
+#
+# The `ferrogate-tenant` shared D1 (`binding = "DB"`) used to sit here. It is
+# gone. Every tenant-schema table (`sql/d1-ts/tenant/`) — `api_keys`, wallets +
+# reservations, usage/monthly rollups, workflow budgets, `stored_assets` +
+# `asset_channels`, `responses_conversations`, billing events/ledger — now lives
+# ONLY in that tenant's own SQLite-backed Durable Object
+# (`env.TENANT_DATA.idFromName(tenantId)`, `packages/storage` `TenantDataObject`).
+# The resolver's pure `DurableObjectTenantDatabaseRouter` is unconditional
+# (src/tenancy/resolver.ts); the `off` / `shared_development` routing modes and
+# the `legacyShared`/`BackendDispatching` fallback arm — the only readers of the
+# shared `DB` — are deleted, so nothing in `src/` reads `env.DB` any more.
+#
+# DEPLOY GATE (IRREVERSIBLE): before deploying, the control roster must show zero
+# tenants with `migration_state ∈ {shared, copying, verifying}` and every tenant
+# `storage_backend = 'durable_object'`; otherwise a not-yet-cut-over tenant's
+# data is dropped when the shared D1 goes away.
+#
+# The earlier Zero-D1 S5 (#881) already deleted the CONTROL_DB / BILLING_DB D1
+# stanzas; their readers resolve the singleton `CONTROL_DATA` Durable Object
+# facade.
+#
+# CONTROL-PLANE D1 (read-replica reader): the ONLY `[[d1_databases]]` stanza on
+# this Worker. It is the single global `ferrogate-control` D1 (Tokyo/APAC
+# primary) that `ferrogate-control-plane` writes. The gateway is a READ-ONLY
+# consumer: when `GATEWAY_CONTROL_STORAGE = "d1"`, `controlDataFrom` opens a
+# `withSession("first-unconstrained")` colo-local replica session (see
+# apps/gateway/src/control-data.ts). Dormant while posture stays
+# `durable_object`; present so the posture var can be flipped out-of-band
+# without a redeploy. NOT a tenant DB and NOT a routing table.
+[[d1_databases]]
+binding = "CONTROL_D1"
+database_name = "ferrogate-control"
+database_id = "4a2f6a84-5fff-4759-af1b-49caa21f4be2"
+migrations_dir = "../../sql/d1-ts/control"
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Queues — the billing report fan-out
+#
+# Read as `env.BILLING` by `meteringBindingsFromEnv` (src/metering/runtime.ts),
+# wrapped by `QueueBillingReportPublisher` (src/metering/publisher.ts). It is
+# the port of the Rust `BillingReporter::deliver_once` HTTP POST, and
+# `docs/legacy/inventory-data-billing.md` §2.5 names it directly: "**Cloudflare
+# Queues** is the natural fit (replace the DB-polled sweeper with a Queue
+# consumer + dead-letter queue)".
+#
+# PRODUCER ONLY. This Worker never consumes the queue — `[[queues.consumers]]`
+# belongs to whichever Worker settles wallets/invoices downstream, together
+# with its `dead_letter_queue`. Declaring a consumer here would make this
+# Worker deliver messages to itself.
+#
+# The body is `MeteringQueueMessage` (src/metering/ports.ts): `credits` travels
+# as a DECIMAL STRING because a Queue body is JSON/structured-clone encoded and
+# a `bigint` past 2^53 would round-trip as a wrong `Number`. `id` is the ledger
+# entry id, so a consumer that has already applied a message can drop the
+# redelivery — which is what makes Queues' at-least-once semantics safe for
+# money.
+#
+# What breaks without it: the publisher falls back to
+# `InMemoryBillingReportPublisher`, so a charge is still priced and still
+# persisted to `BILLING_DB`, but nothing downstream is ever told about it. The
+# outbox row is deleted on that in-isolate "delivery", so the report is lost —
+# hence this binding lands together with the D1 one, not after it.
+#
+# `queue` is a DOCUMENTED PLACEHOLDER; the deploy step substitutes the real
+# queue (`wrangler queues create …`). Queue names are lowercase alphanumerics
+# and hyphens.
+# ---------------------------------------------------------------------------
+[[queues.producers]]
+binding = "BILLING"
+queue = "ferrogate-billing-reports"
+
+# ---------------------------------------------------------------------------
+# Queues — the request-log fan-in  (#664)
+#
+# Read as `env.REQUEST_LOG` by `requestLogBindingsFromEnv`
+# (src/requestlog/sink.ts) and produced from `requestLogging()`
+# (src/requestlog/middleware.ts) on `ctx.waitUntil`, i.e. never in front of a
+# client byte.
+#
+# PRODUCER **AND** CONSUMER, which is the opposite of the `BILLING` stanza
+# above, and deliberately so. `BILLING` is producer-only because settling a
+# wallet is a different Worker's job; the only thing that has to happen to a
+# request-log message is an insert into the CONTROL database, and THIS Worker
+# already binds it (`CONTROL_DB` below). Routing it to a second Worker would
+# add a deploy unit and a second set of credentials to run one statement. A
+# Worker consuming a queue it produces is a supported topology — the delivery
+# is a separate invocation with its own `env`, not a re-entrant call.
+#
+# The body is `RequestLogWire` (src/requestlog/record.ts): a FLAT snake_case
+# record of primitives, because a Queue body is structured-clone encoded and a
+# nested shape is one more thing for both ends to disagree about. The D1 write
+# is an UPSERT on `request_id`, which is what makes Queues' at-least-once
+# redelivery safe here — a re-applied message rewrites the same row instead of
+# failing on the primary key.
+#
+# `max_batch_size` / `max_batch_timeout` are the point of using a queue at all:
+# a hundred decisions become ONE `db.batch()` instead of a hundred D1 round
+# trips. `dead_letter_queue` bounds how long a message that cannot be written
+# (a missing binding, a schema drift) can be retried before it is parked
+# somewhere an operator can see it, rather than looping forever.
+#
+# What breaks without it: nothing is lost — `RequestLogSink` falls back to
+# writing `CONTROL_DB` inline on `ctx.waitUntil`, through the same
+# `writeRequestLogs`. What is lost is the batching and the retry ladder, so a
+# brief D1 outage becomes a handful of missing rows instead of a redelivery.
+#
+# `queue` / `dead_letter_queue` are DOCUMENTED PLACEHOLDERS; the deploy step
+# substitutes the real queues (`wrangler queues create …`).
+# ---------------------------------------------------------------------------
+[[queues.producers]]
+binding = "REQUEST_LOG"
+queue = "ferrogate-request-logs"
+
+[[queues.consumers]]
+queue = "ferrogate-request-logs"
+max_batch_size = 100
+max_batch_timeout = 5
+max_retries = 5
+dead_letter_queue = "ferrogate-request-logs-dlq"
+
+# ---------------------------------------------------------------------------
+# Queues — the online-evaluation sample fan-in  (#692)
+#
+# Read as `env.ONLINE_EVAL` by `onlineEvalQueueFrom` (src/evals/sink.ts) and
+# produced from `onlineEvaluation()` (src/evals/middleware.ts) on
+# `ctx.waitUntil`, i.e. never in front of a client byte.
+#
+# PRODUCER **AND** CONSUMER, like `REQUEST_LOG` above and for the same reason:
+# everything the work needs — the model catalogue, the provider credentials and
+# `CONTROL_DB` — is already bound to THIS Worker, so a second deploy unit would
+# buy nothing but a second copy of the provider credentials.
+#
+# THE QUEUE IS WHAT KEEPS THE JUDGE OFF THE REQUEST PATH. A judge call is a
+# paid model inference of unbounded latency; running it inside the sampled
+# request's own `waitUntil` would hold that isolate (and charge its CPU) for
+# the length of a second inference. With this binding absent the sampler counts
+# its samples as dropped and evaluates nothing — deliberately, rather than
+# falling back to an inline judge.
+#
+# The body is `OnlineEvalSampleWire` (src/evals/record.ts), discriminated by
+# `object = "online_eval_sample"`. `src/index.ts::gatewayQueue` routes on that
+# field rather than on the queue NAME, because these names are placeholders the
+# deploy step substitutes.
+#
+# `max_batch_size` is 10, not 100: each message costs one judge inference, so a
+# batch is bounded by what one invocation can finish rather than by what one D1
+# `batch()` can write. `max_retries` is 2 for the same reason — a redelivery
+# re-judges, and the scores upsert on `(request_id, criterion_id)` so a
+# re-applied delivery corrects a row instead of doubling the sample.
+#
+# `queue` is a DOCUMENTED PLACEHOLDER; the deploy step substitutes the real
+# queues (`wrangler queues create …`).
+# ---------------------------------------------------------------------------
+[[queues.producers]]
+binding = "ONLINE_EVAL"
+queue = "ferrogate-online-eval"
+
+[[queues.consumers]]
+queue = "ferrogate-online-eval"
+max_batch_size = 10
+max_batch_timeout = 30
+max_retries = 2
+dead_letter_queue = "ferrogate-online-eval-dlq"
+
+# ---------------------------------------------------------------------------
+# Queues — tenant Durable Object schedule alarms (#856)
+#
+# TenantDataObject owns one native alarm per tenant and publishes only the
+# tenant wake-up envelope. The control-plane Worker consumes it, re-reads the
+# tenant-local schedule rows, and claims due slots in the object database.
+# ---------------------------------------------------------------------------
+[[queues.producers]]
+binding = "SCHEDULE_ALARMS"
+queue = "ferrogate-schedule-alarms"
+
+# ---------------------------------------------------------------------------
+# Queues — the batch-job executor  (#698, slices 2/3)
+#
+# Read as `env.BATCH_JOBS` by `batchJobQueueFrom` (src/batch/queue.ts). Produced
+# from `createBatch` on `ctx.waitUntil` and, for a job with work left, from the
+# consumer itself.
+#
+# PRODUCER **AND** CONSUMER, like `REQUEST_LOG` and `ONLINE_EVAL` above and for
+# the same reason: the model catalogue, the provider credentials, the tenant
+# databases and the R2 asset bucket are all already bound to THIS Worker, so a
+# second deploy unit would buy nothing but a second copy of the credentials.
+#
+# THE QUEUE IS THE THROUGHPUT LEG, NOT THE CORRECTNESS LEG. With this binding
+# absent `enqueueBatchJob` is a documented no-op and the 1-minute
+# `[triggers] crons` sweep (`sweepBatchExecution`) still advances every job — it
+# just advances one tick per minute per job instead of back-to-back. Nothing is
+# lost, which is why the producer never fails a `createBatch`.
+#
+# The body is `BatchJobWire` (src/batch/queue.ts), discriminated by
+# `object = "batch.job"`. `src/index.ts::gatewayQueue` routes on that field
+# rather than on the queue NAME, because these names are placeholders the deploy
+# step substitutes.
+#
+# `max_batch_size` is 1, and that is the point: one message is one batch job,
+# and a job tick can dispatch up to 25 paid provider calls. Batching ten of them
+# into one invocation would put 250 upstream calls behind a single Worker CPU
+# budget and lose all of them to one timeout. `max_batch_timeout` is 5 so a job
+# starts within seconds of creation. `max_retries` is 2 because the consumer
+# only ever arms a retry for a DURABLE-WRITE failure — a redelivery re-runs a
+# tick, and the `(batch_id, line_index)` results key makes that an overwrite
+# rather than a doubled bill, but it is still a paid re-dispatch of the tail of
+# one tick and must not loop.
+#
+# `queue` / `dead_letter_queue` are DOCUMENTED PLACEHOLDERS; the deploy step
+# substitutes the real queues (`wrangler queues create …`).
+# ---------------------------------------------------------------------------
+[[queues.producers]]
+binding = "BATCH_JOBS"
+queue = "ferrogate-batch-jobs"
+
+[[queues.consumers]]
+queue = "ferrogate-batch-jobs"
+max_batch_size = 1
+max_batch_timeout = 5
+max_retries = 2
+dead_letter_queue = "ferrogate-batch-jobs-dlq"
+
+# ---------------------------------------------------------------------------
+# Durable Objects — the rate-limit / quota counters
+#
+# One DO instance per counter key replaces the Rust `ClusterCounterBackend`
+# (Redis) RPM/TPM/token-budget/wallet sliding windows. Read as `env.RATE_LIMIT`
+# by `limiterForEnv` (src/ratelimit/middleware.ts); with NO binding the limiter
+# degrades to a per-isolate in-memory counter, which is not a correct
+# cross-isolate limiter — so this binding is what makes the limits real.
+#
+# `class_name` is resolved by workerd against the ENTRY MODULE (`main`, i.e.
+# `src/worker.ts`), NOT against the file that defines the class. `src/worker.ts`
+# therefore re-exports `RateLimiterDurableObject`; delete that line and the
+# Worker stops booting while every vitest test still passes.
+#
+# `exports.RateLimiterDurableObject.storage = "sqlite"` because the counter
+# uses the SQLite storage backend that `DurableObjectState.storage.sql` needs.
+# ---------------------------------------------------------------------------
+[[durable_objects.bindings]]
+name = "RATE_LIMIT"
+class_name = "RateLimiterDurableObject"
+
+# ---------------------------------------------------------------------------
+# Durable Objects — the provider circuit breaker
+#
+# One DO instance per PROVIDER NAME (`idFromName("provider:" + name)`) replaces
+# the Rust `Arc<HashMap<String, ProviderCircuitBreaker>>` on `AppState`. The
+# arithmetic is the same one that forced the counters onto a DO: a per-isolate
+# `Map` lets a wedged provider absorb `threshold · K` failures across `K` live
+# isolates before every one of them has opened.
+#
+# Provider names come from the operator's `GATEWAY_PROVIDERS` table, never from
+# a caller, so no request input can choose a DO id here. The object has no
+# `fetch()` surface — every method is RPC over this binding — so it is not
+# addressable from the internet.
+#
+# `class_name` is resolved by workerd against the ENTRY MODULE (`src/worker.ts`),
+# which re-exports `ProviderCircuitDurableObject`; delete that line and the
+# Worker stops booting while every vitest test still passes.
+#
+# Unbound, `providerCircuitFor` falls back to the per-isolate breaker and says
+# so; the breaker itself stays inert until `GATEWAY_RELIABILITY` is set.
+# ---------------------------------------------------------------------------
+[[durable_objects.bindings]]
+name = "PROVIDER_CIRCUIT"
+class_name = "ProviderCircuitDurableObject"
+
+# ---------------------------------------------------------------------------
+# SHADOW_BUDGET — the cross-isolate spend cap on shadow (mirror) traffic
+#
+# Read by `src/inference/shadow.ts::shadowBudgetFor`; the class is
+# `ShadowBudgetDurableObject` from `@ferrogate/routing/durable-objects`,
+# re-exported from `src/worker.ts` because workerd resolves `class_name`
+# against the ENTRY module (same startup rule, and the same vitest blind spot,
+# as the two classes above).
+#
+# WHY IT IS NOT OPTIONAL IN PRACTICE. Shadow mirroring spends real provider
+# money on traffic no client ever sees. The per-isolate fallback caps that
+# spend by a bounded factor (one budget per isolate rather than one globally),
+# which is deliberately not "no cap" but is also not the operator's configured
+# number. This is the only cross-isolate counter the platform offers.
+#
+# ---------------------------------------------------------------------------
+[[durable_objects.bindings]]
+name = "SHADOW_BUDGET"
+class_name = "ShadowBudgetDurableObject"
+
+# ---------------------------------------------------------------------------
+# TENANT_DATA — one SQLite-backed Durable Object per tenant, which IS that
+# tenant's database (#822, docs/design/per-tenant-durable-object-storage-2026-08.md)
+#
+# Read by `src/tenancy/tenant-data.ts` as
+# `env.TENANT_DATA.idFromName(tenantId)`; the class is `TenantDataObject` from
+# `@ferrogate/storage/durable-objects`, re-exported from `src/worker.ts` because
+# workerd resolves `class_name` against the ENTRY module (same startup rule, and
+# the same vitest blind spot, as the three classes above).
+#
+# WHY THIS REPLACES ONE D1 DATABASE PER TENANT. D1 bindings resolve at DEPLOY
+# time, so `native_binding` makes tenant signup a `wrangler deploy` and caps the
+# product at the ~5,000-bindings-per-script ceiling; the REST escape hatch has no
+# transaction envelope, so it reports `supportsAtomicBatch: false` and
+# `requireAtomicBatch()` refuses all 13 money paths. `idFromName` addresses an
+# object at RUNTIME — unlimited instances, no deploy, 10 GB each — and
+# `ctx.storage.transactionSync()` is a real SQLite transaction that rolls back on
+# throw, which is what restores the wallet reserve, the workflow-budget debit and
+# the asset quota admission.
+#
+# `exports.TenantDataObject.storage = "sqlite"` is not a style choice. The
+# storage backend is IMMUTABLE once a namespace exists (`storage_type_mismatch`);
+# switching later requires a `deleted` tombstone and total data loss, per
+# tenant. This declaration is also the current lifecycle source of truth for
+# the class, replacing the legacy `[[migrations]]` history. An app that later
+# wants tenant storage binds it cross-script with `script_name =
+# "ferrogate-gateway"` and adds neither an `exports` stanza nor a
+# `src/worker.ts` re-export, exactly as `apps/mcp` does for RATE_LIMIT.
+#
+# Unbound, `tenantDataNamespace()` raises a 503
+# `tenant_database_routing_misconfigured`. It never falls back to `env.DB`:
+# every unresolvable tenant is an error, and there is deliberately no default
+# database anywhere in this directory.
+# ---------------------------------------------------------------------------
+[[durable_objects.bindings]]
+name = "TENANT_DATA"
+class_name = "TenantDataObject"
+
+# ---------------------------------------------------------------------------
+# ControlDataObject — the control database as ONE SQLite-backed Durable Object
+# (Zero-D1 S1, #877, docs/design/zero-d1-control-object-2026-08.md).
+#
+# A SINGLETON: everything addresses `idFromName("control")` and the object
+# refuses any other address. It is the future home of everything
+# `CONTROL_DB`/`BILLING_DB` hold today; the D1 stanzas remain until slice S5
+# completes the backfill and cutover.
+#
+# S1 ships the CLASS — the `src/worker.ts` re-export and the
+# `[exports.ControlDataObject]` lifecycle declaration below, so the class is
+# BORN with `storage = "sqlite"` (immutable once a namespace exists;
+# converting later is a tombstone and total data loss). There is deliberately
+# S2 lands the first gateway read and this binding in the same diff. The other
+# Workers then bind it cross-script (`script_name = "ferrogate-gateway"`) in
+# S3/S4, exactly as `apps/mcp` does for RATE_LIMIT.
+# ---------------------------------------------------------------------------
+[[durable_objects.bindings]]
+name = "CONTROL_DATA"
+class_name = "ControlDataObject"
+
+
+# `exports` is mutually exclusive with the legacy `migrations` array. Keep all
+# five classes defined by this Worker in one declarative lifecycle map so a
+# deploy cannot accidentally leave one class on the old path.
+[exports.RateLimiterDurableObject]
+type = "durable-object"
+storage = "sqlite"
+
+[exports.ProviderCircuitDurableObject]
+type = "durable-object"
+storage = "sqlite"
+
+[exports.ShadowBudgetDurableObject]
+type = "durable-object"
+storage = "sqlite"
+
+[exports.TenantDataObject]
+type = "durable-object"
+storage = "sqlite"
+
+[exports.ControlDataObject]
+type = "durable-object"
+storage = "sqlite"
+
+# ---------------------------------------------------------------------------
+# TELEMETRY_COLLECTOR — the OTLP egress to `apps/telemetry`
+#
+# Read by `src/telemetry/emit.ts` (`telemetryFromEnv`), which is mounted twice:
+# app-wide in `GATEWAY_MIDDLEWARE` (all 31 operations) and inside
+# `src/inference/route-module.ts` (the six inference operations). The emitter
+# de-duplicates on the inbound `Request` object, so a request that passes
+# through both emits exactly once.
+#
+# A service binding rather than an HTTPS hop: no DNS/TLS handshake, never
+# leaves the colo, and the bearer token never crosses a public network.
+#
+# THE CREDENTIAL IS A SECRET AND IS NOT IN THIS FILE:
+#
+#     bunx wrangler secret put TELEMETRY_TOKEN   # == apps/telemetry COLLECTOR_TOKEN
+#
+# Without it `telemetryFromEnv` returns `NO_TELEMETRY` and every emit is a
+# no-op — the collector answers 401 to an unauthenticated ingest, so emitting
+# anyway would be a guaranteed round trip to a rejection on every request. That
+# is also why `wrangler dev --local` and the E2E harness emit nothing: they
+# have no secret, so nothing is ever sent anywhere.
+#
+# `TELEMETRY_ENDPOINT` in `[vars]` is the alternative transport (a collector on
+# another account, or `wrangler dev` against a locally-running apps/telemetry);
+# it is used only when this binding is absent.
+# ---------------------------------------------------------------------------
+[[services]]
+binding = "TELEMETRY_COLLECTOR"
+service = "ferrogate-telemetry"
+
+# ---------------------------------------------------------------------------
+# [ai] — Workers AI (issue #673)
+#
+# TWO readers, and both were written before this stanza existed, which is why
+# it lands now rather than earlier:
+#
+#   1. `src/inference/workers-ai.ts` — the transport for the `workers-ai`
+#      provider family. A `[[providers]]` row with `kind = "workers-ai"` is
+#      dispatched through `env.AI.run(...)`, so chat and embeddings on a
+#      Cloudflare-hosted model never leave the platform and pay no egress. With
+#      this stanza deleted the family fails CLOSED — `502
+#      provider_dispatch_error: workers-ai provider '<name>' requires the AI
+#      binding` — rather than silently egressing to `api.cloudflare.com` with no
+#      credential.
+#   2. `src/guardrails/config.ts:149` reads `env.AI` for the Llama-Guard
+#      detector (`@ferrogate/guardrails`' `workersAiBindingClient`). That reader
+#      has existed since the guardrail slice and the binding it needed was never
+#      declared, so the detector has been silently taking its REST fallback (or
+#      disabling itself) on every deploy. Declaring `AI` closes that too — it is
+#      the PORT-TODO named in the NOT-DECLARED block below.
+#
+# No account resource and no placeholder: unlike `database_id` / `bucket_name`,
+# `[ai]` names nothing account-specific and deploys exactly as written.
+#
+# THE INFERENCE IS NOT EXERCISABLE OFFLINE, but the BINDING loads offline. Both
+# `wrangler dev --local` and `@cloudflare/vitest-pool-workers` bind `env.AI` to a
+# real `Ai` object that throws `Binding AI needs to be run remotely` the moment
+# anything calls `.run()` — measured on wrangler 4.116, 2026-08-02, with no
+# credentials in the environment. Nothing egresses and nothing is charged. So
+# `test/inference/workers-ai.test.ts` installs a recording double over `env.AI`
+# and drives the deployed Worker through `SELF.fetch`: that proves the WIRING
+# (dispatcher selection, request shaping, response/stream translation, usage
+# extraction), and it cannot prove Workers AI's own wire behaviour, which needs
+# a real account.
+#
+# NO `remote` KEY, DELIBERATELY, AND DO NOT ADD ONE (#673 regression, #666
+# framing). This file is loaded by `wrangler dev`, by `wrangler deploy` and by
+# this app's `vitest.config.ts`, and wrangler's `warnOrError` branches on that
+# one key:
+#
+#   remote = false -> UserError, thrown before the Worker starts:
+#                     "AI bindings do not support local development." That is a
+#                     REFUSAL TO BOOT, not a downgrade: `wrangler dev --local`
+#                     never reaches "Ready on", which takes out the gateway leg
+#                     of `scripts/wave25-boot-proof.sh` and the Playwright
+#                     webServer in `e2e/playwright.config.ts` with it.
+#   remote = true  -> a proxy session against the live Cloudflare API, which
+#                     needs a `CLOUDFLARE_API_TOKEN` that this repo's offline
+#                     gates do not have and must not need.
+#   (absent)       -> a warning ("AI bindings always access remote resources"),
+#                     `env.AI ... not supported` in the binding table, and the
+#                     Worker BOOTS. This is the only value that lets the
+#                     committed config be the config every runner loads.
+#
+# WHAT FAILS IF THIS STANZA GOES MISSING — not a comment asking someone to
+# remember it, which is the thing #666 ruled out:
+#
+#   * `test/env-var-drift.test.ts` "declares the [ai] binding the Workers AI
+#     code paths read" reads this file's committed text and goes red.
+#   * `test/inference/workers-ai.test.ts` "the committed [ai] stanza is the one
+#     the pool actually loaded" goes red, because the pool boots from THIS file
+#     and `env.AI` would no longer exist in it.
+#
+# And because the pool boots from THIS file, adding `remote = false` back cannot
+# be committed quietly either: the gateway suite then dies at pool startup with
+# the same UserError, 0 tests collected, before any assertion runs.
+#
+# Both run in `bun run test`, i.e. in the release CI (.github/workflows/ci.yml)
+# that every deploy goes through. The resolved upload manifest can also be read
+# back directly, without touching the account:
+#
+#   bunx wrangler deploy --dry-run   # "Your Worker has access to…" lists env.AI
+# ---------------------------------------------------------------------------
+[ai]
+binding = "AI"
+
+# ---------------------------------------------------------------------------
+# BILLING ANALYTICS (#956) — the CROSS-TENANT fleet view.
+#
+# Settlement dual-writes one data point per priced event here (offer price,
+# final post-multiplier price, tokens, and the tenant/key/model/provider/group
+# dimensions). The authoritative per-transaction cost stays in the tenant's own
+# object (`billing_events`); this is the SAMPLED, bounded-retention analytics
+# mirror the control plane queries with ONE cross-tenant SQL aggregate, with no
+# tenant-private data copied into the control database and no O(N) object
+# fan-out. Absent binding ⇒ the dual-write is skipped (see `billing-analytics.ts`).
+#
+# `dataset` is a PLACEHOLDER; the deploy step substitutes the account's dataset
+# name. Like all Analytics Engine datasets it is created on first write — nothing
+# to pre-provision — but Analytics Engine must be enabled on the account.
+# ---------------------------------------------------------------------------
+[[analytics_engine_datasets]]
+binding = "BILLING_ANALYTICS"
+dataset = "ferrogate_billing"
+
+# ---------------------------------------------------------------------------
+# Cron — the billing-outbox recovery sweep
+#
+# Handled by `scheduled` on the default export of `src/worker.ts`, which calls
+# `MeteringUsageSink.sweep` (src/metering/sink.ts).
+#
+# WHY A CRON EXISTS AT ALL. A Worker has no background thread, so the Rust
+# `sweep_billing_outbox_once` loop has no direct equivalent. The request path's
+# `meteringDrain` + `ctx.waitUntil` is the primary delivery path and it retries
+# from the in-isolate outbox — but an isolate EVICTED between the D1 ledger
+# commit and the Queue publish takes that buffer with it. The charge is on the
+# tenant's ledger, nothing downstream was ever told, and the only surviving
+# record is the `billing_report_outbox` row committed in the same `batch()`
+# (#150). This trigger is what reads that row back.
+#
+# Every minute is deliberate: `OUTBOX_SWEEP_GRACE_SECONDS` (60s) means the sweep
+# ignores rows still owned by their own request's `waitUntil`, so the effective
+# recovery latency is 1-2 minutes and a healthy gateway's sweep finds an empty
+# due set and does one indexed `SELECT` (`idx_billing_report_outbox_due`).
+#
+# NOT a placeholder — unlike `database_id` / `queue`, a cron expression is not
+# account-specific and deploys as written.
+# ---------------------------------------------------------------------------
+[triggers]
+crons = ["* * * * *"]
+
+# ===========================================================================
+# NOT DECLARED — and why
+#
+# Wave 5 introduced `[[d1_databases]] DB` and the `RATE_LIMIT` Durable Object
+# above; the metering slice added `[[d1_databases]] BILLING_DB` and
+# `[[queues.producers]] BILLING`, each together with the code that reads it. The
+# rule is unchanged: a binding lands in the same commit as its first reader,
+# never before.
+#
+# `[[services]]` is no longer undeclared: `TELEMETRY_COLLECTOR` above names
+# `apps/telemetry`, which HAS been a deployed Worker with a complete OTLP
+# receiver since wave 4 — the condition the old note deferred on ("it names
+# another deployed Worker, and an unimplemented target turns every call into a
+# runtime error"). The target exists, and `src/telemetry/emit.ts` swallows every
+# transport failure on `ctx.waitUntil`, so even a missing collector cannot reach
+# a client.
+#
+# Each remaining entry is introduced by the slice that first reads it:
+#
+#   [[kv_namespaces]]  binding = "CACHE", id = <deploy-time placeholder>
+#       resolved-config and key-lookup cache (Rust `resolved_provider_secrets`,
+#       `response_cache`). The api-key resolution cache is currently an
+#       isolate-local map (`src/keys/cache.ts`), not KV.
+#       PORT-TODO(inventory-request-path §1.7).
+#   [[durable_objects.bindings]]  SESSION
+#       streaming-session state. `RATE_LIMIT` landed in wave 5; `SESSION` has no
+#       reader yet. PORT-TODO(inventory-request-path §1.7).
+#   AI Gateway (`cf-aig-*` routing through a named gateway id)
+#       still undeclared and still unmounted — see the header of
+#       `packages/providers/src/registry.ts`. `[ai]` itself is now DECLARED
+#       above (issue #673), which closes the "Workers AI Llama Guard" half of
+#       the old PORT-TODO; the AI-GATEWAY half is a different product surface
+#       and is unchanged.
+#   [[analytics_engine_datasets]]  binding = "TELEMETRY"
+#       the durable sink behind `AssetAuditSink` / request logs. Today
+#       `InMemoryAssetAuditSink` keeps a bounded 1000-event ring per isolate,
+#       so audit evidence does not survive eviction.
+#       PORT-TODO(inventory-request-path §1.6); see also `apps/telemetry`.
+#   secrets (Secrets Store, deploy-time binding)
+#       provider API keys, and the R2 **S3** credentials `SigV4Presigner` needs
+#       (`endpoint` / `bucket` / `region` / `accessKeyId` / `secretAccessKey`,
+#       src/assets/sigv4.ts). The `R2Bucket` binding above cannot presign —
+#       presigned URLs are an S3-API feature over
+#       `https://<account_id>.r2.cloudflarestorage.com` — so the presign family
+#       stays `503 asset_bucket_unavailable` until these are bound.
+# ===========================================================================
+# --- Workers Observability ---------------------------------------------------
+# Owner directive (2026-08-02): enable Workers Observability on the whole fleet
+# so production behaviour can be read back from the CLI (`wrangler tail`) and the
+# Workers Logs query API, instead of being inferred from responses.
+#
+# THREE INDEPENDENT SWITCHES, exactly as `apps/telemetry/wrangler.toml` documents:
+# `enabled` alone does NOT turn on tracing — the traces sub-table is its own
+# opt-in, and omitting it leaves this Worker's spans unrecorded.
+#
+# `invocation_logs` is ON here, unlike the telemetry ingest Worker: the automatic
+# one-per-request event is what makes a request greppable at all when debugging,
+# which is the whole point of the directive. It roughly DOUBLES billable log
+# events, so lower `head_sampling_rate` on a high-QPS deployment rather than
+# turning this back off — a sampled invocation log still lets you find a request,
+# a missing one does not.
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+[observability.logs]
+enabled = true
+invocation_logs = true
+
+[observability.traces]
+enabled = true

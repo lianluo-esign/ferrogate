@@ -195,6 +195,66 @@ describe("MOUNT: the lifecycle actions reach the credential, not just the docume
   });
 });
 
+describe("MOUNT: updateVirtualKey re-binds the billing group AND re-projects it", () => {
+  /** `POST /admin/v1/billing-groups` as the operator — the multiplier source. */
+  async function createGroup(id: string, multiplier: number): Promise<void> {
+    const res = await SELF.fetch(
+      `${BASE}/admin/v1/billing-groups`,
+      jsonRequest(OPERATOR, "POST", { id, name: id, multiplier }),
+    );
+    expect(res.status).toBe(201);
+  }
+
+  it("PATCH billing_group_id lands in the TENANT api_keys row, not just the document", async () => {
+    await createGroup("bg_two", 2);
+    const key = await mint("vk1");
+    // A freshly minted key with no group projects a null binding (multiplier 1.0).
+    expect((await tenantKeyRow(key.id))?.billing_group_id ?? null).toBeNull();
+
+    const patched = await SELF.fetch(
+      `${BASE}/admin/v1/virtual-keys/${key.id}`,
+      jsonRequest(OPERATOR, "PATCH", {
+        billing_group_id: "bg_two",
+        attribution_tags: { channel_group: "VIP" },
+      }),
+    );
+    expect(patched.status).toBe(200);
+
+    // The CRUX: the gateway reads the multiplier from api_keys.billing_group_id,
+    // so a merge that skipped re-projection would leave the old (null) binding
+    // and the gateway charging ×1 despite the console showing the new group.
+    expect((await tenantKeyRow(key.id))?.billing_group_id).toBe("bg_two");
+    // The edit does not disturb the credential itself.
+    expect(await presentedStatus(key.secret)).toBe(200);
+
+    // null CLEARS the binding, and that clear is re-projected too.
+    const cleared = await SELF.fetch(
+      `${BASE}/admin/v1/virtual-keys/${key.id}`,
+      jsonRequest(OPERATOR, "PATCH", { billing_group_id: null }),
+    );
+    expect(cleared.status).toBe(200);
+    expect((await tenantKeyRow(key.id))?.billing_group_id ?? null).toBeNull();
+  });
+
+  it("PATCH to an unknown billing group is a 400, and changes nothing", async () => {
+    const key = await mint("vk1");
+    const res = await SELF.fetch(
+      `${BASE}/admin/v1/virtual-keys/${key.id}`,
+      jsonRequest(OPERATOR, "PATCH", { billing_group_id: "bg_nope" }),
+    );
+    expect(res.status).toBe(400);
+    expect((await tenantKeyRow(key.id))?.billing_group_id ?? null).toBeNull();
+  });
+
+  it("PATCH on a missing key is a 404", async () => {
+    const res = await SELF.fetch(
+      `${BASE}/admin/v1/virtual-keys/does-not-exist`,
+      jsonRequest(OPERATOR, "PATCH", { attribution_tags: { channel_group: "x" } }),
+    );
+    expect(res.status).toBe(404);
+  });
+});
+
 describe("rotation retires the OLD secret", () => {
   it("the previous secret stops working and the new one starts", async () => {
     const key = await mint("vk1");

@@ -951,12 +951,10 @@ function decodeTenantMigrationState(value: unknown): PersistedTenantMigrationSta
  * future trigger body:
  *
  *  * **Comment stripping must come first.** `0001_init_tenant.sql` has 18
- *    comment lines containing a `;` mid-prose, and the TWENTY-THREE files have
- *    38 between them (18 in 0001, 1 in 0003, 5 in 0005, 3 in 0008, 2 in 0009,
- *    1 in 0011, 1 in 0012, 1 in 0013, 1 in 0015, 1 in 0016, 1 in 0017,
- *    1 in 0018, 1 in 0021 and 1 in 0023) — 38, not 18,
- *    is the number that bounds this function's exposure. Splitting before
- *    stripping cuts statements in half at every one of them.
+ *    comment lines containing a `;` mid-prose, and the twenty-nine files have
+ *    45 between them. The test below pins the per-file breakdown; 45 is the
+ *    number that bounds this function's exposure. Splitting before stripping
+ *    cuts statements in half at every one of them.
  *
  *    These numbers are a MEASUREMENT and they have gone stale before: the
  *    census was not always re-run when a migration landed. `test/do/tenant-
@@ -1051,7 +1049,7 @@ export class TenantDataObject extends DurableObject {
     // `blockConcurrencyWhile` is the lock, and it is the whole reason a request
     // cannot observe a half-migrated database: no RPC is delivered until this
     // settles. An EVICTED instance re-runs it on the next wake, so the version
-    // gate inside `#migrate` is what keeps that from re-applying 431 statements
+    // gate inside `#migrate` is what keeps that from re-applying 441 statements
     // on every cold start of every tenant.
     ctx.blockConcurrencyWhile(async () => {
       this.#tenantId = (await ctx.storage.get<string>(TENANT_ID_KEY)) ?? null;
@@ -2087,15 +2085,15 @@ export class TenantDataObject extends DurableObject {
    * The version gate is the first thing that happens, because this runs on every
    * cold start of every tenant object: an already-current tenant pays one
    * `sqlite_master` probe and one `MAX(version)` read and returns, instead of
-   * re-running the 431 statements of the twenty-three files — 74 `CREATE TABLE IF
-   * NOT EXISTS`, 94 `CREATE INDEX`, 6 `CREATE UNIQUE INDEX`, 21 `ALTER TABLE … ADD
+   * re-running the 447 statements of the thirty files — 80 `CREATE TABLE IF
+   * NOT EXISTS`, 101 `CREATE INDEX`, 6 `CREATE UNIQUE INDEX`, 24 `ALTER TABLE … ADD
    * COLUMN`, 6 ledger `INSERT` statements, 229 `CREATE TRIGGER` and one
    * `DROP TABLE`. (Counted,
    * not estimated — and counted by a
    * TEST since #831's review: an earlier draft said "26 `CREATE INDEX`", and the
    * whole census then went stale again the moment `0013_guardrail_evaluations.sql`
-   * landed. `test/do/tenant-data-object.test.ts` re-derives these five numbers
-   * from `sql/d1-ts/tenant/` and asserts them. The twenty-one ALTERs are the half that
+   * landed. `test/do/tenant-data-object.test.ts` re-derives these numbers
+   * from `sql/d1-ts/tenant/` and asserts them. The twenty-four ALTERs are the half that
    * matters — the CREATEs are idempotent by construction and the ALTERs are not,
    * so the gate is load-bearing rather than an optimisation.)
    */
@@ -2110,7 +2108,7 @@ export class TenantDataObject extends DurableObject {
         // ONE transaction per FILE: the file's DDL and the ledger row that
         // records it commit or roll back together. That is strictly stronger
         // than what `wrangler d1 migrations apply` gives a D1 tenant, and it is
-        // what makes the four ALTER-only migrations safe to gate on the version
+        // what makes ALTER-bearing migrations safe to gate on the version
         // number alone — SQLite has no `ADD COLUMN IF NOT EXISTS`, so a second
         // apply throws `duplicate column name`, and the only way that can
         // happen here is a ledger row that committed without its DDL, which

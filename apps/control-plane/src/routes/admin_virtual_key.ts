@@ -1,10 +1,11 @@
 /**
- * Contract group `admin_virtual_key` (8 operations) — the tenant-minted
+ * Contract group `admin_virtual_key` (9 operations) — the tenant-minted
  * credential family and its full lifecycle.
  *
  * ```
  *   GET/POST  /admin/v1/virtual-keys
  *   GET       /admin/v1/virtual-keys/{key_id}
+ *   PATCH     /admin/v1/virtual-keys/{key_id}            updateVirtualKey
  *   DELETE    /admin/v1/virtual-keys/{key_id}            revokeVirtualKey
  *   POST      /admin/v1/virtual-keys/{key_id}/enable
  *   POST      /admin/v1/virtual-keys/{key_id}/disable
@@ -84,6 +85,22 @@ const VIRTUAL_KEY_SPEC: CollectionSpec = {
   object: "virtual_key",
   body: virtualKeySchema,
 };
+
+/**
+ * `PATCH /admin/v1/virtual-keys/{key_id}` body — the ONLY fields the console
+ * re-binds after mint: the platform billing group (#943, the multiplier source
+ * the gateway reads from `api_keys.billing_group_id`) and the display-only
+ * attribution tags (the free-form `channel_group` label the console renders).
+ *
+ * Everything else about a live key — its secret, scopes, lifecycle bits — is
+ * immutable through this route: re-scoping mints a new key, lifecycle has its
+ * own action verbs. `billing_group_id: null` CLEARS the binding (multiplier
+ * 1.0); an absent key leaves it untouched.
+ */
+const virtualKeyUpdateSchema = z.object({
+  billing_group_id: z.string().trim().min(1).nullish(),
+  attribution_tags: z.record(z.string().trim().min(1)).nullish(),
+});
 
 /** Rust `api_key.rs`: `fg_<hex>`, stored as hash + 16-char prefix + last4. */
 export const VIRTUAL_KEY_PREFIX = "fg_";
@@ -243,6 +260,41 @@ export const adminVirtualKeyRoutes: GroupModule = crudGroup(
       apply: (_record, _body, now) => ({ enabled: false, revoked: true, revoked_at: now }),
       after: (c, record) => projectCredential(c, record, "tighten"),
     }),
+
+    /**
+     * `PATCH /admin/v1/virtual-keys/{key_id}` — re-bind a live key's billing
+     * group (and/or its display tags) WITHOUT rotating the secret. This is the
+     * write behind the console's "编辑分组" action.
+     *
+     * The binding that matters is `api_keys.billing_group_id` in the tenant
+     * database — that is where the gateway reads the settlement multiplier, NOT
+     * the control document. So a merge alone is not enough: after committing the
+     * document we MUST re-project (`loosen`) so the durable twin reflects the new
+     * group. A merge that skipped projection would change the console's display
+     * but leave the gateway charging the old multiplier.
+     */
+    updateVirtualKey: async (c) => {
+      const deps = c.get("deps");
+      const scope = scopeOf(c);
+      const keyId = pathParam(c, "key_id");
+      const body = await readJson(c, virtualKeyUpdateSchema);
+      await validateBillingGroup(c, body);
+      const patch: Record<string, unknown> = {};
+      // `!== undefined` keeps the "absent = leave untouched" vs "null = clear"
+      // distinction the schema encodes; an empty patch is a client error.
+      if (body.billing_group_id !== undefined) patch.billing_group_id = body.billing_group_id;
+      if (body.attribution_tags !== undefined) patch.attribution_tags = body.attribution_tags;
+      if (Object.keys(patch).length === 0) {
+        throw new HttpError(400, "invalid_request_body", "no updatable fields provided");
+      }
+      const stored = await deps.store.merge(VIRTUAL_KEYS, scope, keyId, patch);
+      if (stored === null) throw new HttpError(404, "not_found", `virtual key ${keyId} not found`);
+      // LOOSEN: re-project so the tenant-DB `api_keys.billing_group_id` (the
+      // gateway's multiplier source) reflects the new binding. Not a lifecycle
+      // change, so there is no tighten leg to sequence first.
+      await projectCredential(c, stored, "loosen");
+      return json(c, 200, adminItem("virtual_key", stored));
+    },
 
     /**
      * `DELETE /admin/v1/virtual-keys/{key_id}` — Rust names this

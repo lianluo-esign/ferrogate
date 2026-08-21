@@ -80,11 +80,12 @@ export function auditTenantFence(scope: CallerScope): { sql: string; params: str
  * replaces a client-side scan of the WHOLE table. `%` and `_` in the needle are escaped so a literal
  * underscore (ubiquitous in ids) is not a wildcard.
  */
-function auditSearchPredicate(
-  search: string | null,
-): { sql: string; params: string[] } | null {
+function auditSearchPredicate(search: string | null): { sql: string; params: string[] } | null {
   if (search === null || search.trim() === "") return null;
-  const needle = `%${search.trim().replace(/[\\%_]/g, (ch) => `\\${ch}`).toLowerCase()}%`;
+  const needle = `%${search
+    .trim()
+    .replace(/[\\%_]/g, (ch) => `\\${ch}`)
+    .toLowerCase()}%`;
   return {
     sql:
       `(lower(${AUDIT_TABLE}.audit_json) LIKE ? ESCAPE '\\'` +

@@ -76,6 +76,8 @@ const PLATFORM_SHARED_KINDS = [
   "d1_tenant_database",
   "guardrail-policies",
   "guardrail-policy-revisions",
+  "support-chat-conversations",
+  "support-chat-presence",
 ] as const;
 
 const DERIVED_KINDS = [

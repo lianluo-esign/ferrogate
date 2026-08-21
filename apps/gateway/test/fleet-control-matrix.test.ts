@@ -1074,11 +1074,12 @@ const CONTROLS: readonly FleetControl[] = [
      * it belongs to this control, not beside it.
      */
     id: "billing-group-multiplier",
-    title: "the platform billing-group cost multipliers",
+    title: "the platform billing-group routing and cost multipliers",
     required: "self",
     enforcement: /PlatformBillingGroupStore|platformBillingGroupSourceFromControlData/,
     authorityTables: [
       "platform_billing_groups",
+      "platform_billing_group_providers",
       "platform_billing_group_revisions",
       "shared_billing_groups",
     ],

@@ -41,6 +41,7 @@ async function createGroup(id: string, multiplier: number): Promise<void> {
 
 interface MirrorRow {
   id: string;
+  provider_type_id: string | null;
   multiplier: number;
   enabled: number;
   provider_ids_json: string;
@@ -51,7 +52,7 @@ interface MirrorRow {
 async function mirror(tenantId: string): Promise<readonly MirrorRow[]> {
   const rows = await tenantObjectDb(tenantId)
     .prepare(
-      "SELECT id, multiplier, enabled, provider_ids_json, config_revision " +
+      "SELECT id, provider_type_id, multiplier, enabled, provider_ids_json, config_revision " +
         "FROM shared_billing_groups ORDER BY id ASC",
     )
     .all<MirrorRow>();
@@ -103,6 +104,7 @@ describe("shared-config async channel", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({
       id: "grp-standard",
+      provider_type_id: "openai",
       multiplier: 1.5,
       enabled: 1,
       provider_ids_json: "[]",

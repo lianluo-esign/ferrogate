@@ -51,13 +51,14 @@ async function auditActions(): Promise<readonly string[]> {
   return actions;
 }
 
-async function seedProvider(id: string): Promise<void> {
+async function seedProvider(id: string, providerTypeId = "openai"): Promise<void> {
   await db()
     .prepare(
-      `INSERT INTO platform_provider_channels (id, name, kind, base_url, enabled, created_at_unix, updated_at_unix)
-       VALUES (?, ?, 'openai-compatible', ?, 1, unixepoch(), unixepoch())`,
+      `INSERT INTO platform_provider_channels
+         (id, name, provider_type_id, kind, base_url, enabled, created_at_unix, updated_at_unix)
+       VALUES (?, ?, ?, 'openai-compatible', ?, 1, unixepoch(), unixepoch())`,
     )
-    .bind(id, id, `https://${id}.example.test/v1`)
+    .bind(id, id, providerTypeId, `https://${id}.example.test/v1`)
     .run();
 }
 
@@ -77,6 +78,7 @@ describe("PlatformBillingGroupStore", () => {
     ]);
     await seedProvider("prov-anthropic");
     await seedProvider("prov-openai");
+    await seedProvider("prov-claude", "anthropic");
   });
 
   it("round-trips a group, its multiplier and a provider binding, bumping revision + audit each write", async () => {
@@ -90,6 +92,7 @@ describe("PlatformBillingGroupStore", () => {
       enabled: true,
     });
     expect(created.multiplier).toBe(1.5);
+    expect(created.provider_type_id).toBe("openai");
     expect(created.provider_ids).toEqual([]);
     expect(created.scope).toBe("platform");
     expect(await revision()).toBe(1);
@@ -192,6 +195,21 @@ describe("PlatformBillingGroupStore", () => {
 
     await s.createGroup(OPERATOR, { id: "g", name: "G", multiplier: 1.0 });
     await expect(s.bindProvider(OPERATOR, "g", "does-not-exist")).rejects.toThrow(/not found/);
+  });
+
+  it("rejects binding a provider from a different global provider type", async () => {
+    const s = store();
+    await s.createGroup(OPERATOR, {
+      id: "openai-group",
+      name: "OpenAI",
+      provider_type_id: "openai",
+      multiplier: 1,
+    });
+
+    await expect(s.bindProvider(OPERATOR, "openai-group", "prov-claude")).rejects.toThrow(
+      /does not match billing group type openai/,
+    );
+    expect((await s.getGroup("openai-group"))?.provider_ids).toEqual([]);
   });
 
   it("enforces a unique group name", async () => {

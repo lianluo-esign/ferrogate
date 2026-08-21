@@ -171,6 +171,8 @@ export interface CloudflareAiGatewayRoute {
 export interface PhysicalRoute {
   /** The name the caller asked for (`ModelRoute` is keyed by it). */
   readonly logicalModel: string;
+  /** Stable provider row id used by billing-group routing policy. */
+  readonly providerId?: string | undefined;
   /** Configured provider name (`ProviderConfig.name`). */
   readonly provider: string;
   /** Provider-side model id sent on the wire (`ModelRoute.provider_model`). */
@@ -1436,4 +1438,23 @@ export interface PlatformBillingGroupSource {
     groupId: string | undefined,
     tenantId?: string | undefined,
   ): Promise<number>;
+
+  /**
+   * Resolve the provider rows a group may route through. Unlike the multiplier
+   * lookup, routing fails closed: `null` means the group is absent, disabled,
+   * malformed, or currently unreadable, and therefore exposes no models.
+   *
+   * Optional only for compatibility with narrow test/injected multiplier
+   * sources. The production source always implements it.
+   */
+  routingForGroup?(
+    env: InferenceBindings,
+    groupId: string | undefined,
+    tenantId?: string | undefined,
+  ): Promise<BillingGroupRouting | null>;
+}
+
+/** The authoritative group -> provider edge set used by the data plane. */
+export interface BillingGroupRouting {
+  readonly providerIds: readonly string[];
 }

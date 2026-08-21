@@ -156,7 +156,7 @@ describe("OPENAPI_OPERATION_COUNT is checked against the committed contract", ()
 
 describe("wireSchemas registry", () => {
   test("exposes the OpenAPI operation count", () => {
-    expect(OPENAPI_OPERATION_COUNT).toBe(329);
+    expect(OPENAPI_OPERATION_COUNT).toBe(337);
   });
 
   test("resolves the seeded cross-plane + ferrogate-core schemas by name", () => {
@@ -349,6 +349,14 @@ describe("PORT-TODO STATE PIN — the registry seeds only cross-plane shapes", (
     // at the config-ops route, not a cross-plane wire shape, so `seeded` is
     // unchanged and the shortfall moves 318 -> 319 purely because the operation
     // count moved 328 -> 329.
-    expect(OPENAPI_OPERATION_COUNT - seeded).toBe(319);
+    //
+    // `PATCH /admin/v1/virtual-keys/{key_id}` (`updateVirtualKey`, the console's
+    // edit-group write) seeds no cross-plane wire schema either — its request is
+    // inline Zod and its response is the admin `virtual_key` envelope described
+    // in the OpenAPI — so `seeded` is unchanged and the shortfall moves
+    // 319 -> 320 purely because the operation count moved 329 -> 330.
+    // `testProviderConnectivity` is an operator-only action with an inline
+    // request/response envelope, so it adds one operation and no wire schema.
+    expect(OPENAPI_OPERATION_COUNT - seeded).toBe(327);
   });
 });

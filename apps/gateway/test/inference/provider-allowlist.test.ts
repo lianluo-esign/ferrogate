@@ -129,6 +129,13 @@ describe("callerCanUseProvider is the Rust can_use_provider predicate", () => {
     expect(callerCanUseProvider(restricted, "beta")).toBe(false);
   });
 
+  it("does not apply the legacy provider-name allowlist to a group-bound key", () => {
+    const caller = callerFromAuth({ ...durableKey(["openai"]), billingGroupId: "group-openai" });
+
+    expect(caller.billingGroupId).toBe("group-openai");
+    expect(caller.allowedProviders).toBeUndefined();
+  });
+
   it("treats an ABSENT or EMPTY allowlist as no allowlist", () => {
     // `allowed_providers.is_empty() || allowed_providers.contains(p)`. A
     // credential source with no such column must not read as "may use nothing".

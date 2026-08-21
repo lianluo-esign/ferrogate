@@ -103,8 +103,7 @@ export default function BillingGroupsPage() {
   // opens an existing group's editor, so it is lazy (`enabled`) on the sheet.
   const { data: providersData } = useQuery({
     queryKey: providersKey,
-    queryFn: () =>
-      adminGet(apiKey, "/admin/v1/providers", { query: { offset: 0, limit: 200 } }),
+    queryFn: () => adminGet(apiKey, "/admin/v1/providers", { query: { offset: 0, limit: 200 } }),
     enabled: formOpen && editingId !== null,
   });
 
@@ -120,10 +119,7 @@ export default function BillingGroupsPage() {
     [editingId, groups],
   );
 
-  const boundProviderIds = useMemo(
-    () => new Set(editing?.provider_ids ?? []),
-    [editing],
-  );
+  const boundProviderIds = useMemo(() => new Set(editing?.provider_ids ?? []), [editing]);
 
   function openCreate() {
     setEditingId(null);
@@ -140,8 +136,7 @@ export default function BillingGroupsPage() {
   }
 
   const createMutation = useMutation({
-    mutationFn: (body: BillingGroupMutation) =>
-      adminPost(apiKey, "/admin/v1/billing-groups", body),
+    mutationFn: (body: BillingGroupMutation) => adminPost(apiKey, "/admin/v1/billing-groups", body),
     onSuccess: (response) => {
       queryClient.invalidateQueries({ queryKey: groupsKey });
       toast.success(t("page.billingGroups.toast.created"));
@@ -193,12 +188,9 @@ export default function BillingGroupsPage() {
   const bindMutation = useMutation({
     mutationFn: ({ id, providerId, bind }: { id: string; providerId: string; bind: boolean }) =>
       bind
-        ? adminPut(
-            apiKey,
-            "/admin/v1/billing-groups/{id}/providers/{providerId}",
-            undefined,
-            { params: { id, providerId } },
-          )
+        ? adminPut(apiKey, "/admin/v1/billing-groups/{id}/providers/{providerId}", undefined, {
+            params: { id, providerId },
+          })
         : adminDelete(apiKey, "/admin/v1/billing-groups/{id}/providers/{providerId}", {
             params: { id, providerId },
           }),
@@ -253,9 +245,7 @@ export default function BillingGroupsPage() {
       <div className="flex items-start justify-between gap-3">
         <div>
           <h1 className="text-lg font-semibold">{t("resource.billingGroups.title")}</h1>
-          <p className="text-sm text-muted-foreground">
-            {t("resource.billingGroups.description")}
-          </p>
+          <p className="text-sm text-muted-foreground">{t("resource.billingGroups.description")}</p>
           {scope === "platform" ? (
             <p className="mt-1 text-xs text-muted-foreground">{t("catalog.scope.hint")}</p>
           ) : (
@@ -338,9 +328,7 @@ export default function BillingGroupsPage() {
         <SheetContent className="overflow-y-auto sm:max-w-lg">
           <SheetHeader>
             <SheetTitle>
-              {editing
-                ? t("page.billingGroups.edit.title")
-                : t("page.billingGroups.create.title")}
+              {editing ? t("page.billingGroups.edit.title") : t("page.billingGroups.create.title")}
             </SheetTitle>
           </SheetHeader>
           <div className="grid gap-3 px-4 pb-4">
@@ -353,9 +341,7 @@ export default function BillingGroupsPage() {
               />
             </div>
             <div className="grid gap-1.5">
-              <Label htmlFor="multiplier">
-                {t("resource.billingGroups.field.multiplier")} *
-              </Label>
+              <Label htmlFor="multiplier">{t("resource.billingGroups.field.multiplier")} *</Label>
               <Input
                 id="multiplier"
                 type="number"
@@ -371,9 +357,7 @@ export default function BillingGroupsPage() {
               </p>
             </div>
             <div className="grid gap-1.5">
-              <Label htmlFor="description">
-                {t("resource.billingGroups.field.description")}
-              </Label>
+              <Label htmlFor="description">{t("resource.billingGroups.field.description")}</Label>
               <Textarea
                 id="description"
                 value={form.description}

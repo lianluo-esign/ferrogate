@@ -610,12 +610,12 @@ describe("StoreTenancyLifecycleGate addresses the declared tenant before scannin
 
     // The workspace and project were resolved by a tenant-scoped read of the ONE
     // declared tenant...
-    expect(
-      calls.filter((c) => c.collection === "workspaces" && c.scopeKind === "tenant"),
-    ).toEqual([{ collection: "workspaces", scopeKind: "tenant", tenantId: "tenant_a", id: "ws_1" }]);
-    expect(
-      calls.filter((c) => c.collection === "projects" && c.scopeKind === "tenant"),
-    ).toEqual([{ collection: "projects", scopeKind: "tenant", tenantId: "tenant_a", id: "pr_1" }]);
+    expect(calls.filter((c) => c.collection === "workspaces" && c.scopeKind === "tenant")).toEqual([
+      { collection: "workspaces", scopeKind: "tenant", tenantId: "tenant_a", id: "ws_1" },
+    ]);
+    expect(calls.filter((c) => c.collection === "projects" && c.scopeKind === "tenant")).toEqual([
+      { collection: "projects", scopeKind: "tenant", tenantId: "tenant_a", id: "pr_1" },
+    ]);
     // ...and the fleet scan (platform-operator read of a non-id-keyed kind) never
     // fired. `tenant-accounts` is id-keyed and legitimately reads platform-scoped.
     expect(
@@ -711,7 +711,11 @@ describe("StoreTenancyLifecycleGate parallelizes the fully-declared chain", () =
         if (property !== "get") {
           return () => Promise.reject(new Error(`unexpected store call: ${String(property)}`));
         }
-        return (collection: string, _scope: CallerScope, id: string): Promise<StoreRecord | null> => {
+        return (
+          collection: string,
+          _scope: CallerScope,
+          id: string,
+        ): Promise<StoreRecord | null> => {
           inFlight += 1;
           maxInFlight = Math.max(maxInFlight, inFlight);
           return new Promise<StoreRecord | null>((resolve) => {

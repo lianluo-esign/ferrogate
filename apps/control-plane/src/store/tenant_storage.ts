@@ -61,10 +61,10 @@
  * ones, and every one of them bills for storage forever.
  */
 import {
+  LOCATION_HINT_HEADER,
   type TenantJurisdiction,
   type TenantModelCatalogSeedGraph,
   type TenantObjectAddress,
-  LOCATION_HINT_HEADER,
   coerceTenantLocationHint,
   locationHintFromCloudflareSignal,
   placementSignalFromRequest,

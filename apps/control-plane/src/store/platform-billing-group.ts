@@ -25,6 +25,11 @@
  * (`control-data.ts::controlDatabaseFrom`), never a raw `env.DB` — the Zero-D1
  * seam #879 introduced, the same one {@link PlatformModelCatalogStore} takes.
  */
+import {
+  DEFAULT_PROVIDER_TYPE_ID,
+  type ProviderTypeId,
+  isProviderTypeId,
+} from "@ferrogate/provider-types";
 import type { CallerScope, StoreRecord } from "../ports.js";
 import { type AuditAction, controlPlaneAuditJson, controlPlaneAuditStatement } from "./d1.js";
 import { isMissingPlatformCatalogError } from "./platform-model-catalog.js";
@@ -65,6 +70,7 @@ function isAuditAppendError(error: unknown): boolean {
 export interface BillingGroupInput {
   readonly id: string;
   readonly name: string;
+  readonly provider_type_id?: ProviderTypeId;
   readonly multiplier: number;
   readonly description?: string | null;
   readonly enabled?: boolean;
@@ -73,6 +79,7 @@ export interface BillingGroupInput {
 /** A partial edit; only present keys are touched. */
 export interface BillingGroupPatch {
   readonly name?: string;
+  readonly provider_type_id?: ProviderTypeId;
   readonly multiplier?: number;
   readonly description?: string | null;
   readonly enabled?: boolean;
@@ -81,6 +88,7 @@ export interface BillingGroupPatch {
 interface GroupRow {
   id: string;
   name: string;
+  provider_type_id: string | null;
   multiplier: number;
   description: string | null;
   enabled: number;
@@ -96,6 +104,7 @@ export interface BillingGroupRecord extends StoreRecord {
   readonly id: string;
   readonly scope: typeof PLATFORM_SCOPE;
   readonly name: string;
+  readonly provider_type_id: ProviderTypeId | null;
   readonly multiplier: number;
   readonly description: string | null;
   readonly enabled: boolean;
@@ -109,13 +118,14 @@ export interface BillingGroupMultiplier {
   readonly enabled: boolean;
 }
 
-const GROUP_SELECT = `SELECT id, name, multiplier, description, enabled FROM ${BILLING_GROUP_TABLE}`;
+const GROUP_SELECT = `SELECT id, name, provider_type_id, multiplier, description, enabled FROM ${BILLING_GROUP_TABLE}`;
 
 function groupRecord(row: GroupRow, providerIds: readonly string[]): BillingGroupRecord {
   return {
     id: row.id,
     scope: PLATFORM_SCOPE,
     name: row.name,
+    provider_type_id: isProviderTypeId(row.provider_type_id) ? row.provider_type_id : null,
     multiplier: Number(row.multiplier),
     description: row.description,
     enabled: boolValue(row.enabled, true),
@@ -216,6 +226,9 @@ export class PlatformBillingGroupStore {
 
   async createGroup(scope: CallerScope, input: BillingGroupInput): Promise<BillingGroupRecord> {
     const normalized = this.#validate(input.name, input.multiplier);
+    const providerTypeId = this.#validateProviderType(
+      input.provider_type_id ?? DEFAULT_PROVIDER_TYPE_ID,
+    );
     const now = Math.floor(Date.now() / 1000);
     await this.#commit(
       scope,
@@ -224,12 +237,14 @@ export class PlatformBillingGroupStore {
       this.#db
         .prepare(
           `INSERT OR IGNORE INTO ${BILLING_GROUP_TABLE}
-             (id, name, multiplier, description, enabled, created_at_unix, updated_at_unix)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+             (id, name, provider_type_id, multiplier, description, enabled,
+              created_at_unix, updated_at_unix)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .bind(
           input.id,
           normalized.name,
+          providerTypeId,
           normalized.multiplier,
           input.description ?? null,
           boolSql(input.enabled),
@@ -257,6 +272,16 @@ export class PlatformBillingGroupStore {
       const { name } = this.#validate(patch.name ?? "", existing.multiplier);
       fields.push("name = ?");
       values.push(name);
+    }
+    if (hasOwn(patch, "provider_type_id")) {
+      const providerTypeId = this.#validateProviderType(patch.provider_type_id);
+      if (!(await this.#boundProvidersSupportType(id, providerTypeId))) {
+        throw new TenantCatalogValidationError(
+          `billing group ${id} has providers outside type ${providerTypeId}`,
+        );
+      }
+      fields.push("provider_type_id = ?");
+      values.push(providerTypeId);
     }
     if (hasOwn(patch, "multiplier")) {
       const { multiplier } = this.#validate(existing.name, patch.multiplier ?? Number.NaN);
@@ -316,11 +341,18 @@ export class PlatformBillingGroupStore {
    * would otherwise read back as an unremarkable no-op rather than a 404.
    */
   async bindProvider(scope: CallerScope, groupId: string, providerId: string): Promise<boolean> {
-    if ((await this.getGroup(groupId)) === null) {
+    const group = await this.getGroup(groupId);
+    if (group === null) {
       throw new TenantCatalogNotFoundError(`billing group ${groupId} not found`);
     }
-    if (!(await this.#providerExists(providerId))) {
+    const providerTypeId = await this.#providerType(providerId);
+    if (providerTypeId === null) {
       throw new TenantCatalogNotFoundError(`provider ${providerId} not found`);
+    }
+    if (group.provider_type_id === null || providerTypeId !== group.provider_type_id) {
+      throw new TenantCatalogValidationError(
+        `provider ${providerId} type ${providerTypeId} does not match billing group type ${group.provider_type_id ?? "unset"}`,
+      );
     }
     const now = Math.floor(Date.now() / 1000);
     return this.#commit(
@@ -342,15 +374,15 @@ export class PlatformBillingGroupStore {
     );
   }
 
-  async #providerExists(providerId: string): Promise<boolean> {
+  async #providerType(providerId: string): Promise<ProviderTypeId | null> {
     try {
       const row = await this.#db
-        .prepare("SELECT 1 AS ok FROM platform_provider_channels WHERE id = ?")
+        .prepare("SELECT provider_type_id FROM platform_provider_channels WHERE id = ?")
         .bind(providerId)
-        .first<{ ok: number }>();
-      return row !== null;
+        .first<{ provider_type_id: string | null }>();
+      return isProviderTypeId(row?.provider_type_id) ? row.provider_type_id : null;
     } catch (error) {
-      if (isMissingPlatformCatalogError(error)) return false;
+      if (isMissingPlatformCatalogError(error)) return null;
       throw error;
     }
   }
@@ -388,6 +420,30 @@ export class PlatformBillingGroupStore {
       throw new TenantCatalogValidationError("billing group multiplier must be a number >= 0");
     }
     return { name: trimmed, multiplier };
+  }
+
+  #validateProviderType(value: unknown): ProviderTypeId {
+    if (!isProviderTypeId(value)) {
+      throw new TenantCatalogValidationError("provider_type_id is required and must be supported");
+    }
+    return value;
+  }
+
+  async #boundProvidersSupportType(
+    groupId: string,
+    providerTypeId: ProviderTypeId,
+  ): Promise<boolean> {
+    const row = await this.#db
+      .prepare(
+        `SELECT COUNT(*) AS mismatches
+           FROM ${BILLING_GROUP_PROVIDER_TABLE} AS edge
+           JOIN platform_provider_channels AS provider ON provider.id = edge.provider_id
+          WHERE edge.group_id = ?
+            AND (provider.provider_type_id IS NULL OR provider.provider_type_id <> ?)`,
+      )
+      .bind(groupId, providerTypeId)
+      .first<{ mismatches: number | string }>();
+    return Number(row?.mismatches ?? 0) === 0;
   }
 
   /**

@@ -111,10 +111,11 @@ export class SharedConfigStore {
         // INSERT ... SELECT ... WHERE <behind> so the row only lands while the
         // cursor is still behind; booleans are normalised to 0/1 and the provider
         // edges are flattened to a JSON array for the read-only mirror.
-        sql: `INSERT INTO shared_billing_groups (id, name, multiplier, description, enabled, provider_ids_json, config_revision, synced_at_unix) SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE ${behind}`,
+        sql: `INSERT INTO shared_billing_groups (id, name, provider_type_id, multiplier, description, enabled, provider_ids_json, config_revision, synced_at_unix) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE ${behind}`,
         params: [
           record.id,
           record.name,
+          record.provider_type_id,
           record.multiplier,
           record.description,
           record.enabled ? 1 : 0,

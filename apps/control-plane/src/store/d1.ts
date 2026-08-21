@@ -1022,7 +1022,13 @@ export class D1ControlPlaneStore implements ControlPlaneStore {
       const changes = results.map((result) => result.meta.changes ?? 0);
       if (changes.every((count) => count > 0)) {
         for (const entry of audits) {
-          await this.#appendAudit(entry.action, entry.collection, entry.record, entry.revision, scope);
+          await this.#appendAudit(
+            entry.action,
+            entry.collection,
+            entry.record,
+            entry.revision,
+            scope,
+          );
         }
         return next;
       }
@@ -1178,7 +1184,7 @@ export class D1ControlPlaneStore implements ControlPlaneStore {
     scope: CallerScope,
   ): Promise<void> {
     const sink = this.#auditSink;
-    if (sink !== null && sink.active) {
+    if (sink?.active) {
       sink.defer(() => this.#audit(action, collection, record, revision, scope));
       return Promise.resolve();
     }

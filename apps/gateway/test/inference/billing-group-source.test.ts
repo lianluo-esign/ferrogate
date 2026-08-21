@@ -25,6 +25,7 @@ interface GroupRow {
   readonly id: string;
   readonly multiplier: number | string | null;
   readonly enabled: number | string | null;
+  readonly provider_id?: string | null;
 }
 
 interface FakeDatabase {
@@ -104,6 +105,27 @@ describe("ControlDataPlatformBillingGroupSource", () => {
     const source = new ControlDataPlatformBillingGroupSource();
 
     expect(await source.multiplierForGroup(controlEnv(db), "comp")).toBe(0);
+  });
+
+  it("returns the exact provider ids bound to an enabled group", async () => {
+    const db = fakeDb([
+      { id: "premium", multiplier: 1.5, enabled: 1, provider_id: "provider-a" },
+      { id: "premium", multiplier: 1.5, enabled: 1, provider_id: "provider-b" },
+    ]);
+    const source = new ControlDataPlatformBillingGroupSource();
+
+    expect(await source.routingForGroup(controlEnv(db), "premium")).toEqual({
+      providerIds: ["provider-a", "provider-b"],
+    });
+  });
+
+  it("fails closed for missing and disabled group routing", async () => {
+    const db = fakeDb([{ id: "off", multiplier: 1, enabled: 0, provider_id: "provider-a" }]);
+    const source = new ControlDataPlatformBillingGroupSource();
+    const env = controlEnv(db);
+
+    expect(await source.routingForGroup(env, "off")).toBeNull();
+    expect(await source.routingForGroup(env, "missing")).toBeNull();
   });
 
   it("fails open to 1.0 for a DISABLED group (never the comp 0)", async () => {
@@ -211,6 +233,7 @@ describe("ControlDataPlatformBillingGroupSource", () => {
 interface MirrorRow {
   readonly multiplier: number | string | null;
   readonly enabled: number | string | null;
+  readonly provider_ids_json?: string | null;
 }
 
 interface FakeMirror {
@@ -299,6 +322,44 @@ describe("MirrorFirstBillingGroupSource", () => {
     });
 
     expect(await source.multiplierForGroup(env, "comp", "tnt-1")).toBe(0);
+    expect(fallback.calls).toHaveLength(0);
+  });
+
+  it("reads routing provider ids from the tenant mirror", async () => {
+    const mirror = fakeMirror({
+      "tnt-1": {
+        premium: {
+          multiplier: 1.5,
+          enabled: 1,
+          provider_ids_json: '["provider-a","provider-b"]',
+        },
+      },
+    });
+    const fallback = recordingFallback(99);
+    const source = new MirrorFirstBillingGroupSource({
+      fallback: fallback.source,
+      resolverFor: mirror.resolverFor,
+    });
+
+    expect(await source.routingForGroup(env, "premium", "tnt-1")).toEqual({
+      providerIds: ["provider-a", "provider-b"],
+    });
+    expect(fallback.calls).toHaveLength(0);
+  });
+
+  it("fails closed when the mirrored provider id list is malformed", async () => {
+    const mirror = fakeMirror({
+      "tnt-1": {
+        premium: { multiplier: 1.5, enabled: 1, provider_ids_json: '["provider-a",3]' },
+      },
+    });
+    const fallback = recordingFallback(99);
+    const source = new MirrorFirstBillingGroupSource({
+      fallback: fallback.source,
+      resolverFor: mirror.resolverFor,
+    });
+
+    expect(await source.routingForGroup(env, "premium", "tnt-1")).toBeNull();
     expect(fallback.calls).toHaveLength(0);
   });
 

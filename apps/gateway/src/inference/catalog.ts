@@ -144,6 +144,8 @@ const providerCloudflareAiGatewaySchema = z
  */
 export const providerRecordSchema = z
   .object({
+    /** Stable control/tenant catalog row id. Env-only providers may omit it. */
+    id: z.string().trim().min(1).optional(),
     /** `ProviderConfig.name` — joined to `[[models]].provider`. */
     name: z.string().trim().min(1),
     /** `ProviderConfig.kind`; must be a known adapter family or alias. */
@@ -874,6 +876,7 @@ export function buildModelCatalog(
 
       routes.push({
         logicalModel: model.name,
+        ...(provider.id === undefined ? {} : { providerId: provider.id }),
         provider: provider.name,
         providerModel: leg.provider_model,
         providerKind: provider.kind,
@@ -998,7 +1001,12 @@ export function modelCatalogFromEnv(env: InferenceBindings): ModelCatalogResult 
     return inputs;
   }
   return buildModelCatalog(
-    inputs.inputs.providers,
+    inputs.inputs.providers.map((provider) => ({
+      ...provider,
+      // Keep env fallback routes addressable by the same stable ids written by
+      // the platform-catalog bootstrap import and billing-group bindings.
+      id: provider.id ?? `platform:provider:${provider.name}`,
+    })),
     inputs.inputs.models,
     env,
     inputs.inputs.cloudflare,

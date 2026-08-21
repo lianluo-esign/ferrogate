@@ -14,6 +14,8 @@ describe("control-plane resource kind registry", () => {
     expect(TENANT_RESOURCE_KINDS).not.toContain("plans");
     expect(resourceKindPlacement("agent-workflows")).toBe("tenant_private");
     expect(resourceKindPlacement("plans")).toBe("platform_shared");
+    expect(resourceKindPlacement("support-chat-conversations")).toBe("platform_shared");
+    expect(resourceKindPlacement("support-chat-presence")).toBe("platform_shared");
     expect(CONTROL_RESOURCE_KIND_TABLE).toBe("tenant_resources");
     expect(() => resourceKindPlacement("future-unclassified-kind")).toThrow(
       "unknown control-plane resource kind",

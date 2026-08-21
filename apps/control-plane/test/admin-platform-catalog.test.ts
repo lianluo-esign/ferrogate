@@ -174,6 +174,7 @@ async function createPlatformProvider(
   return request(OPERATOR, "POST", "/admin/v1/providers", {
     id,
     name: id,
+    provider_type_id: "openai",
     kind: "openai-compatible",
     base_url: `https://${id}.example.test/v1`,
     enabled: true,
@@ -243,6 +244,7 @@ describe("platform model catalog admin surface", () => {
     expect(created.status, JSON.stringify(created.body)).toBe(201);
     expect(created.body.scope).toBe("platform");
     expect((created.body.provider as JsonBody).scope).toBe("platform");
+    expect((created.body.provider as JsonBody).provider_type_id).toBe("openai");
     expect((created.body.provider as JsonBody).tenant_id).toBeUndefined();
 
     const model = await createPlatformModel("platform_model");
@@ -292,10 +294,11 @@ describe("platform model catalog admin surface", () => {
     expect(patched.status).toBe(200);
     expect((patched.body.provider as JsonBody).region).toBe("us-east-1");
     const storedRegion = await db()
-      .prepare("SELECT region FROM platform_provider_channels WHERE id = ?")
+      .prepare("SELECT region, provider_type_id FROM platform_provider_channels WHERE id = ?")
       .bind("platform_channel")
-      .first<{ region: string | null }>();
+      .first<{ region: string | null; provider_type_id: string | null }>();
     expect(storedRegion?.region).toBe("us-east-1");
+    expect(storedRegion?.provider_type_id).toBe("openai");
 
     const replacedOffering = await request(
       OPERATOR,

@@ -233,6 +233,17 @@ describe("platform billing-group admin surface", () => {
     );
     expect(bound.status, JSON.stringify(bound.body)).toBe(200);
     expect((bound.body.billing_group as JsonBody).provider_ids).toEqual(["bg_channel"]);
+
+    const incompatibleProviderUpdate = await request(
+      OPERATOR,
+      "PATCH",
+      "/admin/v1/providers/bg_channel",
+      { provider_type_id: "anthropic" },
+    );
+    expect(incompatibleProviderUpdate.status).toBe(400);
+    expect((incompatibleProviderUpdate.body.error as JsonBody).message).toMatch(
+      /different provider type/,
+    );
     expect(await rawProviderIds("bg_bind")).toEqual(["bg_channel"]);
 
     // Idempotent: re-binding the same edge is still a 200 and still one row.

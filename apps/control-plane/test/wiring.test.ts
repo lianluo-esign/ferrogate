@@ -381,6 +381,7 @@ const GROUP_PROBES: readonly (readonly [string, string, HttpMethod, string, numb
   ],
   ["site_domain", "listSiteDomains", "GET", "/admin/v1/site-domains", 200],
   ["skill", "listAdminSkillPackages", "GET", "/admin/v1/skill-packages", 200],
+  ["support_chat", "listSupportConversations", "GET", "/admin/v1/support/conversations", 200],
   ["tenant_data", "queryTenantData", "POST", "/admin/v1/tenant-data/{tenant_id}/query", 400],
   ["tenant_hierarchy", "listAdminTenants", "GET", "/admin/v1/tenants", 200],
   ["wallets", "listWallets", "GET", "/admin/v1/wallets", 200],
@@ -388,7 +389,7 @@ const GROUP_PROBES: readonly (readonly [string, string, HttpMethod, string, numb
 ];
 
 describe("every contract GROUP is reachable on the deployed Worker", () => {
-  it("covers all 40 owned groups — a new group cannot slip past this table", () => {
+  it("covers all 43 owned groups — a new group cannot slip past this table", () => {
     expect(new Set(GROUP_PROBES.map(([group]) => group))).toEqual(new Set(CONTROL_PLANE_GROUPS));
     expect(GROUP_PROBES).toHaveLength(CONTROL_PLANE_GROUPS.length);
   });

@@ -1,3 +1,9 @@
+import {
+  type ProviderTypeId,
+  inferProviderTypeIdFromKind,
+  isProviderTypeId,
+} from "@ferrogate/provider-types";
+
 /**
  * The platform default model catalog (#889, epic #810).
  *
@@ -131,6 +137,7 @@ function isAuditAppendError(error: unknown): boolean {
 interface ProviderRow {
   readonly id: string;
   readonly name: string;
+  readonly provider_type_id: string | null;
   readonly kind: string;
   readonly base_url: string;
   readonly api_key_var: string | null;
@@ -193,7 +200,7 @@ type CatalogRecord = StoreRecord;
 type UpdateField = readonly [string, string | number | null];
 
 const PROVIDER_SELECT = `
-  SELECT id, name, kind, base_url, api_key_var, byok_alias,
+  SELECT id, name, provider_type_id, kind, base_url, api_key_var, byok_alias,
          auth_scheme, region, zero_data_retention, openrouter_http_referer,
          openrouter_x_title, cloudflare_ai_gateway_json, enabled
     FROM ${PLATFORM_PROVIDER_TABLE}`;
@@ -306,6 +313,7 @@ function providerRecord(row: ProviderRow): CatalogRecord {
     id: row.id,
     scope: PLATFORM_SCOPE,
     name: row.name,
+    provider_type_id: row.provider_type_id,
     kind: row.kind,
     compatibility: providerCompatibility(row.kind),
     base_url: row.base_url,
@@ -744,18 +752,20 @@ export class PlatformModelCatalogStore {
 
   #importProviderStatement(provider: SeedProviderChannel): D1PreparedStatement {
     const now = Math.floor(Date.now() / 1000);
+    const providerTypeId = inferProviderTypeIdFromKind(provider.kind);
     return this.#db
       .prepare(
         `INSERT OR IGNORE INTO ${PLATFORM_PROVIDER_TABLE}
-           (id, name, kind, base_url, api_key_var, byok_alias,
+           (id, name, provider_type_id, kind, base_url, api_key_var, byok_alias,
             auth_scheme, region, zero_data_retention, openrouter_http_referer,
             openrouter_x_title, cloudflare_ai_gateway_json, enabled,
             created_at_unix, updated_at_unix)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
         provider.id,
         provider.name,
+        providerTypeId,
         provider.kind,
         provider.base_url,
         provider.api_key_var,
@@ -880,15 +890,16 @@ export class PlatformModelCatalogStore {
       this.#db
         .prepare(
           `INSERT OR IGNORE INTO ${PLATFORM_PROVIDER_TABLE}
-             (id, name, kind, base_url, api_key_var, byok_alias,
+             (id, name, provider_type_id, kind, base_url, api_key_var, byok_alias,
               auth_scheme, region, zero_data_retention, openrouter_http_referer,
               openrouter_x_title, cloudflare_ai_gateway_json, enabled,
               created_at_unix, updated_at_unix)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .bind(
           input.id,
           normalized.name,
+          normalized.provider_type_id,
           normalized.kind,
           normalized.base_url,
           input.api_key_var ?? null,
@@ -924,9 +935,19 @@ export class PlatformModelCatalogStore {
     if (action === "replace") {
       const name = this.#requiredText(input.name ?? current.name, "name");
       const kind = this.#requiredKind(input.kind ?? current.kind);
+      const providerTypeId = this.#requiredProviderType(
+        input.provider_type_id ?? current.provider_type_id,
+        kind,
+      );
+      await this.#assertProviderTypeCompatibleWithGroups(id, providerTypeId);
       const baseUrl = this.#requiredText(input.base_url ?? current.base_url, "base_url");
       if (!urlIsValid(baseUrl)) throw new TenantCatalogValidationError("base_url must be a URL");
-      fields.push(["name", name], ["kind", kind], ["base_url", baseUrl]);
+      fields.push(
+        ["name", name],
+        ["provider_type_id", providerTypeId],
+        ["kind", kind],
+        ["base_url", baseUrl],
+      );
       fields.push(["api_key_var", input.api_key_var ?? null]);
       fields.push(["byok_alias", input.byok_alias ?? null]);
       fields.push(["auth_scheme", input.auth_scheme ?? null]);
@@ -943,6 +964,14 @@ export class PlatformModelCatalogStore {
       fields.push(["enabled", boolSql(input.enabled)]);
     } else {
       if (input.name !== undefined) fields.push(["name", this.#requiredText(input.name, "name")]);
+      if (input.provider_type_id !== undefined) {
+        const providerTypeId = this.#requiredProviderType(
+          input.provider_type_id,
+          input.kind ?? current.kind,
+        );
+        await this.#assertProviderTypeCompatibleWithGroups(id, providerTypeId);
+        fields.push(["provider_type_id", providerTypeId]);
+      }
       if (input.kind !== undefined) fields.push(["kind", this.#requiredKind(input.kind)]);
       if (input.base_url !== undefined) {
         const baseUrl = this.#requiredText(input.base_url, "base_url");
@@ -1059,11 +1088,51 @@ export class PlatformModelCatalogStore {
     return canonical;
   }
 
-  #validateProvider(input: ProviderChannelInput): { name: string; kind: string; base_url: string } {
+  #requiredProviderType(value: unknown, kind: string): ProviderTypeId {
+    const providerTypeId = value ?? inferProviderTypeIdFromKind(kind);
+    if (!isProviderTypeId(providerTypeId)) {
+      throw new TenantCatalogValidationError("provider_type_id is required and must be supported");
+    }
+    return providerTypeId;
+  }
+
+  async #assertProviderTypeCompatibleWithGroups(
+    providerId: string,
+    providerTypeId: ProviderTypeId,
+  ): Promise<void> {
+    const row = await this.#db
+      .prepare(
+        `SELECT COUNT(*) AS mismatches
+           FROM platform_billing_group_providers AS edge
+           JOIN platform_billing_groups AS billing_group ON billing_group.id = edge.group_id
+          WHERE edge.provider_id = ?
+            AND (billing_group.provider_type_id IS NULL OR billing_group.provider_type_id <> ?)`,
+      )
+      .bind(providerId, providerTypeId)
+      .first<{ mismatches: number | string }>();
+    if (Number(row?.mismatches ?? 0) > 0) {
+      throw new TenantCatalogValidationError(
+        `provider ${providerId} is bound to a billing group with a different provider type`,
+      );
+    }
+  }
+
+  #validateProvider(input: ProviderChannelInput): {
+    name: string;
+    provider_type_id: ProviderTypeId;
+    kind: string;
+    base_url: string;
+  } {
     const name = this.#requiredText(input.name, "name");
+    const kind = this.#requiredKind(input.kind);
     const baseUrl = this.#requiredText(input.base_url, "base_url");
     if (!urlIsValid(baseUrl)) throw new TenantCatalogValidationError("base_url must be a URL");
-    return { name, kind: this.#requiredKind(input.kind), base_url: baseUrl };
+    return {
+      name,
+      provider_type_id: this.#requiredProviderType(input.provider_type_id, kind),
+      kind,
+      base_url: baseUrl,
+    };
   }
 
   async listModels(): Promise<readonly CatalogRecord[]> {

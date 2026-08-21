@@ -2540,6 +2540,93 @@
         }
       }
     },
+    "/admin/v1/providers/{id}/connectivity-test": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "operationId": "testProviderConnectivity",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "List a platform provider's live models or send a fixed hi message through one selected model.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "action": {
+                        "type": "string",
+                        "enum": ["models"]
+                      }
+                    },
+                    "required": ["action"]
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "action": {
+                        "type": "string",
+                        "enum": ["chat"]
+                      },
+                      "model": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "required": ["action", "model"]
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Live model list or successful upstream chat response."
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "502": {
+            "description": "The credential, adapter, upstream connection, or upstream response failed."
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.write"
+          },
+          "rbac_action": null
+        }
+      }
+    },
     "/admin/v1/provider-health": {
       "parameters": [
         {
@@ -7452,6 +7539,7 @@
                         "required": [
                           "id",
                           "name",
+                          "provider_type_id",
                           "multiplier",
                           "enabled",
                           "provider_ids"
@@ -7462,6 +7550,21 @@
                           },
                           "name": {
                             "type": "string"
+                          },
+                          "provider_type_id": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "enum": [
+                              "openai",
+                              "anthropic",
+                              "gemini",
+                              "minimax",
+                              "deepseek",
+                              "grok",
+                              null
+                            ]
                           },
                           "multiplier": {
                             "type": "number"
@@ -14582,6 +14685,86 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "parameters": [
+          {
+            "name": "key_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      },
+      "patch": {
+        "operationId": "updateVirtualKey",
+        "tags": [
+          "admin-write"
+        ],
+        "summary": "Re-bind a virtual API key's billing group and attribution tags.",
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.write"
+          },
+          "rbac_action": null
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "billing_group_id": {
+                    "type": "string",
+                    "nullable": true,
+                    "description": "Platform billing group id the key charges through; null clears the binding (multiplier 1.0)."
+                  },
+                  "attribution_tags": {
+                    "type": "object",
+                    "nullable": true,
+                    "additionalProperties": {
+                      "type": "string"
+                    },
+                    "description": "Display-only attribution tags (e.g. channel_group label)."
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated virtual API key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminVirtualApiKeyMutationResponse"
+                }
+              }
+            },
+            "headers": {
+              "x-ferrogate-time-token": {
+                "$ref": "#/components/headers/ClientTimeTokenResponseHeader"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
           }
         },
         "parameters": [
@@ -23534,6 +23717,224 @@
           "rbac_action": null
         }
       }
+    },
+    "/admin/v1/support/conversation": {
+      "get": {
+        "operationId": "getSupportConversation",
+        "tags": ["admin-read"],
+        "summary": "Read the current tenant's persistent support conversation.",
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "minimum": 1, "maximum": 500 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Persistent tenant support conversation.",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object" }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "503": { "$ref": "#/components/responses/ServiceUnavailable" }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": { "kind": "bearer", "scope": "admin.read" },
+          "rbac_action": null
+        }
+      }
+    },
+    "/admin/v1/support/messages": {
+      "post": {
+        "operationId": "createSupportMessage",
+        "tags": ["admin-write"],
+        "summary": "Append a tenant message to persistent support history.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["body"],
+                "properties": {
+                  "body": { "type": "string", "minLength": 1, "maxLength": 4000 }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Support message created.",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "503": { "$ref": "#/components/responses/ServiceUnavailable" }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": { "kind": "bearer", "scope": "admin.write" },
+          "rbac_action": null
+        }
+      }
+    },
+    "/admin/v1/support/conversations": {
+      "get": {
+        "operationId": "listSupportConversations",
+        "tags": ["admin-read"],
+        "summary": "List tenant support conversations for platform operators.",
+        "responses": {
+          "200": {
+            "description": "Support conversation inbox.",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object" }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": { "kind": "bearer", "scope": "admin.read" },
+          "rbac_action": null
+        }
+      }
+    },
+    "/admin/v1/support/conversations/{tenant_id}/messages": {
+      "parameters": [
+        {
+          "name": "tenant_id",
+          "in": "path",
+          "required": true,
+          "schema": { "type": "string", "minLength": 1 }
+        }
+      ],
+      "get": {
+        "operationId": "listSupportConversationMessages",
+        "tags": ["admin-read"],
+        "summary": "Read one tenant's persistent support messages.",
+        "responses": {
+          "200": {
+            "description": "Support messages.",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object" }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "503": { "$ref": "#/components/responses/ServiceUnavailable" }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": { "kind": "bearer", "scope": "admin.read" },
+          "rbac_action": null
+        }
+      },
+      "post": {
+        "operationId": "createOperatorSupportMessage",
+        "tags": ["admin-write"],
+        "summary": "Append an operator reply to one tenant's support history.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["body"],
+                "properties": {
+                  "body": { "type": "string", "minLength": 1, "maxLength": 4000 },
+                  "sender_id": { "type": "string" },
+                  "sender_name": { "type": "string" }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Operator support reply created.",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "503": { "$ref": "#/components/responses/ServiceUnavailable" }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": { "kind": "bearer", "scope": "admin.write" },
+          "rbac_action": null
+        }
+      }
+    },
+    "/admin/v1/support/presence": {
+      "post": {
+        "operationId": "heartbeatSupportOperator",
+        "tags": ["admin-write"],
+        "summary": "Refresh an operator's support-presence lease.",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "operator_id": { "type": "string" },
+                  "display_name": { "type": "string" }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Presence lease refreshed.",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": { "kind": "bearer", "scope": "admin.write" },
+          "rbac_action": null
+        }
+      }
     }
   },
   "components": {
@@ -25285,9 +25686,9 @@
       },
       "AdminProvider": {
         "type": "object",
-        "required": [
-          "name",
-          "kind",
+  "required": [
+    "name",
+    "kind",
           "compatibility",
           "base_url",
           "has_api_key",
@@ -25296,6 +25697,21 @@
         "properties": {
           "name": {
             "type": "string"
+          },
+          "provider_type_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "openai",
+              "anthropic",
+              "gemini",
+              "minimax",
+              "deepseek",
+              "grok",
+              null
+            ]
           },
           "kind": {
             "type": "string"
@@ -27904,6 +28320,17 @@
             "type": "string",
             "minLength": 1
           },
+          "provider_type_id": {
+            "type": "string",
+            "enum": [
+              "openai",
+              "anthropic",
+              "gemini",
+              "minimax",
+              "deepseek",
+              "grok"
+            ]
+          },
           "kind": {
             "type": "string",
             "minLength": 1
@@ -27982,6 +28409,17 @@
           "name": {
             "type": "string",
             "minLength": 1
+          },
+          "provider_type_id": {
+            "type": "string",
+            "enum": [
+              "openai",
+              "anthropic",
+              "gemini",
+              "minimax",
+              "deepseek",
+              "grok"
+            ]
           },
           "kind": {
             "type": "string",
@@ -37052,6 +37490,21 @@
           "name": {
             "type": "string"
           },
+          "provider_type_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "openai",
+              "anthropic",
+              "gemini",
+              "minimax",
+              "deepseek",
+              "grok",
+              null
+            ]
+          },
           "multiplier": {
             "type": "number",
             "minimum": 0
@@ -37076,6 +37529,7 @@
           "id",
           "scope",
           "name",
+          "provider_type_id",
           "multiplier",
           "enabled",
           "provider_ids"
@@ -37091,6 +37545,17 @@
           "name": {
             "type": "string",
             "minLength": 1
+          },
+          "provider_type_id": {
+            "type": "string",
+            "enum": [
+              "openai",
+              "anthropic",
+              "gemini",
+              "minimax",
+              "deepseek",
+              "grok"
+            ]
           },
           "multiplier": {
             "type": "number",

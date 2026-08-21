@@ -131,8 +131,13 @@ export const SUPPORTED_CONTRACT_VERSION = 1;
  * 328 -> 329 with the control-plane-D1 migration's `POST /admin/v1/control-backfill`
  * (`admin_config_ops` group): the operator-only one-shot DO→D1 control backfill
  * trigger, a sibling of `importModelCatalog` in the same group.
+ * 329 -> 330 with `PATCH /admin/v1/virtual-keys/{key_id}` (`updateVirtualKey`,
+ * `admin_virtual_key` group): re-bind a live key's billing group / attribution
+ * tags without rotating the secret — the write behind the console's edit-group
+ * action, which re-projects `api_keys.billing_group_id` so the gateway settles
+ * at the new multiplier.
  */
-export const EXPECTED_TOTAL_OPERATION_COUNT = 329;
+export const EXPECTED_TOTAL_OPERATION_COUNT = 337;
 
 /**
  * Operations `ROUTE-MAP.md` assigns to `apps/control-plane`: `/admin/v1/**`
@@ -180,8 +185,10 @@ export const EXPECTED_TOTAL_OPERATION_COUNT = 329;
  *
  * 256 -> 257 with `POST /admin/v1/control-backfill` (`admin_config_ops`), the
  * operator-only one-shot DO→D1 control backfill trigger this app owns.
+ * 257 -> 258 with `PATCH /admin/v1/virtual-keys/{key_id}` (`updateVirtualKey`,
+ * `admin_virtual_key`), the console's edit-group write this app owns.
  */
-export const EXPECTED_CONTROL_PLANE_OPERATION_COUNT = 257;
+export const EXPECTED_CONTROL_PLANE_OPERATION_COUNT = 265;
 
 // ---------------------------------------------------------------------------
 // Ownership predicate

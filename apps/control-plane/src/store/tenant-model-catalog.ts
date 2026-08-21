@@ -18,6 +18,8 @@ export class TenantCatalogValidationError extends Error {
 export interface ProviderChannelInput {
   readonly id: string;
   readonly name: string;
+  /** Stable product family. Platform providers persist it separately from adapter `kind`. */
+  readonly provider_type_id?: string;
   readonly kind: string;
   readonly base_url: string;
   readonly api_key_var?: string | null;

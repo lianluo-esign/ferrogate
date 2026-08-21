@@ -134,10 +134,7 @@ export function billingEventFilters(url: URL): BillingEventFilter[] {
  * leak unfiltered rows into a narrowed page (`?provider=nobody` answered with the documents).
  * Stated over the projected document so it cannot drift from what the caller is shown.
  */
-export function billingEventDocumentMatches(
-  record: StoreRecord,
-  url: URL,
-): boolean {
+export function billingEventDocumentMatches(record: StoreRecord, url: URL): boolean {
   const want = (name: string): string | undefined => {
     const raw = url.searchParams.get(name);
     const trimmed = raw?.trim();
@@ -149,7 +146,11 @@ export function billingEventDocumentMatches(
   if (provider !== undefined && str(record.provider) !== provider) return false;
 
   const model = want("model");
-  if (model !== undefined && str(record.logical_model) !== model && str(record.provider_model) !== model) {
+  if (
+    model !== undefined &&
+    str(record.logical_model) !== model &&
+    str(record.provider_model) !== model
+  ) {
     return false;
   }
 
@@ -514,7 +515,8 @@ async function listBillingAuthority(
   // object, so the answer is "read that one" — not "read the fleet and drop the rest", which would
   // page over tenants whose rows can never match and would let the fleet's un-attributed control
   // rows (which belong to no tenant) survive a tenant filter.
-  const wantTenant = url?.searchParams.get("tenant_id")?.trim() || url?.searchParams.get("tenant")?.trim();
+  const wantTenant =
+    url?.searchParams.get("tenant_id")?.trim() || url?.searchParams.get("tenant")?.trim();
   if (kind === "events" && wantTenant !== undefined && wantTenant !== "") {
     const page = await tenantBillingEventPage(deps, wantTenant, fetchLimit, filters, url);
     return {
@@ -1171,6 +1173,7 @@ async function replayOutboxReportRow(
 interface SharedBillingGroupRow {
   id: string;
   name: string;
+  provider_type_id: string | null;
   multiplier: number;
   description: string | null;
   enabled: number;
@@ -1192,6 +1195,7 @@ function sharedBillingGroupDocument(row: SharedBillingGroupRow): StoreRecord {
   return {
     id: row.id,
     name: row.name,
+    provider_type_id: row.provider_type_id,
     multiplier: row.multiplier,
     description: row.description,
     enabled: row.enabled === 1,
@@ -1214,9 +1218,7 @@ function sharedBillingGroupDocument(row: SharedBillingGroupRow): StoreRecord {
  * router's `503 tenant_database_unavailable`. A platform-operator caller carries
  * no single tenant mirror, so it may narrow with `?tenant_id=` (else `[]`).
  */
-async function listSharedBillingGroupsHandler(
-  c: Context<ControlPlaneEnv>,
-): Promise<Response> {
+async function listSharedBillingGroupsHandler(c: Context<ControlPlaneEnv>): Promise<Response> {
   const deps = c.get("deps");
   const scope = scopeOf(c);
   const tenantId =
@@ -1227,7 +1229,7 @@ async function listSharedBillingGroupsHandler(
   if (db === null) return json(c, 200, adminList([]));
   const result = await db
     .prepare(
-      `SELECT id, name, multiplier, description, enabled, provider_ids_json
+      `SELECT id, name, provider_type_id, multiplier, description, enabled, provider_ids_json
          FROM shared_billing_groups
         WHERE enabled = 1
         ORDER BY name`,

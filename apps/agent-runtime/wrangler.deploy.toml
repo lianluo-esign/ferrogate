@@ -1,0 +1,88 @@
+# DEPLOY config for ferrogate-agent-runtime — carries the DEPLOY-TIME state the
+# committed wrangler.toml deliberately omits (the real CONTROL_D1 [[d1_databases]]
+# stanza) and pins [vars] to LIVE PROD values, NOT the dev-default template.
+#
+# WHY a separate file: committed wrangler.toml declares NO top-level
+# [[d1_databases]] (a real stanza there breaks hermetic vitest / trips the
+# "declares NO D1 binding" gate) and its [vars] carry DEV defaults
+# (FG_DEV_IN_MEMORY_PORTS = "1"). Prod runs FG_DEV_IN_MEMORY_PORTS = "0" (real
+# ports). This file mirrors the live prod vars verbatim so a deploy changes ONLY
+# the code bundle + the CONTROL_D1 binding + the control-storage posture.
+#
+# CONTROL_D1 → ferrogate-control (4a2f6a84): the ONE global control D1 (Tokyo
+# primary). agent-runtime is a READ-ONLY control consumer; the seam opens a
+# withSession("first-unconstrained") colo-local replica session. This is the
+# SAME database the pre-#881 live deploy already reads via its legacy CONTROL_DB
+# binding, so freshness is preserved — we only rename the binding + adopt the
+# posture seam.
+#
+# DEPLOY GATE (verified 2026-08-20): tenant_databases shows 27/27 tenants
+# storage_backend=durable_object migration_state=done, zero shared/copying/
+# verifying — so dropping the legacy shared-tenant-D1 `DB` binding is safe.
+#
+# DEPLOY ferrogate-gateway FIRST: TENANT_DATA/CONTROL_DATA/RATE_LIMIT are
+# script_name cross-bindings to it (already deployed).
+name = "ferrogate-agent-runtime"
+main = "src/worker.ts"
+
+compatibility_date = "2025-11-17"
+compatibility_flags = ["nodejs_compat"]
+
+# --- Durable Objects: run state + worker plane (self) ------------------------
+[[durable_objects.bindings]]
+name = "AGENT_RUN_STATE"
+class_name = "AgentRunState"
+
+[[durable_objects.bindings]]
+name = "WORKER_PLANE"
+class_name = "WorkerPlane"
+
+# Cross-script to the gateway (authoritative tenant + control DOs, shared limiter)
+[[durable_objects.bindings]]
+name = "TENANT_DATA"
+class_name = "TenantDataObject"
+script_name = "ferrogate-gateway"
+
+[[durable_objects.bindings]]
+name = "CONTROL_DATA"
+class_name = "ControlDataObject"
+script_name = "ferrogate-gateway"
+
+[[durable_objects.bindings]]
+name = "RATE_LIMIT"
+class_name = "RateLimiterDurableObject"
+script_name = "ferrogate-gateway"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["AgentRunState", "WorkerPlane"]
+
+# --- CONTROL_D1: the shared global control database (deploy-time only) --------
+[[d1_databases]]
+binding = "CONTROL_D1"
+database_name = "ferrogate-control"
+database_id = "4a2f6a84-5fff-4759-af1b-49caa21f4be2"
+migrations_dir = "../../sql/d1-ts/control"
+
+# --- vars: LIVE PROD values (harvested from GET /settings), posture flipped ---
+[vars]
+AGENT_RUNTIME_CONTROL_STORAGE = "d1"
+FG_DEV_IN_MEMORY_PORTS = "0"
+FG_REQUIRE_PRODUCTION_MTLS = "0"
+CONTAINER_GOVERNED_EGRESS_HOSTS = ""
+AGENT_RUNTIME_ENABLED = "1"
+AGENT_JOB_MAX_OPEN_PER_TENANT = "200"
+AGENT_JOB_DISPATCH_TTL_SECS = "86400"
+AGENT_WORKFLOWS = "[]"
+FG_DEV_A2A_GUARDRAILS = ""
+
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+[observability.logs]
+enabled = true
+invocation_logs = true
+
+[observability.traces]
+enabled = true

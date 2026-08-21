@@ -194,13 +194,14 @@ describe("ControlDataPlatformModelCatalogSource", () => {
     if (!loaded.ok) return;
     const primary = loaded.models.resolve("platform-model");
     expect(primary).toMatchObject({
+      providerId: "provider-0",
       provider: "platform-openai",
       providerModel: "gpt-4o-mini-2024-07-18",
       inputPricePer1m: 5,
     });
-    expect(loaded.models.candidates?.("platform-model").map((r) => r.provider)).toEqual([
-      "platform-openai",
-      "platform-anthropic",
+    expect(loaded.models.candidates?.("platform-model").map((r) => r.providerId)).toEqual([
+      "provider-0",
+      "provider-1",
     ]);
     // The parsed registry the tenant loader consumes for its `platform` arm.
     expect(loaded.inputs.models.map((m) => m.name)).toEqual(["platform-model"]);

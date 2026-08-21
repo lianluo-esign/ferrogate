@@ -509,9 +509,7 @@ export default function ModelOfferingsPage() {
                       <Button
                         variant="ghost"
                         size="sm"
-                        disabled={
-                          syncModelsMutation.isPending || str(offering.provider_id) === ""
-                        }
+                        disabled={syncModelsMutation.isPending || str(offering.provider_id) === ""}
                         onClick={() => syncModelsMutation.mutate(str(offering.provider_id))}
                       >
                         {t("page.modelOfferings.action.syncModels")}

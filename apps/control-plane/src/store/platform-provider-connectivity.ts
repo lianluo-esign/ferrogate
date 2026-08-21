@@ -1,0 +1,162 @@
+import type { SeedProviderChannel } from "@ferrogate/storage";
+import {
+  defaultAdapterRegistry,
+  defaultAuthScheme,
+} from "../../../gateway/src/inference/adapters.js";
+import { readBoundedProviderBody } from "../../../gateway/src/inference/dispatch.js";
+import type { PhysicalRoute } from "../../../gateway/src/inference/ports.js";
+import { fetchUpstreamModels } from "./platform-provider-sync.js";
+
+const MAX_TEST_RESPONSE_BYTES = 1_048_576;
+
+export class ProviderConnectivityError extends Error {
+  readonly status: number;
+  readonly code: string;
+
+  constructor(status: number, code: string, message: string) {
+    super(message);
+    this.name = "ProviderConnectivityError";
+    this.status = status;
+    this.code = code;
+  }
+}
+
+export async function listProviderConnectivityModels(options: {
+  readonly provider: SeedProviderChannel;
+  readonly apiKey?: string;
+  readonly fetchImpl?: typeof fetch;
+}): Promise<readonly string[]> {
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const boundedFetch: typeof fetch = async (input, init) => {
+    const timeout = AbortSignal.timeout(30_000);
+    const signal = init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout;
+    const upstream = await fetchImpl(input, { ...init, signal });
+    const raw = await readBoundedProviderBody(upstream, MAX_TEST_RESPONSE_BYTES);
+    const body = [101, 204, 205, 304].includes(upstream.status) ? null : raw;
+    return new Response(body, {
+      status: upstream.status,
+      statusText: upstream.statusText,
+      headers: upstream.headers,
+    });
+  };
+  const models = await fetchUpstreamModels({ ...options, fetchImpl: boundedFetch });
+  return [...new Set(models.map((model) => model.id))].sort((a, b) => a.localeCompare(b));
+}
+
+export interface ProviderConnectivityResult {
+  readonly model: string;
+  readonly latencyMs: number;
+  readonly status: number;
+  readonly response: unknown;
+}
+
+export async function testProviderConnectivity(options: {
+  readonly provider: SeedProviderChannel;
+  readonly apiKey?: string;
+  readonly model: string;
+  readonly fetchImpl?: typeof fetch;
+  readonly now?: () => number;
+}): Promise<ProviderConnectivityResult> {
+  const adapter = defaultAdapterRegistry.adapterFor(options.provider.kind);
+  if (adapter === null) {
+    throw new ProviderConnectivityError(
+      400,
+      "provider_adapter_unsupported",
+      `unsupported provider kind ${options.provider.kind}`,
+    );
+  }
+
+  const route: PhysicalRoute = {
+    logicalModel: options.model,
+    providerId: options.provider.id,
+    provider: options.provider.name,
+    providerModel: options.model,
+    providerKind: options.provider.kind,
+    baseUrl: options.provider.base_url,
+    ...(options.apiKey === undefined ? {} : { apiKey: options.apiKey }),
+    authScheme:
+      options.provider.auth_scheme === "bearer" || options.provider.auth_scheme === "x-api-key"
+        ? options.provider.auth_scheme
+        : defaultAuthScheme(options.provider.kind),
+    enabled: options.provider.enabled !== 0,
+  };
+  const built = adapter.buildUpstreamRequest({
+    operation: "chat.completions",
+    route,
+    logicalModel: options.model,
+    providerModel: options.model,
+    stream: false,
+    body: {
+      model: options.model,
+      messages: [{ role: "user", content: "hi" }],
+      max_tokens: 32,
+      stream: false,
+    },
+  });
+  if (!built.ok) {
+    const detail =
+      built.error.kind === "unsupported_provider_kind"
+        ? `unsupported provider kind ${built.error.providerKind}`
+        : built.error.kind === "unsupported_capability"
+          ? `provider kind ${built.error.providerKind} does not support ${built.error.capability}`
+          : built.error.message;
+    throw new ProviderConnectivityError(400, "provider_test_invalid", detail);
+  }
+
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const now = options.now ?? Date.now;
+  const startedAt = now();
+  let upstream: Response;
+  try {
+    upstream = await fetchImpl(built.request.endpoint, {
+      method: built.request.method,
+      headers: built.request.headers,
+      body:
+        built.request.body === undefined
+          ? undefined
+          : built.request.body instanceof FormData
+            ? built.request.body
+            : JSON.stringify(built.request.body),
+      redirect: "manual",
+      signal: AbortSignal.timeout(30_000),
+    });
+  } catch (error) {
+    throw new ProviderConnectivityError(
+      502,
+      "provider_unreachable",
+      `could not reach upstream: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+
+  const latencyMs = Math.max(0, now() - startedAt);
+  let raw: string;
+  try {
+    raw = await readBoundedProviderBody(upstream, MAX_TEST_RESPONSE_BYTES);
+  } catch (error) {
+    throw new ProviderConnectivityError(
+      502,
+      "provider_response_invalid",
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+  if (!upstream.ok) {
+    throw new ProviderConnectivityError(
+      502,
+      "provider_test_failed",
+      `upstream returned HTTP ${upstream.status}`,
+    );
+  }
+
+  let payload: unknown;
+  try {
+    payload = JSON.parse(raw);
+  } catch {
+    throw new ProviderConnectivityError(
+      502,
+      "provider_response_invalid",
+      "upstream did not return a JSON chat response",
+    );
+  }
+  const response = adapter.translateChatCompletionResponse(payload, options.model) ?? payload;
+  return { model: options.model, latencyMs, status: upstream.status, response };
+}

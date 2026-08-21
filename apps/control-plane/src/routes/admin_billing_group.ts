@@ -27,6 +27,7 @@
  * that talk to the platform store directly. The generic CRUD handlers would
  * write `deps.store` (the document store), which no billing reader consults.
  */
+import { DEFAULT_PROVIDER_TYPE_ID, PROVIDER_TYPE_IDS } from "@ferrogate/provider-types";
 import { z } from "zod";
 import { HttpError } from "../middleware/errors.js";
 import type { CallerScope } from "../ports.js";
@@ -58,6 +59,7 @@ const groupCreateSchema = z
   .object({
     id: z.string().trim().min(1).optional(),
     name: z.string().trim().min(1),
+    provider_type_id: z.enum(PROVIDER_TYPE_IDS).default(DEFAULT_PROVIDER_TYPE_ID),
     multiplier: z.number().nonnegative(),
     description: z.string().nullable().optional(),
     enabled: z.boolean().optional(),
@@ -67,6 +69,7 @@ const groupCreateSchema = z
 const groupPatchSchema = z
   .object({
     name: z.string().trim().min(1).optional(),
+    provider_type_id: z.enum(PROVIDER_TYPE_IDS).optional(),
     multiplier: z.number().nonnegative().optional(),
     description: z.string().nullable().optional(),
     enabled: z.boolean().optional(),
@@ -162,6 +165,7 @@ async function createBillingGroup(c: Parameters<Handler>[0]): Promise<Response> 
   const input: BillingGroupInput = {
     id: body.id ?? crypto.randomUUID(),
     name: body.name,
+    provider_type_id: body.provider_type_id,
     multiplier: body.multiplier,
     description: body.description ?? null,
     enabled: body.enabled,

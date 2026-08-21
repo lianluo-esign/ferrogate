@@ -480,7 +480,10 @@ function costFilters(url: URL): Predicate[] {
   // everything. `%`/`_` are escaped so an underscore in an id is a literal, not a wildcard.
   const search = param(url, "search") ?? param(url, "q");
   if (search !== undefined && search.trim() !== "") {
-    const needle = `%${search.trim().replace(/[\\%_]/g, (ch) => `\\${ch}`).toLowerCase()}%`;
+    const needle = `%${search
+      .trim()
+      .replace(/[\\%_]/g, (ch) => `\\${ch}`)
+      .toLowerCase()}%`;
     push(
       "(lower(coalesce(rl.logical_model, '')) LIKE ? ESCAPE '\\'" +
         " OR lower(coalesce(rl.provider_model, '')) LIKE ? ESCAPE '\\'" +

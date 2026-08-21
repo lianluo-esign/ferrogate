@@ -199,6 +199,7 @@ function dbProvider(
   if (!cloudflare.ok) return cloudflare;
 
   const candidate: Record<string, unknown> = {
+    id: row.provider_id,
     name: row.provider_name,
     kind: row.provider_kind,
     base_url: row.provider_base_url,

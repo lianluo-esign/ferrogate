@@ -72,12 +72,12 @@ describe("contract document", () => {
     expect(RAW.operations).toHaveLength(EXPECTED_TOTAL_OPERATION_COUNT);
   });
 
-  it("assigns exactly 250 operations to apps/control-plane", () => {
+  it("assigns exactly 265 operations to apps/control-plane", () => {
     expect(OWNED_RAW).toHaveLength(EXPECTED_CONTROL_PLANE_OPERATION_COUNT);
     expect(CONTROL_PLANE_OPERATIONS).toHaveLength(EXPECTED_CONTROL_PLANE_OPERATION_COUNT);
   });
 
-  it("declares exactly 48 route groups", () => {
+  it("declares exactly 51 route groups", () => {
     // `ROUTE-MAP.md` line 4 designates itself the source of truth and states
     // the group count in PROSE, where nothing held it: it read "40 route
     // groups" for two merges after the 41st group appeared, because a group
@@ -94,7 +94,7 @@ describe("contract document", () => {
     // alone; #944 adds no new group). 48 -> 49 with #956's `admin_billing_fleet`.
     // 49 -> 50 with #948's `admin_announcement` group (its two route patterns
     // share the one group, so the group count grows by one, not two).
-    expect(new Set(RAW.route_patterns.map((pattern) => pattern.group)).size).toBe(50);
+    expect(new Set(RAW.route_patterns.map((pattern) => pattern.group)).size).toBe(51);
   });
 
   it("ownership predicate agrees with the raw document, path by path", () => {
@@ -107,7 +107,7 @@ describe("contract document", () => {
 });
 
 describe("anti-drift: every contract operation has a registered route", () => {
-  it("registers every one of this app's 250 operation ids", () => {
+  it("registers every one of this app's 265 operation ids", () => {
     const registered = new Set(registeredOperationIds());
     const missing = OWNED_RAW.map((operation) => operation.operation_id)
       .filter((operationId) => !registered.has(operationId))

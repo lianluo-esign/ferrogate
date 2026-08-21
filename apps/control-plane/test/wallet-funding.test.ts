@@ -509,7 +509,10 @@ describe("the audit trail survives", () => {
 
 describe("POST /admin/v1/wallets requires the tenant it belongs to", () => {
   it("refuses a body with no tenant_id instead of minting an orphan", async () => {
-    const response = await SELF.fetch(`${BASE}/admin/v1/wallets`, jsonRequest(OPERATOR, "POST", {}));
+    const response = await SELF.fetch(
+      `${BASE}/admin/v1/wallets`,
+      jsonRequest(OPERATOR, "POST", {}),
+    );
 
     // 201 here used to create a wallet keyed to a random UUID — a balance for a tenant that does
     // not exist, unreachable and (there being no wallet DELETE) impossible to remove.

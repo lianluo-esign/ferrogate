@@ -66,6 +66,7 @@ import { retentionPolicyRoutes } from "./retention_policy.js";
 import { selfHostedWorkerRoutes } from "./self_hosted_worker.js";
 import { siteDomainRoutes } from "./site_domain.js";
 import { skillRoutes } from "./skill.js";
+import { supportChatRoutes } from "./support_chat.js";
 import { tenantDataRoutes } from "./tenant_data.js";
 import { tenantHierarchyRoutes } from "./tenant_hierarchy.js";
 import { walletsRoutes } from "./wallets.js";
@@ -111,6 +112,7 @@ export const GROUP_MODULES: readonly GroupModule[] = [
   semanticCachePolicyRoutes,
   siteDomainRoutes,
   skillRoutes,
+  supportChatRoutes,
   tenantHierarchyRoutes,
   tenantDataRoutes,
   walletsRoutes,

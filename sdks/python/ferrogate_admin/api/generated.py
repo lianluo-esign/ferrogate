@@ -17,7 +17,7 @@ class Operation(TypedDict):
     security: SecurityRequirements
     tags: tuple[str, ...]
 
-OPENAPI_OPERATION_COUNT: Final[int] = 329
+OPENAPI_OPERATION_COUNT: Final[int] = 337
 
 OPERATIONS: Final[dict[str, Operation]] = {
     "abortAssetUpload": {
@@ -284,6 +284,12 @@ OPERATIONS: Final[dict[str, Operation]] = {
         "security": ((("bearerAuth", ()),),),
         "tags": ("admin-write",),
     },
+    "createOperatorSupportMessage": {
+        "method": "POST",
+        "path": "/admin/v1/support/conversations/{tenant_id}/messages",
+        "security": ((("bearerAuth", ()),),),
+        "tags": ("admin-write",),
+    },
     "createPaymentMethod": {
         "method": "POST",
         "path": "/admin/v1/payment-methods",
@@ -343,6 +349,12 @@ OPERATIONS: Final[dict[str, Operation]] = {
         "path": "/v1/audio/speech",
         "security": ((("bearerAuth", ()),),),
         "tags": ("gateway",),
+    },
+    "createSupportMessage": {
+        "method": "POST",
+        "path": "/admin/v1/support/messages",
+        "security": ((("bearerAuth", ()),),),
+        "tags": ("admin-write",),
     },
     "createTenantAccount": {
         "method": "POST",
@@ -944,6 +956,12 @@ OPERATIONS: Final[dict[str, Operation]] = {
         "security": ((("bearerAuth", ()),),),
         "tags": ("admin-read",),
     },
+    "getSupportConversation": {
+        "method": "GET",
+        "path": "/admin/v1/support/conversation",
+        "security": ((("bearerAuth", ()),),),
+        "tags": ("admin-read",),
+    },
     "getTenantAccount": {
         "method": "GET",
         "path": "/admin/v1/tenant-accounts/{tenant_id}",
@@ -973,6 +991,12 @@ OPERATIONS: Final[dict[str, Operation]] = {
         "path": "/admin/v1/workspaces/{workspace_id}",
         "security": ((("bearerAuth", ()),),),
         "tags": ("admin-read",),
+    },
+    "heartbeatSupportOperator": {
+        "method": "POST",
+        "path": "/admin/v1/support/presence",
+        "security": ((("bearerAuth", ()),),),
+        "tags": ("admin-write",),
     },
     "importModelCatalog": {
         "method": "POST",
@@ -1409,6 +1433,18 @@ OPERATIONS: Final[dict[str, Operation]] = {
     "listSiteDomains": {
         "method": "GET",
         "path": "/admin/v1/site-domains",
+        "security": ((("bearerAuth", ()),),),
+        "tags": ("admin-read",),
+    },
+    "listSupportConversationMessages": {
+        "method": "GET",
+        "path": "/admin/v1/support/conversations/{tenant_id}/messages",
+        "security": ((("bearerAuth", ()),),),
+        "tags": ("admin-read",),
+    },
+    "listSupportConversations": {
+        "method": "GET",
+        "path": "/admin/v1/support/conversations",
         "security": ((("bearerAuth", ()),),),
         "tags": ("admin-read",),
     },
@@ -1898,6 +1934,12 @@ OPERATIONS: Final[dict[str, Operation]] = {
         "security": ((("bearerAuth", ()),),),
         "tags": ("admin-write",),
     },
+    "testProviderConnectivity": {
+        "method": "POST",
+        "path": "/admin/v1/providers/{id}/connectivity-test",
+        "security": ((("bearerAuth", ()),),),
+        "tags": ("admin-write",),
+    },
     "unbindBillingGroupProvider": {
         "method": "DELETE",
         "path": "/admin/v1/billing-groups/{id}/providers/{providerId}",
@@ -1949,6 +1991,12 @@ OPERATIONS: Final[dict[str, Operation]] = {
     "updateTenantAccount": {
         "method": "PATCH",
         "path": "/admin/v1/tenant-accounts/{tenant_id}",
+        "security": ((("bearerAuth", ()),),),
+        "tags": ("admin-write",),
+    },
+    "updateVirtualKey": {
+        "method": "PATCH",
+        "path": "/admin/v1/virtual-keys/{key_id}",
         "security": ((("bearerAuth", ()),),),
         "tags": ("admin-write",),
     },
@@ -2025,6 +2073,7 @@ ADMIN_OPERATION_IDS: Final[tuple[str, ...]] = (
     "createBillingGroup",
     "createGuardrailPolicyRevision",
     "createNextGuardrailPolicyRevision",
+    "createOperatorSupportMessage",
     "createPaymentMethod",
     "createPermission",
     "createPlan",
@@ -2032,6 +2081,7 @@ ADMIN_OPERATION_IDS: Final[tuple[str, ...]] = (
     "createQuotaPolicy",
     "createRole",
     "createSemanticCachePolicy",
+    "createSupportMessage",
     "createTenantAccount",
     "createVirtualKey",
     "createWallet",
@@ -2103,11 +2153,13 @@ ADMIN_OPERATION_IDS: Final[tuple[str, ...]] = (
     "getRole",
     "getSemanticCachePolicy",
     "getSiteDomain",
+    "getSupportConversation",
     "getTenantAccount",
     "getTenantResolvedDefaults",
     "getVirtualKey",
     "getWallet",
     "getWorkspace",
+    "heartbeatSupportOperator",
     "importModelCatalog",
     "invalidateSemanticCachePolicy",
     "listAdminAgentCostBurn",
@@ -2172,6 +2224,8 @@ ADMIN_OPERATION_IDS: Final[tuple[str, ...]] = (
     "listSemanticCachePolicies",
     "listSharedBillingGroups",
     "listSiteDomains",
+    "listSupportConversationMessages",
+    "listSupportConversations",
     "listTenantAccounts",
     "listTenantRoles",
     "listUsageReports",
@@ -2237,6 +2291,7 @@ ADMIN_OPERATION_IDS: Final[tuple[str, ...]] = (
     "runAdminAgentScheduleNow",
     "setAdminDrain",
     "syncProviderModels",
+    "testProviderConnectivity",
     "unbindBillingGroupProvider",
     "unbindSiteDomain",
     "unbindTenantRole",
@@ -2245,6 +2300,7 @@ ADMIN_OPERATION_IDS: Final[tuple[str, ...]] = (
     "updateProject",
     "updateQuotaPolicy",
     "updateTenantAccount",
+    "updateVirtualKey",
     "updateWallet",
     "updateWorkspace",
     "validateAdminConfig",

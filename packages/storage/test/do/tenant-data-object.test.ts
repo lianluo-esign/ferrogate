@@ -105,6 +105,9 @@ const TENANT_TABLES = [
   "experiment_shadow_legs",
   "guardrail_check_evaluations",
   "guardrail_evaluations",
+  "im_conversation_participants",
+  "im_conversations",
+  "im_messages",
   "managed_worker_isolation_evidence",
   "managed_worker_isolation_policies",
   "managed_worker_isolation_selections",
@@ -351,13 +354,17 @@ describe("the statement splitter", () => {
       // `0027_shared_config_mirror` (#948, +2 tables, +1 `CREATE INDEX`), the
       // read-only shared-config mirror this channel pushes into. Then
       // `0028_shared_announcements_mirror` (#948, +1 table, +1 `CREATE INDEX`)
-      // extended that mirror with the announcements domain.
-      files: 28,
-      statements: 439,
-      createTable: 77,
-      createIndex: 97,
+      // extended that mirror with the announcements domain. Finally,
+      // `0029_shared_billing_group_type` adds the provider-type discriminator
+      // and its lookup index to the shared billing-group mirror. `0030_im_core`
+      // adds the reusable conversation, participant and message core used by
+      // support today and tenant/agent chat later.
+      files: 30,
+      statements: 447,
+      createTable: 80,
+      createIndex: 101,
       createUniqueIndex: 6,
-      alterTable: 23,
+      alterTable: 24,
       insert: 6,
     });
 
@@ -390,8 +397,9 @@ describe("the statement splitter", () => {
       "0025_request_log_routing_decision": 1,
       "0026_api_key_billing_group": 1,
       "0027_shared_config_mirror": 4,
+      "0029_shared_billing_group_type": 1,
     });
-    expect(Object.values(commentSemicolons).reduce((total, n) => total + n, 0)).toBe(44);
+    expect(Object.values(commentSemicolons).reduce((total, n) => total + n, 0)).toBe(45);
 
     // Ordinary statements still have their terminator removed, while each
     // trigger stays whole because its body contains internal terminators.
@@ -413,7 +421,7 @@ describe("a fresh tenant object", () => {
     expect(status.latest).toBe(TENANT_SCHEMA_VERSION);
     // A guard on the fixture: if `TENANT_MIGRATIONS` were ever empty the
     // version assertions above would both read 0 and pass vacuously.
-    expect(TENANT_MIGRATIONS.length).toBe(28);
+    expect(TENANT_MIGRATIONS.length).toBe(30);
     expect(status.appliedThisWake).toEqual(TENANT_MIGRATIONS.map((m) => m.name));
 
     const tables = await object.query({
@@ -478,6 +486,49 @@ describe("a fresh tenant object", () => {
         }),
       ),
     ).toMatch(/CHECK constraint failed|constraint/i);
+  });
+});
+
+describe("tenant-local IM core", () => {
+  test("persists a support conversation, participants and ordered messages", async () => {
+    const tenantId = "tenant_im_support";
+    const object = objectFor(tenantId);
+    await object.batch({
+      tenantId,
+      statements: [
+        {
+          sql:
+            "INSERT INTO im_conversations " +
+            "(id, tenant_id, kind, status, created_by_type, created_by_id, metadata_json, created_at_unix, updated_at_unix) " +
+            "VALUES (?, ?, 'support', 'open', 'tenant_user', ?, '{}', ?, ?)",
+          params: ["support:tenant_im_support", tenantId, "user_1", 100, 100],
+        },
+        {
+          sql:
+            "INSERT INTO im_conversation_participants " +
+            "(conversation_id, participant_type, participant_id, role, joined_at_unix, updated_at_unix) " +
+            "VALUES (?, 'tenant_user', ?, 'member', ?, ?)",
+          params: ["support:tenant_im_support", "user_1", 100, 100],
+        },
+        {
+          sql:
+            "INSERT INTO im_messages " +
+            "(id, conversation_id, sender_type, sender_id, content_type, body, metadata_json, created_at_unix) " +
+            "VALUES (?, ?, 'tenant_user', ?, 'text', ?, '{}', ?)",
+          params: ["message_1", "support:tenant_im_support", "user_1", "hello", 100],
+        },
+      ],
+    });
+
+    const result = await object.query({
+      tenantId,
+      sql:
+        "SELECT c.kind, p.role, m.seq, m.body " +
+        "FROM im_conversations c " +
+        "JOIN im_conversation_participants p ON p.conversation_id = c.id " +
+        "JOIN im_messages m ON m.conversation_id = c.id",
+    });
+    expect(result.results).toEqual([{ kind: "support", role: "member", seq: 1, body: "hello" }]);
   });
 });
 

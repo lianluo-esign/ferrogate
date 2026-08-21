@@ -291,6 +291,10 @@
       "group": "admin_provider"
     },
     {
+      "pattern": "/admin/v1/providers/{id}/connectivity-test",
+      "group": "admin_provider"
+    },
+    {
       "pattern": "/admin/v1/provider-health",
       "group": "admin_provider"
     },
@@ -613,6 +617,14 @@
     {
       "pattern": "/admin/v1/billing-outbox-dead-letters/{*rest}",
       "group": "billing"
+    },
+    {
+      "pattern": "/admin/v1/support/conversation",
+      "group": "support_chat"
+    },
+    {
+      "pattern": "/admin/v1/support/{*rest}",
+      "group": "support_chat"
     },
     {
       "pattern": "/admin/v1/guardrail-evaluations",
@@ -1009,6 +1021,17 @@
       "path": "/admin/v1/providers/{id}/sync-models",
       "method": "post",
       "operation_id": "syncProviderModels",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/providers/{id}/connectivity-test",
+      "method": "post",
+      "operation_id": "testProviderConnectivity",
       "visibility": "admin",
       "auth": {
         "kind": "bearer",
@@ -3119,6 +3142,17 @@
     },
     {
       "path": "/admin/v1/virtual-keys/{key_id}",
+      "method": "patch",
+      "operation_id": "updateVirtualKey",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/virtual-keys/{key_id}",
       "method": "delete",
       "operation_id": "revokeVirtualKey",
       "visibility": "admin",
@@ -4313,6 +4347,72 @@
       "auth": {
         "kind": "bearer",
         "scope": "admin.read"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/support/conversation",
+      "method": "get",
+      "operation_id": "getSupportConversation",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.read"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/support/messages",
+      "method": "post",
+      "operation_id": "createSupportMessage",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/support/conversations",
+      "method": "get",
+      "operation_id": "listSupportConversations",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.read"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/support/conversations/{tenant_id}/messages",
+      "method": "get",
+      "operation_id": "listSupportConversationMessages",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.read"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/support/conversations/{tenant_id}/messages",
+      "method": "post",
+      "operation_id": "createOperatorSupportMessage",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/support/presence",
+      "method": "post",
+      "operation_id": "heartbeatSupportOperator",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
       },
       "rbac_action": null
     }

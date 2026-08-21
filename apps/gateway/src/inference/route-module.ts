@@ -55,8 +55,9 @@ import { tenantDatabaseOf } from "../tenancy/middleware.js";
 import { TENANT_DATABASE_VAR, type TenantDatabaseAccessor } from "../tenancy/ports.js";
 import { parseTenantDatabaseRoutingMode } from "../tenancy/resolver.js";
 import { storedAssetAudioObjects } from "./audio-objects.js";
+import { BillingGroupModelResolver } from "./billing-group-models.js";
 import type { ModelCatalogInputs } from "./catalog.js";
-import { emptyModelResolver } from "./defaults.js";
+import { emptyModelResolver, isolateBillingGroupSource } from "./defaults.js";
 import { errorResponse, reject } from "./errors.js";
 import { createInferenceRouter } from "./handlers.js";
 import type { InferenceEnv } from "./handlers.js";
@@ -67,6 +68,7 @@ import {
   setInferenceRequestScope,
 } from "./identity.js";
 import type {
+  Caller,
   InferenceBindings,
   InferenceDeps,
   ModelResolver,
@@ -139,7 +141,18 @@ export function inferenceRouteModule(deps: InferenceDeps = {}): RouteModule {
               c.get("requestId"),
             );
           }
-          publishRequestScope(c, models.models);
+          const auth = c.get("auth");
+          const caller =
+            auth === null || auth === undefined
+              ? undefined
+              : callerFromAuth(auth, residencyPolicyFor(c.req.raw));
+          const scopedModels = await billingGroupModelsForRequest(
+            c,
+            deps,
+            models.models ?? fallbackModels(deps, c.env),
+            caller,
+          );
+          publishRequestScope(c, scopedModels, caller);
           const startedAtMs = Date.now();
           // `await` costs nothing here: Hono resolves as soon as the RESPONSE
           // OBJECT exists, and a streaming branch hands back the provider's
@@ -237,8 +250,11 @@ function emitInferenceTelemetry(
  * The scope is keyed by `c.req.raw` — the exact `Request` passed to
  * `inner.fetch` on the next line.
  */
-function publishRequestScope(c: Context<GatewayEnv>, models?: ModelResolver): void {
-  const auth = c.get("auth");
+function publishRequestScope(
+  c: Context<GatewayEnv>,
+  models: ModelResolver | undefined,
+  caller: Caller | undefined,
+): void {
   const request = c.req.raw;
   const audioObjects = audioObjectsForRequest(c);
   setInferenceRequestScope(request, {
@@ -252,9 +268,7 @@ function publishRequestScope(c: Context<GatewayEnv>, models?: ModelResolver): vo
     // `planUpstream`) sees it without a second lookup. `residencyPolicyFor`
     // reads the SAME `Request` object `residency()` keyed it by on the outer
     // app, and answers `null` for a tenant nothing governs.
-    ...(auth === null || auth === undefined
-      ? {}
-      : { caller: callerFromAuth(auth, residencyPolicyFor(request)) }),
+    ...(caller === undefined ? {} : { caller }),
     tokens: honoTokenGovernor(c),
     // #664 — the request log's model/provider/token facts. `request` is the
     // OUTER inbound `Request`, which is both the key the fact collector uses
@@ -291,6 +305,36 @@ function publishRequestScope(c: Context<GatewayEnv>, models?: ModelResolver): vo
         }
       : {}),
   });
+}
+
+/** Apply the authenticated key's group -> provider edges to the request catalog. */
+async function billingGroupModelsForRequest(
+  c: Context<GatewayEnv>,
+  deps: InferenceDeps,
+  models: ModelResolver,
+  caller: Caller | undefined,
+): Promise<ModelResolver> {
+  const groupId = caller?.billingGroupId;
+  if (caller === undefined || groupId === undefined || groupId === "") return models;
+
+  const source = deps.billingGroups ?? isolateBillingGroupSource;
+  if (source.routingForGroup === undefined) {
+    // Compatibility for injected multiplier-only sources. The production
+    // source always implements routingForGroup and therefore never enters here.
+    return models;
+  }
+
+  const tenantId = caller.scope.kind === "tenant" ? caller.scope.tenantId : undefined;
+  try {
+    const routing = await source.routingForGroup(
+      c.env as unknown as InferenceBindings,
+      groupId,
+      tenantId,
+    );
+    return new BillingGroupModelResolver(models, routing?.providerIds ?? []);
+  } catch {
+    return new BillingGroupModelResolver(models, []);
+  }
 }
 
 /**

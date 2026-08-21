@@ -4,7 +4,11 @@ import {
   type TenantDatabaseResolver,
   resolverForEnv,
 } from "../tenancy/index.js";
-import type { InferenceBindings, PlatformBillingGroupSource } from "./ports.js";
+import type {
+  BillingGroupRouting,
+  InferenceBindings,
+  PlatformBillingGroupSource,
+} from "./ports.js";
 
 /**
  * The billing-group multiplier source for the inference data plane (#945, epic
@@ -42,18 +46,18 @@ export const DEFAULT_BILLING_GROUP_CACHE_TTL_MS = 30_000;
 
 const REVISION_SQL = "SELECT revision FROM platform_billing_group_revisions WHERE id = 1";
 
-/**
- * `id`, `multiplier` and `enabled` for every group — the exact projection
- * `PlatformBillingGroupStore.multiplierSnapshot()` returns. Inlined here rather
- * than imported from `apps/control-plane` to avoid a reverse dependency (the
- * store already imports FROM the gateway), byte-identical to that store's SQL.
- */
-const MULTIPLIER_SQL = "SELECT id, multiplier, enabled FROM platform_billing_groups";
+/** One graph read keeps each group and its provider edges in one snapshot. */
+const GROUP_GRAPH_SQL = `
+  SELECT g.id, g.multiplier, g.enabled, edge.provider_id
+  FROM platform_billing_groups g
+  LEFT JOIN platform_billing_group_providers edge ON edge.group_id = g.id
+  ORDER BY g.id ASC, edge.provider_id ASC`;
 
 interface BillingGroupRow {
   readonly id: string | null;
   readonly multiplier: number | string | null;
   readonly enabled: number | string | null;
+  readonly provider_id?: string | null;
 }
 
 /**
@@ -62,11 +66,17 @@ interface BillingGroupRow {
  * malformed group is simply absent, so a lookup on it falls to `1.0` — the same
  * fail-open reading a missing id gets.
  */
-type MultiplierSnapshot = ReadonlyMap<string, number>;
+interface BillingGroupSnapshotEntry {
+  readonly enabled: boolean;
+  readonly multiplier: number | undefined;
+  readonly providerIds: readonly string[];
+}
+
+type BillingGroupSnapshot = ReadonlyMap<string, BillingGroupSnapshotEntry>;
 
 interface CacheEntry {
   readonly revision: number;
-  readonly snapshot: MultiplierSnapshot;
+  readonly snapshot: BillingGroupSnapshot;
   readonly expiresAt: number;
 }
 
@@ -82,13 +92,26 @@ function parseMultiplier(value: number | string | null): number | undefined {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
 }
 
-function snapshotFromRows(rows: readonly BillingGroupRow[]): MultiplierSnapshot {
-  const snapshot = new Map<string, number>();
+function snapshotFromRows(rows: readonly BillingGroupRow[]): BillingGroupSnapshot {
+  const mutable = new Map<
+    string,
+    { enabled: boolean; multiplier: number | undefined; providerIds: Set<string> }
+  >();
   for (const row of rows) {
-    if (row.id === null || !rowIsEnabled(row.enabled)) continue;
-    const multiplier = parseMultiplier(row.multiplier);
-    if (multiplier === undefined) continue;
-    snapshot.set(row.id, multiplier);
+    if (row.id === null) continue;
+    const entry = mutable.get(row.id) ?? {
+      enabled: rowIsEnabled(row.enabled),
+      multiplier: parseMultiplier(row.multiplier),
+      providerIds: new Set<string>(),
+    };
+    if (typeof row.provider_id === "string" && row.provider_id !== "") {
+      entry.providerIds.add(row.provider_id);
+    }
+    mutable.set(row.id, entry);
+  }
+  const snapshot = new Map<string, BillingGroupSnapshotEntry>();
+  for (const [id, entry] of mutable) {
+    snapshot.set(id, { ...entry, providerIds: [...entry.providerIds] });
   }
   return snapshot;
 }
@@ -115,12 +138,27 @@ export class ControlDataPlatformBillingGroupSource implements PlatformBillingGro
     try {
       const snapshot = await this.#snapshot(env);
       if (snapshot === undefined) return 1;
-      return snapshot.get(groupId) ?? 1;
+      const group = snapshot.get(groupId);
+      return group?.enabled === true ? (group.multiplier ?? 1) : 1;
     } catch {
       // MONEY PATH: any unexpected failure (including a 503 posture throw from
       // `controlDatabaseFrom`) bills at the official price rather than failing
       // the served request. The blip is never cached, so the next request retries.
       return 1;
+    }
+  }
+
+  async routingForGroup(
+    env: InferenceBindings,
+    groupId: string | undefined,
+    _tenantId?: string | undefined,
+  ): Promise<BillingGroupRouting | null> {
+    if (groupId === undefined || groupId === "") return null;
+    try {
+      const group = (await this.#snapshot(env))?.get(groupId);
+      return group?.enabled === true ? { providerIds: group.providerIds } : null;
+    } catch {
+      return null;
     }
   }
 
@@ -130,7 +168,7 @@ export class ControlDataPlatformBillingGroupSource implements PlatformBillingGro
    * reached). Throws only when a genuine read fails, which the caller turns into
    * the fail-open `1.0`.
    */
-  async #snapshot(env: InferenceBindings): Promise<MultiplierSnapshot | undefined> {
+  async #snapshot(env: InferenceBindings): Promise<BillingGroupSnapshot | undefined> {
     const db = controlDatabaseFrom(env);
     if (db === undefined) return undefined;
 
@@ -153,7 +191,7 @@ export class ControlDataPlatformBillingGroupSource implements PlatformBillingGro
       return cached.snapshot;
     }
 
-    const result = await db.prepare(MULTIPLIER_SQL).all<BillingGroupRow>();
+    const result = await db.prepare(GROUP_GRAPH_SQL).all<BillingGroupRow>();
     const snapshot = snapshotFromRows(result.results);
     this.#byEnv.set(envKey, { revision, snapshot, expiresAt: now + this.#ttlMs });
     return snapshot;
@@ -165,11 +203,29 @@ export class ControlDataPlatformBillingGroupSource implements PlatformBillingGro
  * as {@link ControlDataPlatformBillingGroupSource} reads them from the control
  * table, but from the tenant's own read-only `shared_billing_groups`.
  */
-const MIRROR_GROUP_SQL = "SELECT multiplier, enabled FROM shared_billing_groups WHERE id = ?";
+const MIRROR_GROUP_SQL =
+  "SELECT multiplier, enabled, provider_ids_json FROM shared_billing_groups WHERE id = ?";
 
 interface MirrorGroupRow {
   readonly multiplier: number | string | null;
   readonly enabled: number | string | null;
+  readonly provider_ids_json: string | null;
+}
+
+function parseProviderIds(raw: string | null): readonly string[] | undefined {
+  if (raw === null) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (
+      !Array.isArray(parsed) ||
+      parsed.some((value) => typeof value !== "string" || value === "")
+    ) {
+      return undefined;
+    }
+    return [...new Set(parsed)];
+  } catch {
+    return undefined;
+  }
 }
 
 /** Resolve `env`'s tenant-database resolver; the seam a unit test overrides. */
@@ -221,13 +277,35 @@ export class MirrorFirstBillingGroupSource implements PlatformBillingGroupSource
     if (groupId === undefined || groupId === "") return 1;
 
     if (tenantId !== undefined && tenantId !== "") {
-      const mirrored = await this.#fromMirror(env, groupId, tenantId);
+      const mirrored = await this.#rowFromMirror(env, groupId, tenantId);
       // `undefined` = the mirror could not answer authoritatively (not synced,
       // unreachable, or unmigrated); only then do we pay the control fallback.
-      if (mirrored !== undefined) return mirrored;
+      if (mirrored !== undefined) {
+        if (!rowIsEnabled(mirrored.enabled)) return 1;
+        return parseMultiplier(mirrored.multiplier) ?? 1;
+      }
     }
 
     return this.#fallback.multiplierForGroup(env, groupId, tenantId);
+  }
+
+  async routingForGroup(
+    env: InferenceBindings,
+    groupId: string | undefined,
+    tenantId?: string | undefined,
+  ): Promise<BillingGroupRouting | null> {
+    if (groupId === undefined || groupId === "") return null;
+
+    if (tenantId !== undefined && tenantId !== "") {
+      const mirrored = await this.#rowFromMirror(env, groupId, tenantId);
+      if (mirrored !== undefined) {
+        if (!rowIsEnabled(mirrored.enabled)) return null;
+        const providerIds = parseProviderIds(mirrored.provider_ids_json);
+        return providerIds === undefined ? null : { providerIds };
+      }
+    }
+
+    return (await this.#fallback.routingForGroup?.(env, groupId, tenantId)) ?? null;
   }
 
   /**
@@ -236,17 +314,16 @@ export class MirrorFirstBillingGroupSource implements PlatformBillingGroupSource
    * A PRESENT row is authoritative: enabled → its parsed multiplier, otherwise
    * `1.0`.
    */
-  async #fromMirror(
+  async #rowFromMirror(
     env: InferenceBindings,
     groupId: string,
     tenantId: string,
-  ): Promise<number | undefined> {
+  ): Promise<MirrorGroupRow | undefined> {
     try {
       const handle = await this.#resolverFor(env).forTenant(tenantId);
       const row = await handle.db.prepare(MIRROR_GROUP_SQL).bind(groupId).first<MirrorGroupRow>();
       if (row === null) return undefined; // not synced yet → let the fallback read it
-      if (!rowIsEnabled(row.enabled)) return 1; // disabled → official price
-      return parseMultiplier(row.multiplier) ?? 1; // malformed → official price
+      return row;
     } catch {
       // A missing mirror table or an unreachable tenant object is not a billing
       // event: defer to the control fallback (which itself fails open to 1.0).

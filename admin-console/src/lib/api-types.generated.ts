@@ -689,6 +689,25 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/admin/v1/providers/{id}/connectivity-test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** List a platform provider's live models or send a fixed hi message through one selected model. */
+        post: operations["testProviderConnectivity"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/admin/v1/provider-health": {
         parameters: {
             query?: never;
@@ -4254,7 +4273,8 @@ export interface paths {
         delete: operations["revokeVirtualKey"];
         options?: never;
         head?: never;
-        patch?: never;
+        /** Re-bind a virtual API key's billing group and attribution tags. */
+        patch: operations["updateVirtualKey"];
         trace?: never;
     };
     "/admin/v1/quota-policies": {
@@ -6563,6 +6583,94 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/admin/v1/support/conversation": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read the current tenant's persistent support conversation. */
+        get: operations["getSupportConversation"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/v1/support/messages": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Append a tenant message to persistent support history. */
+        post: operations["createSupportMessage"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/v1/support/conversations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List tenant support conversations for platform operators. */
+        get: operations["listSupportConversations"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/v1/support/conversations/{tenant_id}/messages": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        /** Read one tenant's persistent support messages. */
+        get: operations["listSupportConversationMessages"];
+        put?: never;
+        /** Append an operator reply to one tenant's support history. */
+        post: operations["createOperatorSupportMessage"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/v1/support/presence": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Refresh an operator's support-presence lease. */
+        post: operations["heartbeatSupportOperator"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -6730,6 +6838,8 @@ export interface components {
         };
         AdminProvider: {
             name: string;
+            /** @enum {string|null} */
+            provider_type_id?: "openai" | "anthropic" | "gemini" | "minimax" | "deepseek" | "grok" | null;
             kind: string;
             /** @enum {string} */
             compatibility: "openai-compatible" | "dedicated";
@@ -7376,6 +7486,8 @@ export interface components {
             id?: string;
             tenant_id?: string;
             name: string;
+            /** @enum {string} */
+            provider_type_id?: "openai" | "anthropic" | "gemini" | "minimax" | "deepseek" | "grok";
             kind: string;
             /** Format: uri */
             base_url: string;
@@ -7395,6 +7507,8 @@ export interface components {
             id?: string;
             tenant_id?: string;
             name?: string;
+            /** @enum {string} */
+            provider_type_id?: "openai" | "anthropic" | "gemini" | "minimax" | "deepseek" | "grok";
             kind?: string;
             /** Format: uri */
             base_url?: string;
@@ -9660,6 +9774,8 @@ export interface components {
             /** @constant */
             scope: "platform";
             name: string;
+            /** @enum {string|null} */
+            provider_type_id: "openai" | "anthropic" | "gemini" | "minimax" | "deepseek" | "grok" | null;
             multiplier: number;
             description?: string | null;
             enabled: boolean;
@@ -9668,6 +9784,8 @@ export interface components {
         BillingGroupMutation: {
             id?: string;
             name: string;
+            /** @enum {string} */
+            provider_type_id?: "openai" | "anthropic" | "gemini" | "minimax" | "deepseek" | "grok";
             multiplier: number;
             description?: string | null;
             enabled?: boolean;
@@ -13597,6 +13715,49 @@ export interface operations {
             503: components["responses"]["ServiceUnavailable"];
         };
     };
+    testProviderConnectivity: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @enum {string} */
+                    action: "models";
+                } | {
+                    /** @enum {string} */
+                    action: "chat";
+                    model: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Live model list or successful upstream chat response. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            /** @description The credential, adapter, upstream connection, or upstream response failed. */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
     listAdminProviderHealth: {
         parameters: {
             query?: never;
@@ -16374,6 +16535,8 @@ export interface operations {
                         data: {
                             id: string;
                             name: string;
+                            /** @enum {string|null} */
+                            provider_type_id: "openai" | "anthropic" | "gemini" | "minimax" | "deepseek" | "grok" | null;
                             multiplier: number;
                             description?: string | null;
                             enabled: boolean;
@@ -20471,6 +20634,55 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+        };
+    };
+    updateVirtualKey: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Client-minted identifier of one operator action (issue #548). Sent by the FerroGate CLI on every request it issues, reads included, and identical across every page of an --all-pages walk and across retries of the same logical action. It is an identifier, not a claim: the client is the authority on it. Distinct from an idempotency key, which governs whether an effect may be applied twice. */
+                "x-ferrogate-action-id"?: components["parameters"]["ClientActionIdHeader"];
+                /** @description Client-asserted descriptor of where an action came from (issue #548), rendered as a v1 semicolon-delimited list of `cli`, `os`, `arch`, `context`, `cred` and `host` fields; `host` is present only when the operator sets FERROGATE_CLIENT_HOST_LABEL, and other optional fields are omitted rather than sent empty. Values are percent-encoded, so the blob is always printable ASCII and a value can never introduce a delimiter. Never carries credential material -- `cred` names the credential SOURCE (env:VAR, stdin, inline, none) and never the token. This is NOT the canonical_target_sha256 action fingerprint, which digests the target of a call rather than the client and is a sha256: digest; this one is not a digest at all. */
+                "x-ferrogate-client-fingerprint"?: components["parameters"]["ClientFingerprintHeader"];
+                /** @description The client's own clock, in seconds since the Unix epoch, as read on the machine that issued the request (issue #548). Client-asserted and untrusted: it must never be used as the event time, nor read by any authorization or ordering decision. Its only purpose is to be compared against the server-issued instant so client clock skew is measurable. */
+                "x-ferrogate-client-clock-unverified"?: components["parameters"]["ClientClockUnverifiedHeader"];
+                /** @description A short-lived, server-issued time token echoed verbatim by the client (issue #548), rendered as a v1 semicolon-delimited list of issued_at (unix seconds), ttl (seconds), action_id and sig fields. It is the authoritative client_sent_at: the client never fills that field from its own clock. A token outside its TTL, or presented with an action id other than the one it was issued for, is refused. The server also records its own receive time; the two together bound the action. */
+                "x-ferrogate-time-token"?: components["parameters"]["ClientTimeTokenHeader"];
+                /** @description An address the operator chose to disclose about the client (issue #548). Client-asserted, opt-in and trivially forged: it is stored and rendered as client-reported and must never be merged with the source IP the server observes, which is the authoritative record. */
+                "x-ferrogate-client-reported-ip"?: components["parameters"]["ClientReportedIpHeader"];
+            };
+            path: {
+                key_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @description Platform billing group id the key charges through; null clears the binding (multiplier 1.0). */
+                    billing_group_id?: string | null;
+                    /** @description Display-only attribution tags (e.g. channel_group label). */
+                    attribution_tags?: {
+                        [key: string]: string;
+                    } | null;
+                };
+            };
+        };
+        responses: {
+            /** @description Updated virtual API key. */
+            200: {
+                headers: {
+                    "x-ferrogate-time-token": components["headers"]["ClientTimeTokenResponseHeader"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminVirtualApiKeyMutationResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
         };
     };
     listQuotaPolicies: {
@@ -25023,6 +25235,173 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    getSupportConversation: {
+        parameters: {
+            query?: {
+                cursor?: string;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Persistent tenant support conversation. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Record<string, never>;
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    createSupportMessage: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    body: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Support message created. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Record<string, never>;
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    listSupportConversations: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Support conversation inbox. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Record<string, never>;
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    listSupportConversationMessages: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Support messages. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Record<string, never>;
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    createOperatorSupportMessage: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    body: string;
+                    sender_id?: string;
+                    sender_name?: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Operator support reply created. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Record<string, never>;
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    heartbeatSupportOperator: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    operator_id?: string;
+                    display_name?: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Presence lease refreshed. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Record<string, never>;
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
         };
     };
 }

@@ -140,6 +140,12 @@ describe("D1TenantModelCatalogSource", () => {
       "provider-c",
       "provider-d",
     ]);
+    expect(routes.map((route) => route.providerId)).toEqual([
+      "provider-0",
+      "provider-1",
+      "provider-2",
+      "provider-3",
+    ]);
     expect(routes.map((route) => route.priority)).toEqual([0, 10, 20, 30]);
     expect(routes[2]).toMatchObject({
       inputPricePer1m: 3,

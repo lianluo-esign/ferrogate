@@ -103,7 +103,10 @@ function stubBillingGroups(initial: AdminBillingGroup[]): {
         ...(body as Partial<AdminBillingGroup>),
       });
       groups.push(created);
-      return HttpResponse.json({ object: "billing_group", billing_group: created }, { status: 201 });
+      return HttpResponse.json(
+        { object: "billing_group", billing_group: created },
+        { status: 201 },
+      );
     }),
     http.patch(gatewayUrl("/admin/v1/billing-groups/:id"), async ({ request, params }) => {
       const body = await capture(request);
@@ -276,8 +279,7 @@ describe("billing-groups CRUD", () => {
       expect(
         writes.some(
           (w) =>
-            w.method === "DELETE" &&
-            w.url.includes("/billing-groups/bg-1/providers/prov-openai"),
+            w.method === "DELETE" && w.url.includes("/billing-groups/bg-1/providers/prov-openai"),
         ),
       ).toBe(true),
     );
