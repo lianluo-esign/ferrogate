@@ -216,8 +216,16 @@ export function billingEventFromUsage(
   usage: UsageWithProviderAttempt,
   context: BillingEventContext,
 ): BillingEvent {
-  const metadata: Record<string, string> =
-    usage.metadata === undefined ? {} : { ...usage.metadata };
+  // These fields explain trusted settlement decisions and must never come
+  // from caller-controlled request metadata. Omit any lookalikes before the
+  // actual key binding below stamps authoritative values. Request metadata is
+  // bounded to eight entries, so this destructuring stays a small fixed cost.
+  const {
+    billing_group_id: _untrustedBillingGroupId,
+    billing_multiplier: _untrustedBillingMultiplier,
+    offer_cost_usd: _untrustedOfferCostUsd,
+    ...metadata
+  }: Record<string, string> = usage.metadata ?? {};
   // #945 — record the applied billing group and multiplier ON the event, so a
   // cost record / chargeback export shows WHY the settled cost differs from the
   // official price. Stamped ONLY when a group applied, so a request bound to no

@@ -174,6 +174,34 @@ describe("billingEventFromUsage", () => {
     });
     expect(reported).toEqual([]);
   });
+
+  it("reserves billing-group metadata for the gateway settlement result", () => {
+    const spoofed = {
+      billing_group_id: "spoofed-group",
+      billing_multiplier: "999",
+      offer_cost_usd: "0",
+      team: "search",
+    };
+    const ungrouped = billingEventFromUsage(usageFixture({ metadata: spoofed }), {
+      nowUnixSeconds: 1,
+    });
+    expect(ungrouped.metadata).toEqual({ team: "search" });
+
+    const grouped = billingEventFromUsage(
+      usageFixture({
+        metadata: spoofed,
+        billingGroupId: "actual-group",
+        billingMultiplier: 1.5,
+      }),
+      { nowUnixSeconds: 1, offerCostUsd: 0.25 },
+    );
+    expect(grouped.metadata).toEqual({
+      team: "search",
+      billing_group_id: "actual-group",
+      billing_multiplier: "1.5",
+      offer_cost_usd: "0.25",
+    });
+  });
 });
 
 describe("usageSourceFor", () => {
