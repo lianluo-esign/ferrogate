@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { BillingGroupModelResolver } from "../../src/inference/billing-group-models.js";
 import { InMemoryModelResolver } from "../../src/inference/defaults.js";
 import type { ModelResolver, PhysicalRoute } from "../../src/inference/ports.js";
 import { D1TenantModelCatalogSource } from "../../src/inference/tenant-catalog.js";
@@ -161,6 +162,28 @@ describe("D1TenantModelCatalogSource", () => {
     });
     expect(loaded.models.catalog()).toHaveLength(1);
     expect(db.catalogReads).toBe(1);
+  });
+
+  it("restores mirrored provider ids before exact billing-group filtering", async () => {
+    const db = fakeDb([
+      routeRow("openai", 0, {
+        provider_id: "tenant-a:platform:provider:openai",
+      }),
+    ]);
+    const source = new D1TenantModelCatalogSource();
+
+    const loaded = await source.load({
+      tenantId: "tenant-a",
+      db: db.db,
+      env: ENV,
+      fallback: emptyFallback(),
+    });
+
+    expect(loaded.ok).toBe(true);
+    if (!loaded.ok) return;
+    const models = new BillingGroupModelResolver(loaded.models, ["platform:provider:openai"]);
+    expect(models.catalog().map((model) => model.logicalModel)).toEqual(["tenant-model"]);
+    expect(models.resolve("tenant-model")?.providerId).toBe("platform:provider:openai");
   });
 
   it("uses the tenant graph before env data and maps platform-default through env metadata", async () => {

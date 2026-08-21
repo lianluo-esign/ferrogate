@@ -136,6 +136,8 @@ interface ProjectedOffering {
   readonly providerModel: string;
 }
 
+type ProviderIdProjection = (row: CatalogJoinRow) => string;
+
 type CatalogBuildResult =
   | {
       readonly ok: true;
@@ -191,6 +193,7 @@ function schemaFailure(
 
 function dbProvider(
   row: CatalogJoinRow,
+  providerId: string,
 ): { ok: true; provider: ProviderRecord } | { ok: false; reason: string } {
   const cloudflare = parsedJson(
     row.provider_cloudflare_ai_gateway_json,
@@ -199,7 +202,7 @@ function dbProvider(
   if (!cloudflare.ok) return cloudflare;
 
   const candidate: Record<string, unknown> = {
-    id: row.provider_id,
+    id: providerId,
     name: row.provider_name,
     kind: row.provider_kind,
     base_url: row.provider_base_url,
@@ -297,6 +300,7 @@ function asModelRecord(
   rows: readonly CatalogJoinRow[],
   inputs: ModelCatalogInputs,
   providers: Map<string, ProviderRecord>,
+  providerIdForRow: ProviderIdProjection,
 ): { ok: true; model: ModelRecord } | { ok: false; reason: string } {
   const first = rows[0];
   if (first === undefined) return { ok: false, reason: "model group is empty" };
@@ -345,7 +349,7 @@ function asModelRecord(
       continue;
     }
 
-    const provider = dbProvider(row);
+    const provider = dbProvider(row, providerIdForRow(row));
     if (!provider.ok) return provider;
     const existing = providers.get(provider.provider.name);
     if (existing !== undefined && JSON.stringify(existing) !== JSON.stringify(provider.provider)) {
@@ -444,6 +448,7 @@ function asModelRecord(
 export function projectCatalog(
   rows: readonly CatalogJoinRow[],
   inputs: ModelCatalogInputs,
+  providerIdForRow: ProviderIdProjection = (row) => row.provider_id,
 ):
   | { ok: true; providers: Map<string, ProviderRecord>; models: ModelRecord[] }
   | { ok: false; reason: string } {
@@ -463,7 +468,7 @@ export function projectCatalog(
   const providers = new Map<string, ProviderRecord>();
   const models: ModelRecord[] = [];
   for (const group of byModel.values()) {
-    const result = asModelRecord(group, inputs, providers);
+    const result = asModelRecord(group, inputs, providers, providerIdForRow);
     if (!result.ok) return result;
     models.push(result.model);
   }
@@ -473,6 +478,7 @@ export function projectCatalog(
 function buildTenantCatalog(
   rows: readonly CatalogJoinRow[],
   env: InferenceBindings,
+  tenantId: string,
   platformInputs?: ModelCatalogInputs,
 ): CatalogBuildResult {
   // A `platform`-kind row is an indirection into the platform catalog. #890:
@@ -491,7 +497,12 @@ function buildTenantCatalog(
     }
   }
 
-  const projected = projectCatalog(rows, inputs);
+  const tenantPrefix = `${tenantId}:`;
+  const projected = projectCatalog(rows, inputs, (row) =>
+    row.provider_id.startsWith(tenantPrefix)
+      ? row.provider_id.slice(tenantPrefix.length)
+      : row.provider_id,
+  );
   if (!projected.ok) return projected;
 
   const built = buildModelCatalog(
@@ -577,7 +588,7 @@ export class D1TenantModelCatalogSource implements TenantModelCatalogSource {
       return { ok: true, models: input.fallback, revision };
     }
 
-    const built = buildTenantCatalog(rows, input.env, input.platformInputs);
+    const built = buildTenantCatalog(rows, input.env, input.tenantId, input.platformInputs);
     if (!built.ok) return built;
     entries.set(input.tenantId, {
       revision,
