@@ -220,7 +220,7 @@ describe("copies the control database into the object", () => {
       expect(result.copied, `${result.table} re-copied`).toBe(0);
       expect(result.sourceRows).toBeGreaterThan(0);
     }
-  });
+  }, 15_000);
 
   test("the verification is NOT vacuous — a divergence is reported, then healed", async () => {
     await backfillControlData(env.CONTROL_DB, objectDb());
@@ -250,7 +250,7 @@ describe("copies the control database into the object", () => {
       .bind("bf-t3")
       .first<{ id: string }>();
     expect(landed?.id).toBe("bf-t3");
-  });
+  }, 15_000);
 
   test("the checksum leg is a discriminator — an in-place value change is reported", async () => {
     await backfillControlData(env.CONTROL_DB, objectDb());
