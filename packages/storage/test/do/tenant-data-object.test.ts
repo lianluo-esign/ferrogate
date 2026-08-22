@@ -358,13 +358,15 @@ describe("the statement splitter", () => {
       // `0029_shared_billing_group_type` adds the provider-type discriminator
       // and its lookup index to the shared billing-group mirror. `0030_im_core`
       // adds the reusable conversation, participant and message core used by
-      // support today and tenant/agent chat later.
-      files: 30,
-      statements: 447,
+      // support today and tenant/agent chat later. Finally,
+      // `0031_public_model_pricing_binding` adds the supplier cost multiplier,
+      // the configured route's public-price binding and its lookup index.
+      files: 31,
+      statements: 450,
       createTable: 80,
-      createIndex: 101,
+      createIndex: 102,
       createUniqueIndex: 6,
-      alterTable: 24,
+      alterTable: 26,
       insert: 6,
     });
 
@@ -421,7 +423,7 @@ describe("a fresh tenant object", () => {
     expect(status.latest).toBe(TENANT_SCHEMA_VERSION);
     // A guard on the fixture: if `TENANT_MIGRATIONS` were ever empty the
     // version assertions above would both read 0 and pass vacuously.
-    expect(TENANT_MIGRATIONS.length).toBe(30);
+    expect(TENANT_MIGRATIONS.length).toBe(31);
     expect(status.appliedThisWake).toEqual(TENANT_MIGRATIONS.map((m) => m.name));
 
     const tables = await object.query({

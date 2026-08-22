@@ -68,6 +68,7 @@ async function wipePlatformCatalog(handle: D1Database): Promise<void> {
     handle.prepare("DELETE FROM platform_catalog_offerings"),
     handle.prepare("DELETE FROM platform_catalog_models"),
     handle.prepare("DELETE FROM platform_provider_channels"),
+    handle.prepare("DELETE FROM platform_model_prices"),
     handle.prepare("DELETE FROM platform_catalog_revisions"),
     handle.prepare("DELETE FROM audit_events"),
   ]);
@@ -328,6 +329,65 @@ describe("platform model catalog admin surface", () => {
 
     const missing = await request(OPERATOR, "GET", "/admin/v1/providers/platform_channel");
     expect(missing.status).toBe(404);
+  });
+
+  it("binds exact public pricing to supplier routes and stores the supplier cost multiplier", async () => {
+    const provider = await createPlatformProvider("priced_channel", { cost_multiplier: 0.5 });
+    expect(provider.status, JSON.stringify(provider.body)).toBe(201);
+    expect((provider.body.provider as JsonBody).cost_multiplier).toBe(0.5);
+    expect((await createPlatformProvider("invalid_cost", { cost_multiplier: -0.1 })).status).toBe(
+      400,
+    );
+
+    expect((await createPlatformModel("priced_model")).status).toBe(201);
+    const offering = await createPlatformOffering(
+      "priced_model",
+      "priced_offering",
+      "priced_channel",
+      { upstream_model_id: "claude-opus-5" },
+    );
+    expect(offering.status, JSON.stringify(offering.body)).toBe(201);
+    expect((offering.body.offering as JsonBody).pricing_model_id).toBeNull();
+
+    const imported = await request(OPERATOR, "POST", "/admin/v1/model-prices/import", {
+      prices: [
+        {
+          id: "price_claude_opus_5",
+          model_key: "claude-opus-5",
+          name: "Claude Opus 5",
+          source_type: "models_dev",
+          source_provider_id: "anthropic",
+          source_provider_name: "Anthropic",
+          input_price_per_1m: 10,
+          output_price_per_1m: 50,
+          currency: "USD",
+          enabled: true,
+        },
+      ],
+    });
+    expect(imported.status, JSON.stringify(imported.body)).toBe(200);
+    expect(imported.body.upserted).toBe(1);
+
+    const bound = await db()
+      .prepare(
+        `SELECT o.pricing_model_id, p.cost_multiplier
+           FROM platform_catalog_offerings AS o
+           JOIN platform_provider_channels AS p ON p.id = o.provider_id
+          WHERE o.id = ?`,
+      )
+      .bind("priced_offering")
+      .first<{ pricing_model_id: string | null; cost_multiplier: number }>();
+    expect(bound).toEqual({ pricing_model_id: "price_claude_opus_5", cost_multiplier: 0.5 });
+
+    const prices = await request(OPERATOR, "GET", "/admin/v1/model-prices");
+    expect(prices.status).toBe(200);
+    expect((prices.body.data as JsonBody[]).map((row) => row.model_key)).toEqual(["claude-opus-5"]);
+
+    const patched = await request(OPERATOR, "PATCH", "/admin/v1/model-prices/price_claude_opus_5", {
+      output_price_per_1m: 60,
+    });
+    expect(patched.status, JSON.stringify(patched.body)).toBe(200);
+    expect((patched.body.model_price as JsonBody).output_price_per_1m).toBe(60);
   });
 
   it("bumps the platform revision and appends exactly one audit row per write", async () => {

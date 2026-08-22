@@ -316,6 +316,7 @@ export interface SeedProviderChannel {
   readonly name: string;
   readonly kind: string;
   readonly base_url: string;
+  readonly cost_multiplier?: number;
   readonly api_key_var: string | null;
   readonly byok_alias: string | null;
   readonly auth_scheme: string | null;
@@ -353,6 +354,8 @@ export interface SeedCatalogOffering {
   readonly model_id: string;
   readonly provider_id: string;
   readonly upstream_model_id: string;
+  /** Platform public-price catalog reference; null means the route is unbound. */
+  readonly pricing_model_id?: string | null;
   readonly role: string;
   readonly priority: number;
   readonly weight: number;
@@ -679,11 +682,11 @@ function buildCardSeedBatch(
   );
   const ensureOffering = db.prepare(
     "INSERT OR IGNORE INTO catalog_model_offerings " +
-      "(id, tenant_id, model_id, provider_id, upstream_model_id, role, priority, weight, " +
+      "(id, tenant_id, model_id, provider_id, upstream_model_id, pricing_model_id, role, priority, weight, " +
       "input_price_per_1m, output_price_per_1m, cached_input_price_per_1m, " +
       "cache_write_price_per_1m, audio_second_price_per_1m, audio_character_price_per_1m, " +
       "currency, source, enabled, created_at_unix, updated_at_unix) " +
-      "VALUES (?, ?, ?, ?, ?, 'primary', 0, 1, ?, ?, ?, ?, ?, ?, 'USD', ?, 1, ?, ?)",
+      "VALUES (?, ?, ?, ?, ?, NULL, 'primary', 0, 1, ?, ?, ?, ?, ?, ?, 'USD', ?, 1, ?, ?)",
   );
 
   const channelStatements = [...providers.entries()].map(([provider, id]) => {
@@ -752,10 +755,10 @@ function buildGraphSeedBatch(
 ): CatalogSeedBatch {
   const ensureChannel = db.prepare(
     "INSERT OR IGNORE INTO provider_channels " +
-      "(id, tenant_id, name, kind, base_url, api_key_var, byok_alias, auth_scheme, region, " +
+      "(id, tenant_id, name, kind, base_url, cost_multiplier, api_key_var, byok_alias, auth_scheme, region, " +
       "zero_data_retention, openrouter_http_referer, openrouter_x_title, " +
       "cloudflare_ai_gateway_json, enabled, created_at_unix, updated_at_unix) " +
-      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
   );
   const ensureModel = db.prepare(
     "INSERT OR IGNORE INTO catalog_models " +
@@ -765,13 +768,16 @@ function buildGraphSeedBatch(
   );
   const ensureOffering = db.prepare(
     "INSERT OR IGNORE INTO catalog_model_offerings " +
-      "(id, tenant_id, model_id, provider_id, upstream_model_id, role, priority, weight, " +
+      "(id, tenant_id, model_id, provider_id, upstream_model_id, pricing_model_id, role, priority, weight, " +
       "canary_percent, shadow_percent, shadow_max_requests, capabilities_json, context_window, " +
       "region, zero_data_retention, input_price_per_1m, output_price_per_1m, " +
       "cached_input_price_per_1m, cache_write_price_per_1m, reasoning_price_per_1m, " +
       "audio_second_price_per_1m, audio_character_price_per_1m, currency, source, enabled, " +
       "created_at_unix, updated_at_unix) " +
-      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, " +
+      "?, ?, ?, ?, ?, ?, ?, " +
+      "?, ?, ?, ?, ?, ?, ?, " +
+      "?, ?, ?, ?, ?)",
   );
 
   const channelStatements = graph.providers.map((provider) =>
@@ -781,6 +787,7 @@ function buildGraphSeedBatch(
       provider.name,
       provider.kind,
       provider.base_url,
+      provider.cost_multiplier ?? 1,
       provider.api_key_var,
       provider.byok_alias,
       provider.auth_scheme,
@@ -816,6 +823,7 @@ function buildGraphSeedBatch(
       catalogModelId(tenantId, offering.model_id),
       providerChannelId(tenantId, offering.provider_id),
       offering.upstream_model_id,
+      offering.pricing_model_id ?? null,
       offering.role,
       offering.priority,
       offering.weight,

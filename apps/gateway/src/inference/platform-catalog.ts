@@ -57,6 +57,7 @@ const CATALOG_SQL = `
     m.enabled AS model_enabled,
     o.id AS offering_id,
     o.upstream_model_id AS upstream_model_id,
+    o.pricing_model_id AS pricing_model_id,
     o.role AS offering_role,
     o.priority AS offering_priority,
     o.weight AS offering_weight,
@@ -67,18 +68,26 @@ const CATALOG_SQL = `
     o.context_window AS offering_context_window,
     o.region AS offering_region,
     o.zero_data_retention AS offering_zero_data_retention,
-    o.input_price_per_1m AS input_price_per_1m,
-    o.output_price_per_1m AS output_price_per_1m,
-    o.cached_input_price_per_1m AS cached_input_price_per_1m,
-    o.cache_write_price_per_1m AS cache_write_price_per_1m,
-    o.reasoning_price_per_1m AS reasoning_price_per_1m,
-    o.audio_second_price_per_1m AS audio_second_price_per_1m,
-    o.audio_character_price_per_1m AS audio_character_price_per_1m,
+    CASE WHEN o.pricing_model_id IS NULL THEN o.input_price_per_1m
+         WHEN price.enabled = 1 THEN price.input_price_per_1m * p.cost_multiplier END AS input_price_per_1m,
+    CASE WHEN o.pricing_model_id IS NULL THEN o.output_price_per_1m
+         WHEN price.enabled = 1 THEN price.output_price_per_1m * p.cost_multiplier END AS output_price_per_1m,
+    CASE WHEN o.pricing_model_id IS NULL THEN o.cached_input_price_per_1m
+         WHEN price.enabled = 1 THEN price.cached_input_price_per_1m * p.cost_multiplier END AS cached_input_price_per_1m,
+    CASE WHEN o.pricing_model_id IS NULL THEN o.cache_write_price_per_1m
+         WHEN price.enabled = 1 THEN price.cache_write_price_per_1m * p.cost_multiplier END AS cache_write_price_per_1m,
+    CASE WHEN o.pricing_model_id IS NULL THEN o.reasoning_price_per_1m
+         WHEN price.enabled = 1 THEN price.reasoning_price_per_1m * p.cost_multiplier END AS reasoning_price_per_1m,
+    CASE WHEN o.pricing_model_id IS NULL THEN o.audio_second_price_per_1m
+         WHEN price.enabled = 1 THEN price.audio_second_price_per_1m * p.cost_multiplier END AS audio_second_price_per_1m,
+    CASE WHEN o.pricing_model_id IS NULL THEN o.audio_character_price_per_1m
+         WHEN price.enabled = 1 THEN price.audio_character_price_per_1m * p.cost_multiplier END AS audio_character_price_per_1m,
     o.enabled AS offering_enabled,
     p.id AS provider_id,
     p.name AS provider_name,
     p.kind AS provider_kind,
     p.base_url AS provider_base_url,
+    p.cost_multiplier AS provider_cost_multiplier,
     p.api_key_var AS provider_api_key_var,
     p.byok_alias AS provider_byok_alias,
     p.auth_scheme AS provider_auth_scheme,
@@ -93,6 +102,8 @@ const CATALOG_SQL = `
     ON o.model_id = m.id
   JOIN platform_provider_channels p
     ON p.id = o.provider_id
+  LEFT JOIN platform_model_prices price
+    ON price.id = o.pricing_model_id
   ORDER BY m.name ASC, o.priority ASC, o.weight DESC, o.id ASC`;
 
 /** The bootstrap registry: empty, so the tenant `platform` arm falls to env. */
@@ -137,7 +148,10 @@ function errorDetail(error: unknown): string {
  */
 function isMissingPlatformCatalogError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  return /no such table:\s*(main\.)?platform_/i.test(message);
+  return (
+    /no such table:\s*(main\.)?platform_/i.test(message) ||
+    /no such column:\s*(o\.pricing_model_id|p\.cost_multiplier)/i.test(message)
+  );
 }
 
 /**

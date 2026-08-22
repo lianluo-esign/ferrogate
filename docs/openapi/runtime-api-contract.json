@@ -681,6 +681,18 @@
     {
       "pattern": "/admin/v1/billing-fleet",
       "group": "admin_billing_fleet"
+    },
+    {
+      "pattern": "/admin/v1/model-prices",
+      "group": "admin_model"
+    },
+    {
+      "pattern": "/admin/v1/model-prices/import",
+      "group": "admin_model"
+    },
+    {
+      "pattern": "/admin/v1/model-prices/{id}",
+      "group": "admin_model"
     }
   ],
   "dynamic_surfaces": [
@@ -4409,6 +4421,39 @@
       "path": "/admin/v1/support/presence",
       "method": "post",
       "operation_id": "heartbeatSupportOperator",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/model-prices",
+      "method": "get",
+      "operation_id": "listAdminModelPrices",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.read"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/model-prices/import",
+      "method": "post",
+      "operation_id": "importAdminModelPrices",
+      "visibility": "admin",
+      "auth": {
+        "kind": "bearer",
+        "scope": "admin.write"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/admin/v1/model-prices/{id}",
+      "method": "patch",
+      "operation_id": "patchAdminModelPrice",
       "visibility": "admin",
       "auth": {
         "kind": "bearer",

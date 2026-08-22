@@ -1,3 +1,4 @@
+import { controlDatabaseFrom } from "../control-data.js";
 import {
   buildModelCatalog,
   modelCatalogInputsFromEnv,
@@ -41,6 +42,8 @@ const CATALOG_SQL = `
     m.enabled AS model_enabled,
     o.id AS offering_id,
     o.upstream_model_id AS upstream_model_id,
+    o.pricing_model_id AS pricing_model_id,
+    o.source AS offering_source,
     o.role AS offering_role,
     o.priority AS offering_priority,
     o.weight AS offering_weight,
@@ -63,6 +66,7 @@ const CATALOG_SQL = `
     p.name AS provider_name,
     p.kind AS provider_kind,
     p.base_url AS provider_base_url,
+    p.cost_multiplier AS provider_cost_multiplier,
     p.api_key_var AS provider_api_key_var,
     p.byok_alias AS provider_byok_alias,
     p.auth_scheme AS provider_auth_scheme,
@@ -90,6 +94,8 @@ export interface CatalogJoinRow {
   readonly model_enabled: number | null;
   readonly offering_id: string;
   readonly upstream_model_id: string;
+  readonly pricing_model_id?: string | null;
+  readonly offering_source?: string;
   readonly offering_role: string;
   readonly offering_priority: number | null;
   readonly offering_weight: number | null;
@@ -112,6 +118,7 @@ export interface CatalogJoinRow {
   readonly provider_name: string;
   readonly provider_kind: string;
   readonly provider_base_url: string;
+  readonly provider_cost_multiplier?: number | null;
   readonly provider_api_key_var: string | null;
   readonly provider_byok_alias: string | null;
   readonly provider_auth_scheme: string | null;
@@ -121,6 +128,142 @@ export interface CatalogJoinRow {
   readonly provider_openrouter_x_title: string | null;
   readonly provider_cloudflare_ai_gateway_json: string | null;
   readonly provider_enabled: number | null;
+}
+
+interface PublicModelPriceRow {
+  readonly id: string;
+  readonly model_key: string;
+  readonly aliases_json: string;
+  readonly enabled: number | string;
+  readonly input_price_per_1m: number | null;
+  readonly output_price_per_1m: number | null;
+  readonly cached_input_price_per_1m: number | null;
+  readonly cache_write_price_per_1m: number | null;
+  readonly reasoning_price_per_1m: number | null;
+  readonly audio_second_price_per_1m: number | null;
+  readonly audio_character_price_per_1m: number | null;
+}
+
+interface PlatformProviderCostRow {
+  readonly id: string;
+  readonly cost_multiplier: number | string | null;
+}
+
+const PUBLIC_MODEL_PRICE_SQL = `
+  SELECT id, model_key, aliases_json, enabled, input_price_per_1m, output_price_per_1m,
+         cached_input_price_per_1m, cache_write_price_per_1m,
+         reasoning_price_per_1m, audio_second_price_per_1m,
+         audio_character_price_per_1m
+    FROM platform_model_prices`;
+
+const PLATFORM_PROVIDER_COST_SQL = `
+  SELECT id, cost_multiplier FROM platform_provider_channels`;
+
+const PUBLIC_PRICE_FIELDS = [
+  "input_price_per_1m",
+  "output_price_per_1m",
+  "cached_input_price_per_1m",
+  "cache_write_price_per_1m",
+  "reasoning_price_per_1m",
+  "audio_second_price_per_1m",
+  "audio_character_price_per_1m",
+] as const;
+
+function providerCostMultiplier(
+  row: CatalogJoinRow,
+  platformCosts: ReadonlyMap<string, number>,
+  tenantId: string,
+): number {
+  if (row.offering_source === "platform_seed") {
+    const tenantPrefix = `${tenantId}:`;
+    const platformProviderId = row.provider_id.startsWith(tenantPrefix)
+      ? row.provider_id.slice(tenantPrefix.length)
+      : row.provider_id;
+    const platformCost = platformCosts.get(platformProviderId);
+    if (platformCost !== undefined) return platformCost;
+  }
+  const value = row.provider_cost_multiplier;
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 1;
+}
+
+function withPublicModelPrices(
+  rows: readonly CatalogJoinRow[],
+  prices: readonly PublicModelPriceRow[],
+  platformCosts: ReadonlyMap<string, number>,
+  tenantId: string,
+): CatalogJoinRow[] {
+  const byId = new Map(prices.map((price) => [price.id, price]));
+  const byModelKey = new Map<string, PublicModelPriceRow>();
+  for (const price of prices) {
+    byModelKey.set(price.model_key, price);
+    const aliases = JSON.parse(price.aliases_json) as unknown;
+    if (!Array.isArray(aliases) || aliases.some((alias) => typeof alias !== "string")) {
+      throw new Error(`public model price ${price.id} has invalid aliases_json`);
+    }
+    for (const alias of aliases) byModelKey.set(alias, price);
+  }
+  return rows.map((row) => {
+    const explicitId = row.pricing_model_id ?? null;
+    const price =
+      explicitId !== null
+        ? byId.get(explicitId)
+        : row.offering_source === "platform_seed"
+          ? byModelKey.get(row.upstream_model_id)
+          : undefined;
+    if (price === undefined) {
+      if (explicitId === null) return row;
+      return Object.fromEntries(
+        Object.entries(row).map(([key, value]) => [
+          key,
+          (PUBLIC_PRICE_FIELDS as readonly string[]).includes(key) ? null : value,
+        ]),
+      ) as unknown as CatalogJoinRow;
+    }
+    const multiplier = providerCostMultiplier(row, platformCosts, tenantId);
+    const projected = { ...row } as Record<string, unknown>;
+    for (const field of PUBLIC_PRICE_FIELDS) {
+      const value = price.enabled === 1 || price.enabled === "1" ? price[field] : null;
+      projected[field] = value === null ? null : value * multiplier;
+    }
+    return projected as unknown as CatalogJoinRow;
+  });
+}
+
+async function resolvePublicModelPrices(
+  rows: readonly CatalogJoinRow[],
+  env: InferenceBindings,
+  tenantId: string,
+): Promise<readonly CatalogJoinRow[]> {
+  const needsPricing = rows.some(
+    (row) => row.pricing_model_id != null || row.offering_source === "platform_seed",
+  );
+  if (!needsPricing) return rows;
+  const control = controlDatabaseFrom(env);
+  if (control === undefined) return rows;
+  try {
+    const [priceResult, providerResult] = await Promise.all([
+      control.prepare(PUBLIC_MODEL_PRICE_SQL).all<PublicModelPriceRow>(),
+      control.prepare(PLATFORM_PROVIDER_COST_SQL).all<PlatformProviderCostRow>(),
+    ]);
+    const platformCosts = new Map<string, number>();
+    for (const provider of providerResult.results) {
+      const value =
+        typeof provider.cost_multiplier === "number"
+          ? provider.cost_multiplier
+          : Number(provider.cost_multiplier);
+      if (Number.isFinite(value) && value >= 0) platformCosts.set(provider.id, value);
+    }
+    return withPublicModelPrices(rows, priceResult.results, platformCosts, tenantId);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (
+      /no such table:\s*(main\.)?platform_model_prices/i.test(message) ||
+      /no such column:\s*(cost_multiplier|pricing_model_id)/i.test(message)
+    ) {
+      return rows;
+    }
+    throw error;
+  }
 }
 
 interface CacheEntry {
@@ -588,7 +731,14 @@ export class D1TenantModelCatalogSource implements TenantModelCatalogSource {
       return { ok: true, models: input.fallback, revision };
     }
 
-    const built = buildTenantCatalog(rows, input.env, input.tenantId, input.platformInputs);
+    let pricedRows: readonly CatalogJoinRow[];
+    try {
+      pricedRows = await resolvePublicModelPrices(rows, input.env, input.tenantId);
+    } catch (error) {
+      return failure(`tenant ${input.tenantId} public model price read failed`, error);
+    }
+
+    const built = buildTenantCatalog(pricedRows, input.env, input.tenantId, input.platformInputs);
     if (!built.ok) return built;
     entries.set(input.tenantId, {
       revision,

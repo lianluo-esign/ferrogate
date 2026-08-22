@@ -4749,6 +4749,196 @@
         }
       }
     },
+    "/admin/v1/model-prices": {
+      "get": {
+        "operationId": "listAdminModelPrices",
+        "summary": "List deduplicated public model baseline prices.",
+        "tags": [
+          "admin-read"
+        ],
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Public model price list.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.read"
+          },
+          "rbac_action": null
+        }
+      }
+    },
+    "/admin/v1/model-prices/import": {
+      "post": {
+        "operationId": "importAdminModelPrices",
+        "summary": "Bulk upsert selected public model prices.",
+        "tags": [
+          "admin-write"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "prices"
+                ],
+                "properties": {
+                  "prices": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 80,
+                    "items": {
+                      "$ref": "#/components/schemas/AdminModelPriceMutation"
+                    }
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Price import result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.write"
+          },
+          "rbac_action": null
+        }
+      }
+    },
+    "/admin/v1/model-prices/{id}": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      ],
+      "patch": {
+        "operationId": "patchAdminModelPrice",
+        "summary": "Change a public model price or its selected source.",
+        "tags": [
+          "admin-write"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdminModelPricePatch"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated public model price.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "x-ferrogate-contract": {
+          "visibility": "admin",
+          "auth": {
+            "kind": "bearer",
+            "scope": "admin.write"
+          },
+          "rbac_action": null
+        }
+      }
+    },
     "/admin/v1/models": {
       "parameters": [
         {
@@ -25729,6 +25919,12 @@
           "has_api_key": {
             "type": "boolean"
           },
+          "cost_multiplier": {
+            "type": "number",
+            "minimum": 0,
+            "default": 1,
+            "description": "Multiplier applied to the selected public model baseline price for this provider."
+          },
           "enabled": {
             "type": "boolean"
           },
@@ -28389,6 +28585,12 @@
             ]
           },
           "cloudflare_ai_gateway": {},
+          "cost_multiplier": {
+            "type": "number",
+            "minimum": 0,
+            "default": 1,
+            "description": "Multiplier applied to the selected public model baseline price for this provider."
+          },
           "enabled": {
             "type": "boolean"
           }
@@ -28479,6 +28681,12 @@
             ]
           },
           "cloudflare_ai_gateway": {},
+          "cost_multiplier": {
+            "type": "number",
+            "minimum": 0,
+            "default": 1,
+            "description": "Multiplier applied to the selected public model baseline price for this provider."
+          },
           "enabled": {
             "type": "boolean"
           }
@@ -28671,6 +28879,14 @@
             "type": "string",
             "minLength": 1
           },
+          "pricing_model_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "minLength": 1,
+            "description": "Reference to the selected public model baseline price."
+          },
           "role": {
             "type": "string",
             "enum": [
@@ -28819,6 +29035,14 @@
             "type": "string",
             "minLength": 1
           },
+          "pricing_model_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "minLength": 1,
+            "description": "Reference to the selected public model baseline price."
+          },
           "role": {
             "type": "string",
             "enum": [
@@ -28948,6 +29172,198 @@
         },
         "additionalProperties": false
       },
+      "AdminModelPriceMutation": {
+        "type": "object",
+        "required": [
+          "model_key",
+          "name"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "model_key": {
+            "type": "string",
+            "minLength": 1
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "aliases": {
+            "type": "array",
+            "maxItems": 128,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "source_type": {
+            "type": "string",
+            "minLength": 1
+          },
+          "source_provider_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source_provider_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "input_price_per_1m": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "output_price_per_1m": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "cached_input_price_per_1m": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "cache_write_price_per_1m": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "reasoning_price_per_1m": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "audio_second_price_per_1m": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "audio_character_price_per_1m": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "currency": {
+            "type": "string",
+            "minLength": 1
+          },
+          "enabled": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdminModelPricePatch": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "aliases": {
+            "type": "array",
+            "maxItems": 128,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "source_type": {
+            "type": "string",
+            "minLength": 1
+          },
+          "source_provider_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source_provider_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "input_price_per_1m": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "output_price_per_1m": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "cached_input_price_per_1m": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "cache_write_price_per_1m": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "reasoning_price_per_1m": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "audio_second_price_per_1m": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "audio_character_price_per_1m": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "currency": {
+            "type": "string",
+            "minLength": 1
+          },
+          "enabled": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
       "AdminOffering": {
         "type": "object",
         "required": [
@@ -28976,6 +29392,12 @@
           },
           "upstream_model_id": {
             "type": "string"
+          },
+          "pricing_model_id": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "role": {
             "type": "string"

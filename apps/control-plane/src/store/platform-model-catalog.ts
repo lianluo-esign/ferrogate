@@ -70,6 +70,7 @@ import {
 export const PLATFORM_PROVIDER_TABLE = "platform_provider_channels";
 export const PLATFORM_MODEL_TABLE = "platform_catalog_models";
 export const PLATFORM_OFFERING_TABLE = "platform_catalog_offerings";
+export const PLATFORM_MODEL_PRICE_TABLE = "platform_model_prices";
 export const PLATFORM_REVISION_TABLE = "platform_catalog_revisions";
 
 /**
@@ -83,6 +84,7 @@ export const PLATFORM_REVISION_TABLE = "platform_catalog_revisions";
 const PROVIDER_COLLECTION = "platform_providers";
 const MODEL_COLLECTION = "platform_models";
 const OFFERING_COLLECTION = "platform_offerings";
+const MODEL_PRICE_COLLECTION = "platform_model_prices";
 
 /**
  * Audit `collection` for the whole bootstrap import (#892).
@@ -140,6 +142,7 @@ interface ProviderRow {
   readonly provider_type_id: string | null;
   readonly kind: string;
   readonly base_url: string;
+  readonly cost_multiplier: number;
   readonly api_key_var: string | null;
   readonly byok_alias: string | null;
   readonly auth_scheme: string | null;
@@ -168,6 +171,7 @@ interface OfferingRow {
   readonly provider_id: string;
   readonly provider_name: string | null;
   readonly upstream_model_id: string;
+  readonly pricing_model_id: string | null;
   readonly role: string;
   readonly priority: number;
   readonly weight: number;
@@ -190,6 +194,44 @@ interface OfferingRow {
   readonly enabled: number;
 }
 
+export interface PlatformModelPriceInput {
+  readonly id: string;
+  readonly model_key: string;
+  readonly name: string;
+  readonly aliases?: readonly string[];
+  readonly source_type?: string;
+  readonly source_provider_id?: string | null;
+  readonly source_provider_name?: string | null;
+  readonly input_price_per_1m?: number | null;
+  readonly output_price_per_1m?: number | null;
+  readonly cached_input_price_per_1m?: number | null;
+  readonly cache_write_price_per_1m?: number | null;
+  readonly reasoning_price_per_1m?: number | null;
+  readonly audio_second_price_per_1m?: number | null;
+  readonly audio_character_price_per_1m?: number | null;
+  readonly currency?: string;
+  readonly enabled?: boolean;
+}
+
+interface ModelPriceRow {
+  readonly id: string;
+  readonly model_key: string;
+  readonly name: string;
+  readonly aliases_json: string;
+  readonly source_type: string;
+  readonly source_provider_id: string | null;
+  readonly source_provider_name: string | null;
+  readonly input_price_per_1m: number | null;
+  readonly output_price_per_1m: number | null;
+  readonly cached_input_price_per_1m: number | null;
+  readonly cache_write_price_per_1m: number | null;
+  readonly reasoning_price_per_1m: number | null;
+  readonly audio_second_price_per_1m: number | null;
+  readonly audio_character_price_per_1m: number | null;
+  readonly currency: string;
+  readonly enabled: number;
+}
+
 export interface PlatformModelCatalogStoreOptions {
   /** MUST be the CONTROL_DATA facade handle, not a raw `env.DB`. */
   readonly db: D1Database;
@@ -200,7 +242,7 @@ type CatalogRecord = StoreRecord;
 type UpdateField = readonly [string, string | number | null];
 
 const PROVIDER_SELECT = `
-  SELECT id, name, provider_type_id, kind, base_url, api_key_var, byok_alias,
+  SELECT id, name, provider_type_id, kind, base_url, cost_multiplier, api_key_var, byok_alias,
          auth_scheme, region, zero_data_retention, openrouter_http_referer,
          openrouter_x_title, cloudflare_ai_gateway_json, enabled
     FROM ${PLATFORM_PROVIDER_TABLE}`;
@@ -212,7 +254,7 @@ const MODEL_SELECT = `
 
 const OFFERING_SELECT = `
   SELECT o.id, o.model_id, o.provider_id, p.name AS provider_name,
-         o.upstream_model_id, o.role, o.priority, o.weight, o.canary_percent,
+         o.upstream_model_id, o.pricing_model_id, o.role, o.priority, o.weight, o.canary_percent,
          o.shadow_percent, o.shadow_max_requests, o.capabilities_json,
          o.context_window, o.region, o.zero_data_retention,
          o.input_price_per_1m, o.output_price_per_1m,
@@ -222,6 +264,13 @@ const OFFERING_SELECT = `
     FROM ${PLATFORM_OFFERING_TABLE} o
     LEFT JOIN ${PLATFORM_PROVIDER_TABLE} p
       ON p.id = o.provider_id`;
+
+const MODEL_PRICE_SELECT = `
+  SELECT id, model_key, name, aliases_json, source_type, source_provider_id, source_provider_name,
+         input_price_per_1m, output_price_per_1m, cached_input_price_per_1m,
+         cache_write_price_per_1m, reasoning_price_per_1m,
+         audio_second_price_per_1m, audio_character_price_per_1m, currency, enabled
+    FROM ${PLATFORM_MODEL_PRICE_TABLE}`;
 
 /**
  * `scope` replaces the tenant store's `tenant_id` on every projected record.
@@ -246,6 +295,7 @@ function seedProvider(row: ProviderRow): SeedProviderChannel {
     name: row.name,
     kind: row.kind,
     base_url: row.base_url,
+    cost_multiplier: row.cost_multiplier,
     api_key_var: row.api_key_var,
     byok_alias: row.byok_alias,
     auth_scheme: row.auth_scheme,
@@ -286,6 +336,7 @@ function seedOffering(row: OfferingRow): SeedCatalogOffering {
     model_id: row.model_id,
     provider_id: row.provider_id,
     upstream_model_id: row.upstream_model_id,
+    pricing_model_id: row.pricing_model_id,
     role: row.role,
     priority: row.priority,
     weight: row.weight,
@@ -317,6 +368,7 @@ function providerRecord(row: ProviderRow): CatalogRecord {
     kind: row.kind,
     compatibility: providerCompatibility(row.kind),
     base_url: row.base_url,
+    cost_multiplier: row.cost_multiplier,
     has_api_key: Boolean(row.api_key_var || row.byok_alias),
     byok_alias: row.byok_alias,
     auth_scheme: row.auth_scheme,
@@ -339,6 +391,7 @@ function offeringRecord(row: OfferingRow): CatalogRecord {
     provider_id: row.provider_id,
     provider: row.provider_name,
     upstream_model_id: row.upstream_model_id,
+    pricing_model_id: row.pricing_model_id,
     role: row.role,
     priority: row.priority,
     weight: row.weight,
@@ -358,6 +411,16 @@ function offeringRecord(row: OfferingRow): CatalogRecord {
     audio_character_price_per_1m: row.audio_character_price_per_1m,
     currency: row.currency,
     source: row.source,
+    enabled: boolValue(row.enabled, true),
+  };
+}
+
+function modelPriceRecord(row: ModelPriceRow): CatalogRecord {
+  return {
+    ...row,
+    aliases: parsedArray(row.aliases_json),
+    aliases_json: undefined,
+    scope: PLATFORM_SCOPE,
     enabled: boolValue(row.enabled, true),
   };
 }
@@ -756,11 +819,11 @@ export class PlatformModelCatalogStore {
     return this.#db
       .prepare(
         `INSERT OR IGNORE INTO ${PLATFORM_PROVIDER_TABLE}
-           (id, name, provider_type_id, kind, base_url, api_key_var, byok_alias,
+           (id, name, provider_type_id, kind, base_url, cost_multiplier, api_key_var, byok_alias,
             auth_scheme, region, zero_data_retention, openrouter_http_referer,
             openrouter_x_title, cloudflare_ai_gateway_json, enabled,
             created_at_unix, updated_at_unix)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
         provider.id,
@@ -768,6 +831,7 @@ export class PlatformModelCatalogStore {
         providerTypeId,
         provider.kind,
         provider.base_url,
+        provider.cost_multiplier ?? 1,
         provider.api_key_var,
         provider.byok_alias,
         provider.auth_scheme,
@@ -812,19 +876,33 @@ export class PlatformModelCatalogStore {
     return this.#db
       .prepare(
         `INSERT OR IGNORE INTO ${PLATFORM_OFFERING_TABLE}
-           (id, model_id, provider_id, upstream_model_id, role,
+           (id, model_id, provider_id, upstream_model_id, pricing_model_id, role,
             priority, weight, canary_percent, shadow_percent, shadow_max_requests,
             capabilities_json, context_window, region, zero_data_retention,
             input_price_per_1m, output_price_per_1m, cached_input_price_per_1m,
             cache_write_price_per_1m, reasoning_price_per_1m,
             audio_second_price_per_1m, audio_character_price_per_1m,
             currency, source, enabled, created_at_unix, updated_at_unix)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?,
+                 COALESCE(?, (SELECT price.id FROM platform_model_prices AS price
+                               WHERE price.enabled = 1
+                                 AND (price.model_key = ?
+                                      OR EXISTS (SELECT 1 FROM json_each(price.aliases_json) AS alias
+                                                  WHERE alias.value = ?))
+                               LIMIT 1)),
+                 ?, ?, ?, ?, ?, ?,
+                 ?, ?, ?, ?,
+                 ?, ?, ?, ?,
+                 ?, ?, ?,
+                 ?, ?, ?, ?, ?)`,
       )
       .bind(
         offering.id,
         offering.model_id,
         offering.provider_id,
+        offering.upstream_model_id,
+        offering.pricing_model_id ?? null,
+        offering.upstream_model_id,
         offering.upstream_model_id,
         offering.role,
         offering.priority,
@@ -846,6 +924,208 @@ export class PlatformModelCatalogStore {
         offering.currency,
         offering.source,
         offering.enabled,
+        now,
+        now,
+      );
+  }
+
+  /** List the deduplicated public model prices selected by the operator. */
+  async listModelPrices(): Promise<readonly CatalogRecord[]> {
+    const result = await this.#db
+      .prepare(`${MODEL_PRICE_SELECT} ORDER BY model_key ASC, id ASC`)
+      .all<ModelPriceRow>();
+    return result.results.map(modelPriceRecord);
+  }
+
+  async getModelPrice(id: string): Promise<CatalogRecord | null> {
+    const row = await this.#modelPriceRow(id);
+    return row === null ? null : modelPriceRecord(row);
+  }
+
+  /**
+   * Upsert one small public-price batch and bind currently-unpriced provider
+   * routes by exact upstream model id. The selected source is data; routes keep
+   * only the stable price id and therefore do not need to be rewritten when an
+   * operator switches that source later.
+   */
+  async upsertModelPrices(
+    scope: CallerScope,
+    prices: readonly PlatformModelPriceInput[],
+  ): Promise<{ readonly revision: number; readonly upserted: number }> {
+    if (prices.length === 0) {
+      return { revision: await this.#revision(), upserted: 0 };
+    }
+    const mutations = [
+      ...prices.map((price) => this.#modelPriceUpsertStatement(price)),
+      this.#db.prepare(
+        `UPDATE ${PLATFORM_OFFERING_TABLE}
+              SET pricing_model_id = (
+                    SELECT price.id
+                     FROM ${PLATFORM_MODEL_PRICE_TABLE} AS price
+                     WHERE price.enabled = 1
+                       AND (price.model_key = ${PLATFORM_OFFERING_TABLE}.upstream_model_id
+                            OR EXISTS (
+                                 SELECT 1 FROM json_each(price.aliases_json) AS alias
+                                  WHERE alias.value = ${PLATFORM_OFFERING_TABLE}.upstream_model_id
+                               ))
+                     LIMIT 1
+                  ),
+                  updated_at_unix = unixepoch()
+            WHERE pricing_model_id IS NULL
+              AND EXISTS (
+                    SELECT 1
+                     FROM ${PLATFORM_MODEL_PRICE_TABLE} AS price
+                     WHERE price.enabled = 1
+                       AND (price.model_key = ${PLATFORM_OFFERING_TABLE}.upstream_model_id
+                            OR EXISTS (
+                                 SELECT 1 FROM json_each(price.aliases_json) AS alias
+                                  WHERE alias.value = ${PLATFORM_OFFERING_TABLE}.upstream_model_id
+                               ))
+                  )`,
+      ),
+    ];
+
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= PLATFORM_COMMIT_ATTEMPTS; attempt += 1) {
+      const now = Math.floor(Date.now() / 1000);
+      const revision = (await this.#revision()) + 1;
+      try {
+        const results = await this.#db.batch([
+          this.#db
+            .prepare(
+              `INSERT OR IGNORE INTO ${PLATFORM_REVISION_TABLE} (id, revision, updated_at_unix)
+               VALUES (1, 0, ?)`,
+            )
+            .bind(now),
+          ...mutations,
+          this.#db
+            .prepare(
+              `UPDATE ${PLATFORM_REVISION_TABLE}
+                  SET revision = revision + 1, updated_at_unix = ?
+                WHERE id = 1
+                RETURNING revision`,
+            )
+            .bind(now),
+          await controlPlaneAuditStatement(this.#db, {
+            action: "replace",
+            collection: MODEL_PRICE_COLLECTION,
+            record: { id: "platform:model-prices:import", scope: PLATFORM_SCOPE },
+            revision,
+            scope,
+            requestId: this.#requestId,
+            auditJson: controlPlaneAuditJson({
+              action: "replace",
+              collection: MODEL_PRICE_COLLECTION,
+              record: { id: "platform:model-prices:import", scope: PLATFORM_SCOPE },
+              revision,
+              scope,
+            }),
+          }),
+        ]);
+        const bumpIndex = 1 + mutations.length;
+        const bumped = Number(
+          (results[bumpIndex]?.results?.[0] as { revision?: number | string } | undefined)
+            ?.revision ?? 0,
+        );
+        if (bumped !== revision) {
+          throw new Error(
+            `platform model prices revision bumped to ${bumped}, expected ${revision}`,
+          );
+        }
+        if (Number(results[bumpIndex + 1]?.meta.changes ?? 0) === 0) {
+          throw new Error("platform model price audit row was not appended");
+        }
+        return { revision, upserted: prices.length };
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    throw new Error("platform model price import failed", { cause: lastError });
+  }
+
+  async updateModelPrice(
+    scope: CallerScope,
+    id: string,
+    input: Partial<PlatformModelPriceInput>,
+  ): Promise<CatalogRecord | null> {
+    const current = await this.#modelPriceRow(id);
+    if (current === null) return null;
+    const merged: PlatformModelPriceInput = {
+      ...current,
+      ...input,
+      id,
+      model_key: current.model_key,
+      name: input.name ?? current.name,
+      aliases:
+        input.aliases ??
+        parsedArray(current.aliases_json).filter(
+          (alias): alias is string => typeof alias === "string",
+        ),
+      enabled: input.enabled ?? boolValue(current.enabled, true),
+    };
+    await this.upsertModelPrices(scope, [merged]);
+    return this.getModelPrice(id);
+  }
+
+  async #modelPriceRow(id: string): Promise<ModelPriceRow | null> {
+    return this.#db.prepare(`${MODEL_PRICE_SELECT} WHERE id = ?`).bind(id).first<ModelPriceRow>();
+  }
+
+  #modelPriceUpsertStatement(price: PlatformModelPriceInput): D1PreparedStatement {
+    const modelKey = this.#requiredText(price.model_key, "model_key");
+    const name = this.#requiredText(price.name, "name");
+    const sourceType = this.#requiredText(price.source_type ?? "manual", "source_type");
+    const currency = this.#requiredText(price.currency ?? "USD", "currency").toUpperCase();
+    const aliases = Array.from(
+      new Set([
+        modelKey,
+        ...(price.aliases ?? []).map((alias) => this.#requiredText(alias, "aliases[]")),
+      ]),
+    ).sort((left, right) => left.localeCompare(right));
+    const now = Math.floor(Date.now() / 1000);
+    return this.#db
+      .prepare(
+        `INSERT INTO ${PLATFORM_MODEL_PRICE_TABLE}
+           (id, model_key, name, aliases_json, source_type, source_provider_id, source_provider_name,
+            input_price_per_1m, output_price_per_1m, cached_input_price_per_1m,
+            cache_write_price_per_1m, reasoning_price_per_1m,
+            audio_second_price_per_1m, audio_character_price_per_1m,
+            currency, enabled, created_at_unix, updated_at_unix)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(model_key) DO UPDATE SET
+           name = excluded.name,
+           aliases_json = excluded.aliases_json,
+           source_type = excluded.source_type,
+           source_provider_id = excluded.source_provider_id,
+           source_provider_name = excluded.source_provider_name,
+           input_price_per_1m = excluded.input_price_per_1m,
+           output_price_per_1m = excluded.output_price_per_1m,
+           cached_input_price_per_1m = excluded.cached_input_price_per_1m,
+           cache_write_price_per_1m = excluded.cache_write_price_per_1m,
+           reasoning_price_per_1m = excluded.reasoning_price_per_1m,
+           audio_second_price_per_1m = excluded.audio_second_price_per_1m,
+           audio_character_price_per_1m = excluded.audio_character_price_per_1m,
+           currency = excluded.currency,
+           enabled = excluded.enabled,
+           updated_at_unix = excluded.updated_at_unix`,
+      )
+      .bind(
+        price.id,
+        modelKey,
+        name,
+        JSON.stringify(aliases),
+        sourceType,
+        price.source_provider_id ?? null,
+        price.source_provider_name ?? null,
+        price.input_price_per_1m ?? null,
+        price.output_price_per_1m ?? null,
+        price.cached_input_price_per_1m ?? null,
+        price.cache_write_price_per_1m ?? null,
+        price.reasoning_price_per_1m ?? null,
+        price.audio_second_price_per_1m ?? null,
+        price.audio_character_price_per_1m ?? null,
+        currency,
+        boolSql(price.enabled),
         now,
         now,
       );
@@ -890,11 +1170,11 @@ export class PlatformModelCatalogStore {
       this.#db
         .prepare(
           `INSERT OR IGNORE INTO ${PLATFORM_PROVIDER_TABLE}
-             (id, name, provider_type_id, kind, base_url, api_key_var, byok_alias,
+             (id, name, provider_type_id, kind, base_url, cost_multiplier, api_key_var, byok_alias,
               auth_scheme, region, zero_data_retention, openrouter_http_referer,
               openrouter_x_title, cloudflare_ai_gateway_json, enabled,
               created_at_unix, updated_at_unix)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .bind(
           input.id,
@@ -902,6 +1182,7 @@ export class PlatformModelCatalogStore {
           normalized.provider_type_id,
           normalized.kind,
           normalized.base_url,
+          normalized.cost_multiplier,
           input.api_key_var ?? null,
           input.byok_alias ?? null,
           input.auth_scheme ?? null,
@@ -948,6 +1229,7 @@ export class PlatformModelCatalogStore {
         ["kind", kind],
         ["base_url", baseUrl],
       );
+      fields.push(["cost_multiplier", this.#requiredCostMultiplier(input.cost_multiplier ?? 1)]);
       fields.push(["api_key_var", input.api_key_var ?? null]);
       fields.push(["byok_alias", input.byok_alias ?? null]);
       fields.push(["auth_scheme", input.auth_scheme ?? null]);
@@ -977,6 +1259,9 @@ export class PlatformModelCatalogStore {
         const baseUrl = this.#requiredText(input.base_url, "base_url");
         if (!urlIsValid(baseUrl)) throw new TenantCatalogValidationError("base_url must be a URL");
         fields.push(["base_url", baseUrl]);
+      }
+      if (input.cost_multiplier !== undefined) {
+        fields.push(["cost_multiplier", this.#requiredCostMultiplier(input.cost_multiplier)]);
       }
       if (hasOwn(input, "api_key_var")) fields.push(["api_key_var", input.api_key_var ?? null]);
       if (hasOwn(input, "byok_alias")) fields.push(["byok_alias", input.byok_alias ?? null]);
@@ -1074,6 +1359,13 @@ export class PlatformModelCatalogStore {
     return value.trim();
   }
 
+  #requiredCostMultiplier(value: number): number {
+    if (!Number.isFinite(value) || value < 0) {
+      throw new TenantCatalogValidationError("cost_multiplier must be a non-negative number");
+    }
+    return value;
+  }
+
   /**
    * `kind` is validated by the SAME `canonicalProviderKind` the tenant store
    * uses, which is what rejects `"platform"` here: that kind is a tenant-side
@@ -1122,6 +1414,7 @@ export class PlatformModelCatalogStore {
     provider_type_id: ProviderTypeId;
     kind: string;
     base_url: string;
+    cost_multiplier: number;
   } {
     const name = this.#requiredText(input.name, "name");
     const kind = this.#requiredKind(input.kind);
@@ -1132,6 +1425,7 @@ export class PlatformModelCatalogStore {
       provider_type_id: this.#requiredProviderType(input.provider_type_id, kind),
       kind,
       base_url: baseUrl,
+      cost_multiplier: this.#requiredCostMultiplier(input.cost_multiplier ?? 1),
     };
   }
 
@@ -1321,19 +1615,27 @@ export class PlatformModelCatalogStore {
       this.#db
         .prepare(
           `INSERT OR IGNORE INTO ${PLATFORM_OFFERING_TABLE}
-             (id, model_id, provider_id, upstream_model_id, role,
+             (id, model_id, provider_id, upstream_model_id, pricing_model_id, role,
               priority, weight, canary_percent, shadow_percent, shadow_max_requests,
               capabilities_json, context_window, region, zero_data_retention,
               input_price_per_1m, output_price_per_1m, cached_input_price_per_1m,
               cache_write_price_per_1m, reasoning_price_per_1m,
               audio_second_price_per_1m, audio_character_price_per_1m,
               currency, source, enabled, created_at_unix, updated_at_unix)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?,
+                   COALESCE(?, (SELECT id FROM platform_model_prices WHERE model_key = ? AND enabled = 1)),
+                   ?, ?, ?, ?, ?, ?,
+                   ?, ?, ?, ?,
+                   ?, ?, ?, ?,
+                   ?, ?, ?,
+                   ?, ?, ?, ?, ?)`,
         )
         .bind(
           input.id,
           modelId,
           input.provider_id,
+          input.upstream_model_id,
+          input.pricing_model_id ?? null,
           input.upstream_model_id,
           values.role,
           values.priority,
@@ -1403,6 +1705,7 @@ export class PlatformModelCatalogStore {
       fields.push(
         ["provider_id", input.provider_id ?? current.provider_id],
         ["upstream_model_id", input.upstream_model_id ?? current.upstream_model_id],
+        ["pricing_model_id", input.pricing_model_id ?? null],
         ["role", role],
         ["priority", input.priority ?? 100],
         ["weight", input.weight ?? 1],
@@ -1431,6 +1734,9 @@ export class PlatformModelCatalogStore {
     };
     push("provider_id", input.provider_id);
     push("upstream_model_id", input.upstream_model_id);
+    if (!replacing && hasOwn(input, "pricing_model_id")) {
+      push("pricing_model_id", input.pricing_model_id);
+    }
     push("role", input.role);
     push("priority", input.priority);
     push("weight", input.weight);

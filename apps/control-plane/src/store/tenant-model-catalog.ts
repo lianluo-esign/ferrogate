@@ -22,6 +22,7 @@ export interface ProviderChannelInput {
   readonly provider_type_id?: string;
   readonly kind: string;
   readonly base_url: string;
+  readonly cost_multiplier?: number;
   readonly api_key_var?: string | null;
   readonly byok_alias?: string | null;
   readonly auth_scheme?: "bearer" | "x-api-key" | null;
@@ -48,6 +49,7 @@ export interface ModelOfferingInput {
   readonly id: string;
   readonly provider_id: string;
   readonly upstream_model_id: string;
+  readonly pricing_model_id?: string | null;
   readonly role?: "primary" | "fallback" | "canary" | "shadow";
   readonly priority?: number;
   readonly weight?: number;
@@ -76,6 +78,7 @@ interface ProviderRow {
   readonly name: string;
   readonly kind: string;
   readonly base_url: string;
+  readonly cost_multiplier: number;
   readonly api_key_var: string | null;
   readonly byok_alias: string | null;
   readonly auth_scheme: string | null;
@@ -106,6 +109,7 @@ interface OfferingRow {
   readonly provider_id: string;
   readonly provider_name: string | null;
   readonly upstream_model_id: string;
+  readonly pricing_model_id: string | null;
   readonly role: string;
   readonly priority: number;
   readonly weight: number;
@@ -158,7 +162,7 @@ type CatalogRecord = StoreRecord;
 type UpdateField = readonly [string, string | number | null];
 
 const PROVIDER_SELECT = `
-  SELECT id, tenant_id, name, kind, base_url, api_key_var, byok_alias,
+  SELECT id, tenant_id, name, kind, base_url, cost_multiplier, api_key_var, byok_alias,
          auth_scheme, region, zero_data_retention, openrouter_http_referer,
          openrouter_x_title, cloudflare_ai_gateway_json, enabled
     FROM provider_channels`;
@@ -170,7 +174,7 @@ const MODEL_SELECT = `
 
 const OFFERING_SELECT = `
   SELECT o.id, o.tenant_id, o.model_id, o.provider_id, p.name AS provider_name,
-         o.upstream_model_id, o.role, o.priority, o.weight, o.canary_percent,
+         o.upstream_model_id, o.pricing_model_id, o.role, o.priority, o.weight, o.canary_percent,
          o.shadow_percent, o.shadow_max_requests, o.capabilities_json,
          o.context_window, o.region, o.zero_data_retention,
          o.input_price_per_1m, o.output_price_per_1m,
@@ -325,6 +329,7 @@ function providerRecord(row: ProviderRow): CatalogRecord {
     kind: row.kind,
     compatibility: providerCompatibility(row.kind),
     base_url: row.base_url,
+    cost_multiplier: row.cost_multiplier,
     has_api_key: Boolean(row.api_key_var || row.byok_alias),
     byok_alias: row.byok_alias,
     auth_scheme: row.auth_scheme,
@@ -347,6 +352,7 @@ function offeringRecord(row: OfferingRow): CatalogRecord {
     provider_id: row.provider_id,
     provider: row.provider_name,
     upstream_model_id: row.upstream_model_id,
+    pricing_model_id: row.pricing_model_id,
     role: row.role,
     priority: row.priority,
     weight: row.weight,
@@ -467,11 +473,11 @@ export class TenantModelCatalogStore {
       this.#db
         .prepare(
           `INSERT OR IGNORE INTO provider_channels
-             (id, tenant_id, name, kind, base_url, api_key_var, byok_alias,
+             (id, tenant_id, name, kind, base_url, cost_multiplier, api_key_var, byok_alias,
               auth_scheme, region, zero_data_retention, openrouter_http_referer,
               openrouter_x_title, cloudflare_ai_gateway_json, enabled,
               created_at_unix, updated_at_unix)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .bind(
           input.id,
@@ -479,6 +485,7 @@ export class TenantModelCatalogStore {
           normalized.name,
           normalized.kind,
           normalized.base_url,
+          normalized.cost_multiplier,
           input.api_key_var ?? null,
           input.byok_alias ?? null,
           input.auth_scheme ?? null,
@@ -519,6 +526,7 @@ export class TenantModelCatalogStore {
       const baseUrl = this.#requiredText(input.base_url ?? current.base_url, "base_url");
       if (!urlIsValid(baseUrl)) throw new TenantCatalogValidationError("base_url must be a URL");
       fields.push(["name", name], ["kind", kind], ["base_url", baseUrl]);
+      fields.push(["cost_multiplier", this.#requiredCostMultiplier(input.cost_multiplier ?? 1)]);
       fields.push(["api_key_var", input.api_key_var ?? null]);
       fields.push(["byok_alias", input.byok_alias ?? null]);
       fields.push(["auth_scheme", input.auth_scheme ?? null]);
@@ -545,6 +553,9 @@ export class TenantModelCatalogStore {
         const baseUrl = this.#requiredText(input.base_url, "base_url");
         if (!urlIsValid(baseUrl)) throw new TenantCatalogValidationError("base_url must be a URL");
         fields.push(["base_url", baseUrl]);
+      }
+      if (input.cost_multiplier !== undefined) {
+        fields.push(["cost_multiplier", this.#requiredCostMultiplier(input.cost_multiplier)]);
       }
       if (hasOwn(input, "api_key_var")) fields.push(["api_key_var", input.api_key_var ?? null]);
       if (hasOwn(input, "byok_alias")) fields.push(["byok_alias", input.byok_alias ?? null]);
@@ -649,14 +660,31 @@ export class TenantModelCatalogStore {
     return value.trim();
   }
 
-  #validateProvider(input: ProviderChannelInput): { name: string; kind: string; base_url: string } {
+  #requiredCostMultiplier(value: number): number {
+    if (!Number.isFinite(value) || value < 0) {
+      throw new TenantCatalogValidationError("cost_multiplier must be a non-negative number");
+    }
+    return value;
+  }
+
+  #validateProvider(input: ProviderChannelInput): {
+    name: string;
+    kind: string;
+    base_url: string;
+    cost_multiplier: number;
+  } {
     const name = this.#requiredText(input.name, "name");
     const baseUrl = this.#requiredText(input.base_url, "base_url");
     if (!urlIsValid(baseUrl)) throw new TenantCatalogValidationError("base_url must be a URL");
     const kind = canonicalProviderKind(input.kind);
     if (kind === null)
       throw new TenantCatalogValidationError(`unsupported provider kind: ${input.kind}`);
-    return { name, kind, base_url: baseUrl };
+    return {
+      name,
+      kind,
+      base_url: baseUrl,
+      cost_multiplier: this.#requiredCostMultiplier(input.cost_multiplier ?? 1),
+    };
   }
 
   async listModels(tenantId: string): Promise<readonly CatalogRecord[]> {
@@ -844,14 +872,14 @@ export class TenantModelCatalogStore {
       this.#db
         .prepare(
           `INSERT OR IGNORE INTO catalog_model_offerings
-             (id, tenant_id, model_id, provider_id, upstream_model_id, role,
+             (id, tenant_id, model_id, provider_id, upstream_model_id, pricing_model_id, role,
               priority, weight, canary_percent, shadow_percent, shadow_max_requests,
               capabilities_json, context_window, region, zero_data_retention,
               input_price_per_1m, output_price_per_1m, cached_input_price_per_1m,
               cache_write_price_per_1m, reasoning_price_per_1m,
               audio_second_price_per_1m, audio_character_price_per_1m,
               currency, source, enabled, created_at_unix, updated_at_unix)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .bind(
           input.id,
@@ -859,6 +887,7 @@ export class TenantModelCatalogStore {
           modelId,
           input.provider_id,
           input.upstream_model_id,
+          input.pricing_model_id ?? null,
           values.role,
           values.priority,
           values.weight,
@@ -931,6 +960,7 @@ export class TenantModelCatalogStore {
       fields.push(
         ["provider_id", input.provider_id ?? current.provider_id],
         ["upstream_model_id", input.upstream_model_id ?? current.upstream_model_id],
+        ["pricing_model_id", input.pricing_model_id ?? null],
         ["role", role],
         ["priority", input.priority ?? 100],
         ["weight", input.weight ?? 1],
@@ -967,6 +997,9 @@ export class TenantModelCatalogStore {
     };
     push("provider_id", input.provider_id);
     push("upstream_model_id", input.upstream_model_id);
+    if (!replacing && hasOwn(input, "pricing_model_id")) {
+      push("pricing_model_id", input.pricing_model_id);
+    }
     push("role", input.role);
     push("priority", input.priority);
     push("weight", input.weight);

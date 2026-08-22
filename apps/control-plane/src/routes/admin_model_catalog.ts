@@ -8,6 +8,7 @@ import type { StoreRecord } from "../ports.js";
 import { adminDeleted, adminItem, listResponse, parseListQuery } from "../responses.js";
 import {
   PlatformModelCatalogStore,
+  type PlatformModelPriceInput,
   isMissingPlatformCatalogError,
 } from "../store/platform-model-catalog.js";
 import {
@@ -41,6 +42,7 @@ const providerCreateSchema = z
     provider_type_id: z.enum(PROVIDER_TYPE_IDS).optional(),
     kind: z.string().trim().min(1),
     base_url: z.string().trim().url(),
+    cost_multiplier: z.number().nonnegative().optional(),
     api_key_var: z.string().trim().min(1).nullable().optional(),
     byok_alias: z.string().trim().min(1).nullable().optional(),
     auth_scheme: z.enum(["bearer", "x-api-key"]).nullable().optional(),
@@ -97,6 +99,7 @@ const offeringCreateSchema = z
     tenant_id: z.string().trim().min(1).optional(),
     provider_id: z.string().trim().min(1),
     upstream_model_id: z.string().trim().min(1),
+    pricing_model_id: z.string().trim().min(1).nullable().optional(),
     role: z.enum(["primary", "fallback", "canary", "shadow"]).optional(),
     priority: z.number().int().min(0).optional(),
     weight: z.number().int().min(0).optional(),
@@ -121,6 +124,33 @@ const offeringCreateSchema = z
   .strict();
 
 const offeringUpdateSchema = offeringCreateSchema.partial();
+
+const modelPriceSchema = z
+  .object({
+    id: z.string().trim().min(1).optional(),
+    model_key: z.string().trim().min(1),
+    name: z.string().trim().min(1),
+    aliases: z.array(z.string().trim().min(1)).max(128).optional(),
+    source_type: z.string().trim().min(1).optional(),
+    source_provider_id: z.string().trim().min(1).nullable().optional(),
+    source_provider_name: z.string().trim().min(1).nullable().optional(),
+    input_price_per_1m: z.number().nonnegative().nullable().optional(),
+    output_price_per_1m: z.number().nonnegative().nullable().optional(),
+    cached_input_price_per_1m: z.number().nonnegative().nullable().optional(),
+    cache_write_price_per_1m: z.number().nonnegative().nullable().optional(),
+    reasoning_price_per_1m: z.number().nonnegative().nullable().optional(),
+    audio_second_price_per_1m: z.number().nonnegative().nullable().optional(),
+    audio_character_price_per_1m: z.number().nonnegative().nullable().optional(),
+    currency: z.string().trim().min(1).optional(),
+    enabled: z.boolean().optional(),
+  })
+  .strict();
+
+const modelPriceImportSchema = z
+  .object({ prices: z.array(modelPriceSchema).min(1).max(80) })
+  .strict();
+
+const modelPriceUpdateSchema = modelPriceSchema.partial().omit({ id: true, model_key: true });
 
 type Body = Record<string, unknown>;
 
@@ -403,6 +433,7 @@ function providerInput(body: Body, id: string): ProviderChannelInput {
     provider_type_id: body.provider_type_id as string | undefined,
     kind: body.kind as string,
     base_url: body.base_url as string,
+    cost_multiplier: body.cost_multiplier as number | undefined,
     api_key_var: body.api_key_var as string | null | undefined,
     byok_alias: body.byok_alias as string | null | undefined,
     auth_scheme: body.auth_scheme as "bearer" | "x-api-key" | null | undefined,
@@ -433,6 +464,7 @@ function offeringInput(body: Body, id: string): ModelOfferingInput {
     id,
     provider_id: body.provider_id as string,
     upstream_model_id: body.upstream_model_id as string,
+    pricing_model_id: body.pricing_model_id as string | null | undefined,
     role: body.role as ModelOfferingInput["role"],
     priority: body.priority as number | undefined,
     weight: body.weight as number | undefined,
@@ -454,6 +486,46 @@ function offeringInput(body: Body, id: string): ModelOfferingInput {
     source: body.source as string | undefined,
     enabled: body.enabled as boolean | undefined,
   };
+}
+
+function platformOperatorOnly(c: Parameters<Handler>[0]): void {
+  if (scopeOf(c).kind !== "platform_operator") {
+    throw new HttpError(
+      403,
+      "tenant_scope_denied",
+      "public model prices require a platform operator",
+    );
+  }
+}
+
+async function modelPriceList(c: Parameters<Handler>[0]): Promise<Response> {
+  platformOperatorOnly(c);
+  return filterAndList(c, await platformCatalogStore(c).listModelPrices(), { kind: "platform" });
+}
+
+async function modelPriceImport(c: Parameters<Handler>[0]): Promise<Response> {
+  platformOperatorOnly(c);
+  const body = await readJson(c, modelPriceImportSchema);
+  const prices: PlatformModelPriceInput[] = body.prices.map((price) => ({
+    ...price,
+    id: price.id ?? crypto.randomUUID(),
+  }));
+  const result = await platformCatalogStore(c).upsertModelPrices(scopeOf(c), prices);
+  return json(c, 200, {
+    object: "model_price_import",
+    scope: "platform",
+    upserted: result.upserted,
+    revision: result.revision,
+  });
+}
+
+async function modelPriceUpdate(c: Parameters<Handler>[0]): Promise<Response> {
+  platformOperatorOnly(c);
+  const id = pathParam(c, "id");
+  const input = await readJson(c, modelPriceUpdateSchema);
+  const record = await platformCatalogStore(c).updateModelPrice(scopeOf(c), id, input);
+  if (record === null) throw new TenantCatalogNotFoundError(`model price ${id} not found`);
+  return json(c, 200, scoped(adminItem("model_price", record), { kind: "platform" }));
 }
 
 async function providerList(c: Parameters<Handler>[0]): Promise<Response> {
@@ -856,6 +928,9 @@ export function providerCatalogOverrides(): Readonly<Record<string, Handler>> {
 
 export function modelCatalogOverrides(): Readonly<Record<string, Handler>> {
   return {
+    listAdminModelPrices: wrapped(modelPriceList),
+    importAdminModelPrices: wrapped(modelPriceImport),
+    patchAdminModelPrice: wrapped(modelPriceUpdate),
     listAdminModels: wrapped(modelList),
     createAdminModel: wrapped(modelCreate),
     getAdminModel: wrapped(modelRead),

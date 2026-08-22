@@ -1038,7 +1038,7 @@ const CONTROLS: readonly FleetControl[] = [
     /**
      * Platform default model catalog routing and its operator CRUD surface
      * (#889, #890). The control plane writes the platform catalog into the
-     * CONTROL database and the gateway data plane reads the same four tables
+     * CONTROL database and the gateway data plane reads the same tables
      * through `controlDatabaseFrom` before resolving platform model candidates —
      * the same authoritative-when-present rule the tenant catalog above uses.
      */
@@ -1049,6 +1049,7 @@ const CONTROLS: readonly FleetControl[] = [
     authorityTables: [
       "platform_provider_channels",
       "platform_catalog_models",
+      "platform_model_prices",
       "platform_catalog_offerings",
       "platform_catalog_revisions",
     ],

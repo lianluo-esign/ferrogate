@@ -37,7 +37,7 @@ import { z } from "zod";
  * unfailable — it would agree with the contract by construction, which is the
  * vacuous-assertion shape this repo keeps getting bitten by.
  */
-export const OPENAPI_OPERATION_COUNT = 337 as const;
+export const OPENAPI_OPERATION_COUNT = 340 as const;
 
 /** Tenancy scope, the wire twin of `@ferrogate/core`'s `Scope`. */
 export const scopeSchema = z.object({

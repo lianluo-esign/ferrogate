@@ -401,12 +401,11 @@ export interface UpstreamModel {
  * does NOT run {@link importGraphReferentialError} (which only knows the graph's
  * own providers) against a provider-sync graph.
  *
- * Prices come from `priceBook` matched by model NAME on the wildcard (`"*"`)
- * provider — the upstream `/v1/models` endpoint advertises none — and are left
- * `null` for a model the card does not cover, exactly the "priced from the seed
- * where the upstream gives none" the issue asks for. Duplicate upstream ids are
- * collapsed to the first, so a malformed upstream list cannot fan out into a
- * `ux_..._primary` collision.
+ * Provider discovery never manufactures a price. `importGraph` binds the new
+ * offering to an exact `platform_model_prices.model_key` when one exists; no
+ * match leaves the route unbound and all legacy price columns null. Duplicate
+ * upstream ids are collapsed to the first, so a malformed upstream list cannot
+ * fan out into a `ux_..._primary` collision.
  *
  * ## Two providers serving the same model → the later one is a FALLBACK, not a drop
  *
@@ -426,14 +425,9 @@ export interface UpstreamModel {
 export function providerModelsToImportGraph(
   provider: Pick<SeedProviderChannel, "id" | "name">,
   upstreamModels: readonly UpstreamModel[],
-  priceBook: PriceBook,
+  _priceBook: PriceBook,
   fallbackModelIds: ReadonlySet<string> = new Set(),
 ): PlatformCatalogImportGraph {
-  const priceByModel = new Map(
-    priceBook.entries
-      .filter((entry) => entry.provider === "*")
-      .map((entry) => [entry.model, entry.price] as const),
-  );
   const modelRows: SeedCatalogModel[] = [];
   const offeringRows: ImportOfferingRow[] = [];
   const seen = new Set<string>();
@@ -455,7 +449,6 @@ export function providerModelsToImportGraph(
     });
 
     const asFallback = fallbackModelIds.has(modelId(name));
-    const price = priceByModel.get(name);
     offeringRows.push({
       id: offeringId(name, provider.name, name),
       model_id: modelId(name),
@@ -475,14 +468,14 @@ export function providerModelsToImportGraph(
       context_window: null,
       region: null,
       zero_data_retention: null,
-      input_price_per_1m: price?.input_price_per_1m ?? null,
-      output_price_per_1m: price?.output_price_per_1m ?? null,
-      cached_input_price_per_1m: price?.cached_input_price_per_1m ?? null,
-      cache_write_price_per_1m: price?.cache_write_price_per_1m ?? null,
-      reasoning_price_per_1m: price?.reasoning_price_per_1m ?? null,
-      audio_second_price_per_1m: price?.audio_second_price_per_1m ?? null,
-      audio_character_price_per_1m: price?.audio_character_price_per_1m ?? null,
-      currency: price?.currency ?? "USD",
+      input_price_per_1m: null,
+      output_price_per_1m: null,
+      cached_input_price_per_1m: null,
+      cache_write_price_per_1m: null,
+      reasoning_price_per_1m: null,
+      audio_second_price_per_1m: null,
+      audio_character_price_per_1m: null,
+      currency: "USD",
       enabled: 1,
       source: IMPORT_SOURCE_PROVIDER_SYNC,
     });

@@ -1454,6 +1454,59 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/admin/v1/model-prices": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List deduplicated public model baseline prices. */
+        get: operations["listAdminModelPrices"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/v1/model-prices/import": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Bulk upsert selected public model prices. */
+        post: operations["importAdminModelPrices"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/v1/model-prices/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Change a public model price or its selected source. */
+        patch: operations["patchAdminModelPrice"];
+        trace?: never;
+    };
     "/admin/v1/models": {
         parameters: {
             query?: {
@@ -6845,6 +6898,11 @@ export interface components {
             compatibility: "openai-compatible" | "dedicated";
             base_url: string;
             has_api_key: boolean;
+            /**
+             * @description Multiplier applied to the selected public model baseline price for this provider.
+             * @default 1
+             */
+            cost_multiplier: number;
             enabled: boolean;
             /**
              * @description Present and `platform` on platform-catalog rows, which carry no `tenant_id`.
@@ -7501,6 +7559,11 @@ export interface components {
             openrouter_http_referer?: string | null;
             openrouter_x_title?: string | null;
             cloudflare_ai_gateway?: unknown;
+            /**
+             * @description Multiplier applied to the selected public model baseline price for this provider.
+             * @default 1
+             */
+            cost_multiplier: number;
             enabled?: boolean;
         };
         AdminProviderChannelPatch: {
@@ -7522,6 +7585,11 @@ export interface components {
             openrouter_http_referer?: string | null;
             openrouter_x_title?: string | null;
             cloudflare_ai_gateway?: unknown;
+            /**
+             * @description Multiplier applied to the selected public model baseline price for this provider.
+             * @default 1
+             */
+            cost_multiplier: number;
             enabled?: boolean;
         };
         AdminProviderMutationResponse: {
@@ -7573,6 +7641,8 @@ export interface components {
             tenant_id?: string;
             provider_id: string;
             upstream_model_id: string;
+            /** @description Reference to the selected public model baseline price. */
+            pricing_model_id?: string | null;
             /** @enum {string} */
             role?: "primary" | "fallback" | "canary" | "shadow";
             priority?: number;
@@ -7600,6 +7670,8 @@ export interface components {
             tenant_id?: string;
             provider_id?: string;
             upstream_model_id?: string;
+            /** @description Reference to the selected public model baseline price. */
+            pricing_model_id?: string | null;
             /** @enum {string} */
             role?: "primary" | "fallback" | "canary" | "shadow";
             priority?: number;
@@ -7622,12 +7694,47 @@ export interface components {
             source?: string;
             enabled?: boolean;
         };
+        AdminModelPriceMutation: {
+            id?: string;
+            model_key: string;
+            name: string;
+            aliases?: string[];
+            source_type?: string;
+            source_provider_id?: string | null;
+            source_provider_name?: string | null;
+            input_price_per_1m?: number | null;
+            output_price_per_1m?: number | null;
+            cached_input_price_per_1m?: number | null;
+            cache_write_price_per_1m?: number | null;
+            reasoning_price_per_1m?: number | null;
+            audio_second_price_per_1m?: number | null;
+            audio_character_price_per_1m?: number | null;
+            currency?: string;
+            enabled?: boolean;
+        };
+        AdminModelPricePatch: {
+            name?: string;
+            aliases?: string[];
+            source_type?: string;
+            source_provider_id?: string | null;
+            source_provider_name?: string | null;
+            input_price_per_1m?: number | null;
+            output_price_per_1m?: number | null;
+            cached_input_price_per_1m?: number | null;
+            cache_write_price_per_1m?: number | null;
+            reasoning_price_per_1m?: number | null;
+            audio_second_price_per_1m?: number | null;
+            audio_character_price_per_1m?: number | null;
+            currency?: string;
+            enabled?: boolean;
+        };
         AdminOffering: {
             id: string;
             model_id: string;
             provider_id: string;
             provider?: string | null;
             upstream_model_id: string;
+            pricing_model_id?: string | null;
             role: string;
             priority?: number;
             weight?: number;
@@ -15035,6 +15142,97 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+        };
+    };
+    listAdminModelPrices: {
+        parameters: {
+            query?: {
+                q?: string;
+                offset?: number;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Public model price list. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    importAdminModelPrices: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    prices: components["schemas"]["AdminModelPriceMutation"][];
+                };
+            };
+        };
+        responses: {
+            /** @description Price import result. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    patchAdminModelPrice: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AdminModelPricePatch"];
+            };
+        };
+        responses: {
+            /** @description Updated public model price. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
         };
     };
     listAdminModels: {

@@ -48,11 +48,11 @@ function census<T extends string>(values: readonly T[]): Record<string, number> 
 }
 
 describe("contract table", () => {
-  it("carries exactly 337 operations", () => {
+  it("carries exactly 340 operations", () => {
     expect(OPERATIONS).toHaveLength(EXPECTED_OPERATION_COUNT);
   });
 
-  it("has 337 unique operation ids", () => {
+  it("has 340 unique operation ids", () => {
     expect(new Set(operationIds()).size).toBe(EXPECTED_OPERATION_COUNT);
   });
 
@@ -135,7 +135,8 @@ describe("contract table", () => {
       // +1 (316) with `updateVirtualKey` (PATCH /admin/v1/virtual-keys/{key_id}),
       // an admin bearer op — the console's edit-group write.
       // +1 for the operator-only provider connectivity probe used by Polaris.
-      bearer: 323,
+      // +3 for public-model-price list, bulk import and source update.
+      bearer: 326,
       internal: 6,
       anonymous: 7,
       method_dependent: 1,
@@ -177,7 +178,8 @@ describe("contract table", () => {
       // `PATCH /admin/v1/virtual-keys/{key_id}` (updateVirtualKey) is one more
       // admin-visible op, taking admin 253 -> 254.
       // +1 for the operator-only provider connectivity probe used by Polaris.
-      admin: 261,
+      // +3 for public-model-price list, bulk import and source update.
+      admin: 264,
       // 51 -> 52 with `countMessageTokens` (issue #671): a data-plane
       // operation, publicly reachable, bearer-guarded; then 52 -> 53 with
       // `getModel` (issue #670), public for the same reason as `listModels`.
@@ -253,7 +255,8 @@ describe("contract table", () => {
       // #948 adds two GETs (announcement list + item read), 143 -> 145.
       // The tenant-scoped `GET /admin/v1/shared-billing-groups` is one more GET,
       // 145 -> 146.
-      GET: 149,
+      // Public-model-price management adds one GET.
+      GET: 150,
       // 78 -> 79 with `POST /v1/messages/count_tokens` (issue #671), then
       // 79 -> 81 with the two #695 semantic-cache-policy POSTs, then 82 with
       // #676's `/v1/rerank` and 85 with #703's three audio POSTs, then 86 with
@@ -270,11 +273,13 @@ describe("contract table", () => {
       // The control-plane-D1 migration's `POST /admin/v1/control-backfill` is one
       // more POST, taking POST 100 -> 101.
       // +1 for the provider connectivity probe.
-      POST: 105,
+      // Public-model-price bulk import adds one POST.
+      POST: 106,
       DELETE: 36,
       PUT: 25,
       // `updateVirtualKey` (edit-group) is one more PATCH, 21 -> 22.
-      PATCH: 22,
+      // Public-model-price source selection adds one PATCH.
+      PATCH: 23,
     });
   });
 

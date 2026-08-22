@@ -18,6 +18,7 @@ import type { CallerScope } from "../../../control-plane/src/ports.js";
  */
 import { PlatformModelCatalogStore } from "../../../control-plane/src/store/platform-model-catalog.js";
 import {
+  emptyModelResolver,
   inferenceRouteModule,
   modelsFromEnv,
   platformModelCatalogFromControlData,
@@ -60,6 +61,7 @@ async function seedPlatformCatalog(): Promise<void> {
     name: "platform-openai",
     kind: "openai",
     base_url: "https://api.openai.example/v1",
+    cost_multiplier: 0.5,
     api_key_var: "PLATFORM_KEY",
     enabled: true,
   });
@@ -79,14 +81,29 @@ async function seedPlatformCatalog(): Promise<void> {
     context_window: 128_000,
     enabled: true,
   });
+  await store.upsertModelPrices(OPERATOR, [
+    {
+      id: "public:model:gpt-4o-mini-2024-07-18",
+      model_key: "gpt-4o-mini-2024-07-18",
+      name: "GPT-4o mini",
+      source_type: "models_dev",
+      source_provider_id: "openai",
+      source_provider_name: "OpenAI",
+      input_price_per_1m: 10,
+      output_price_per_1m: 50,
+      currency: "USD",
+      enabled: true,
+    },
+  ]);
   await store.createOffering(OPERATOR, MODEL_ID, {
     id: "po_primary",
     provider_id: OPENAI_PROVIDER_ID,
     upstream_model_id: "gpt-4o-mini-2024-07-18",
+    pricing_model_id: "public:model:gpt-4o-mini-2024-07-18",
     role: "primary",
     priority: 0,
-    input_price_per_1m: 5,
-    output_price_per_1m: 10,
+    input_price_per_1m: 999,
+    output_price_per_1m: 999,
   });
   await store.createOffering(OPERATOR, MODEL_ID, {
     id: "po_fallback",
@@ -168,6 +185,19 @@ describe("platform model catalog projected into the data plane (#890)", () => {
     const res = await call(MODELS, { headers: bearer("fg_tenant_unscoped") });
     expect(res.status).toBe(200);
     expect(await listedModelIds(res)).toContain(MODEL_NAME);
+  });
+
+  it("prices a bound supplier route at public baseline times its cost multiplier", async () => {
+    const source = platformModelCatalogFromControlData({ ttlMs: 0 });
+    const loaded = await source.load({
+      env: { ...bindings, PLATFORM_KEY: "sk-platform" } as never,
+      fallback: emptyModelResolver,
+    });
+    expect(loaded.ok).toBe(true);
+    if (!loaded.ok) return;
+    const model = loaded.inputs.models.find((candidate) => candidate.name === MODEL_NAME);
+    expect(model?.input_price_per_1m).toBe(5);
+    expect(model?.output_price_per_1m).toBe(25);
   });
 
   it("dispatches the platform model's primary leg", async () => {

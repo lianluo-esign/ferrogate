@@ -151,6 +151,9 @@ export const CONTROL_BACKFILL_TABLES: readonly ControlBackfillTable[] = Object.f
   // Parents before child: platform_catalog_offerings FK → platform_catalog_models
   // AND platform_provider_channels, migration 0025.
   table("platform_catalog_models", ["id"]),
+  // Public baseline prices (migration 0034). Offerings may bind this id, so
+  // copy the price registry before the configured routes that consume it.
+  table("platform_model_prices", ["id"]),
   table("platform_provider_channels", ["id"]),
   // FK → platform_billing_groups (above) AND platform_provider_channels (above),
   // migration 0028 — so the junction copies after both its parents.

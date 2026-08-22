@@ -67,12 +67,12 @@ const OWNED_RAW = RAW.operations.filter(
 );
 
 describe("contract document", () => {
-  it("is version 1 and carries all 320 operations", () => {
+  it("is version 1 and carries all 340 operations", () => {
     expect(RAW.version).toBe(1);
     expect(RAW.operations).toHaveLength(EXPECTED_TOTAL_OPERATION_COUNT);
   });
 
-  it("assigns exactly 265 operations to apps/control-plane", () => {
+  it("assigns exactly 268 operations to apps/control-plane", () => {
     expect(OWNED_RAW).toHaveLength(EXPECTED_CONTROL_PLANE_OPERATION_COUNT);
     expect(CONTROL_PLANE_OPERATIONS).toHaveLength(EXPECTED_CONTROL_PLANE_OPERATION_COUNT);
   });
@@ -107,7 +107,7 @@ describe("contract document", () => {
 });
 
 describe("anti-drift: every contract operation has a registered route", () => {
-  it("registers every one of this app's 265 operation ids", () => {
+  it("registers every one of this app's 268 operation ids", () => {
     const registered = new Set(registeredOperationIds());
     const missing = OWNED_RAW.map((operation) => operation.operation_id)
       .filter((operationId) => !registered.has(operationId))

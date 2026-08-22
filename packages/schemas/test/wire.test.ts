@@ -156,7 +156,7 @@ describe("OPENAPI_OPERATION_COUNT is checked against the committed contract", ()
 
 describe("wireSchemas registry", () => {
   test("exposes the OpenAPI operation count", () => {
-    expect(OPENAPI_OPERATION_COUNT).toBe(337);
+    expect(OPENAPI_OPERATION_COUNT).toBe(340);
   });
 
   test("resolves the seeded cross-plane + ferrogate-core schemas by name", () => {
@@ -357,6 +357,8 @@ describe("PORT-TODO STATE PIN — the registry seeds only cross-plane shapes", (
     // 319 -> 320 purely because the operation count moved 329 -> 330.
     // `testProviderConnectivity` is an operator-only action with an inline
     // request/response envelope, so it adds one operation and no wire schema.
-    expect(OPENAPI_OPERATION_COUNT - seeded).toBe(327);
+    // Public model pricing adds list, import and patch operations; all three
+    // use admin-only inline envelopes, so the shortfall grows by three.
+    expect(OPENAPI_OPERATION_COUNT - seeded).toBe(330);
   });
 });

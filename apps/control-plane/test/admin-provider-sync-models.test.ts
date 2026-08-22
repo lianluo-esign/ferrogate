@@ -11,8 +11,8 @@ import { SELF, env } from "cloudflare:test";
  * any upstream fetch — is proven through the mounted route with `SELF.fetch`.
  *
  * The invariants:
- *   1. first sync ADDS every upstream model as a real offering, priced from the
- *      rate-card seed where the card covers the name and `null` where it does not;
+ *   1. first sync ADDS every upstream model as a real offering, binding an exact
+ *      public-model price where one exists and leaving the others unpriced;
  *   2. a second sync is IDEMPOTENT — nothing added, every model skipped, only the
  *      revision moves;
  *   3. a model the upstream DROPS is reported (skipped/absent), never deleted.
@@ -100,15 +100,38 @@ async function tableCount(table: string): Promise<number> {
   return Number(row?.n ?? 0);
 }
 
-async function offering(
-  id: string,
-): Promise<{ provider_id: string; source: string; input_price_per_1m: number | null } | null> {
+async function seedPublicPrice(modelKey: string, aliases: readonly string[] = []): Promise<string> {
+  const id = `public:model:${modelKey}`;
+  await db()
+    .prepare(
+      `INSERT INTO platform_model_prices
+         (id, model_key, name, aliases_json, source_type, input_price_per_1m, output_price_per_1m,
+          currency, enabled, created_at_unix, updated_at_unix)
+       VALUES (?, ?, ?, ?, 'models_dev', 10, 50, 'USD', 1, 0, 0)`,
+    )
+    .bind(id, modelKey, modelKey, JSON.stringify([modelKey, ...aliases]))
+    .run();
+  return id;
+}
+
+async function offering(id: string): Promise<{
+  provider_id: string;
+  source: string;
+  pricing_model_id: string | null;
+  input_price_per_1m: number | null;
+} | null> {
   return db()
     .prepare(
-      "SELECT provider_id, source, input_price_per_1m FROM platform_catalog_offerings WHERE id = ?",
+      `SELECT provider_id, source, pricing_model_id, input_price_per_1m
+         FROM platform_catalog_offerings WHERE id = ?`,
     )
     .bind(id)
-    .first<{ provider_id: string; source: string; input_price_per_1m: number | null }>();
+    .first<{
+      provider_id: string;
+      source: string;
+      pricing_model_id: string | null;
+      input_price_per_1m: number | null;
+    }>();
 }
 
 beforeAll(async () => {
@@ -130,15 +153,16 @@ afterEach(() => {
 });
 
 describe("provider model-list sync (#944)", () => {
-  it("first sync adds every upstream model as a priced-from-seed offering", async () => {
+  it("first sync binds exact public pricing and leaves unmatched models unpriced", async () => {
     await seedProvider("OPENAI_KEY");
+    const publicPriceId = await seedPublicPrice("gpt-4o");
     const store = new PlatformModelCatalogStore({ db: db() });
     const provider = await store.getProviderSeed(PROVIDER_ID);
     expect(provider, "getProviderSeed must return the raw row with api_key_var").not.toBeNull();
     // getProviderSeed carries the credential REFERENCE, unlike the masked getProvider.
     expect(provider?.api_key_var).toBe("OPENAI_KEY");
 
-    // `o1` is NOT in the default rate card; `gpt-4o` and `gpt-4o-mini` are.
+    // Only `gpt-4o` exists in the public catalog. Matching is exact.
     const { fetchImpl, calls } = stubModels([
       { id: "gpt-4o", owned_by: "openai" },
       { id: "gpt-4o-mini" },
@@ -167,14 +191,36 @@ describe("provider model-list sync (#944)", () => {
     expect(await tableCount("platform_catalog_models")).toBe(3);
     expect(await tableCount("platform_catalog_offerings")).toBe(3);
 
-    // Rate-card seed applied by NAME: gpt-4o priced, the off-card o1 left null.
+    // Provider sync stores no copied price. It binds only the exact public model.
     const priced = await offering("platform:offering:gpt-4o:openai:gpt-4o");
     expect(priced?.provider_id).toBe(PROVIDER_ID);
     expect(priced?.source).toBe("provider_sync");
-    expect(priced?.input_price_per_1m).toBe(2.5);
+    expect(priced?.pricing_model_id).toBe(publicPriceId);
+    expect(priced?.input_price_per_1m).toBeNull();
     const unpriced = await offering("platform:offering:o1:openai:o1");
+    expect(unpriced?.pricing_model_id).toBeNull();
     expect(unpriced?.input_price_per_1m).toBeNull();
     expect(unpriced?.source).toBe("provider_sync");
+  });
+
+  it("binds a hosted provider model through the public model alias", async () => {
+    await seedProvider("OPENAI_KEY");
+    const publicPriceId = await seedPublicPrice("gpt-5.5", ["openai/gpt-5.5"]);
+    const store = new PlatformModelCatalogStore({ db: db() });
+    const provider = await store.getProviderSeed(PROVIDER_ID);
+
+    await syncProviderModelsIntoCatalog({
+      store,
+      scope: PLATFORM_SCOPE,
+      provider: provider!,
+      apiKey: "sk-live-123",
+      priceBook: PriceBook.withDefaultRateCard(),
+      fetchImpl: stubModels([{ id: "openai/gpt-5.5" }]).fetchImpl,
+    });
+
+    const bound = await offering("platform:offering:openai/gpt-5.5:openai:openai/gpt-5.5");
+    expect(bound?.pricing_model_id).toBe(publicPriceId);
+    expect(bound?.input_price_per_1m).toBeNull();
   });
 
   it("is idempotent: a re-sync adds nothing, skips all, and only bumps the revision", async () => {

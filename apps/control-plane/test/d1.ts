@@ -185,6 +185,7 @@ export async function resetD1(): Promise<void> {
     db().prepare("DELETE FROM platform_catalog_offerings"),
     db().prepare("DELETE FROM platform_catalog_models"),
     db().prepare("DELETE FROM platform_provider_channels"),
+    db().prepare("DELETE FROM platform_model_prices"),
     db().prepare("DELETE FROM platform_catalog_revisions"),
   ]);
 

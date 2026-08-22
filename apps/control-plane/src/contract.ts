@@ -137,7 +137,7 @@ export const SUPPORTED_CONTRACT_VERSION = 1;
  * action, which re-projects `api_keys.billing_group_id` so the gateway settles
  * at the new multiplier.
  */
-export const EXPECTED_TOTAL_OPERATION_COUNT = 337;
+export const EXPECTED_TOTAL_OPERATION_COUNT = 340;
 
 /**
  * Operations `ROUTE-MAP.md` assigns to `apps/control-plane`: `/admin/v1/**`
@@ -188,7 +188,7 @@ export const EXPECTED_TOTAL_OPERATION_COUNT = 337;
  * 257 -> 258 with `PATCH /admin/v1/virtual-keys/{key_id}` (`updateVirtualKey`,
  * `admin_virtual_key`), the console's edit-group write this app owns.
  */
-export const EXPECTED_CONTROL_PLANE_OPERATION_COUNT = 265;
+export const EXPECTED_CONTROL_PLANE_OPERATION_COUNT = 268;
 
 // ---------------------------------------------------------------------------
 // Ownership predicate

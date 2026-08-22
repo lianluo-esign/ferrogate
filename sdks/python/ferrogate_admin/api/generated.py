@@ -17,7 +17,7 @@ class Operation(TypedDict):
     security: SecurityRequirements
     tags: tuple[str, ...]
 
-OPENAPI_OPERATION_COUNT: Final[int] = 337
+OPENAPI_OPERATION_COUNT: Final[int] = 340
 
 OPERATIONS: Final[dict[str, Operation]] = {
     "abortAssetUpload": {
@@ -998,6 +998,12 @@ OPERATIONS: Final[dict[str, Operation]] = {
         "security": ((("bearerAuth", ()),),),
         "tags": ("admin-write",),
     },
+    "importAdminModelPrices": {
+        "method": "POST",
+        "path": "/admin/v1/model-prices/import",
+        "security": ((("bearerAuth", ()),),),
+        "tags": ("admin-write",),
+    },
     "importModelCatalog": {
         "method": "POST",
         "path": "/admin/v1/config/import-model-catalog",
@@ -1133,6 +1139,12 @@ OPERATIONS: Final[dict[str, Operation]] = {
     "listAdminModelOfferings": {
         "method": "GET",
         "path": "/admin/v1/models/{model_id}/offerings",
+        "security": ((("bearerAuth", ()),),),
+        "tags": ("admin-read",),
+    },
+    "listAdminModelPrices": {
+        "method": "GET",
+        "path": "/admin/v1/model-prices",
         "security": ((("bearerAuth", ()),),),
         "tags": ("admin-read",),
     },
@@ -1565,6 +1577,12 @@ OPERATIONS: Final[dict[str, Operation]] = {
     "patchAdminModelOffering": {
         "method": "PATCH",
         "path": "/admin/v1/models/{model_id}/offerings/{offering_id}",
+        "security": ((("bearerAuth", ()),),),
+        "tags": ("admin-write",),
+    },
+    "patchAdminModelPrice": {
+        "method": "PATCH",
+        "path": "/admin/v1/model-prices/{id}",
         "security": ((("bearerAuth", ()),),),
         "tags": ("admin-write",),
     },
@@ -2160,6 +2178,7 @@ ADMIN_OPERATION_IDS: Final[tuple[str, ...]] = (
     "getWallet",
     "getWorkspace",
     "heartbeatSupportOperator",
+    "importAdminModelPrices",
     "importModelCatalog",
     "invalidateSemanticCachePolicy",
     "listAdminAgentCostBurn",
@@ -2182,6 +2201,7 @@ ADMIN_OPERATION_IDS: Final[tuple[str, ...]] = (
     "listAdminMeteringEvents",
     "listAdminMeteringExportStatus",
     "listAdminModelOfferings",
+    "listAdminModelPrices",
     "listAdminModels",
     "listAdminObservability",
     "listAdminObservedAgentActivity",
@@ -2243,6 +2263,7 @@ ADMIN_OPERATION_IDS: Final[tuple[str, ...]] = (
     "patchAdminMcpServer",
     "patchAdminModel",
     "patchAdminModelOffering",
+    "patchAdminModelPrice",
     "patchAdminPolicy",
     "patchAdminPromptTemplate",
     "patchAdminProvider",

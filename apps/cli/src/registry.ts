@@ -473,6 +473,7 @@ const PROMPTS = new ResourceApi("/v1/prompts");
 const SKILL_PACKAGES = new ResourceApi("/admin/v1/skill-packages");
 const PLUGINS = new ResourceApi("/admin/v1/plugins");
 const MODELS = new ResourceApi("/admin/v1/models");
+const MODEL_PRICES = new ResourceApi("/admin/v1/model-prices");
 const PROVIDERS = new ResourceApi("/admin/v1/providers");
 const PROVIDER_MODELS = new ResourceApi("/admin/v1/provider-models");
 const BILLING_GROUPS = new ResourceApi("/admin/v1/billing-groups");
@@ -1609,6 +1610,30 @@ export const GROUPS: readonly GroupDescriptor[] = [
       mutating("rm", "Delete a model offering", "deleteAdminModelOffering"),
     ],
     build: (verb, input) => buildOfferingRequest(verb, input),
+  },
+  {
+    name: "model-prices",
+    about: "Manage public model baseline prices",
+    verbs: [
+      read("list", "List public model baseline prices", "listAdminModelPrices"),
+      mutating("import", "Import public model baseline prices", "importAdminModelPrices"),
+      mutating("update", "Patch a public model baseline price", "patchAdminModelPrice"),
+    ],
+    build: (verb, input) => {
+      switch (verb) {
+        case "list":
+          return MODEL_PRICES.read([], input.list);
+        case "import":
+          return MODEL_PRICES.action(["import"], requireBody(input, verb));
+        case "update":
+          return MODEL_PRICES.update(
+            requireTargetSegments(MODEL_PRICES, verb, input.segments, 1),
+            requireBody(input, verb),
+          );
+        default:
+          throw CliError.usage(`verb '${verb}' is not supported for ${MODEL_PRICES.collection}`);
+      }
+    },
   },
   {
     name: "catalog",
