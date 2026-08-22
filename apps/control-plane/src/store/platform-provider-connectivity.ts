@@ -9,7 +9,17 @@ import { fetchUpstreamModels } from "./platform-provider-sync.js";
 
 const MAX_TEST_RESPONSE_BYTES = 1_048_576;
 
-export type ProviderConnectivityProtocol = "responses" | "chat.completions";
+export const PROVIDER_CONNECTIVITY_PROTOCOLS = [
+  "openai.responses",
+  "openai.chat.completions",
+  "anthropic.messages",
+  "gemini.generateContent",
+  "grok.chat.completions",
+  "deepseek.chat.completions",
+  "minimax.chat.completions",
+] as const;
+
+export type ProviderConnectivityProtocol = (typeof PROVIDER_CONNECTIVITY_PROTOCOLS)[number];
 
 export class ProviderConnectivityError extends Error {
   readonly status: number;
@@ -58,7 +68,7 @@ function nonEmptyText(value: unknown): string | null {
   return typeof value === "string" && value.trim() !== "" ? value.trim() : null;
 }
 
-/** Extract the assistant text from OpenAI Responses or chat-completions JSON. */
+/** Extract the assistant text from the supported provider response envelopes. */
 export function providerConnectivityAnswer(payload: unknown): string | null {
   if (typeof payload !== "object" || payload === null) return null;
   const record = payload as Record<string, unknown>;
@@ -89,7 +99,69 @@ export function providerConnectivityAnswer(payload: unknown): string | null {
       }
     }
   }
+
+  if (Array.isArray(record.content)) {
+    const text = record.content
+      .map((block) =>
+        typeof block === "object" && block !== null
+          ? nonEmptyText((block as Record<string, unknown>).text)
+          : null,
+      )
+      .filter((part): part is string => part !== null);
+    if (text.length > 0) return text.join("\n");
+  }
+
+  if (Array.isArray(record.candidates)) {
+    const first = record.candidates[0];
+    if (typeof first === "object" && first !== null) {
+      const content = (first as Record<string, unknown>).content;
+      if (typeof content === "object" && content !== null) {
+        const parts = (content as Record<string, unknown>).parts;
+        if (Array.isArray(parts)) {
+          const text = parts
+            .map((part) =>
+              typeof part === "object" && part !== null
+                ? nonEmptyText((part as Record<string, unknown>).text)
+                : null,
+            )
+            .filter((part): part is string => part !== null);
+          if (text.length > 0) return text.join("\n");
+        }
+      }
+    }
+  }
   return null;
+}
+
+function connectivityPlan(
+  protocol: ProviderConnectivityProtocol,
+  model: string,
+): {
+  readonly adapterKind: "openai-compatible" | "anthropic" | "gemini" | "grok";
+  readonly operation: "responses" | "chat.completions";
+  readonly body: Record<string, unknown>;
+} {
+  if (protocol === "openai.responses") {
+    return {
+      adapterKind: "openai-compatible",
+      operation: "responses",
+      body: { model, input: "hi", stream: false },
+    };
+  }
+
+  const adapterKind =
+    protocol === "anthropic.messages"
+      ? "anthropic"
+      : protocol === "gemini.generateContent"
+        ? "gemini"
+        : protocol === "grok.chat.completions"
+          ? "grok"
+          : "openai-compatible";
+  return {
+    adapterKind,
+    operation: "chat.completions",
+    body: { model, messages: [{ role: "user", content: "hi" }], stream: false },
+  };
 }
 
 export async function testProviderConnectivity(options: {
@@ -100,12 +172,13 @@ export async function testProviderConnectivity(options: {
   readonly fetchImpl?: typeof fetch;
   readonly now?: () => number;
 }): Promise<ProviderConnectivityResult> {
-  const adapter = defaultAdapterRegistry.adapterFor(options.provider.kind);
+  const plan = connectivityPlan(options.protocol, options.model);
+  const adapter = defaultAdapterRegistry.adapterFor(plan.adapterKind);
   if (adapter === null) {
     throw new ProviderConnectivityError(
       400,
       "provider_adapter_unsupported",
-      `unsupported provider kind ${options.provider.kind}`,
+      `unsupported provider kind ${plan.adapterKind}`,
     );
   }
 
@@ -114,33 +187,22 @@ export async function testProviderConnectivity(options: {
     providerId: options.provider.id,
     provider: options.provider.name,
     providerModel: options.model,
-    providerKind: options.provider.kind,
+    providerKind: plan.adapterKind,
     baseUrl: options.provider.base_url,
     ...(options.apiKey === undefined ? {} : { apiKey: options.apiKey }),
     authScheme:
       options.provider.auth_scheme === "bearer" || options.provider.auth_scheme === "x-api-key"
         ? options.provider.auth_scheme
-        : defaultAuthScheme(options.provider.kind),
+        : defaultAuthScheme(plan.adapterKind),
     enabled: options.provider.enabled !== 0,
   };
   const built = adapter.buildUpstreamRequest({
-    operation: options.protocol,
+    operation: plan.operation,
     route,
     logicalModel: options.model,
     providerModel: options.model,
     stream: false,
-    body:
-      options.protocol === "responses"
-        ? {
-            model: options.model,
-            input: "hi",
-            stream: false,
-          }
-        : {
-            model: options.model,
-            messages: [{ role: "user", content: "hi" }],
-            stream: false,
-          },
+    body: plan.body,
   });
   if (!built.ok) {
     const detail =
@@ -213,6 +275,6 @@ export async function testProviderConnectivity(options: {
     latencyMs,
     status: upstream.status,
     response,
-    answer: providerConnectivityAnswer(response),
+    answer: providerConnectivityAnswer(payload) ?? providerConnectivityAnswer(response),
   };
 }

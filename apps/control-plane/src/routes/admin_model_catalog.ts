@@ -11,6 +11,7 @@ import {
   isMissingPlatformCatalogError,
 } from "../store/platform-model-catalog.js";
 import {
+  PROVIDER_CONNECTIVITY_PROTOCOLS,
   ProviderConnectivityError,
   listProviderConnectivityModels,
   testProviderConnectivity,
@@ -60,7 +61,16 @@ const providerConnectivitySchema = z.discriminatedUnion("action", [
     .object({
       action: z.literal("chat"),
       model: z.string().trim().min(1),
-      protocol: z.enum(["responses", "chat.completions"]).default("chat.completions"),
+      protocol: z
+        .enum([...PROVIDER_CONNECTIVITY_PROTOCOLS, "responses", "chat.completions"])
+        .default("chat.completions")
+        .transform((protocol) =>
+          protocol === "responses"
+            ? "openai.responses"
+            : protocol === "chat.completions"
+              ? "openai.chat.completions"
+              : protocol,
+        ),
     })
     .strict(),
 ]);

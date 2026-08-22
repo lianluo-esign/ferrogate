@@ -64,7 +64,7 @@ describe("platform provider connectivity", () => {
       provider: provider(),
       apiKey: "sk-live",
       model: "gpt-5.4",
-      protocol: "chat.completions",
+      protocol: "openai.chat.completions",
       now: () => clock.shift() ?? 137,
       fetchImpl: async (input, init) => {
         const headers = new Headers(init?.headers);
@@ -96,7 +96,7 @@ describe("platform provider connectivity", () => {
     ]);
     expect(result).toMatchObject({
       model: "gpt-5.4",
-      protocol: "chat.completions",
+      protocol: "openai.chat.completions",
       latencyMs: 37,
       status: 200,
       answer: "hi",
@@ -109,7 +109,7 @@ describe("platform provider connectivity", () => {
       provider: provider(),
       apiKey: "sk-live",
       model: "gpt-5.5",
-      protocol: "responses",
+      protocol: "openai.responses",
       fetchImpl: async (input, init) => {
         calls.push({ url: String(input), body: JSON.parse(String(init?.body)) });
         return Response.json({
@@ -138,13 +138,114 @@ describe("platform provider connectivity", () => {
     ]);
     expect(result).toMatchObject({
       model: "gpt-5.5",
-      protocol: "responses",
+      protocol: "openai.responses",
       status: 200,
       answer: "Hello from Responses",
     });
   });
 
-  it("uses the Anthropic adapter and never returns an upstream error body", async () => {
+  it("uses Gemini generateContent and extracts candidate text", async () => {
+    const calls: Array<{
+      url: string;
+      body: unknown;
+      apiKey: string | null;
+    }> = [];
+    const result = await testProviderConnectivity({
+      provider: provider({ base_url: "https://generativelanguage.test/v1beta" }),
+      apiKey: "gemini-live",
+      model: "gemini-2.5-pro",
+      protocol: "gemini.generateContent",
+      fetchImpl: async (input, init) => {
+        const headers = new Headers(init?.headers);
+        calls.push({
+          url: String(input),
+          body: JSON.parse(String(init?.body)),
+          apiKey: headers.get("x-goog-api-key"),
+        });
+        return Response.json({
+          candidates: [{ content: { role: "model", parts: [{ text: "Hello from Gemini" }] } }],
+        });
+      },
+    });
+
+    expect(calls).toEqual([
+      {
+        url: "https://generativelanguage.test/v1beta/models/gemini-2.5-pro:generateContent",
+        apiKey: "gemini-live",
+        body: { contents: [{ role: "user", parts: [{ text: "hi" }] }] },
+      },
+    ]);
+    expect(result).toMatchObject({
+      protocol: "gemini.generateContent",
+      answer: "Hello from Gemini",
+    });
+  });
+
+  it.each([
+    ["grok.chat.completions", "grok-4"],
+    ["deepseek.chat.completions", "deepseek-chat"],
+    ["minimax.chat.completions", "MiniMax-M2"],
+  ] as const)(
+    "uses the %s protocol through its compatible chat wire format",
+    async (protocol, model) => {
+      const calls: Array<{ url: string; body: unknown; authorization: string | null }> = [];
+      const result = await testProviderConnectivity({
+        provider: provider(),
+        apiKey: "vendor-live",
+        model,
+        protocol,
+        fetchImpl: async (input, init) => {
+          const headers = new Headers(init?.headers);
+          calls.push({
+            url: String(input),
+            body: JSON.parse(String(init?.body)),
+            authorization: headers.get("authorization"),
+          });
+          return Response.json({
+            choices: [{ message: { role: "assistant", content: `Hello from ${model}` } }],
+          });
+        },
+      });
+
+      expect(calls).toEqual([
+        {
+          url: "https://upstream.test/v1/chat/completions",
+          authorization: "Bearer vendor-live",
+          body: {
+            model,
+            messages: [{ role: "user", content: "hi" }],
+            stream: false,
+          },
+        },
+      ]);
+      expect(result).toMatchObject({ protocol, answer: `Hello from ${model}` });
+    },
+  );
+
+  it("uses Anthropic Messages and extracts content-block text", async () => {
+    const result = await testProviderConnectivity({
+      provider: provider({ kind: "anthropic" }),
+      apiKey: "anthropic-secret",
+      model: "claude-sonnet",
+      protocol: "anthropic.messages",
+      fetchImpl: async () =>
+        Response.json({
+          id: "msg-test",
+          type: "message",
+          content: [
+            { type: "text", text: "Hello" },
+            { type: "text", text: "from Anthropic" },
+          ],
+        }),
+    });
+
+    expect(result).toMatchObject({
+      protocol: "anthropic.messages",
+      answer: "Hello\nfrom Anthropic",
+    });
+  });
+
+  it("never returns an Anthropic upstream error body", async () => {
     let requestUrl = "";
     let apiKey = "";
     await expect(
@@ -152,7 +253,7 @@ describe("platform provider connectivity", () => {
         provider: provider({ kind: "anthropic", auth_scheme: "x-api-key" }),
         apiKey: "anthropic-secret",
         model: "claude-sonnet",
-        protocol: "chat.completions",
+        protocol: "anthropic.messages",
         fetchImpl: async (input, init) => {
           requestUrl = String(input);
           apiKey = new Headers(init?.headers).get("x-api-key") ?? "";
