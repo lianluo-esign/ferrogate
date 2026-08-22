@@ -132,24 +132,22 @@ function withCounters(
 
 /**
  * `OpenAiCompatibleAdapter::extract_usage` — top-level
- * `usage.{prompt,completion,total}_tokens`, plus the cached/reasoning details
- * (issue #667).
+ * Chat Completions uses `usage.{prompt,completion,total}_tokens`; Responses uses
+ * `usage.{input,output,total}_tokens`. Both are accepted here, plus their
+ * cached/reasoning detail objects (issue #667).
  *
  * BOTH detail spellings are read. Chat Completions nests them under
  * `prompt_tokens_details` / `completion_tokens_details`; the Responses API uses
- * `input_tokens_details` / `output_tokens_details`, and `/v1/responses` streams
- * are metered with THIS extractor by `usageProviderKindFor` (they are normalized
- * to the OpenAI shape before metering sees them). Reading only one spelling
- * would therefore silently drop the discount on exactly one of the two
- * ingresses, which is the shape of bug this issue is about.
+ * `input_tokens_details` / `output_tokens_details`. Reading only one spelling
+ * would silently drop the discount on one of the two OpenAI ingresses.
  *
- * Both counts are already SUBSETS of `prompt_tokens` / `completion_tokens` in
+ * Both counts are already SUBSETS of their parent input/output counts in
  * OpenAI's own accounting, so nothing is added in. There is no cache-WRITE
  * counter: OpenAI's automatic prompt caching charges nothing to populate the
  * cache, so claiming one would be an invention.
  */
 export function extractOpenAiUsage(payload: unknown): ProviderUsage | undefined {
-  const usage = member(payload, "usage");
+  const usage = member(payload, "usage") ?? member(member(payload, "response"), "usage");
   if (usage === undefined) {
     return undefined;
   }
@@ -160,8 +158,10 @@ export function extractOpenAiUsage(payload: unknown): ProviderUsage | undefined 
   return nonEmpty(
     withCounters(
       {
-        promptTokens: asUint(member(usage, "prompt_tokens")),
-        completionTokens: asUint(member(usage, "completion_tokens")),
+        promptTokens:
+          asUint(member(usage, "prompt_tokens")) ?? asUint(member(usage, "input_tokens")),
+        completionTokens:
+          asUint(member(usage, "completion_tokens")) ?? asUint(member(usage, "output_tokens")),
         totalTokens: asUint(member(usage, "total_tokens")),
       },
       {
@@ -257,7 +257,8 @@ export function extractGeminiUsage(payload: unknown): ProviderUsage | undefined 
     withCounters(
       {
         promptTokens: asUint(member(usage, "promptTokenCount")),
-        completionTokens: visible === undefined ? undefined : visible + (reasoningTokens ?? 0),
+        completionTokens:
+          visible === undefined ? reasoningTokens : visible + (reasoningTokens ?? 0),
         totalTokens: asUint(member(usage, "totalTokenCount")),
       },
       {
@@ -286,19 +287,15 @@ export function extractUsage(dialect: UsageDialect, payload: unknown): ProviderU
 /**
  * Which extractor a stream needs.
  *
- * `/v1/responses` streams are normalized to the OpenAI/Responses shape BEFORE
- * metering sees them, so they are always read with the OpenAI extractor
- * regardless of upstream family. Chat-completions streams the raw native SSE,
- * so the upstream family decides. This mirrors the `usage_provider_kind` branch
- * at `chat.rs:1022` verbatim — it is a security control, not a nicety.
+ * Chat and Responses are tapped before client-shape normalization, so the
+ * upstream family selects their extractor. Messages is tapped after conversion
+ * because the client is served Anthropic-shaped frames. Selecting from the
+ * bytes the tap actually observes is a billing security control, not a nicety.
  */
 export function usageProviderKindFor(
   operation: "chat.completions" | "responses" | "messages",
   providerKind: string,
 ): UsageDialect {
-  if (operation === "responses") {
-    return "openai";
-  }
   if (operation === "messages") {
     // The client is served Anthropic SSE; whatever the upstream was, the frames
     // metering sees at this point carry Anthropic-shaped usage.

@@ -79,75 +79,87 @@ function joinUrl(baseUrl: string, path: string): string {
   return `${baseUrl.replace(/\/+$/, "")}${path}`;
 }
 
-/**
- * GET the provider's `/v1/models` and return its model list.
- *
- * The auth header matches the provider's kind exactly as the data plane's
- * adapter does — `x-api-key` for anthropic, `Authorization: Bearer` otherwise,
- * unless the channel pins an `auth_scheme`. No credential ⇒ no header, so an
- * unauthenticated local upstream can be pointed at without a secret (the Rust
- * `api_key.filter(|v| !v.is_empty())` behaviour). An anthropic channel also
- * carries the mandatory `anthropic-version` header, without which its
- * `/v1/models` answers 400.
- *
- * `fetchImpl` is injected so a workerd test can drive a STUB `/v1/models`
- * without a live upstream and without the (unavailable) pool-workers fetch mock;
- * it defaults to the global `fetch` in production.
- */
-export async function fetchUpstreamModels(options: {
-  readonly provider: Pick<SeedProviderChannel, "kind" | "base_url" | "auth_scheme">;
-  readonly apiKey?: string;
-  readonly fetchImpl?: typeof fetch;
-}): Promise<readonly UpstreamModel[]> {
-  const { provider, apiKey } = options;
-  const fetchImpl = options.fetchImpl ?? fetch;
-  const url = joinUrl(provider.base_url, "/models");
+const MAX_MODEL_LIST_PAGES = 100;
+
+function modelListUrl(
+  provider: Pick<SeedProviderChannel, "kind" | "base_url">,
+  pageToken?: string,
+): string {
+  const url = new URL(joinUrl(provider.base_url, "/models"));
+  if (canonicalProviderKind(provider.kind) === "gemini") {
+    // Gemini defaults to only 50 models. Ask for the documented maximum and
+    // still follow nextPageToken so a growing catalog is never silently cut.
+    url.searchParams.set("pageSize", "1000");
+    if (pageToken !== undefined) url.searchParams.set("pageToken", pageToken);
+  }
+  return url.toString();
+}
+
+function modelListHeaders(
+  provider: Pick<SeedProviderChannel, "kind" | "auth_scheme">,
+  apiKey?: string,
+): Record<string, string> {
+  const kind = canonicalProviderKind(provider.kind);
   const headers: Record<string, string> = { accept: "application/json" };
-  // Anthropic's API — GET /v1/models included — REJECTS any request without the
-  // `anthropic-version` header (400), so it is pinned here exactly as the data
-  // plane's `anthropicHeaders` does. It is keyed on the provider KIND, not the
-  // auth scheme: an anthropic channel needs it even under a bearer override, and
-  // it is a harmless protocol header when no credential is sent.
-  if (canonicalProviderKind(provider.kind) === "anthropic") {
+  if (kind === "anthropic") {
     headers["anthropic-version"] = "2023-06-01";
   }
-  if (apiKey !== undefined && apiKey.trim().length > 0) {
-    const scheme = provider.auth_scheme ?? defaultAuthScheme(provider.kind);
-    if (scheme === "x-api-key") headers["x-api-key"] = apiKey;
-    else headers.authorization = `Bearer ${apiKey}`;
+  if (apiKey === undefined || apiKey.trim().length === 0) return headers;
+
+  // Gemini's API-key protocol uses Google's dedicated header. The generation
+  // adapter does the same; putting this key in a URL would leak it into logs.
+  if (kind === "gemini") {
+    headers["x-goog-api-key"] = apiKey;
+    return headers;
+  }
+  const scheme = provider.auth_scheme ?? defaultAuthScheme(provider.kind);
+  if (scheme === "x-api-key") headers["x-api-key"] = apiKey;
+  else headers.authorization = `Bearer ${apiKey}`;
+  return headers;
+}
+
+function nonEmptyString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() !== "" ? value.trim() : undefined;
+}
+
+function parseModelListPage(
+  payload: unknown,
+  kind: string | null,
+  url: string,
+): { readonly models: UpstreamModel[]; readonly nextPageToken?: string } {
+  if (kind === "gemini") {
+    const models =
+      typeof payload === "object" &&
+      payload !== null &&
+      Array.isArray((payload as { models?: unknown }).models)
+        ? (payload as { models: unknown[] }).models
+        : null;
+    if (models === null) {
+      throw new ProviderModelSyncError(
+        502,
+        "provider_models_malformed",
+        `upstream ${url} did not return a { models: [...] } model list`,
+      );
+    }
+    const parsed: UpstreamModel[] = [];
+    for (const entry of models) {
+      if (typeof entry !== "object" || entry === null) continue;
+      const record = entry as Record<string, unknown>;
+      const id =
+        nonEmptyString(record.baseModelId) ?? nonEmptyString(record.name)?.replace(/^models\//, "");
+      if (id === undefined) continue;
+      parsed.push({ id, owned_by: "google" });
+    }
+    const nextPageToken =
+      typeof payload === "object" && payload !== null
+        ? nonEmptyString((payload as { nextPageToken?: unknown }).nextPageToken)
+        : undefined;
+    return { models: parsed, ...(nextPageToken === undefined ? {} : { nextPageToken }) };
   }
 
-  let response: Response;
-  try {
-    response = await fetchImpl(url, { method: "GET", headers });
-  } catch (error) {
-    throw new ProviderModelSyncError(
-      502,
-      "provider_unreachable",
-      `could not reach upstream ${url}: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
-  if (!response.ok) {
-    throw new ProviderModelSyncError(
-      502,
-      "provider_models_unavailable",
-      `upstream GET ${url} returned ${response.status}`,
-    );
-  }
-
-  let payload: unknown;
-  try {
-    payload = await response.json();
-  } catch (error) {
-    throw new ProviderModelSyncError(
-      502,
-      "provider_models_malformed",
-      `upstream ${url} did not return JSON: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
-
-  // OpenAI answers `{ object: "list", data: [{ id, ... }] }`; a bare array is
-  // accepted too. Anything else is a malformed list, not an empty one.
+  // OpenAI, Grok, DeepSeek, and Anthropic all expose the OpenAI-style `data`
+  // list on their model-catalog endpoint. A bare array remains accepted for
+  // compatible/self-hosted providers.
   const list =
     Array.isArray(payload) === true
       ? (payload as unknown[])
@@ -167,15 +179,90 @@ export async function fetchUpstreamModels(options: {
   const models: UpstreamModel[] = [];
   for (const entry of list) {
     if (typeof entry !== "object" || entry === null) continue;
-    const id = (entry as { id?: unknown }).id;
-    if (typeof id !== "string" || id.trim() === "") continue;
-    const ownedBy = (entry as { owned_by?: unknown }).owned_by;
-    models.push({
-      id: id.trim(),
-      owned_by: typeof ownedBy === "string" && ownedBy.trim() !== "" ? ownedBy.trim() : null,
-    });
+    const id = nonEmptyString((entry as { id?: unknown }).id);
+    if (id === undefined) continue;
+    const ownedBy = nonEmptyString((entry as { owned_by?: unknown }).owned_by);
+    models.push({ id, owned_by: ownedBy ?? null });
   }
-  return models;
+  return { models };
+}
+
+/**
+ * GET the provider's `/v1/models` and return its model list.
+ *
+ * The auth header matches the data-plane adapter: `x-api-key` for Anthropic,
+ * `x-goog-api-key` for Gemini, and `Authorization: Bearer` for the compatible
+ * families unless the channel pins another scheme. No credential means no auth
+ * header. Gemini's `{ models, nextPageToken }` catalog is paged; the other
+ * supported families use an OpenAI-style `{ data }` list.
+ *
+ * `fetchImpl` is injected so a workerd test can drive a STUB `/v1/models`
+ * without a live upstream and without the (unavailable) pool-workers fetch mock;
+ * it defaults to the global `fetch` in production.
+ */
+export async function fetchUpstreamModels(options: {
+  readonly provider: Pick<SeedProviderChannel, "kind" | "base_url" | "auth_scheme">;
+  readonly apiKey?: string;
+  readonly fetchImpl?: typeof fetch;
+}): Promise<readonly UpstreamModel[]> {
+  const { provider, apiKey } = options;
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const kind = canonicalProviderKind(provider.kind);
+  const headers = modelListHeaders(provider, apiKey);
+  const models: UpstreamModel[] = [];
+  const seenPageTokens = new Set<string>();
+  let pageToken: string | undefined;
+
+  for (let page = 0; page < MAX_MODEL_LIST_PAGES; page += 1) {
+    const url = modelListUrl(provider, pageToken);
+    let response: Response;
+    try {
+      response = await fetchImpl(url, { method: "GET", headers });
+    } catch (error) {
+      throw new ProviderModelSyncError(
+        502,
+        "provider_unreachable",
+        `could not reach upstream ${url}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    if (!response.ok) {
+      throw new ProviderModelSyncError(
+        502,
+        "provider_models_unavailable",
+        `upstream GET ${url} returned ${response.status}`,
+      );
+    }
+
+    let payload: unknown;
+    try {
+      payload = await response.json();
+    } catch (error) {
+      throw new ProviderModelSyncError(
+        502,
+        "provider_models_malformed",
+        `upstream ${url} did not return JSON: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
+    const parsed = parseModelListPage(payload, kind, url);
+    models.push(...parsed.models);
+    if (parsed.nextPageToken === undefined) return models;
+    if (seenPageTokens.has(parsed.nextPageToken)) {
+      throw new ProviderModelSyncError(
+        502,
+        "provider_models_malformed",
+        `upstream ${url} repeated a model-list page token`,
+      );
+    }
+    seenPageTokens.add(parsed.nextPageToken);
+    pageToken = parsed.nextPageToken;
+  }
+
+  throw new ProviderModelSyncError(
+    502,
+    "provider_models_malformed",
+    `upstream ${provider.base_url} exceeded ${MAX_MODEL_LIST_PAGES} model-list pages`,
+  );
 }
 
 /**

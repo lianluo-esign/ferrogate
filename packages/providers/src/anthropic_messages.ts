@@ -369,15 +369,16 @@ export function messageToChatCompletion(message: Json, fallbackModel: string): J
   if (toolCalls.length > 0) assistantMessage.tool_calls = toolCalls;
 
   const usage = getField(message, "usage");
-  const promptTokens = asU64(getField(usage, "input_tokens")) ?? 0;
+  const freshInputTokens = asU64(getField(usage, "input_tokens")) ?? 0;
   const completionTokens = asU64(getField(usage, "output_tokens")) ?? 0;
+  const cacheRead = asU64(getField(usage, "cache_read_input_tokens"));
+  const cacheCreation = asU64(getField(usage, "cache_creation_input_tokens"));
+  const promptTokens = freshInputTokens + (cacheRead ?? 0) + (cacheCreation ?? 0);
   const openAiUsage: JsonObject = {
     prompt_tokens: promptTokens,
     completion_tokens: completionTokens,
     total_tokens: promptTokens + completionTokens,
   };
-  const cacheRead = asU64(getField(usage, "cache_read_input_tokens"));
-  const cacheCreation = asU64(getField(usage, "cache_creation_input_tokens"));
   if (cacheRead !== undefined) {
     openAiUsage.prompt_tokens_details = { cached_tokens: cacheRead };
     openAiUsage.cache_read_input_tokens = cacheRead;

@@ -493,6 +493,52 @@ describe("fetchUpstreamModels upstream-failure mapping (#944)", () => {
     expect(seen[0]?.["x-api-key"]).toBe("sk-ant-123");
     expect(seen[0]?.authorization).toBeUndefined();
   });
+
+  it("lists every Gemini model page with the dedicated API-key header", async () => {
+    const calls: Array<{ url: string; headers: Record<string, string> }> = [];
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const headers: Record<string, string> = {};
+      for (const [key, value] of Object.entries((init?.headers ?? {}) as Record<string, string>)) {
+        headers[key.toLowerCase()] = value;
+      }
+      const url = String(input);
+      calls.push({ url, headers });
+      return Response.json(
+        url.includes("pageToken=next-page")
+          ? { models: [{ name: "models/gemini-2.5-flash" }] }
+          : {
+              models: [
+                {
+                  name: "models/gemini-2.5-pro-001",
+                  baseModelId: "gemini-2.5-pro",
+                },
+              ],
+              nextPageToken: "next-page",
+            },
+      );
+    }) as unknown as typeof fetch;
+
+    const models = await fetchUpstreamModels({
+      provider: {
+        kind: "gemini",
+        base_url: "https://generativelanguage.googleapis.com/v1beta",
+        auth_scheme: null,
+      },
+      apiKey: "gemini-api-key",
+      fetchImpl,
+    });
+
+    expect(models).toEqual([
+      { id: "gemini-2.5-pro", owned_by: "google" },
+      { id: "gemini-2.5-flash", owned_by: "google" },
+    ]);
+    expect(calls.map((call) => call.url)).toEqual([
+      "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000",
+      "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000&pageToken=next-page",
+    ]);
+    expect(calls.every((call) => call.headers["x-goog-api-key"] === "gemini-api-key")).toBe(true);
+    expect(calls.every((call) => call.headers.authorization === undefined)).toBe(true);
+  });
 });
 
 describe("provider connectivity protocol contract", () => {

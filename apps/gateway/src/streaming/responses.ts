@@ -43,12 +43,9 @@ export const RESPONSES_STREAM_ERROR_MESSAGE = "provider returned a streaming err
 /**
  * `ProviderUsageState`.
  *
- * NOTE the merge policy, which is deliberately *different* from
- * `usage.ts::mergeUsage`: every frame that carries a usage object **replaces**
- * all three counters, including setting a counter back to `null` when the new
- * frame omits it. That is what `update_from_value` does (it assigns the
- * `Option` unconditionally), and the `response.completed` payload is expected
- * to mirror the provider's last usage frame rather than a running total.
+ * Usage is merged field by field because Anthropic splits input/cache counts
+ * onto `message_start` and output counts onto `message_delta`. Gemini thinking
+ * tokens are folded into output, matching the billing extractor.
  */
 class ProviderUsageState {
   promptTokens: number | null = null;
@@ -57,12 +54,13 @@ class ProviderUsageState {
 
   updateFromValue(value: unknown, kind: ResponsesStreamProviderKind): void {
     if (kind === "anthropic") {
-      const usage = get(value, "usage");
-      if (usage === undefined) {
-        return;
-      }
-      this.promptTokens = getUint(usage, "input_tokens") ?? null;
-      this.completionTokens = getUint(usage, "output_tokens") ?? null;
+      const usage = get(value, "usage") ?? get(get(value, "message"), "usage");
+      if (usage === undefined) return;
+      const fresh = getUint(usage, "input_tokens");
+      const cacheRead = getUint(usage, "cache_read_input_tokens") ?? 0;
+      const cacheWrite = getUint(usage, "cache_creation_input_tokens") ?? 0;
+      if (fresh !== undefined) this.promptTokens = fresh + cacheRead + cacheWrite;
+      this.completionTokens = getUint(usage, "output_tokens") ?? this.completionTokens;
       this.totalTokens =
         this.promptTokens !== null && this.completionTokens !== null
           ? this.promptTokens + this.completionTokens
@@ -74,18 +72,34 @@ class ProviderUsageState {
       if (usage === undefined) {
         return;
       }
-      this.promptTokens = getUint(usage, "promptTokenCount") ?? null;
-      this.completionTokens = getUint(usage, "candidatesTokenCount") ?? null;
-      this.totalTokens = getUint(usage, "totalTokenCount") ?? null;
+      this.promptTokens = getUint(usage, "promptTokenCount") ?? this.promptTokens;
+      const visible = getUint(usage, "candidatesTokenCount");
+      const thinking = getUint(usage, "thoughtsTokenCount");
+      if (visible !== undefined || thinking !== undefined) {
+        this.completionTokens = (visible ?? 0) + (thinking ?? 0);
+      }
+      this.totalTokens =
+        getUint(usage, "totalTokenCount") ??
+        (this.promptTokens !== null && this.completionTokens !== null
+          ? this.promptTokens + this.completionTokens
+          : this.totalTokens);
       return;
     }
-    const usage = get(value, "usage");
+    const usage = get(value, "usage") ?? get(get(value, "response"), "usage");
     if (usage === undefined) {
       return;
     }
-    this.promptTokens = getUint(usage, "prompt_tokens") ?? null;
-    this.completionTokens = getUint(usage, "completion_tokens") ?? null;
-    this.totalTokens = getUint(usage, "total_tokens") ?? null;
+    this.promptTokens =
+      getUint(usage, "prompt_tokens") ?? getUint(usage, "input_tokens") ?? this.promptTokens;
+    this.completionTokens =
+      getUint(usage, "completion_tokens") ??
+      getUint(usage, "output_tokens") ??
+      this.completionTokens;
+    this.totalTokens =
+      getUint(usage, "total_tokens") ??
+      (this.promptTokens !== null && this.completionTokens !== null
+        ? this.promptTokens + this.completionTokens
+        : this.totalTokens);
   }
 
   toJson(): {
@@ -272,9 +286,10 @@ export function isDoneEvent(eventName: string | undefined, parsed: unknown): boo
   if (getString(parsed, "type") === "response.completed") {
     return true;
   }
-  // Key presence, not truthiness: `"finish_reason": null` also ends the stream.
-  const record = asRecord(parsed);
-  return record !== undefined && "finish_reason" in record;
+  if (getString(parsed, "finish_reason") !== undefined) return true;
+  return (asArray(get(parsed, "choices")) ?? []).some(
+    (choice) => getString(choice, "finish_reason") !== undefined,
+  );
 }
 
 /** `extract_text_deltas`. */
@@ -298,7 +313,7 @@ export function extractTextDeltas(
     for (const candidate of asArray(get(parsed, "candidates")) ?? []) {
       for (const part of asArray(get(get(candidate, "content"), "parts")) ?? []) {
         const text = asString(get(part, "text"));
-        if (text !== undefined && text.length > 0) {
+        if (get(part, "thought") !== true && text !== undefined && text.length > 0) {
           out.push(text);
         }
       }
@@ -334,35 +349,7 @@ export function extractTextDeltas(
   return out;
 }
 
-/**
- * `extract_function_call_deltas`.
- *
- * PORT_TODO(inventory-request-path §1.5) — **KEPT AS A PARITY BOUNDARY, NOT A
- * GAP.** For `kind: "anthropic"` the Rust reads the tool-argument fragment from
- * `delta.text` — the same field a plain `text_delta` uses — so an Anthropic
- * *text* delta is emitted BOTH as `response.output_text.delta` and as
- * `response.function_call_arguments.delta`. That double-emission is replicated
- * here verbatim.
- *
- * Anthropic's own wire format puts tool-argument fragments in
- * `delta.partial_json` and prose in `delta.text`, so the Rust reading is almost
- * certainly a bug: a plain streamed sentence against an Anthropic upstream on
- * `/v1/responses` produces spurious `function_call_arguments` deltas, and the
- * `ToolCallAccumulator` accrues them into a tool call the model never made.
- *
- * It is reproduced rather than fixed for two reasons, and both are why the
- * marker stays rather than becoming a silent correction:
- *
- *  1. it is OBSERVABLE — a client that has been consuming this stream shape has
- *     been seeing those deltas since the Rust tree shipped, and a port is not
- *     the place to change what a deployed client receives;
- *  2. the fix is not one line. Narrowing to `delta.partial_json` also changes
- *     which blocks the accumulator opens and therefore what
- *     `response.function_call_arguments.done` reports at the tail, so it needs
- *     its own fixtures and its own acceptance criteria.
- *
- * Raise it as a defect slice against the Rust behavior; do not close it here.
- */
+/** Extract provider-native function calls as Responses argument deltas. */
 export function extractFunctionCallDeltas(
   kind: ResponsesStreamProviderKind,
   eventName: string | undefined,
@@ -374,15 +361,35 @@ export function extractFunctionCallDeltas(
   }
 
   if (kind === "anthropic") {
+    if (eventName === "content_block_start") {
+      const block = get(parsed, "content_block");
+      if (getString(block, "type") !== "tool_use") return [];
+      const index = getUint(parsed, "index") ?? 0;
+      const input = get(block, "input");
+      const inputRecord = asRecord(input);
+      const initialArguments =
+        inputRecord !== undefined && Object.keys(inputRecord).length === 0
+          ? undefined
+          : input === undefined
+            ? undefined
+            : JSON.stringify(input);
+      const update = accumulator.applyFragment({
+        index,
+        id: getString(block, "id"),
+        name: getString(block, "name"),
+        argumentsDelta: initialArguments,
+      });
+      return [update];
+    }
     if (eventName !== "content_block_delta" && eventName !== "response.output_item.delta") {
       return [];
     }
     const delta = get(parsed, "delta");
-    if (delta === undefined) {
+    if (delta === undefined || getString(delta, "type") !== "input_json_delta") {
       return [];
     }
     const index = getUint(parsed, "index") ?? 0;
-    const fragment = asString(get(delta, "text")) ?? asString(get(delta, "input"));
+    const fragment = asString(get(delta, "partial_json"));
     const update = accumulator.applyFragment({
       index,
       id: getString(parsed, "id"),
@@ -394,6 +401,7 @@ export function extractFunctionCallDeltas(
 
   if (kind === "gemini") {
     if (
+      eventName !== undefined &&
       eventName !== "data" &&
       eventName !== "message" &&
       eventName !== "response.output_item.delta"
@@ -406,8 +414,11 @@ export function extractFunctionCallDeltas(
       const parts = asArray(get(get(candidates[candidateIndex], "content"), "parts")) ?? [];
       for (let partIndex = 0; partIndex < parts.length; partIndex += 1) {
         const call = get(parts[partIndex], "functionCall");
-        const index = candidateIndex + partIndex;
-        const args = asString(get(call, "args")) ?? asString(get(call, "arguments"));
+        if (call === undefined) continue;
+        const index = candidateIndex * 1_000_000 + partIndex;
+        const rawArgs = get(call, "args") ?? get(call, "arguments");
+        const args =
+          asString(rawArgs) ?? (rawArgs === undefined ? undefined : JSON.stringify(rawArgs));
         const update = accumulator.applyFragment({
           index,
           id: asString(get(call, "id")),

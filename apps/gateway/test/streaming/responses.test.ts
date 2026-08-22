@@ -130,22 +130,31 @@ describe("Responses normalizer — Anthropic upstream", () => {
     expect(sse).toContain("event: response.completed");
   });
 
-  test("ported quirk: an Anthropic text delta ALSO emits a function-call delta", async () => {
-    // `responses_stream.rs::extract_function_call_deltas` reads the Anthropic
-    // tool fragment from `delta.text` — the same field a plain `text_delta`
-    // uses — so a text delta is emitted twice. Locked here deliberately: it is
-    // observable behavior, and narrowing it is a behavior change, not a port.
+  test("Anthropic text deltas do not create spurious function calls", async () => {
     const sse = await normalize(
       'event: content_block_delta\ndata: {"index":0,"delta":{"text":"ok"}}\n\n' +
         "event: message_stop\ndata: {}\n\n",
       "anthropic",
     );
     expect(jsonEvents(sse, "response.output_text.delta")).toHaveLength(1);
-    const calls = jsonEvents(sse, "response.function_call_arguments.delta") as {
-      delta: string;
-    }[];
-    expect(calls).toHaveLength(1);
-    expect((calls[0] as NonNullable<(typeof calls)[0]>).delta).toBe("ok");
+    expect(jsonEvents(sse, "response.function_call_arguments.delta")).toHaveLength(0);
+  });
+
+  test("Anthropic tool metadata and partial_json are accumulated", async () => {
+    const sse = await normalize(
+      'event: content_block_start\ndata: {"index":1,"content_block":{"type":"tool_use","id":"tool_1","name":"lookup","input":{}}}\n\n' +
+        'event: content_block_delta\ndata: {"index":1,"delta":{"type":"input_json_delta","partial_json":"{\\"q\\":\\"x\\"}"}}\n\n' +
+        "event: message_stop\ndata: {}\n\n",
+      "anthropic",
+    );
+    const done = jsonEvents(sse, "response.function_call_arguments.done") as Array<{
+      call_id: string;
+      name: string;
+      arguments: string;
+    }>;
+    expect(done).toEqual([
+      expect.objectContaining({ call_id: "tool_1", name: "lookup", arguments: '{"q":"x"}' }),
+    ]);
   });
 
   test("message_start input tokens and message_delta output tokens are reported", async () => {
@@ -188,6 +197,27 @@ describe("Responses normalizer — Gemini upstream", () => {
     }[];
     expect(deltas.map((delta) => delta.delta)).toEqual(["a", "b"]);
   });
+
+  test("functionCall args objects are serialized as JSON", async () => {
+    const sse = await normalize(
+      'data: {"candidates":[{"content":{"parts":[{"text":"answer"},{"functionCall":{"name":"lookup","args":{"q":"x"}}}]}}]}\n\n',
+      "gemini",
+    );
+    const done = jsonEvents(sse, "response.function_call_arguments.done") as Array<{
+      name: string;
+      arguments: string;
+    }>;
+    expect(done).toEqual([expect.objectContaining({ name: "lookup", arguments: '{"q":"x"}' })]);
+  });
+
+  test("thought summaries are not emitted as visible response text", async () => {
+    const sse = await normalize(
+      'data: {"candidates":[{"content":{"parts":[{"thought":true,"text":"hidden"},{"text":"visible"}]}}]}\n\n',
+      "gemini",
+    );
+    const deltas = jsonEvents(sse, "response.output_text.delta") as Array<{ delta: string }>;
+    expect(deltas.map((event) => event.delta)).toEqual(["visible"]);
+  });
 });
 
 describe("Responses normalizer — failures and terminators", () => {
@@ -205,13 +235,13 @@ describe("Responses normalizer — failures and terminators", () => {
     expect(sse).not.toContain("response.completed");
   });
 
-  test("isDoneEvent matches the Rust is_done_frame predicate", () => {
+  test("isDoneEvent waits for a real terminal reason", () => {
     expect(isDoneEvent("response.completed", undefined)).toBe(true);
     expect(isDoneEvent("message_stop", undefined)).toBe(true);
     expect(isDoneEvent(undefined, { type: "response.completed" })).toBe(true);
-    // Key PRESENCE ends the stream, even when the value is null.
-    expect(isDoneEvent(undefined, { finish_reason: null })).toBe(true);
-    expect(isDoneEvent(undefined, { choices: [{ finish_reason: "stop" }] })).toBe(false);
+    expect(isDoneEvent(undefined, { finish_reason: null })).toBe(false);
+    expect(isDoneEvent(undefined, { choices: [{ finish_reason: null }] })).toBe(false);
+    expect(isDoneEvent(undefined, { choices: [{ finish_reason: "stop" }] })).toBe(true);
     expect(isDoneEvent("content_block_delta", { delta: {} })).toBe(false);
   });
 
@@ -249,7 +279,7 @@ describe("Responses normalizer — failures and terminators", () => {
     expect(sse).toContain("data: [DONE]");
   });
 
-  test("usage is REPLACED per frame, not merged (Rust update_from_value)", () => {
+  test("usage is merged across partial frames", () => {
     const normalizer = new ResponsesStreamNormalizer({
       providerKind: "openai_compatible",
       requestId: "fg-test",
@@ -262,9 +292,9 @@ describe("Responses normalizer — failures and terminators", () => {
     expect(normalizer.usage.prompt_tokens).toBe(10);
     normalizer.push({ data: '{"usage":{"completion_tokens":9}}', comments: [], raw: "" });
     expect(normalizer.usage).toEqual({
-      prompt_tokens: null,
+      prompt_tokens: 10,
       completion_tokens: 9,
-      total_tokens: null,
+      total_tokens: 19,
     });
   });
 });

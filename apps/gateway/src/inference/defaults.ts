@@ -11,7 +11,11 @@
 
 import { routingQualityPortFor } from "../evals/quality-source.js";
 import { experimentObserverFor } from "../experiments/index.js";
-import { openAiToAnthropicStream, responsesNormalizeStream } from "../streaming/index.js";
+import {
+  nativeToOpenAiChatStream,
+  openAiToAnthropicStream,
+  responsesNormalizeStream,
+} from "../streaming/index.js";
 import type { ResponsesStreamProviderKind } from "../streaming/index.js";
 import { canonicalProviderKind, defaultAdapterRegistry } from "./adapters.js";
 import { defaultAnthropicTranslator } from "./anthropic.js";
@@ -345,10 +349,10 @@ function responsesProviderKind(providerKind: string): ResponsesStreamProviderKin
  *    stop` / `message_delta` / `message_stop`, with tool-call accumulation).
  *  - `openai.responses` on ANY upstream → `responsesNormalizeStream`
  *    (`ResponsesStreamNormalizer`: the `response.*` event sequence). This runs
- *    even for an OpenAI upstream because the Rust tree normalized the Responses
- *    stream unconditionally — and metering depends on it, since the usage
- *    extractor for `/v1/responses` reads the NORMALIZED shape (`chat.rs:1012`).
- *  - everything else → `null`, i.e. byte-for-byte passthrough.
+ *    even for an OpenAI upstream so every client sees one Responses event shape.
+ *    Metering taps the provider-native frames before this conversion.
+ *  - `openai.chat` on Anthropic/Gemini → native SSE is converted to canonical
+ *    `chat.completion.chunk` events; compatible providers stay byte-for-byte.
  */
 export const defaultStreamNormalizers: StreamNormalizers = {
   normalizerFor(context: StreamNormalizerContext): TransformStream<Uint8Array, Uint8Array> | null {
@@ -364,7 +368,22 @@ export const defaultStreamNormalizers: StreamNormalizers = {
           contentType: context.contentType,
         });
       case "openai.chat":
-        return null;
+        switch (canonicalProviderKind(context.providerKind)) {
+          case "anthropic":
+            return nativeToOpenAiChatStream({
+              providerKind: "anthropic",
+              requestId: context.requestId,
+              fallbackModel: context.logicalModel,
+            });
+          case "gemini":
+            return nativeToOpenAiChatStream({
+              providerKind: "gemini",
+              requestId: context.requestId,
+              fallbackModel: context.logicalModel,
+            });
+          default:
+            return null;
+        }
     }
   },
 };

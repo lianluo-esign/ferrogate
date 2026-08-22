@@ -1,42 +1,16 @@
-/**
- * PINS FOR THE DELIBERATE NON-PARITIES in `src/streaming/`.
- *
- * There were THREE. Issue #667 CLOSED the third — Anthropic's cache counters
- * are now read and priced — and this file therefore changed from asserting that
- * they are ignored to asserting how they are normalized. See the third block
- * below; the change was made on purpose and is not a relaxation.
- *
- * Each of these is a PORT-TODO that is deliberately NOT closed, because closing
- * it would add behavior the Rust tree does not have. That makes them the most
- * fragile kind of comment: a later reader sees a "missing" feature, adds it,
- * and the port silently diverges from the thing it is a port of.
- *
- * So each one is asserted here in its CURRENT, Rust-matching form. If someone
- * implements the "obvious fix", the corresponding test goes red and they are
- * forced to raise it as a behavior change — which is exactly the conversation
- * that should happen — rather than discovering it in production.
- *
- * None of these is a platform limit. All three are parity decisions.
- */
+/** Compatibility behavior intentionally added beyond the legacy Rust port. */
 import { describe, expect, test } from "vitest";
 import { defaultStreamNormalizers } from "../../src/inference/index.js";
-import { OPENAI_REVERSE_NORMALIZER_UNPORTED } from "../../src/streaming/openai.js";
 import { responsesNormalizeStream } from "../../src/streaming/responses.js";
 import { extractUsage } from "../../src/streaming/usage.js";
 import { bytes, drainText, jsonEvents, streamOf } from "./helpers.js";
 
 // ---------------------------------------------------------------------------
-// 1. No Anthropic-events → OpenAI-chunks reverse normalizer
+// 1. Native provider events → OpenAI chunks
 // ---------------------------------------------------------------------------
 
-describe("there is no Anthropic → OpenAI reverse stream normalizer", () => {
-  test("an Anthropic upstream on the OpenAI chat ingress is relayed UNCHANGED", () => {
-    // The Rust tower has three normalizers and none of them runs in this
-    // direction: OpenAI → Anthropic (`MessagesStreamNormalizer`),
-    // OpenAI/Anthropic/Gemini → Responses (`ResponsesStreamNormalizer`), and
-    // Anthropic-object → Anthropic-SSE (`message_to_anthropic_sse`). An
-    // Anthropic upstream answering `/v1/chat/completions` therefore streams
-    // Anthropic frames to an OpenAI client, on purpose.
+describe("native provider streams are normalized for OpenAI chat clients", () => {
+  test("Anthropic and Gemini upstreams select a reverse normalizer", () => {
     const normalizer = defaultStreamNormalizers.normalizerFor({
       dialect: "openai.chat",
       providerKind: "anthropic",
@@ -45,8 +19,16 @@ describe("there is no Anthropic → OpenAI reverse stream normalizer", () => {
       contentType: "text/event-stream",
     });
 
-    expect(normalizer).toBeNull();
-    expect(OPENAI_REVERSE_NORMALIZER_UNPORTED).toBe(true);
+    expect(normalizer).not.toBeNull();
+    expect(
+      defaultStreamNormalizers.normalizerFor({
+        dialect: "openai.chat",
+        providerKind: "gemini",
+        logicalModel: "gemini-logical",
+        requestId: "fg-test",
+        contentType: "text/event-stream",
+      }),
+    ).not.toBeNull();
   });
 
   test("and the two directions that DO exist still normalize", () => {
@@ -74,16 +56,11 @@ describe("there is no Anthropic → OpenAI reverse stream normalizer", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 2. The Anthropic `delta.text` double-emission on the Responses normalizer
+// 2. Anthropic text and tool deltas remain distinct
 // ---------------------------------------------------------------------------
 
-describe("an Anthropic text delta is emitted TWICE on the Responses ingress", () => {
-  test("as output_text.delta AND as function_call_arguments.delta", async () => {
-    // `extract_function_call_deltas` reads the tool-argument fragment from
-    // `delta.text` for `kind: "anthropic"` — the same field a plain text delta
-    // uses — so a text-only Anthropic stream produces both events. This is
-    // observable behavior a client may already depend on; narrowing it to
-    // `delta.partial_json` is a behavior change, not a port fix.
+describe("Anthropic Responses normalization separates text from tool arguments", () => {
+  test("a text delta is emitted only as output_text.delta", async () => {
     const sse = await drainText(
       streamOf([
         bytes(
@@ -102,10 +79,7 @@ describe("an Anthropic text delta is emitted TWICE on the Responses ingress", ()
     const textDeltas = jsonEvents(sse, "response.output_text.delta") as { delta: string }[];
     expect(textDeltas.map((event) => event.delta)).toContain("hello");
 
-    const argumentDeltas = jsonEvents(sse, "response.function_call_arguments.delta") as {
-      delta: string;
-    }[];
-    expect(argumentDeltas.map((event) => event.delta)).toContain("hello");
+    expect(jsonEvents(sse, "response.function_call_arguments.delta")).toHaveLength(0);
   });
 
   test("an OpenAI upstream does NOT double-emit — the quirk is Anthropic-only", async () => {

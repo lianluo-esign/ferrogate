@@ -1843,11 +1843,19 @@ function streamResponse(
     requestId,
     contentType,
   });
-  const normalized = normalizer === null ? body : body.pipeThrough(normalizer);
-  // The usage tap sits AFTER the normalizer, so it always reads the dialect the
-  // client is actually served — that ordering is the fix for the metering
-  // bypass documented at `chat.rs:1012`.
-  const tapped = normalized.pipeThrough(sseUsageTap(usageDialect, onUsage));
+  // Messages conversion rewrites OpenAI usage into Anthropic usage, so its tap
+  // reads the client-side bytes. Chat/Responses native conversions are metered
+  // before rewriting, directly from the provider dialect. That retains split
+  // Anthropic cache usage and Gemini reasoning usage without depending on a
+  // client compatibility envelope.
+  const tapAfterNormalization = dialect === "anthropic.messages";
+  const meteredSource = tapAfterNormalization
+    ? body
+    : body.pipeThrough(sseUsageTap(usageDialect, onUsage));
+  const normalized = normalizer === null ? meteredSource : meteredSource.pipeThrough(normalizer);
+  const tapped = tapAfterNormalization
+    ? normalized.pipeThrough(sseUsageTap(usageDialect, onUsage))
+    : normalized;
 
   // A normalized stream is always `text/event-stream`, whatever the upstream
   // labelled itself (the Rust writer hard-codes it on the normalized branches).
@@ -2274,6 +2282,87 @@ function handleModel(c: InferenceContext, deps: ResolvedInferenceDeps): Response
 // POST /v1/chat/completions and POST /v1/responses — `chat.rs::handle_ai_request`
 // ---------------------------------------------------------------------------
 
+function record(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+/** Convert an adapter's canonical chat.completion into a buffered Responses document. */
+function chatCompletionToResponse(
+  chat: unknown,
+  logicalModel: string,
+  nowUnixSeconds: number,
+): unknown {
+  const source = record(chat);
+  if (source === undefined) return chat;
+  const sourceId = typeof source.id === "string" && source.id !== "" ? source.id : "ferrogate";
+  const responseId = sourceId.startsWith("chatcmpl")
+    ? sourceId.replace(/^chatcmpl/, "resp")
+    : `resp_${sourceId}`;
+  const choices = Array.isArray(source.choices) ? source.choices : [];
+  const firstChoice = record(choices[0]);
+  const message = record(firstChoice?.message);
+  const output: Array<Record<string, unknown>> = [];
+  const content = typeof message?.content === "string" ? message.content : undefined;
+  if (content !== undefined) {
+    output.push({
+      id: `msg_${responseId.replace(/^resp_?/, "")}`,
+      type: "message",
+      status: "completed",
+      role: "assistant",
+      content: [{ type: "output_text", text: content, annotations: [] }],
+    });
+  }
+  const toolCalls = Array.isArray(message?.tool_calls) ? message.tool_calls : [];
+  for (const [index, rawToolCall] of toolCalls.entries()) {
+    const toolCall = record(rawToolCall);
+    const fn = record(toolCall?.function);
+    if (typeof fn?.name !== "string") continue;
+    const callId =
+      typeof toolCall?.id === "string" && toolCall.id !== "" ? toolCall.id : `call_${index}`;
+    output.push({
+      id: `fc_${callId}`,
+      type: "function_call",
+      status: "completed",
+      call_id: callId,
+      name: fn.name,
+      arguments: typeof fn.arguments === "string" ? fn.arguments : "{}",
+    });
+  }
+
+  const sourceUsage = record(source.usage);
+  const inputTokens = sourceUsage?.prompt_tokens;
+  const outputTokens = sourceUsage?.completion_tokens;
+  const totalTokens = sourceUsage?.total_tokens;
+  const promptDetails = record(sourceUsage?.prompt_tokens_details);
+  const completionDetails = record(sourceUsage?.completion_tokens_details);
+  const usage =
+    inputTokens === undefined && outputTokens === undefined && totalTokens === undefined
+      ? undefined
+      : {
+          ...(typeof inputTokens === "number" ? { input_tokens: inputTokens } : {}),
+          ...(typeof outputTokens === "number" ? { output_tokens: outputTokens } : {}),
+          ...(typeof totalTokens === "number" ? { total_tokens: totalTokens } : {}),
+          ...(typeof promptDetails?.cached_tokens === "number"
+            ? { input_tokens_details: { cached_tokens: promptDetails.cached_tokens } }
+            : {}),
+          ...(typeof completionDetails?.reasoning_tokens === "number"
+            ? { output_tokens_details: { reasoning_tokens: completionDetails.reasoning_tokens } }
+            : {}),
+        };
+
+  return {
+    id: responseId,
+    object: "response",
+    created_at: typeof source.created === "number" ? source.created : nowUnixSeconds,
+    status: "completed",
+    model: typeof source.model === "string" ? source.model : logicalModel,
+    output,
+    ...(usage === undefined ? {} : { usage }),
+  };
+}
+
 async function handleOpenAiInference(
   c: InferenceContext,
   deps: ResolvedInferenceDeps,
@@ -2340,11 +2429,9 @@ async function handleOpenAiInference(
   // decision instead of five call sites re-deriving it.
   const relay: UpstreamRelay = { headers: upstreamResponse.headers, failedOver };
 
-  // #886 — the adapter that answered, used both to refuse Anthropic streaming
-  // (no chunk translator yet) and to translate the buffered Anthropic response.
+  // The adapter that answered translates native buffered responses. Streaming
+  // native responses are handled by the protocol normalizers.
   const servedAdapter = deps.adapters.adapterFor(servedRoute.providerKind);
-  const servedIsAnthropicChat =
-    operation === "chat.completions" && servedAdapter?.kind === "anthropic";
 
   const routeLabel = ROUTE_LABELS[operation];
   const usageDialect = usageProviderKindFor(operation, servedRoute.providerKind);
@@ -2369,26 +2456,6 @@ async function handleOpenAiInference(
   // response whose usage frame has not arrived yet. `recordUsage` publishes it
   // again (harmlessly — the merge is idempotent) for the buffered paths.
   observeInvocation(c.get("inferenceOriginRequest"), meterBase, servedRoute.providerKind);
-
-  // #886 — an Anthropic-family provider would stream Anthropic SSE, which the
-  // openai.chat normalizer cannot turn into `chat.completion.chunk` frames yet
-  // (non-streaming translation ships in this slice; the SSE translator is a
-  // follow-up). Refuse a streaming chat/completions request clearly rather than
-  // relay a silently-wrong dialect. Gated on the REQUEST's stream flag, before
-  // the upstream-streaming branch, so it holds regardless of how the upstream answered.
-  if (stream && servedIsAnthropicChat) {
-    settleTokensDetached(c, admission, undefined);
-    settleWorkflowStep(c, deps, gate, false, undefined);
-    return errorResponse(
-      reject(
-        501,
-        "streaming_translation_unsupported",
-        "streaming /v1/chat/completions from an Anthropic-family provider is not yet " +
-          'translated to OpenAI chat.completion.chunk frames; retry with "stream": false',
-      ),
-      requestId,
-    );
-  }
 
   if (stream && isStreamingUpstream(upstreamResponse)) {
     const dialect: StreamDialect = operation === "responses" ? "openai.responses" : "openai.chat";
@@ -2440,24 +2507,48 @@ async function handleOpenAiInference(
   }
 
   const parsed = safeJson(text);
+  // Buffered responses are still in the upstream provider's native dialect at
+  // this point, so Anthropic and Gemini must use their own extractors just as
+  // the pre-normalization streaming tap does.
   const usage = usageFromResponseBody(usageDialect, parsed);
   recordUsage(c, deps, meterBase, servedRoute.providerKind, usage);
   await settleTokens(c, admission, usage?.totalTokens);
   settleWorkflowStep(c, deps, gate, true, usage?.totalTokens);
-  // #886 — an Anthropic-family provider answers a chat/completions request with
-  // an Anthropic-native Message (`{type:"message",content:[…],stop_reason}`).
-  // Translate it to an OpenAI `chat.completion` so OpenAI-SDK clients and
-  // tool-use loops see `choices[].message`/`finish_reason`. The adapter returns
-  // null for same-protocol families, which relays the body verbatim as before.
+  // Dedicated provider families answer in their own dialect. Translate those
+  // answers before serving an OpenAI ingress; compatible families return null
+  // and continue to relay their already-canonical body byte-for-byte.
   const translatedChat =
-    servedIsAnthropicChat && parsed !== undefined && servedAdapter
+    parsed !== undefined && servedAdapter
       ? servedAdapter.translateChatCompletionResponse(parsed, logicalModel)
       : null;
   if (translatedChat !== null && translatedChat !== undefined) {
+    const translated =
+      operation === "responses"
+        ? chatCompletionToResponse(translatedChat, logicalModel, deps.nowUnixSeconds())
+        : translatedChat;
+    const serialized = JSON.stringify(translated);
+    if (conversation !== undefined) {
+      const finished = finishBufferedTurn(
+        c,
+        deps,
+        conversation,
+        translated,
+        serialized,
+        logicalModel,
+      );
+      return rawUpstreamResponse(
+        upstreamResponse.status,
+        "application/json",
+        finished.body,
+        requestId,
+        relay,
+        finished.headers,
+      );
+    }
     return rawUpstreamResponse(
       upstreamResponse.status,
       "application/json",
-      JSON.stringify(translatedChat),
+      serialized,
       requestId,
       relay,
     );

@@ -215,7 +215,15 @@ describe("AnthropicAdapter", () => {
         ],
       },
     });
-    const body = prepared.body as any;
+    const body = prepared.body as {
+      tools: [{ name: string }];
+      tool_choice: { type: string };
+      messages: [
+        {
+          content: [{ type: string }, { type: string; source: { type: string } }];
+        },
+      ];
+    };
     expect(body.tools[0].name).toBe("lookup_weather");
     expect(body.tool_choice.type).toBe("tool");
     expect(body.messages[0].content[0].type).toBe("text");
@@ -335,7 +343,11 @@ describe("Gemini", () => {
     expect(prepared.endpoint).toBe(
       "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
     );
-    const body = prepared.body as any;
+    const body = prepared.body as {
+      contents: [{ parts: [{ text: string }] }];
+      systemInstruction: { parts: [{ text: string }] };
+      generationConfig: { maxOutputTokens: number; stopSequences: string[] };
+    };
     expect(body.contents[0].parts[0].text).toBe("hello");
     expect(body.systemInstruction.parts[0].text).toBe("be concise");
     expect(body.generationConfig.maxOutputTokens).toBe(256);
@@ -352,6 +364,153 @@ describe("Gemini", () => {
     expect(prepared.endpoint).toBe(
       "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse",
     );
+  });
+
+  test("chat tool loops map to Gemini declarations, calls, and responses", () => {
+    const prepared = new GeminiAdapter().prepareChatCompletions(provider(), {
+      logicalModel: "flash",
+      providerModel: "gemini-2.5-flash",
+      stream: false,
+      body: {
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: "lookup",
+              description: "Look up a value",
+              parameters: { type: "object", properties: { q: { type: "string" } } },
+            },
+          },
+        ],
+        tool_choice: { type: "function", function: { name: "lookup" } },
+        messages: [
+          { role: "user", content: "find x" },
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              {
+                id: "call_1",
+                type: "function",
+                function: { name: "lookup", arguments: '{"q":"x"}' },
+              },
+            ],
+          },
+          { role: "tool", tool_call_id: "call_1", content: '{"value":1}' },
+        ],
+      },
+    });
+    const body = prepared.body as {
+      tools: [{ functionDeclarations: [Record<string, unknown>] }];
+      toolConfig: { functionCallingConfig: Record<string, unknown> };
+      contents: [unknown, unknown, unknown];
+    };
+
+    expect(body.tools[0].functionDeclarations[0]).toMatchObject({
+      name: "lookup",
+      description: "Look up a value",
+    });
+    expect(body.toolConfig.functionCallingConfig).toEqual({
+      mode: "ANY",
+      allowedFunctionNames: ["lookup"],
+    });
+    expect(body.contents[1]).toEqual({
+      role: "model",
+      parts: [{ functionCall: { name: "lookup", args: { q: "x" }, id: "call_1" } }],
+    });
+    expect(body.contents[2]).toEqual({
+      role: "user",
+      parts: [
+        {
+          functionResponse: {
+            name: "lookup",
+            response: { output: '{"value":1}' },
+            id: "call_1",
+          },
+        },
+      ],
+    });
+  });
+
+  test("buffered answers keep Gemini thinking separate from visible text", () => {
+    const translated = new GeminiAdapter().translateChatCompletionResponse(
+      bytes(
+        '{"candidates":[{"content":{"parts":[{"thought":true,"text":"reason","thoughtSignature":"reason-signature"},{"text":"answer","thoughtSignature":"text-signature"},{"thoughtSignature":"tool-signature","functionCall":{"id":"native-call","name":"lookup","args":{"q":"x"}}}]},"finishReason":"STOP"}]}',
+      ),
+      "flash",
+    ) as {
+      choices: [
+        {
+          message: {
+            content: string;
+            reasoning_content: string;
+            reasoning_signature: string;
+            text_signature: string;
+            tool_calls: [Record<string, unknown>];
+          };
+        },
+      ];
+    };
+
+    expect(translated.choices[0].message.content).toBe("answer");
+    expect(translated.choices[0].message.reasoning_content).toBe("reason");
+    expect(translated.choices[0].message.reasoning_signature).toBe("reason-signature");
+    expect(translated.choices[0].message.text_signature).toBe("text-signature");
+    expect(translated.choices[0].message.tool_calls[0]).toMatchObject({
+      id: "native-call",
+      thought_signature: "tool-signature",
+    });
+  });
+
+  test("chat replay restores Gemini text, reasoning, and tool signatures", () => {
+    const prepared = new GeminiAdapter().prepareChatCompletions(provider(), {
+      logicalModel: "flash",
+      providerModel: "gemini-3.5-flash",
+      stream: false,
+      body: {
+        messages: [
+          {
+            role: "assistant",
+            content: "answer",
+            text_signature: "text-signature",
+            reasoning_content: "reason",
+            reasoning_signature: "reason-signature",
+            tool_calls: [
+              {
+                id: "native-call",
+                type: "function",
+                thought_signature: "tool-signature",
+                function: { name: "lookup", arguments: '{"q":"x"}' },
+              },
+            ],
+          },
+        ],
+      },
+    });
+    const body = prepared.body as { contents: [{ parts: unknown[] }] };
+
+    expect(body.contents[0].parts).toEqual([
+      { text: "answer", thoughtSignature: "text-signature" },
+      { thought: true, text: "reason", thoughtSignature: "reason-signature" },
+      {
+        functionCall: { id: "native-call", name: "lookup", args: { q: "x" } },
+        thoughtSignature: "tool-signature",
+      },
+    ]);
+  });
+
+  test("usage includes Gemini thinking tokens in completion tokens", () => {
+    const usage = new GeminiAdapter().extractUsage(
+      bytes(
+        '{"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":40,"thoughtsTokenCount":10,"totalTokenCount":150}}',
+      ),
+    );
+
+    expect(usage).toEqual({
+      promptTokens: 100,
+      completionTokens: 50,
+      totalTokens: 150,
+    });
   });
 
   test("embeddings → batchEmbedContents and normalizes to OpenAI shape", () => {

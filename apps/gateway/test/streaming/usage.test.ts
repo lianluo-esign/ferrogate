@@ -69,6 +69,26 @@ describe("extractUsage", () => {
     ).toEqual({ promptTokens: 3, completionTokens: 5, totalTokens: 8 });
   });
 
+  test("Gemini thought-only usage still reports completion tokens", () => {
+    expect(
+      extractUsage(
+        {
+          usageMetadata: {
+            promptTokenCount: 3,
+            thoughtsTokenCount: 5,
+            totalTokenCount: 8,
+          },
+        },
+        "gemini",
+      ),
+    ).toEqual({
+      promptTokens: 3,
+      completionTokens: 5,
+      totalTokens: 8,
+      reasoningTokens: 5,
+    });
+  });
+
   test("a frame with no usage, or a null usage, reports nothing", () => {
     expect(extractUsage({ choices: [] })).toBeUndefined();
     expect(extractUsage({ usage: null })).toBeUndefined();

@@ -828,9 +828,16 @@ function chatMessagesToAnthropic(
 function chatTurnToAnthropic(role: string, message: unknown): Json {
   const content = get(message, "content");
   const toolCalls = asArray(get(message, "tool_calls"));
+  const reasoning = asString(get(message, "reasoning_content"));
+  const reasoningSignature = asString(get(message, "reasoning_signature"));
 
   const text = asString(content);
-  if (text !== undefined && toolCalls === undefined) {
+  if (
+    text !== undefined &&
+    toolCalls === undefined &&
+    reasoning === undefined &&
+    reasoningSignature === undefined
+  ) {
     // A plain string stays a plain string: it is the shape Anthropic documents
     // for a single-text turn, and re-wrapping it would change nothing but the
     // bytes a caching prefix hashes over.
@@ -838,6 +845,13 @@ function chatTurnToAnthropic(role: string, message: unknown): Json {
   }
 
   const blocks: Json[] = [];
+  if (role === "assistant" && (reasoning !== undefined || reasoningSignature !== undefined)) {
+    blocks.push({
+      type: "thinking",
+      thinking: reasoning ?? "",
+      ...(reasoningSignature === undefined ? {} : { signature: reasoningSignature }),
+    });
+  }
   if (text !== undefined) {
     if (text.length > 0) {
       blocks.push({ type: "text", text });
@@ -982,15 +996,28 @@ export function messageToChatCompletion(message: unknown, fallbackModel: string)
   const model = asString(get(message, "model")) ?? fallbackModel;
   const contentBlocks = asArray(get(message, "content")) ?? [];
   const textParts: string[] = [];
+  const thinkingParts: string[] = [];
+  let reasoningSignature: string | undefined;
   const toolCalls: Json[] = [];
 
   for (const block of contentBlocks) {
-    if (asString(get(block, "type")) === "text") {
+    const blockType = asString(get(block, "type"));
+    if (blockType === "text") {
       const text = asString(get(block, "text"));
       if (text !== undefined) textParts.push(text);
       continue;
     }
-    if (asString(get(block, "type")) !== "tool_use") continue;
+    if (blockType === "thinking") {
+      const thinking = asString(get(block, "thinking"));
+      if (thinking !== undefined) thinkingParts.push(thinking);
+      reasoningSignature = asString(get(block, "signature")) ?? reasoningSignature;
+      continue;
+    }
+    if (blockType === "redacted_thinking") {
+      reasoningSignature = asString(get(block, "data")) ?? reasoningSignature;
+      continue;
+    }
+    if (blockType !== "tool_use") continue;
     const input = get(block, "input");
     toolCalls.push({
       id: asString(get(block, "id")) ?? "",
@@ -1006,18 +1033,23 @@ export function messageToChatCompletion(message: unknown, fallbackModel: string)
     role: "assistant",
     content: textParts.length === 0 ? null : textParts.join(""),
   };
+  if (thinkingParts.length > 0) assistantMessage.reasoning_content = thinkingParts.join("");
+  if (reasoningSignature !== undefined) {
+    assistantMessage.reasoning_signature = reasoningSignature;
+  }
   if (toolCalls.length > 0) assistantMessage.tool_calls = toolCalls;
 
   const usage = get(message, "usage");
-  const promptTokens = asUint(get(usage, "input_tokens")) ?? 0;
+  const freshInputTokens = asUint(get(usage, "input_tokens")) ?? 0;
   const completionTokens = asUint(get(usage, "output_tokens")) ?? 0;
+  const cacheRead = asUint(get(usage, "cache_read_input_tokens"));
+  const cacheCreation = asUint(get(usage, "cache_creation_input_tokens"));
+  const promptTokens = freshInputTokens + (cacheRead ?? 0) + (cacheCreation ?? 0);
   const openAiUsage: Json = {
     prompt_tokens: promptTokens,
     completion_tokens: completionTokens,
     total_tokens: promptTokens + completionTokens,
   };
-  const cacheRead = asUint(get(usage, "cache_read_input_tokens"));
-  const cacheCreation = asUint(get(usage, "cache_creation_input_tokens"));
   if (cacheRead !== undefined) {
     openAiUsage.prompt_tokens_details = { cached_tokens: cacheRead };
     openAiUsage.cache_read_input_tokens = cacheRead;

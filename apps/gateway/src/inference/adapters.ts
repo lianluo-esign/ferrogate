@@ -46,6 +46,7 @@
  */
 import {
   BedrockAdapter,
+  CanonicalAiRequest,
   GeminiAdapter,
   AdapterError as PackageAdapterError,
   SecretValue,
@@ -60,7 +61,6 @@ import {
   promptCacheFromBody,
   stripPromptCacheDirective,
   structuredOutputFromChatBody,
-  structuredOutputFromResponsesBody,
 } from "@ferrogate/providers";
 import type {
   CloudflareAiGatewaySurface,
@@ -553,14 +553,10 @@ export const anthropicAdapter: ProviderAdapter = {
     // whole body: re-spelled, gateway-owned, refused, or forwarded verbatim.
     const source = plan.body;
     try {
+      const isResponses = plan.operation === "responses";
       const anthropicBody = ownBody(
-        plan.operation === "responses"
-          ? // `/v1/responses` reaches this adapter carrying the RESPONSES
-            // grammar (`input`, flattened tools), not a chat body, so the chat
-            // translation above would mis-read it. `prepare_responses`' own
-            // minimal rebuild is kept until that surface gets the same
-            // treatment; it at least forwards the canonicalized tool fields.
-            responsesDraft(plan, source)
+        isResponses
+          ? responsesDraft(plan, source)
           : (chatCompletionsToMessages(source as Record<string, unknown>, {
               model: plan.providerModel,
               stream: plan.stream,
@@ -576,26 +572,27 @@ export const anthropicAdapter: ProviderAdapter = {
       // anything Anthropic cannot express is refused rather than sent
       // unconstrained. The translation itself is `@ferrogate/providers`'
       // canonical one, NOT a second copy of it.
-      const structured =
-        plan.operation === "responses"
-          ? structuredOutputFromResponsesBody(source as Json)
-          : structuredOutputFromChatBody(source as Json);
-      if (structured !== undefined) {
-        applyStructuredOutputToAnthropic(anthropicBody, structured, "anthropic");
-      }
-      // Prompt caching (issue #690), same story one field over: this adapter
-      // does not forward the caller's body, so a caller's caching intent used to
-      // vanish here while an OpenAI upstream cached the prefix automatically —
-      // the same request, two different bills, with no way to tell which one
-      // ran. The directive becomes Anthropic's `cache_control` breakpoint (or
-      // strips the caller's markers, for `mode: "off"`), using the SAME
-      // canonical translation as `@ferrogate/providers`, not a second copy.
-      // Applied AFTER the translation, so the breakpoint lands on the LIFTED
-      // top-level `system` — the real static prefix — rather than on a
-      // `system`-role turn that no longer exists.
-      const promptCache = promptCacheFromBody(source as Json);
-      if (promptCache !== undefined) {
-        applyPromptCacheToAnthropic(anthropicBody, promptCache, "anthropic");
+      // CanonicalAiRequest already applies Responses structured output and
+      // caching while translating. Chat requests still need both policies here.
+      if (!isResponses) {
+        const structured = structuredOutputFromChatBody(source as Json);
+        if (structured !== undefined) {
+          applyStructuredOutputToAnthropic(anthropicBody, structured, "anthropic");
+        }
+        // Prompt caching (issue #690), same story one field over: this adapter
+        // does not forward the caller's body, so a caller's caching intent used to
+        // vanish here while an OpenAI upstream cached the prefix automatically —
+        // the same request, two different bills, with no way to tell which one
+        // ran. The directive becomes Anthropic's `cache_control` breakpoint (or
+        // strips the caller's markers, for `mode: "off"`), using the SAME
+        // canonical translation as `@ferrogate/providers`, not a second copy.
+        // Applied AFTER the translation, so the breakpoint lands on the LIFTED
+        // top-level `system` — the real static prefix — rather than on a
+        // `system`-role turn that no longer exists.
+        const promptCache = promptCacheFromBody(source as Json);
+        if (promptCache !== undefined) {
+          applyPromptCacheToAnthropic(anthropicBody, promptCache, "anthropic");
+        }
       }
 
       return {
@@ -616,25 +613,23 @@ export const anthropicAdapter: ProviderAdapter = {
 };
 
 /**
- * The pre-#725 minimal rebuild, kept for `/v1/responses` only.
- *
- * That surface hands this adapter a RESPONSES body — `input` rather than
- * `messages`, tools flattened to `{type:"function",name,parameters}` — so the
- * chat translation would read the wrong members off it. Translating it properly
- * means porting `CanonicalAiRequest::into_anthropic_body`, which is its own
- * slice; until then this at least keeps the behavior #674 and #690 were built
- * on rather than replacing one wrong body with another.
+ * Translate the Responses grammar through the shared provider-neutral model,
+ * then retain only fields accepted by Anthropic's Messages endpoint.
  */
 function responsesDraft(plan: UpstreamPlan, source: Record<string, unknown>): Record<string, Json> {
+  const canonical = CanonicalAiRequest.fromResponsesBody(source as Json).intoAnthropicBody();
+  if (canonical === null || typeof canonical !== "object" || Array.isArray(canonical)) {
+    throw PackageAdapterError.invalidRequest("responses request body must be a JSON object");
+  }
   const draft: Record<string, Json> = {
     model: plan.providerModel,
-    messages: (source.messages ?? []) as Json,
-    max_tokens: (source.max_tokens ?? 1024) as Json,
+    messages: canonical.messages ?? [],
+    max_tokens: canonical.max_tokens ?? 1024,
     stream: plan.stream,
   };
   for (const key of ["system", "tools", "tool_choice"]) {
-    if (source[key] !== undefined) {
-      draft[key] = source[key] as Json;
+    if (canonical[key] !== undefined) {
+      draft[key] = canonical[key] as Json;
     }
   }
   return draft;
@@ -1156,9 +1151,10 @@ export function packageProviderAdapter(
   return {
     kind: canonicalKind,
 
-    // Non-Anthropic families relay the chat body verbatim — only the dedicated
-    // anthropicAdapter translates the response to chat.completion (#886).
-    translateChatCompletionResponse: () => null,
+    translateChatCompletionResponse(body: unknown, logicalModel: string): unknown | null {
+      const encoded = new TextEncoder().encode(JSON.stringify(body) ?? "null");
+      return adapter.translateChatCompletionResponse(encoded, logicalModel);
+    },
 
     buildUpstreamRequest(plan: UpstreamPlan): AdapterResult {
       if (canonicalProviderKind(plan.route.providerKind) !== canonicalKind) {

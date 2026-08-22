@@ -26,7 +26,7 @@
 import { describe, expect, it } from "vitest";
 
 import { ANTHROPIC_ROUTE, OPENAI_ROUTE, errorBody, harness } from "./fixtures.js";
-import { interceptProviderFetch, providerJson } from "./provider-mock.js";
+import { interceptProviderFetch, providerJson, providerSse } from "./provider-mock.js";
 
 const ANTHROPIC_MESSAGE = {
   id: "msg_725",
@@ -551,12 +551,81 @@ describe("/v1/chat/completions on an anthropic upstream translates the RESPONSE 
     expect(JSON.parse(fn?.arguments as string)).toEqual({ city: "Paris" });
   });
 
-  it("refuses a streaming chat/completions to an Anthropic provider rather than relay wrong SSE", async () => {
-    const out = await received("/v1/chat/completions", chatRequest({ stream: true }));
-    expect(out.status).toBe(501);
-    expect((out.body.error as Record<string, unknown>)?.code).toBe(
-      "streaming_translation_unsupported",
+  it("preserves Anthropic thinking text and signatures for the next turn", async () => {
+    const response = {
+      ...ANTHROPIC_MESSAGE,
+      content: [
+        { type: "thinking", thinking: "reason", signature: "reason-signature" },
+        { type: "text", text: "answer" },
+      ],
+    };
+    const out = await received("/v1/chat/completions", chatRequest(), response);
+    const choices = out.body.choices as Array<Record<string, unknown>>;
+    expect(choices[0]?.message).toMatchObject({
+      content: "answer",
+      reasoning_content: "reason",
+      reasoning_signature: "reason-signature",
+    });
+  });
+
+  it("restores OpenAI reasoning extensions as an Anthropic thinking block", async () => {
+    const out = await sent(
+      "/v1/chat/completions",
+      chatRequest({
+        messages: [
+          {
+            role: "assistant",
+            content: "answer",
+            reasoning_content: "reason",
+            reasoning_signature: "reason-signature",
+          },
+          { role: "user", content: "continue" },
+        ],
+      }),
     );
+    expect(out.body.messages).toEqual([
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "thinking",
+            thinking: "reason",
+            signature: "reason-signature",
+          },
+          { type: "text", text: "answer" },
+        ],
+      },
+      { role: "user", content: "continue" },
+    ]);
+  });
+
+  it("normalizes a streaming Anthropic response to OpenAI chat SSE", async () => {
+    const provider = interceptProviderFetch(() =>
+      providerSse([
+        'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_stream","model":"claude-test","usage":{"input_tokens":7,"output_tokens":0}}}',
+        'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+        'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello"}}',
+        'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}',
+        'event: message_stop\ndata: {"type":"message_stop"}',
+      ]),
+    );
+    try {
+      const res = await harness({}, ROUTES).post(
+        "/v1/chat/completions",
+        chatRequest({ stream: true }),
+      );
+      const body = await res.text();
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-type")).toContain("text/event-stream");
+      expect(body).toContain('"object":"chat.completion.chunk"');
+      expect(body).toContain('"content":"hello"');
+      expect(body).toContain('"prompt_tokens":7');
+      expect(body).toContain('"completion_tokens":2');
+      expect(body).not.toContain("message_start");
+      expect(body.endsWith("data: [DONE]\n\n")).toBe(true);
+    } finally {
+      provider.restore();
+    }
   });
 
   it("leaves /v1/messages (native ingress) untranslated — still an Anthropic Message", async () => {

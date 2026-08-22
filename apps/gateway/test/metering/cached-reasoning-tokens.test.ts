@@ -168,6 +168,18 @@ describe("buffered capture normalizes each family onto the subset invariant", ()
     expect(usage?.totalTokens).toBe(32_000);
   });
 
+  it("Gemini: thought-only output remains billable", () => {
+    const usage = usageFromResponseBody("gemini", {
+      usageMetadata: {
+        promptTokenCount: 30,
+        thoughtsTokenCount: 12,
+        totalTokenCount: 42,
+      },
+    });
+    expect(usage?.completionTokens).toBe(12);
+    expect(usage?.reasoningTokens).toBe(12);
+  });
+
   it("leaves the counters absent when the provider reports none", () => {
     const usage = usageFromResponseBody("openai", {
       usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 },

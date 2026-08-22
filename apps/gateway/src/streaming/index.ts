@@ -62,6 +62,7 @@ export * from "./ports.js";
 export * from "./toolcalls.js";
 export * from "./usage.js";
 export * from "./openai.js";
+export * from "./chat.js";
 export * from "./anthropic.js";
 export * from "./responses.js";
 export * from "./abort.js";

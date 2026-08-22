@@ -134,13 +134,11 @@ function withCounters(
  *
  * Both detail spellings are read — `prompt_tokens_details` /
  * `completion_tokens_details` (Chat Completions) and `input_tokens_details` /
- * `output_tokens_details` (Responses) — because `/v1/responses` streams are
- * normalized to the OpenAI shape before metering sees them and are read with
- * this extractor. Both counts are already subsets of the headline counts in
- * OpenAI's accounting, so nothing is added in.
+ * `output_tokens_details` (Responses). Both counts are already subsets of the
+ * headline counts in OpenAI's accounting, so nothing is added in.
  */
 function extractOpenAiUsage(payload: unknown): NormalizedUsage | undefined {
-  const usage = nonNull(get(payload, "usage"));
+  const usage = nonNull(get(payload, "usage")) ?? nonNull(get(get(payload, "response"), "usage"));
   if (usage === undefined) {
     return undefined;
   }
@@ -152,8 +150,8 @@ function extractOpenAiUsage(payload: unknown): NormalizedUsage | undefined {
   return finish(
     withCounters(
       {
-        promptTokens: getUint(usage, "prompt_tokens"),
-        completionTokens: getUint(usage, "completion_tokens"),
+        promptTokens: getUint(usage, "prompt_tokens") ?? getUint(usage, "input_tokens"),
+        completionTokens: getUint(usage, "completion_tokens") ?? getUint(usage, "output_tokens"),
         totalTokens: getUint(usage, "total_tokens"),
       },
       {
@@ -250,7 +248,8 @@ function extractGeminiUsage(payload: unknown): NormalizedUsage | undefined {
     withCounters(
       {
         promptTokens: getUint(usage, "promptTokenCount"),
-        completionTokens: visible === undefined ? undefined : visible + (reasoningTokens ?? 0),
+        completionTokens:
+          visible === undefined ? reasoningTokens : visible + (reasoningTokens ?? 0),
         totalTokens: getUint(usage, "totalTokenCount"),
       },
       { cachedInputTokens: getUint(usage, "cachedContentTokenCount"), reasoningTokens },
