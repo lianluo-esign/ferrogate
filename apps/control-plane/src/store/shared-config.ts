@@ -302,6 +302,32 @@ export interface SharedConfigPassReport {
 }
 
 /**
+ * Push a just-committed platform config edit to the tenant fleet before the
+ * operator write returns. A failed propagation must not turn a committed
+ * create/update into an HTTP error that the console may retry as a duplicate;
+ * the scheduled pass retains the unchanged watermark and retries it.
+ */
+export async function propagateSharedConfigAfterMutation(
+  deps: Pick<ControlPlaneDeps, "controlDatabase" | "tenantDatabases" | "tenantStorage">,
+  requestId: string,
+): Promise<void> {
+  try {
+    const report = await fanOutSharedConfig(deps);
+    if (report.failed > 0 || report.skipped === "roster_unavailable") {
+      console.warn("control-plane: immediate shared-config propagation incomplete", {
+        request_id: requestId,
+        ...report,
+      });
+    }
+  } catch (error) {
+    console.warn("control-plane: immediate shared-config propagation failed", {
+      request_id: requestId,
+      error,
+    });
+  }
+}
+
+/**
  * Fan the current shared config out to every provisioned tenant — but only for
  * the domains whose source revision has moved past their fleet watermark, so an
  * unchanged fleet does zero tenant-object work. Each due domain's statements are

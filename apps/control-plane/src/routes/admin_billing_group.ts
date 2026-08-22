@@ -39,6 +39,7 @@ import {
 } from "../store/platform-billing-group.js";
 import { isMissingPlatformCatalogError } from "../store/platform-model-catalog.js";
 import { matchesSearch } from "../store/query.js";
+import { propagateSharedConfigAfterMutation } from "../store/shared-config.js";
 import {
   TenantCatalogConflictError,
   TenantCatalogNotFoundError,
@@ -116,6 +117,10 @@ function platformScope(c: Parameters<Handler>[0]): CallerScope {
   return scope;
 }
 
+async function propagateBillingGroups(c: Parameters<Handler>[0]): Promise<void> {
+  await propagateSharedConfigAfterMutation(depsOf(c), c.get("requestId") ?? "admin-billing-group");
+}
+
 /** Map the store's typed errors onto HTTP, exactly as the catalog handler does. */
 function billingGroupHandler(handler: Handler): Handler {
   return async (c) => {
@@ -171,6 +176,7 @@ async function createBillingGroup(c: Parameters<Handler>[0]): Promise<Response> 
     enabled: body.enabled,
   };
   const record = await billingGroupStore(c).createGroup(scope, input);
+  await propagateBillingGroups(c);
   return json(c, 201, adminItem("billing_group", record));
 }
 
@@ -188,6 +194,7 @@ async function patchBillingGroup(c: Parameters<Handler>[0]): Promise<Response> {
   const body = await readJson(c, groupPatchSchema);
   const patch: BillingGroupPatch = body;
   const record = await billingGroupStore(c).updateGroup(scope, id, patch);
+  await propagateBillingGroups(c);
   return json(c, 200, adminItem("billing_group", record));
 }
 
@@ -196,6 +203,7 @@ async function deleteBillingGroup(c: Parameters<Handler>[0]): Promise<Response> 
   const id = pathParam(c, "id");
   const deleted = await billingGroupStore(c).deleteGroup(scope, id);
   if (!deleted) throw new HttpError(404, "not_found", `billing group ${id} not found`);
+  await propagateBillingGroups(c);
   return json(c, 200, adminDeleted("billing_group", id));
 }
 
@@ -207,9 +215,10 @@ async function bindBillingGroupProvider(c: Parameters<Handler>[0]): Promise<Resp
   // Idempotent: re-binding an existing edge is a no-op. The store still throws
   // 404 when the group or the provider does not exist, so this cannot manufacture
   // a binding to a phantom provider.
-  await store.bindProvider(scope, id, providerId);
+  const changed = await store.bindProvider(scope, id, providerId);
   const record = await store.getGroup(id);
   if (record === null) throw new HttpError(404, "not_found", `billing group ${id} not found`);
+  if (changed) await propagateBillingGroups(c);
   return json(c, 200, adminItem("billing_group", record));
 }
 
@@ -224,6 +233,7 @@ async function unbindBillingGroupProvider(c: Parameters<Handler>[0]): Promise<Re
   }
   const record = await store.getGroup(id);
   if (record === null) throw new HttpError(404, "not_found", `billing group ${id} not found`);
+  await propagateBillingGroups(c);
   return json(c, 200, adminItem("billing_group", record));
 }
 

@@ -27,6 +27,11 @@ import {
   resetTenantD1,
   tenantDbA,
 } from "./tenant-db.js";
+import {
+  privilegedTenantBatch,
+  registerDurableObjectTenant,
+  tenantObjectDb,
+} from "./tenant-object.js";
 
 const OPERATOR = operatorKey.secret;
 const TENANT_SECRET = "billing-group-tenant";
@@ -100,12 +105,31 @@ async function tenantKeyBillingGroup(id: string): Promise<string | null | undefi
   return row === null ? undefined : row.billing_group_id;
 }
 
+/** One shared group projected into the tenant DO immediately after an operator write. */
+async function tenantSharedBillingGroup(id: string): Promise<{
+  multiplier: number;
+  enabled: number;
+  provider_ids_json: string;
+} | null> {
+  return await tenantObjectDb(TENANT_A)
+    .prepare(
+      "SELECT multiplier, enabled, provider_ids_json FROM shared_billing_groups WHERE id = ?",
+    )
+    .bind(id)
+    .first<{
+      multiplier: number;
+      enabled: number;
+      provider_ids_json: string;
+    }>();
+}
+
 /** Remove billing-group state `resetD1` does not know about. */
 async function wipeBillingGroups(): Promise<void> {
   await db().batch([
     db().prepare("DELETE FROM platform_billing_group_providers"),
     db().prepare("DELETE FROM platform_billing_groups"),
     db().prepare("DELETE FROM platform_billing_group_revisions"),
+    db().prepare("DELETE FROM shared_config_push_state"),
   ]);
 }
 
@@ -272,6 +296,70 @@ describe("platform billing-group admin surface", () => {
       (await request(OPERATOR, "DELETE", "/admin/v1/billing-groups/bg_bind/providers/bg_channel"))
         .status,
     ).toBe(404);
+  });
+
+  it("projects every successful group mutation into tenant Durable Objects immediately", async () => {
+    await registerDurableObjectTenant(TENANT_A);
+    await privilegedTenantBatch(TENANT_A, [
+      { sql: "DELETE FROM shared_billing_groups", params: [] },
+      { sql: "DELETE FROM shared_config_cursor", params: [] },
+    ]);
+    expect((await createPlatformProvider("bg_live_channel")).status).toBe(201);
+
+    expect(
+      (
+        await request(OPERATOR, "POST", "/admin/v1/billing-groups", {
+          id: "bg_live",
+          name: "live",
+          multiplier: 1.5,
+        })
+      ).status,
+    ).toBe(201);
+    expect(await tenantSharedBillingGroup("bg_live")).toEqual({
+      multiplier: 1.5,
+      enabled: 1,
+      provider_ids_json: "[]",
+    });
+
+    expect(
+      (await request(OPERATOR, "PUT", "/admin/v1/billing-groups/bg_live/providers/bg_live_channel"))
+        .status,
+    ).toBe(200);
+    expect(
+      JSON.parse((await tenantSharedBillingGroup("bg_live"))?.provider_ids_json ?? "[]"),
+    ).toEqual(["bg_live_channel"]);
+
+    expect(
+      (
+        await request(OPERATOR, "PATCH", "/admin/v1/billing-groups/bg_live", {
+          multiplier: 2,
+          enabled: false,
+        })
+      ).status,
+    ).toBe(200);
+    // Disabled rows remain in the mirror for exact snapshot parity; the tenant
+    // read endpoint excludes them from Vega's selectable list.
+    expect(await tenantSharedBillingGroup("bg_live")).toEqual({
+      multiplier: 2,
+      enabled: 0,
+      provider_ids_json: '["bg_live_channel"]',
+    });
+
+    expect(
+      (
+        await request(
+          OPERATOR,
+          "DELETE",
+          "/admin/v1/billing-groups/bg_live/providers/bg_live_channel",
+        )
+      ).status,
+    ).toBe(200);
+    expect((await tenantSharedBillingGroup("bg_live"))?.provider_ids_json).toBe("[]");
+
+    expect((await request(OPERATOR, "DELETE", "/admin/v1/billing-groups/bg_live")).status).toBe(
+      200,
+    );
+    expect(await tenantSharedBillingGroup("bg_live")).toBeNull();
   });
 
   it("fences a tenant-scoped caller out of the billing-group surface", async () => {

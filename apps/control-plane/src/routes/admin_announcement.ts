@@ -31,6 +31,7 @@ import {
 } from "../store/platform-announcement.js";
 import { isMissingPlatformCatalogError } from "../store/platform-model-catalog.js";
 import { matchesSearch } from "../store/query.js";
+import { propagateSharedConfigAfterMutation } from "../store/shared-config.js";
 import {
   TenantCatalogConflictError,
   TenantCatalogNotFoundError,
@@ -105,6 +106,10 @@ function platformScope(c: Parameters<Handler>[0]): CallerScope {
   return scope;
 }
 
+async function propagateAnnouncements(c: Parameters<Handler>[0]): Promise<void> {
+  await propagateSharedConfigAfterMutation(depsOf(c), c.get("requestId") ?? "admin-announcement");
+}
+
 /** Map the store's typed errors onto HTTP, exactly as the billing-group handler does. */
 function announcementHandler(handler: Handler): Handler {
   return async (c) => {
@@ -157,6 +162,7 @@ async function createAnnouncement(c: Parameters<Handler>[0]): Promise<Response> 
     endsAtUnix: body.ends_at_unix ?? null,
   };
   const record = await announcementStore(c).createAnnouncement(scope, input);
+  await propagateAnnouncements(c);
   return json(c, 201, adminItem("announcement", record));
 }
 
@@ -184,6 +190,7 @@ async function patchAnnouncement(c: Parameters<Handler>[0]): Promise<Response> {
     ...("ends_at_unix" in body ? { endsAtUnix: body.ends_at_unix ?? null } : {}),
   };
   const record = await announcementStore(c).updateAnnouncement(scope, id, patch);
+  await propagateAnnouncements(c);
   return json(c, 200, adminItem("announcement", record));
 }
 
@@ -192,6 +199,7 @@ async function deleteAnnouncement(c: Parameters<Handler>[0]): Promise<Response> 
   const id = pathParam(c, "id");
   const deleted = await announcementStore(c).deleteAnnouncement(scope, id);
   if (!deleted) throw new HttpError(404, "not_found", `announcement ${id} not found`);
+  await propagateAnnouncements(c);
   return json(c, 200, adminDeleted("announcement", id));
 }
 
