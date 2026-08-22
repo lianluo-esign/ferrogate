@@ -448,3 +448,24 @@ describe("fetchUpstreamModels upstream-failure mapping (#944)", () => {
     expect(seen[0]?.authorization).toBeUndefined();
   });
 });
+
+describe("provider connectivity protocol contract", () => {
+  it("rejects protocol values outside the supported dropdown choices", async () => {
+    const response = await SELF.fetch(
+      `${BASE}/admin/v1/providers/${PROVIDER_ID}/connectivity-test`,
+      {
+        method: "POST",
+        headers: { ...bearer(OPERATOR_KEY), "content-type": "application/json" },
+        body: JSON.stringify({
+          action: "chat",
+          model: "gpt-5.5",
+          protocol: "completions",
+        }),
+      },
+    );
+
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as { error?: { code?: string } };
+    expect(body.error?.code).toBe("invalid_request_body");
+  });
+});

@@ -60,6 +60,7 @@ const providerConnectivitySchema = z.discriminatedUnion("action", [
     .object({
       action: z.literal("chat"),
       model: z.string().trim().min(1),
+      protocol: z.enum(["responses", "chat.completions"]).default("chat.completions"),
     })
     .strict(),
 ]);
@@ -803,6 +804,7 @@ async function providerConnectivity(c: Parameters<Handler>[0]): Promise<Response
       provider,
       apiKey,
       model: body.model,
+      protocol: body.protocol,
       fetchImpl: fetch,
     });
     return json(c, 200, {
@@ -811,8 +813,10 @@ async function providerConnectivity(c: Parameters<Handler>[0]): Promise<Response
       provider_id: id,
       ok: true,
       model: result.model,
+      protocol: result.protocol,
       latency_ms: result.latencyMs,
       upstream_status: result.status,
+      answer: result.answer,
       response: result.response,
     });
   } catch (error) {

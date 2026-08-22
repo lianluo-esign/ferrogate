@@ -9,6 +9,8 @@ import { fetchUpstreamModels } from "./platform-provider-sync.js";
 
 const MAX_TEST_RESPONSE_BYTES = 1_048_576;
 
+export type ProviderConnectivityProtocol = "responses" | "chat.completions";
+
 export class ProviderConnectivityError extends Error {
   readonly status: number;
   readonly code: string;
@@ -45,15 +47,56 @@ export async function listProviderConnectivityModels(options: {
 
 export interface ProviderConnectivityResult {
   readonly model: string;
+  readonly protocol: ProviderConnectivityProtocol;
   readonly latencyMs: number;
   readonly status: number;
   readonly response: unknown;
+  readonly answer: string | null;
+}
+
+function nonEmptyText(value: unknown): string | null {
+  return typeof value === "string" && value.trim() !== "" ? value.trim() : null;
+}
+
+/** Extract the assistant text from OpenAI Responses or chat-completions JSON. */
+export function providerConnectivityAnswer(payload: unknown): string | null {
+  if (typeof payload !== "object" || payload === null) return null;
+  const record = payload as Record<string, unknown>;
+  const direct = nonEmptyText(record.output_text);
+  if (direct !== null) return direct;
+
+  if (Array.isArray(record.output)) {
+    const parts: string[] = [];
+    for (const item of record.output) {
+      if (typeof item !== "object" || item === null) continue;
+      const content = (item as Record<string, unknown>).content;
+      if (!Array.isArray(content)) continue;
+      for (const block of content) {
+        if (typeof block !== "object" || block === null) continue;
+        const text = nonEmptyText((block as Record<string, unknown>).text);
+        if (text !== null) parts.push(text);
+      }
+    }
+    if (parts.length > 0) return parts.join("\n");
+  }
+
+  if (Array.isArray(record.choices)) {
+    const first = record.choices[0];
+    if (typeof first === "object" && first !== null) {
+      const message = (first as Record<string, unknown>).message;
+      if (typeof message === "object" && message !== null) {
+        return nonEmptyText((message as Record<string, unknown>).content);
+      }
+    }
+  }
+  return null;
 }
 
 export async function testProviderConnectivity(options: {
   readonly provider: SeedProviderChannel;
   readonly apiKey?: string;
   readonly model: string;
+  readonly protocol: ProviderConnectivityProtocol;
   readonly fetchImpl?: typeof fetch;
   readonly now?: () => number;
 }): Promise<ProviderConnectivityResult> {
@@ -81,17 +124,23 @@ export async function testProviderConnectivity(options: {
     enabled: options.provider.enabled !== 0,
   };
   const built = adapter.buildUpstreamRequest({
-    operation: "chat.completions",
+    operation: options.protocol,
     route,
     logicalModel: options.model,
     providerModel: options.model,
     stream: false,
-    body: {
-      model: options.model,
-      messages: [{ role: "user", content: "hi" }],
-      max_tokens: 32,
-      stream: false,
-    },
+    body:
+      options.protocol === "responses"
+        ? {
+            model: options.model,
+            input: "hi",
+            stream: false,
+          }
+        : {
+            model: options.model,
+            messages: [{ role: "user", content: "hi" }],
+            stream: false,
+          },
   });
   if (!built.ok) {
     const detail =
@@ -158,5 +207,12 @@ export async function testProviderConnectivity(options: {
     );
   }
   const response = adapter.translateChatCompletionResponse(payload, options.model) ?? payload;
-  return { model: options.model, latencyMs, status: upstream.status, response };
+  return {
+    model: options.model,
+    protocol: options.protocol,
+    latencyMs,
+    status: upstream.status,
+    response,
+    answer: providerConnectivityAnswer(response),
+  };
 }

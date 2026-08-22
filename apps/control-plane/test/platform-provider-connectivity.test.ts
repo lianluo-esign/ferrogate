@@ -64,6 +64,7 @@ describe("platform provider connectivity", () => {
       provider: provider(),
       apiKey: "sk-live",
       model: "gpt-5.4",
+      protocol: "chat.completions",
       now: () => clock.shift() ?? 137,
       fetchImpl: async (input, init) => {
         const headers = new Headers(init?.headers);
@@ -89,12 +90,58 @@ describe("platform provider connectivity", () => {
         body: {
           model: "gpt-5.4",
           messages: [{ role: "user", content: "hi" }],
-          max_tokens: 32,
           stream: false,
         },
       },
     ]);
-    expect(result).toMatchObject({ model: "gpt-5.4", latencyMs: 37, status: 200 });
+    expect(result).toMatchObject({
+      model: "gpt-5.4",
+      protocol: "chat.completions",
+      latencyMs: 37,
+      status: 200,
+      answer: "hi",
+    });
+  });
+
+  it("sends hi through the Responses API and extracts the answer", async () => {
+    const calls: Array<{ url: string; body: unknown }> = [];
+    const result = await testProviderConnectivity({
+      provider: provider(),
+      apiKey: "sk-live",
+      model: "gpt-5.5",
+      protocol: "responses",
+      fetchImpl: async (input, init) => {
+        calls.push({ url: String(input), body: JSON.parse(String(init?.body)) });
+        return Response.json({
+          id: "resp-test",
+          object: "response",
+          output: [
+            {
+              type: "message",
+              role: "assistant",
+              content: [{ type: "output_text", text: "Hello from Responses" }],
+            },
+          ],
+        });
+      },
+    });
+
+    expect(calls).toEqual([
+      {
+        url: "https://upstream.test/v1/responses",
+        body: {
+          model: "gpt-5.5",
+          input: "hi",
+          stream: false,
+        },
+      },
+    ]);
+    expect(result).toMatchObject({
+      model: "gpt-5.5",
+      protocol: "responses",
+      status: 200,
+      answer: "Hello from Responses",
+    });
   });
 
   it("uses the Anthropic adapter and never returns an upstream error body", async () => {
@@ -105,6 +152,7 @@ describe("platform provider connectivity", () => {
         provider: provider({ kind: "anthropic", auth_scheme: "x-api-key" }),
         apiKey: "anthropic-secret",
         model: "claude-sonnet",
+        protocol: "chat.completions",
         fetchImpl: async (input, init) => {
           requestUrl = String(input);
           apiKey = new Headers(init?.headers).get("x-api-key") ?? "";
