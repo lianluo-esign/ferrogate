@@ -437,7 +437,11 @@ function promptCacheFromCacheControl(body: Json): Json | undefined {
   const marker = findCacheControl(body);
   if (marker === undefined) return undefined;
   const ttl = asString(get(marker, "ttl"));
-  return { mode: "explicit", ...(ttl === "1h" ? { ttl } : {}) };
+  // A default ephemeral marker asks for ordinary prompt caching, which an
+  // automatic-cache family can satisfy even though it chooses the breakpoint.
+  // Long retention remains explicit because an automatic family cannot promise
+  // Anthropic's requested one-hour lifetime.
+  return ttl === "1h" ? { mode: "explicit", ttl } : { mode: "auto" };
 }
 
 function findCacheControl(value: unknown): unknown {

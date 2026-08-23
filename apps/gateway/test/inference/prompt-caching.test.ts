@@ -372,6 +372,63 @@ describe("the /v1/messages ingress keeps the caller's caching intent", () => {
     }
   });
 
+  it("maps a default Anthropic cache marker onto an automatic-cache provider", async () => {
+    const provider = interceptProviderFetch(() => providerJson(OPENAI_COMPLETION));
+    try {
+      const res = await harness({}, ROUTES).post("/v1/messages", {
+        model: "gpt-4o-mini",
+        max_tokens: 256,
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text: "is claim 91 covered?",
+                cache_control: { type: "ephemeral" },
+              },
+            ],
+          },
+        ],
+      });
+
+      expect(res.status).toBe(200);
+      expect(provider.requests).toHaveLength(1);
+      expect(JSON.stringify(provider.lastRequest().body)).not.toContain("prompt_cache");
+      expect(JSON.stringify(provider.lastRequest().body)).not.toContain("cache_control");
+    } finally {
+      provider.restore();
+    }
+  });
+
+  it("still refuses Anthropic long-cache retention on an automatic-cache provider", async () => {
+    const provider = interceptProviderFetch(() => providerJson(OPENAI_COMPLETION));
+    try {
+      const res = await harness({}, ROUTES).post("/v1/messages", {
+        model: "gpt-4o-mini",
+        max_tokens: 256,
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text: "is claim 91 covered?",
+                cache_control: { type: "ephemeral", ttl: "1h" },
+              },
+            ],
+          },
+        ],
+      });
+
+      expect(res.status).toBe(400);
+      expect((await errorBody(res)).error.code).toBe("model_capability_unsupported");
+      expect(provider.requests).toHaveLength(0);
+    } finally {
+      provider.restore();
+    }
+  });
+
   it("a `prompt_cache` on /v1/messages reaches the family's own mechanism", async () => {
     // The other half of the same claim: read means READ, not merely validated.
     const provider = interceptProviderFetch(() => providerJson(ANTHROPIC_MESSAGE));
