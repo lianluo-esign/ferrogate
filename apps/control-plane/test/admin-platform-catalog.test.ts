@@ -460,6 +460,22 @@ describe("platform model catalog admin surface", () => {
       .first<{ pricing_model_id: string | null; cost_multiplier: number }>();
     expect(bound).toEqual({ pricing_model_id: "price_claude_opus_5", cost_multiplier: 0.5 });
 
+    const modelWithOfficialPrice = await request(OPERATOR, "GET", "/admin/v1/models/priced_model");
+    expect(modelWithOfficialPrice.status).toBe(200);
+    const pricedOffering = (
+      (modelWithOfficialPrice.body.model as JsonBody).offerings as JsonBody[]
+    )[0];
+    expect(pricedOffering).toMatchObject({
+      pricing_model_id: "price_claude_opus_5",
+      input_price_per_1m: 0.25,
+      output_price_per_1m: 0.5,
+      official_input_price_per_1m: 10,
+      official_output_price_per_1m: 50,
+      official_currency: "USD",
+    });
+    expect(pricedOffering?.provider_cost_multiplier).toBeUndefined();
+    expect(pricedOffering?.billing_input_price_per_1m).toBeUndefined();
+
     const prices = await request(OPERATOR, "GET", "/admin/v1/model-prices");
     expect(prices.status).toBe(200);
     expect((prices.body.data as JsonBody[]).map((row) => row.model_key)).toEqual(["claude-opus-5"]);

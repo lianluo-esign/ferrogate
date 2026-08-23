@@ -176,6 +176,7 @@ interface OfferingRow {
   readonly provider_name: string | null;
   readonly upstream_model_id: string;
   readonly pricing_model_id: string | null;
+  readonly pricing_enabled: number | null;
   readonly role: string;
   readonly priority: number;
   readonly weight: number;
@@ -194,6 +195,14 @@ interface OfferingRow {
   readonly audio_second_price_per_1m: number | null;
   readonly audio_character_price_per_1m: number | null;
   readonly currency: string;
+  readonly official_input_price_per_1m: number | null;
+  readonly official_output_price_per_1m: number | null;
+  readonly official_cached_input_price_per_1m: number | null;
+  readonly official_cache_write_price_per_1m: number | null;
+  readonly official_reasoning_price_per_1m: number | null;
+  readonly official_audio_second_price_per_1m: number | null;
+  readonly official_audio_character_price_per_1m: number | null;
+  readonly official_currency: string | null;
   readonly source: string;
   readonly enabled: number;
 }
@@ -258,16 +267,28 @@ const MODEL_SELECT = `
 
 const OFFERING_SELECT = `
   SELECT o.id, o.model_id, o.provider_id, p.name AS provider_name,
-         o.upstream_model_id, o.pricing_model_id, o.role, o.priority, o.weight, o.canary_percent,
+         o.upstream_model_id, o.pricing_model_id, price.enabled AS pricing_enabled,
+         o.role, o.priority, o.weight, o.canary_percent,
          o.shadow_percent, o.shadow_max_requests, o.capabilities_json,
          o.context_window, o.region, o.zero_data_retention,
          o.input_price_per_1m, o.output_price_per_1m,
          o.cached_input_price_per_1m, o.cache_write_price_per_1m,
          o.reasoning_price_per_1m, o.audio_second_price_per_1m,
-         o.audio_character_price_per_1m, o.currency, o.source, o.enabled
+         o.audio_character_price_per_1m, o.currency,
+         price.input_price_per_1m AS official_input_price_per_1m,
+         price.output_price_per_1m AS official_output_price_per_1m,
+         price.cached_input_price_per_1m AS official_cached_input_price_per_1m,
+         price.cache_write_price_per_1m AS official_cache_write_price_per_1m,
+         price.reasoning_price_per_1m AS official_reasoning_price_per_1m,
+         price.audio_second_price_per_1m AS official_audio_second_price_per_1m,
+         price.audio_character_price_per_1m AS official_audio_character_price_per_1m,
+         price.currency AS official_currency,
+         o.source, o.enabled
     FROM ${PLATFORM_OFFERING_TABLE} o
     LEFT JOIN ${PLATFORM_PROVIDER_TABLE} p
-      ON p.id = o.provider_id`;
+      ON p.id = o.provider_id
+    LEFT JOIN ${PLATFORM_MODEL_PRICE_TABLE} price
+      ON price.id = o.pricing_model_id`;
 
 const MODEL_PRICE_SELECT = `
   SELECT id, model_key, name, aliases_json, source_type, source_provider_id, source_provider_name,
@@ -393,7 +414,18 @@ function providerRecord(row: ProviderRow): CatalogRecord {
   };
 }
 
+function resolvedOfficialPrice(row: OfferingRow, official: number | null): number | null {
+  return row.pricing_model_id !== null && row.pricing_enabled === 1 ? official : null;
+}
+
 function offeringRecord(row: OfferingRow): CatalogRecord {
+  const input = resolvedOfficialPrice(row, row.official_input_price_per_1m);
+  const output = resolvedOfficialPrice(row, row.official_output_price_per_1m);
+  const cachedInput = resolvedOfficialPrice(row, row.official_cached_input_price_per_1m);
+  const cacheWrite = resolvedOfficialPrice(row, row.official_cache_write_price_per_1m);
+  const reasoning = resolvedOfficialPrice(row, row.official_reasoning_price_per_1m);
+  const audioSecond = resolvedOfficialPrice(row, row.official_audio_second_price_per_1m);
+  const audioCharacter = resolvedOfficialPrice(row, row.official_audio_character_price_per_1m);
   return {
     id: row.id,
     scope: PLATFORM_SCOPE,
@@ -420,6 +452,14 @@ function offeringRecord(row: OfferingRow): CatalogRecord {
     audio_second_price_per_1m: row.audio_second_price_per_1m,
     audio_character_price_per_1m: row.audio_character_price_per_1m,
     currency: row.currency,
+    official_input_price_per_1m: input,
+    official_output_price_per_1m: output,
+    official_cached_input_price_per_1m: cachedInput,
+    official_cache_write_price_per_1m: cacheWrite,
+    official_reasoning_price_per_1m: reasoning,
+    official_audio_second_price_per_1m: audioSecond,
+    official_audio_character_price_per_1m: audioCharacter,
+    official_currency: row.pricing_enabled === 1 ? row.official_currency : null,
     source: row.source,
     enabled: boolValue(row.enabled, true),
   };
