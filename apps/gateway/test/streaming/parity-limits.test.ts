@@ -53,6 +53,19 @@ describe("native provider streams are normalized for OpenAI chat clients", () =>
       }),
     ).not.toBeNull();
   });
+
+  test("a native Responses upstream is relayed without a normalizer", () => {
+    expect(
+      defaultStreamNormalizers.normalizerFor({
+        dialect: "openai.responses",
+        providerKind: "openai-compatible",
+        upstreamProtocol: "openai.responses",
+        logicalModel: "gpt-5.5",
+        requestId: "fg-test",
+        contentType: "text/event-stream",
+      }),
+    ).toBeNull();
+  });
 });
 
 // ---------------------------------------------------------------------------

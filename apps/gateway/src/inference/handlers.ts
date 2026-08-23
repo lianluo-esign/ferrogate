@@ -63,7 +63,7 @@ import { conversationReplayScreenerFor } from "../guardrails/conversation-replay
 import { effectiveResidencyPolicy } from "../residency/policy.js";
 import type { ResidencyPolicy } from "../residency/policy.js";
 import { genAiOperationForRouteLabel, observeGenAiInvocation } from "../telemetry/genai.js";
-import { canonicalProviderKind } from "./adapters.js";
+import { OPENAI_RESPONSES_CAPABILITY_HEADERS, canonicalProviderKind } from "./adapters.js";
 import { parseAudioObjectReference } from "./audio-objects.js";
 import { byokScopedModels } from "./byok.js";
 import {
@@ -678,6 +678,30 @@ interface PlannedRequest {
   readonly routingDecision?: CostQualityDecision | undefined;
 }
 
+const MAX_PROTOCOL_HEADER_VALUE_LENGTH = 1_024;
+
+/**
+ * Select the capability negotiation fields that are safe to relay to a native
+ * Responses upstream. Tenant credentials and Codex's request/session telemetry
+ * deliberately never enter this map.
+ */
+function openAiResponsesCapabilityHeaders(
+  headers: Headers,
+): Readonly<Record<string, string>> | undefined {
+  const selected: Record<string, string> = {};
+  for (const name of OPENAI_RESPONSES_CAPABILITY_HEADERS) {
+    const value = headers.get(name)?.trim();
+    if (
+      value !== undefined &&
+      value.length > 0 &&
+      value.length <= MAX_PROTOCOL_HEADER_VALUE_LENGTH
+    ) {
+      selected[name] = value;
+    }
+  }
+  return Object.keys(selected).length === 0 ? undefined : selected;
+}
+
 /** `ModelEndpointKind` for the eligibility gate. */
 function endpointKindFor(operation: InferenceOperation): ModelEndpointKind {
   switch (operation) {
@@ -731,6 +755,7 @@ function planUpstream(
   body: Record<string, unknown>,
   estimated?: EstimatedUsage,
   workflowConstraint: WorkflowProviderConstraint | null = null,
+  protocolHeaders?: Readonly<Record<string, string>>,
 ): PlannedRequest | InferenceRejection {
   const inputTokenUpperBound = estimated?.promptTokens ?? 0;
   const metadataReason = validateRequestMetadata(metadata);
@@ -913,6 +938,7 @@ function planUpstream(
       providerModel: route.providerModel,
       stream,
       body,
+      ...(protocolHeaders === undefined ? {} : { protocolHeaders }),
     });
     if (!built.ok) {
       // `UnsupportedCapability` is the fail-closed capability error from issue
@@ -2454,6 +2480,7 @@ async function handleOpenAiInference(
     request,
     estimated,
     workflowConstraintOf(gate),
+    operation === "responses" ? openAiResponsesCapabilityHeaders(c.req.raw.headers) : undefined,
   );
   if (isRejection(planned)) {
     return errorResponse(planned, requestId);

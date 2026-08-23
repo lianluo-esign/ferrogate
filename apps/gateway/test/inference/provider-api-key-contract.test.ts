@@ -557,6 +557,87 @@ describe("API-key provider protocol and billing contract", () => {
     }
   });
 
+  it("relays native Responses function and MCP events without rewriting their schema", async () => {
+    const entry = CHAT_CASES[0] as ProviderCase;
+    const frames = [
+      'event: response.created\ndata: {"type":"response.created","sequence_number":0,"response":{"id":"resp-agent","object":"response","status":"in_progress","model":"gpt-5.5","output":[]}}',
+      'event: response.output_item.added\ndata: {"type":"response.output_item.added","sequence_number":1,"output_index":0,"item":{"id":"fc_weather","type":"function_call","call_id":"call_weather","name":"weather","arguments":"","status":"in_progress"}}',
+      'event: response.function_call_arguments.delta\ndata: {"type":"response.function_call_arguments.delta","sequence_number":2,"item_id":"fc_weather","output_index":0,"delta":"{\\"city\\":\\"Singapore\\"}"}',
+      'event: response.mcp_list_tools.completed\ndata: {"type":"response.mcp_list_tools.completed","sequence_number":3,"item_id":"mcp_list_1"}',
+      'event: response.mcp_call.completed\ndata: {"type":"response.mcp_call.completed","sequence_number":4,"item_id":"mcp_call_1"}',
+      'event: response.completed\ndata: {"type":"response.completed","sequence_number":5,"response":{"id":"resp-agent","object":"response","status":"completed","model":"gpt-5.5","output":[{"id":"fc_weather","type":"function_call","call_id":"call_weather","name":"weather","arguments":"{\\"city\\":\\"Singapore\\"}","status":"completed"}],"usage":{"input_tokens":20,"output_tokens":5,"total_tokens":25}}}',
+    ];
+    const upstream = interceptProviderFetch(() => providerSse(frames));
+    try {
+      const physicalRoute: PhysicalRoute = {
+        ...route(entry),
+        upstreamProtocol: "openai.responses",
+      };
+      const gateway = harness({}, [physicalRoute]);
+      const response = await gateway.post(
+        "/v1/responses",
+        {
+          model: physicalRoute.logicalModel,
+          input: "Use the available tools",
+          tools: [
+            {
+              type: "function",
+              name: "weather",
+              description: "Read weather",
+              parameters: { type: "object" },
+            },
+            {
+              type: "mcp",
+              server_label: "orders",
+              server_url: "https://mcp.example.test",
+            },
+          ],
+          stream: true,
+        },
+        {
+          headers: {
+            authorization: "Bearer tenant-virtual-key",
+            "openai-beta": "responses=v1",
+            "session-id": "private-session",
+            "thread-id": "private-thread",
+            "x-api-key": "tenant-virtual-key",
+            "x-codex-beta-features": "remote_compaction_v2",
+            "x-codex-turn-metadata": "private-turn",
+          },
+        },
+      );
+      const text = await response.text();
+
+      expect(response.status).toBe(200);
+      expect(upstream.lastRequest().body).toMatchObject({
+        tools: [
+          expect.objectContaining({ type: "function", name: "weather" }),
+          expect.objectContaining({ type: "mcp", server_label: "orders" }),
+        ],
+      });
+      expect(upstream.lastRequest().headers).toMatchObject({
+        authorization: "Bearer provider-api-key",
+        "openai-beta": "responses=v1",
+        "x-codex-beta-features": "remote_compaction_v2",
+      });
+      expect(upstream.lastRequest().headers["x-api-key"]).toBeUndefined();
+      expect(upstream.lastRequest().headers["session-id"]).toBeUndefined();
+      expect(upstream.lastRequest().headers["thread-id"]).toBeUndefined();
+      expect(upstream.lastRequest().headers["x-codex-turn-metadata"]).toBeUndefined();
+      for (const frame of frames) expect(text).toContain(`${frame}\n\n`);
+      expect(text).toContain('"sequence_number":5');
+      expect(text).toContain('"item_id":"mcp_call_1"');
+      expect(text).toBe(`${frames.join("\n\n")}\n\n`);
+      expect(gateway.usage.last).toMatchObject({
+        promptTokens: 20,
+        completionTokens: 5,
+        totalTokens: 25,
+      });
+    } finally {
+      upstream.restore();
+    }
+  });
+
   it.each(CHAT_CASES.filter((entry) => entry.kind === "anthropic" || entry.kind === "gemini"))(
     "$name normalizes a native buffered answer for the Responses ingress",
     async (entry) => {

@@ -116,9 +116,10 @@ describe("POST /v1/responses — continuing a conversation (#689)", () => {
         { role: "user", content: "And of Germany?" },
       ]);
       // Our id space is not the provider's, and FerroGate is the store of
-      // record — neither member may reach the upstream.
+      // record. Its id must not reach the upstream, and provider-side storage is
+      // disabled explicitly rather than delegated to an upstream default.
       expect(upstream.previous_response_id).toBeUndefined();
-      expect(upstream.store).toBeUndefined();
+      expect(upstream.store).toBe(false);
     } finally {
       provider.restore();
     }

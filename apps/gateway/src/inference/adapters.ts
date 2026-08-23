@@ -138,6 +138,12 @@ function credentialHeader(
   }
 }
 
+export const OPENAI_RESPONSES_CAPABILITY_HEADERS = [
+  "openai-beta",
+  "x-codex-beta-features",
+] as const;
+const OPENAI_RESPONSES_CAPABILITY_HEADER_SET = new Set<string>(OPENAI_RESPONSES_CAPABILITY_HEADERS);
+
 /**
  * The credential scheme a family uses when the provider table does not say.
  *
@@ -154,8 +160,16 @@ export function defaultAuthScheme(providerKind: string): ProviderAuthScheme {
 function openAiHeaders(
   apiKey: string | undefined,
   scheme: ProviderAuthScheme = "bearer",
+  protocolHeaders?: Readonly<Record<string, string>>,
 ): Record<string, string> {
   const headers: Record<string, string> = { "content-type": "application/json" };
+  for (const [name, value] of Object.entries(protocolHeaders ?? {})) {
+    const normalized = name.trim().toLowerCase();
+    if (OPENAI_RESPONSES_CAPABILITY_HEADER_SET.has(normalized)) {
+      headers[normalized] = value;
+    }
+  }
+  // Provider credentials are written last and are never sourced from ingress.
   credentialHeader(headers, apiKey, scheme);
   return headers;
 }
@@ -322,7 +336,13 @@ export const openAiCompatibleAdapter: ProviderAdapter = {
     // or contradict the resolved stream decision.
     body.model = plan.providerModel;
 
-    const headers = openAiHeaders(plan.route.apiKey, plan.route.authScheme ?? "bearer");
+    const headers = openAiHeaders(
+      plan.route.apiKey,
+      plan.route.authScheme ?? "bearer",
+      plan.operation === "responses" && usesResponsesUpstream(plan.route.upstreamProtocol)
+        ? plan.protocolHeaders
+        : undefined,
+    );
     const base: Omit<UpstreamRequest, "endpoint" | "body" | "stream"> = {
       provider: plan.route.provider,
       method: "POST",

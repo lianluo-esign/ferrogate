@@ -361,10 +361,10 @@ function composeByteTransforms(
  *    pass through `responsesToOpenAiChatStream`. The client always receives
  *    `message_start` / `content_block_start|delta|stop` / `message_delta` /
  *    `message_stop`, with tool-call accumulation.
- *  - `openai.responses` on ANY upstream → `responsesNormalizeStream`
- *    (`ResponsesStreamNormalizer`: the `response.*` event sequence). This runs
- *    even for an OpenAI upstream so every client sees one Responses event shape.
- *    Metering taps the provider-native frames before this conversion.
+ *  - `openai.responses` on a Responses upstream stays byte-for-byte. Codex,
+ *    function tools and remote MCP depend on the complete upstream event graph,
+ *    not only output-text deltas. Other upstream dialects are converted through
+ *    `responsesNormalizeStream`. Metering taps provider frames in either case.
  *  - `openai.chat` on Anthropic/Gemini → native SSE is converted to canonical
  *    `chat.completion.chunk` events; compatible providers stay byte-for-byte.
  */
@@ -385,6 +385,9 @@ export const defaultStreamNormalizers: StreamNormalizers = {
           ? null
           : openAiToAnthropicStream({ fallbackModel: context.logicalModel });
       case "openai.responses":
+        if (context.upstreamProtocol === "openai.responses") {
+          return null;
+        }
         return responsesNormalizeStream({
           providerKind: responsesProviderKind(context.providerKind),
           requestId: context.requestId,

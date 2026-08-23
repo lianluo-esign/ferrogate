@@ -37,10 +37,12 @@
  * that relayed the id would offer continuity that silently depends on routing
  * luck.
  *
- * `store` is stripped for the same reason plus a compliance one: FerroGate is
- * the store of record here, and leaving `store: true` on the upstream body
- * would ALSO have the provider retain the conversation — a second copy, under a
- * retention policy the tenant never agreed to and this gateway cannot expire.
+ * `store` is rewritten to `false` for the same reason plus a compliance one:
+ * FerroGate is the store of record here, and leaving `store: true` on the
+ * upstream body would ALSO have the provider retain the conversation — a second
+ * copy, under a retention policy the tenant never agreed to and this gateway
+ * cannot expire. Omitting the member is not sufficient because Responses
+ * providers may default it on; the upstream contract must be explicit.
  *
  * ============================================================================
  * ZERO DATA RETENTION (#681) GOVERNS THIS, BECAUSE IT IS PROMPT CONTENT
@@ -441,13 +443,14 @@ export function conversationInput(
 }
 
 /**
- * The body that goes UPSTREAM: our reconstructed `input`, and neither
- * `previous_response_id` nor `store`.
+ * The body that goes UPSTREAM: our reconstructed `input`, no
+ * `previous_response_id`, and an explicit `store: false`.
  *
- * See the module docs. Both members are ours to honour, and relaying either one
- * would create a second, provider-side conversation with its own id space and
- * its own retention — invisible to `GET`/`DELETE /v1/responses/{id}` and to the
- * retention sweep.
+ * See the module docs. Both members are ours to honour. Relaying the id or a true
+ * store value would create a second, provider-side conversation with its own id
+ * space and retention — invisible to `GET`/`DELETE /v1/responses/{id}` and to
+ * the retention sweep. `false` is sent instead of omitting `store`, so an
+ * upstream whose default is to retain cannot silently create that second copy.
  */
 export function upstreamConversationBody(
   request: Record<string, unknown>,
@@ -456,8 +459,7 @@ export function upstreamConversationBody(
   const body: Record<string, unknown> = { ...request };
   // biome-ignore lint/performance/noDelete: removes the own-property key entirely; assigning undefined would leave an enumerable undefined-valued key and change JSON serialization, the 'in' operator, and Object.keys semantics
   delete body.previous_response_id;
-  // biome-ignore lint/performance/noDelete: removes the own-property key entirely; assigning undefined would leave an enumerable undefined-valued key and change JSON serialization, the 'in' operator, and Object.keys semantics
-  delete body.store;
+  body.store = false;
   if (input !== undefined) body.input = [...input];
   return body;
 }

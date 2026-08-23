@@ -573,6 +573,12 @@ export interface UpstreamPlan {
   readonly stream: boolean;
   /** The caller's body, already validated; adapters rewrite it in place-ish. */
   readonly body: Record<string, unknown>;
+  /**
+   * Protocol capability headers selected by the ingress. This is never the
+   * caller's complete header map: authentication, cookies and client/session
+   * identifiers must not cross the provider boundary.
+   */
+  readonly protocolHeaders?: Readonly<Record<string, string>> | undefined;
 }
 
 /** `ferrogate_providers::ProviderHttpRequest`. */
