@@ -102,6 +102,11 @@ export const configSchema = z.object({
   // opaque entries until that crate is ported. See `../x402-scope.ts`.
   x402_spend_policies: z.array(z.unknown()).default([]),
   asset_egress_price_per_gb: z.number().nullable().default(null),
+  // STATIC_RESOURCES_DESIGN.md §5.3 — flat per-request price for a
+  // `static_resource` pull ($0.001 by default). `null` disables billing (the
+  // pull stays metered/audited but carries no cost). Operator-facing and edited
+  // through Polaris, which is why it lives here and not in the `PriceBook`.
+  static_resource_price_per_request: z.number().nonnegative().nullable().default(0.001),
   cloudflare: cloudflareConfigSchema.nullable().default(null),
   tenancy: sectionDefault(tenancyConfigSchema),
   auth: sectionDefault(authConfigSchema),

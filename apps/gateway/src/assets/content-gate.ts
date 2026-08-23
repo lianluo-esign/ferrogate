@@ -42,9 +42,13 @@ export const ASSET_REJECTED_STATUS = 422;
 /** The Rust `ScreeningRejection.code` for every gate-1 refusal. */
 export const ASSET_REJECTED_CODE = "asset_rejected";
 
+/** The FerroGate-local asset type for tenant-managed static files (STATIC_RESOURCES_DESIGN §4.1). */
+export const STATIC_RESOURCE_ASSET_TYPE = "static_resource";
+
 /**
  * `asset_security.rs::content_type_allowed` (line 107), transcribed exactly —
- * same asset types, same members, same order.
+ * same asset types, same members, same order — PLUS one FerroGate-local entry
+ * (`static_resource`, below the Rust block) that has no upstream counterpart.
  *
  * An `asset_type` NOT named here is unrestricted, which is the Rust `_ => true`
  * arm: no allowlist is defined for it, so it is not blocked on content-type
@@ -94,6 +98,30 @@ export const ASSET_CONTENT_TYPE_ALLOWLIST: Readonly<Record<string, readonly stri
     "application/x-yaml",
     "text/yaml",
     "application/toml",
+  ],
+  // ── FerroGate-local — NOT part of the upstream Rust `asset_security.rs` table ──
+  // `static_resource` is a FerroGate addition (STATIC_RESOURCES_DESIGN §4.1/§4.3):
+  // tenant-managed static files (markdown / html / pdf / images / binary) browsed
+  // in the dashboard and served through the asset system. The list is intentionally
+  // broad — the feature stores arbitrary binary resources, so `application/octet-stream`
+  // is the binary fallback and `application/x-directory` marks folder placeholders.
+  // Script-bearing types (`text/html`, `image/svg+xml`) are admitted at PUBLISH but
+  // MUST be served sandboxed with the correct Content-Type / Content-Disposition
+  // (design §9); the malware screener (`scan.ts`) still runs independently on push.
+  [STATIC_RESOURCE_ASSET_TYPE]: [
+    "text/markdown",
+    "text/html",
+    "text/plain",
+    "text/css",
+    "application/json",
+    "application/pdf",
+    "image/png",
+    "image/jpeg",
+    "image/gif",
+    "image/webp",
+    "image/svg+xml",
+    "application/x-directory",
+    "application/octet-stream",
   ],
 };
 
@@ -197,6 +225,53 @@ export function assetContentRejection(
     }
   }
   return undefined;
+}
+
+/**
+ * Base content types a browser will execute script from when it renders them
+ * INLINE (as a page, not a download). `image/svg+xml` belongs here: an SVG can
+ * carry `<script>`.
+ */
+const SCRIPTABLE_BASE_TYPES: ReadonlySet<string> = new Set([
+  "text/html",
+  "application/xhtml+xml",
+  "image/svg+xml",
+]);
+
+/**
+ * Defensive RESPONSE headers for serving a `static_resource` object through the
+ * gateway origin (STATIC_RESOURCES_DESIGN §4.3 / §9).
+ *
+ * Unlike `static_site` — a website whose HTML is MEANT to render inline — a
+ * `static_resource` html/svg is a managed tenant FILE the dashboard distributes.
+ * Served naively it would run its script in the gateway's own origin, so this
+ * neutralises it:
+ *
+ *  - `content-disposition: attachment` — the browser downloads rather than
+ *    renders it, so no script executes in the gateway origin.
+ *  - `content-security-policy: sandbox` — a client that renders it anyway gets
+ *    scripts, forms and same-origin access disabled.
+ *
+ * `x-content-type-options: nosniff` is set for EVERY `static_resource` response
+ * so a mislabeled `application/octet-stream` cannot be sniffed into active
+ * content.
+ *
+ * Returns `{}` for any other asset type — this must NEVER change how
+ * `static_site` / `cli_tool` / etc. are served. Only the BASE type is inspected
+ * (parameters split on `;`), matching {@link contentTypeAllowed}.
+ */
+export function staticResourceServeHeaders(
+  assetType: string,
+  contentType: string,
+): Record<string, string> {
+  if (assetType !== STATIC_RESOURCE_ASSET_TYPE) return {};
+  const headers: Record<string, string> = { "x-content-type-options": "nosniff" };
+  const baseType = (contentType.split(";")[0] ?? contentType).trim().toLowerCase();
+  if (SCRIPTABLE_BASE_TYPES.has(baseType)) {
+    headers["content-disposition"] = "attachment";
+    headers["content-security-policy"] = "sandbox";
+  }
+  return headers;
 }
 
 /**

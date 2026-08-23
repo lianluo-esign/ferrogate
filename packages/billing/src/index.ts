@@ -32,3 +32,4 @@ export * from "./service.js";
 export * from "./budget-alerts.js";
 export * from "./x402-inbound.js";
 export * from "./asset-egress.js";
+export * from "./static-resource.js";

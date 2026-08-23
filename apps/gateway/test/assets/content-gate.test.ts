@@ -32,6 +32,7 @@ import {
   assetContentRejection,
   contentTypeAllowed,
   mcpManifestTransport,
+  staticResourceServeHeaders,
   streamedAssetContentRejection,
 } from "../../src/assets/content-gate.js";
 import { sha256Hex } from "../../src/assets/hash.js";
@@ -104,6 +105,22 @@ describe("D5 gate 1a — the per-asset_type content-type allowlist", () => {
     expect(contentTypeAllowed("something_new", "application/x-womp")).toBe(true);
   });
 
+  it("gates the FerroGate-local static_resource type to its published allowlist", () => {
+    // Not in the Rust table — a FerroGate addition (STATIC_RESOURCES_DESIGN §4.3).
+    // Broad enough for real static files (pdf, images, binary fallback, folder marker)…
+    expect(ASSET_CONTENT_TYPE_ALLOWLIST.static_resource).toHaveLength(13);
+    expect(contentTypeAllowed("static_resource", "text/markdown")).toBe(true);
+    expect(contentTypeAllowed("static_resource", "application/pdf")).toBe(true);
+    expect(contentTypeAllowed("static_resource", "image/webp")).toBe(true);
+    expect(contentTypeAllowed("static_resource", "application/x-directory")).toBe(true);
+    expect(contentTypeAllowed("static_resource", "application/octet-stream")).toBe(true);
+    // base-type comparison holds here too (parameters do not smuggle a type past it).
+    expect(contentTypeAllowed("static_resource", "text/html; charset=utf-8")).toBe(true);
+    // …but still a real gate: types outside the list are refused.
+    expect(contentTypeAllowed("static_resource", "application/x-sh")).toBe(false);
+    expect(contentTypeAllowed("static_resource", "application/zip")).toBe(false);
+  });
+
   it("REFUSES a disallowed content-type at putAsset with 422 asset_rejected", async () => {
     const h = harness({ screener: new AdmitEverythingScreener() });
     const result = await h.service.putAsset(
@@ -169,6 +186,31 @@ describe("D5 gate 1a — the per-asset_type content-type allowlist", () => {
     expect(commit.message).toBe("content-type text/html is not allowed for asset_type cli_tool");
   });
 });
+
+describe("static_resource serve hardening (design §4.3/§9)", () => {
+  it("forces attachment + sandbox for script-bearing static_resource types", () => {
+    for (const ct of ["text/html", "image/svg+xml", "application/xhtml+xml", "TEXT/HTML; charset=utf-8"]) {
+      const h = staticResourceServeHeaders("static_resource", ct)
+      expect(h["content-disposition"]).toBe("attachment")
+      expect(h["content-security-policy"]).toBe("sandbox")
+      expect(h["x-content-type-options"]).toBe("nosniff")
+    }
+  })
+
+  it("sets only nosniff for non-scriptable static_resource types", () => {
+    for (const ct of ["application/pdf", "image/png", "text/markdown", "application/octet-stream"]) {
+      const h = staticResourceServeHeaders("static_resource", ct)
+      expect(h["x-content-type-options"]).toBe("nosniff")
+      expect(h["content-disposition"]).toBeUndefined()
+      expect(h["content-security-policy"]).toBeUndefined()
+    }
+  })
+
+  it("returns no headers for other asset types — static_site html still renders inline", () => {
+    expect(staticResourceServeHeaders("static_site", "text/html")).toEqual({})
+    expect(staticResourceServeHeaders("cli_tool", "application/octet-stream")).toEqual({})
+  })
+})
 
 describe("D5 gate 1b — the mcp_manifest stdio refusal", () => {
   it("extracts a declared transport, and only from parseable JSON with the field", () => {

@@ -43,10 +43,13 @@
 
 import {
   type AssetEgressQuota,
+  DEFAULT_STATIC_RESOURCE_PRICE_PER_REQUEST,
   NO_ASSET_EGRESS_METER,
+  NO_STATIC_RESOURCE_METER,
   assetEgressCountersFromEnv,
   assetEgressMeterFromEnv,
   assetEgressPricePerGb,
+  staticResourceMeterFromEnv,
 } from "@ferrogate/billing";
 import type { Context } from "hono";
 import type { z } from "zod";
@@ -762,6 +765,23 @@ export function assetDepsFromEnv(env: Record<string, unknown>): Partial<AssetSer
     meter: egressMeter ?? NO_ASSET_EGRESS_METER,
     ...(pricePerGb !== undefined ? { pricePerGb } : {}),
   };
+  // `static_resource` per-request billing (STATIC_RESOURCES_DESIGN.md §5.3).
+  // The meter degrades to a drop when no billing database is bound, exactly
+  // like egress. The price is the product default here; a Polaris-editable
+  // per-deployment override is P3 follow-up and needs the same config→runtime
+  // plumbing `asset_egress_price_per_gb` uses (seeding, not a Worker var —
+  // `test/env-var-drift.test.ts` refuses an undeclared read).
+  const staticResourceMeter =
+    env.TENANT_DATA === undefined
+      ? staticResourceMeterFromEnv(env)
+      : staticResourceMeterFromEnv(env, (tenantId) => {
+          const database = meteringDatabaseFrom(env, tenantId);
+          return database === undefined ? undefined : new D1LedgerStore(database, { tenantId });
+        });
+  const staticResource = {
+    meter: staticResourceMeter ?? NO_STATIC_RESOURCE_METER,
+    pricePerRequest: DEFAULT_STATIC_RESOURCE_PRICE_PER_REQUEST,
+  };
   return {
     ...(objects !== undefined ? { objects } : {}),
     ...(metadata !== null ? { metadata } : {}),
@@ -770,6 +790,7 @@ export function assetDepsFromEnv(env: Record<string, unknown>): Partial<AssetSer
     ...(presigner !== null ? { presigner } : {}),
     ...(screener !== null ? { screener } : {}),
     egress,
+    staticResource,
     limits: {
       objectStoreEnabled,
       ...(objects !== undefined && presigner !== null ? { presignEnabled: true } : {}),

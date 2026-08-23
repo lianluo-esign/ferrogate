@@ -25,6 +25,7 @@ import {
   type AssetLimits,
   type AssetRequestContext,
   AssetService,
+  type StaticResourceDeps,
 } from "../../src/assets/service.js";
 
 /** Deterministic presigner: no network, no credentials, stable URLs. */
@@ -92,6 +93,8 @@ export interface HarnessOptions {
   readonly objects?: InMemoryAssetObjectStore;
   /** Egress counters/meter (issue #262). Absent ⇒ the service's own default. */
   readonly egress?: AssetEgressDeps;
+  /** `static_resource` per-request meter. Absent ⇒ the service's drop meter. */
+  readonly staticResource?: StaticResourceDeps;
 }
 
 export const START_UNIX = 1_700_000_000;
@@ -113,6 +116,7 @@ export function harness(options: HarnessOptions = {}): Harness {
     limits: { presignEnabled: true, presignTtlSeconds: 900, ...(options.limits ?? {}) },
     now: () => clock,
     ...(options.egress !== undefined ? { egress: options.egress } : {}),
+    ...(options.staticResource !== undefined ? { staticResource: options.staticResource } : {}),
   });
   return {
     service,

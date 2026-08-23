@@ -29,10 +29,15 @@ import {
   type AssetEgressMeter,
   InMemoryAssetEgressCounters,
   NO_ASSET_EGRESS_METER,
+  NO_STATIC_RESOURCE_METER,
+  STATIC_RESOURCE_PROVIDER,
+  type StaticResourceMeter,
   assetEgressQuotaDenial,
   assetEgressTargetId,
   assetPullAuditMessage,
   recordAssetEgress,
+  recordStaticResourceRequest,
+  staticResourcePullAuditMessage,
 } from "@ferrogate/billing";
 import {
   bundlePathRejection,
@@ -48,6 +53,7 @@ import {
   ASSET_REJECTED_STATUS,
   EICAR_SIGNATURE,
   assetContentRejection,
+  staticResourceServeHeaders,
   streamedAssetContentRejection,
 } from "./content-gate.js";
 import { StreamingSha256, randomHex128, sha256Hex, toHex } from "./hash.js";
@@ -448,6 +454,20 @@ export interface AssetEgressDeps {
   readonly pricePerGb?: number | undefined;
 }
 
+/**
+ * Per-request billing for the `static_resource` asset type
+ * (STATIC_RESOURCES_DESIGN.md §5.3). A pull of this type is charged a flat
+ * `pricePerRequest` per served gateway GET (design Q-A) INSTEAD of the per-GB
+ * egress path (Q-E), which is why it has its own meter and no byte counter.
+ * Absent ⇒ a dropping meter, the same DEGRADATION posture {@link AssetEgressDeps}
+ * takes when no billing sink is bound.
+ */
+export interface StaticResourceDeps {
+  readonly meter: StaticResourceMeter;
+  /** `static_resource_price_per_request`. Null/absent ⇒ metered but not priced. */
+  readonly pricePerRequest?: number | null | undefined;
+}
+
 export interface AssetServiceDeps {
   readonly objects: AssetObjectStore;
   readonly metadata: AssetMetadataStore;
@@ -465,6 +485,8 @@ export interface AssetServiceDeps {
   readonly now?: (() => number) | undefined;
   /** Egress quota + metering (issue #262). See {@link AssetEgressDeps}. */
   readonly egress?: AssetEgressDeps | undefined;
+  /** Per-request `static_resource` billing. See {@link StaticResourceDeps}. */
+  readonly staticResource?: StaticResourceDeps | undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -628,6 +650,7 @@ export class AssetService {
   readonly #limits: AssetLimits;
   readonly #now: () => number;
   readonly #egress: AssetEgressDeps;
+  readonly #staticResource: StaticResourceDeps;
 
   constructor(deps: AssetServiceDeps) {
     this.#objects = deps.objects;
@@ -642,6 +665,7 @@ export class AssetService {
       counters: new InMemoryAssetEgressCounters(this.#now),
       meter: NO_ASSET_EGRESS_METER,
     };
+    this.#staticResource = deps.staticResource ?? { meter: NO_STATIC_RESOURCE_METER };
   }
 
   get limits(): AssetLimits {
@@ -857,6 +881,80 @@ export class AssetService {
       id,
       "served",
       assetPullAuditMessage(id, servedBytes),
+    );
+  }
+
+  /**
+   * The `static_resource` per-request meter + PULL-side audit event
+   * (STATIC_RESOURCES_DESIGN.md §5.3). Charged a FLAT `pricePerRequest` per
+   * served gateway GET, independent of object size — the deliberate replacement
+   * (Q-E) for the per-GB egress path, which is why this type never reaches
+   * {@link #recordEgress} and never accumulates a byte budget.
+   *
+   * `servedBytes` gates the same way egress does: a `HEAD`/`304`/`416` puts
+   * nothing on the wire and is NOT billed (design Q-A — only a successful 200/206
+   * that served content counts). Best-effort, so a metering failure never turns a
+   * served pull into the caller's error.
+   */
+  async #recordStaticResourcePull(
+    caller: AssetCaller,
+    context: AssetRequestContext,
+    asset: { id: string; name: string; version: string },
+    servedBytes: number,
+  ): Promise<void> {
+    if (servedBytes <= 0) return;
+    await recordStaticResourceRequest({
+      tenantId: caller.tenantId,
+      apiKeyId: caller.apiKeyId ?? "",
+      projectId: caller.projectId,
+      requestId: context.requestId,
+      agentRunId: context.agentRunId,
+      name: asset.name,
+      version: asset.version,
+      requests: 1,
+      pricePerRequest: this.#staticResource.pricePerRequest,
+      meter: this.#staticResource.meter,
+      nowUnix: this.#now(),
+    });
+    const id = asset.id;
+    this.#record(
+      context,
+      caller,
+      "asset.pull",
+      id,
+      "served",
+      staticResourcePullAuditMessage(id, 1),
+    );
+  }
+
+  /**
+   * The inline-GET pull settle: `static_resource` bills flat-per-request (Q-E),
+   * every other type bills per-GB egress (#262). The two are mutually exclusive
+   * by design — a `static_resource` pull is deliberately kept OUT of the egress
+   * byte accounting so its rate card reads as "$X per request", full stop.
+   */
+  async #recordDownloadPull(
+    caller: AssetCaller,
+    context: AssetRequestContext,
+    ref: AssetName,
+    id: string,
+    version: string,
+    servedBytes: number,
+  ): Promise<void> {
+    if (ref.assetType === STATIC_RESOURCE_PROVIDER) {
+      await this.#recordStaticResourcePull(
+        caller,
+        context,
+        { id, name: ref.name, version },
+        servedBytes,
+      );
+      return;
+    }
+    await this.#recordEgress(
+      caller,
+      context,
+      { id, assetType: ref.assetType, name: ref.name, version },
+      servedBytes,
     );
   }
 
@@ -1626,6 +1724,9 @@ export class AssetService {
     const etag = `"${served.content_hash}"`;
     const validators: Record<string, string> = {
       ...extra,
+      // Defensive serve headers for `static_resource` html/svg (design §4.3/§9);
+      // `{}` for every other asset type, so `static_site` inline serving is intact.
+      ...staticResourceServeHeaders(ref.assetType, served.content_type),
       etag,
       "last-modified": formatHttpDate(selected.updated_at_unix),
       // PER-RESPONSE since #737. It was one hard-coded constant for every byte
@@ -1667,10 +1768,12 @@ export class AssetService {
         // is never double-billed. Recorded before the body is handed back, so
         // a client that disconnects mid-download is still billed for what was
         // actually served.
-        await this.#recordEgress(
+        await this.#recordDownloadPull(
           caller,
           context,
-          { id: egressTarget, assetType: ref.assetType, name: ref.name, version },
+          ref,
+          egressTarget,
+          version,
           body === null ? 0 : body.byteLength,
         );
         return {
@@ -1687,10 +1790,12 @@ export class AssetService {
       }
       case "full": {
         const body = isHead ? null : content;
-        await this.#recordEgress(
+        await this.#recordDownloadPull(
           caller,
           context,
-          { id: egressTarget, assetType: ref.assetType, name: ref.name, version },
+          ref,
+          egressTarget,
+          version,
           body === null ? 0 : body.byteLength,
         );
         return {
@@ -2938,17 +3043,26 @@ export class AssetService {
     // Rust `asset_presign.rs:1629`: the presigned direct path bills at ISSUANCE
     // using the object size, since the bytes never traverse the gateway hot
     // path and there is no later moment at which they could be counted.
-    await this.#recordEgress(
-      caller,
-      context,
-      {
-        id: egressTarget,
-        assetType: ref.assetType,
-        name: ref.name,
-        version: ref.version,
-      },
-      asset.size_bytes,
-    );
+    //
+    // `static_resource` is the ONE exception: it is billed flat-per-request on
+    // the gateway GET path, NOT per-GB, and the presigned URL is a MANAGEMENT
+    // affordance (preview/admin download) that design Q-B leaves unbilled. So
+    // this type issues the URL, audits it above, and settles no charge here —
+    // end-user distribution of a static resource must go through the gateway
+    // GET (which is where its per-request charge lands), never this presign.
+    if (ref.assetType !== STATIC_RESOURCE_PROVIDER) {
+      await this.#recordEgress(
+        caller,
+        context,
+        {
+          id: egressTarget,
+          assetType: ref.assetType,
+          name: ref.name,
+          version: ref.version,
+        },
+        asset.size_bytes,
+      );
+    }
 
     return {
       ok: true,
