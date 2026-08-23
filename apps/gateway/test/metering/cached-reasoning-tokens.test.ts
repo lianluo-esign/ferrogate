@@ -268,6 +268,32 @@ describe("streaming capture", () => {
     expect(observed?.promptTokens).toBe(26_000);
   });
 
+  it("reports terminal Anthropic usage before a client stops reading at message_delta", async () => {
+    const terminal = new TextEncoder().encode(
+      'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":330,"output_tokens":16}}\n\n',
+    );
+    let observed: ProviderUsage | undefined;
+    let reports = 0;
+    const tap = sseUsageTap("anthropic", (usage) => {
+      observed = usage;
+      reports += 1;
+    });
+    const source = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(terminal);
+      },
+    });
+    const reader = source.pipeThrough(tap).getReader();
+
+    const first = await reader.read();
+    expect(first.done).toBe(false);
+    expect(new TextDecoder().decode(first.value)).toBe(new TextDecoder().decode(terminal));
+    expect(observed).toEqual({ promptTokens: 330, completionTokens: 16, totalTokens: 346 });
+
+    await reader.cancel("Claude Code consumed the terminal delta");
+    expect(reports).toBe(1);
+  });
+
   it("the parsed-frame capture in src/streaming agrees with the raw-byte one", () => {
     // Two independent scrapers exist (one over parsed `SseFrame`s for the
     // re-serializing ingresses, one over raw bytes for the passthrough leg).

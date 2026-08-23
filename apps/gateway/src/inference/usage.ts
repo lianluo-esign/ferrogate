@@ -391,6 +391,7 @@ export class SseUsageScraper {
   #eventData = "";
   #sawData = false;
   #usage: ProviderUsage | undefined;
+  #terminal = false;
 
   constructor(dialect: UsageDialect) {
     this.#dialect = dialect;
@@ -426,6 +427,11 @@ export class SseUsageScraper {
     return this.#usage;
   }
 
+  /** True once a protocol terminal frame carrying final usage was observed. */
+  get terminal(): boolean {
+    return this.#terminal;
+  }
+
   #line(rawLine: string): void {
     const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
     if (line.length === 0) {
@@ -447,7 +453,9 @@ export class SseUsageScraper {
   }
 
   #dispatch(): void {
-    if (this.#sawData && this.#eventData !== DONE_SENTINEL) {
+    if (this.#sawData && this.#eventData === DONE_SENTINEL) {
+      this.#terminal = true;
+    } else if (this.#sawData) {
       let payload: unknown;
       try {
         payload = JSON.parse(this.#eventData);
@@ -459,6 +467,14 @@ export class SseUsageScraper {
         if (observed !== undefined) {
           this.#usage = mergeUsage(this.#usage, observed);
         }
+        const type = member(payload, "type");
+        const delta = member(payload, "delta");
+        if (
+          type === "response.completed" ||
+          (type === "message_delta" && member(delta, "stop_reason") != null)
+        ) {
+          this.#terminal = true;
+        }
       }
     }
     this.#eventData = "";
@@ -468,7 +484,8 @@ export class SseUsageScraper {
 
 /**
  * A byte-for-byte passthrough `TransformStream` that tees the bytes into an
- * {@link SseUsageScraper} and reports the final usage on flush.
+ * {@link SseUsageScraper} and reports usage on a protocol terminal frame or,
+ * for providers without one, on flush.
  *
  * The client-visible bytes are the upstream chunks re-enqueued UNCHANGED (the
  * same `Uint8Array` references), which is the "preserve upstream SSE framing
@@ -491,8 +508,12 @@ export function sseUsageTap(
   };
   return new TransformStream<Uint8Array, Uint8Array>({
     transform(chunk, controller) {
-      controller.enqueue(chunk);
       scraper.push(decoder.decode(chunk, { stream: true }));
+      // Claude Code stops reading once the terminal Anthropic delta arrives.
+      // Settle before exposing that chunk so client cancellation cannot erase
+      // a completed provider call from billing.
+      if (scraper.terminal) report();
+      controller.enqueue(chunk);
     },
     flush() {
       scraper.push(decoder.decode());
