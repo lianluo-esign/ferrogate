@@ -17,6 +17,11 @@ export interface ChatStreamOptions {
   readonly fallbackModel: string;
 }
 
+export interface ResponsesChatStreamOptions {
+  readonly requestId: string;
+  readonly fallbackModel: string;
+}
+
 interface AnthropicUsageState {
   freshInput?: number;
   cacheRead?: number;
@@ -389,4 +394,146 @@ export function nativeToOpenAiChatStream(
   options: ChatStreamOptions,
 ): TransformStream<Uint8Array, Uint8Array> {
   return bytesThroughFrames(nativeToOpenAiChatFrameStream(options), { preferRaw: false });
+}
+
+/** OpenAI Responses SSE -> OpenAI Chat Completions SSE. */
+export function responsesToOpenAiChatStream(
+  options: ResponsesChatStreamOptions,
+): TransformStream<Uint8Array, Uint8Array> {
+  const id = `chatcmpl_${options.requestId}`;
+  const created = Math.floor(Date.now() / 1000);
+  let model = options.fallbackModel;
+  let started = false;
+  let completed = false;
+  let sawToolCall = false;
+  const toolIndexes = new Map<string, number>();
+  const toolCallIds = new Map<string, string>();
+
+  const chunk = (
+    delta: Record<string, unknown>,
+    finishReason: string | null = null,
+    usage?: Record<string, unknown>,
+  ): SseFrame =>
+    jsonSseFrame(undefined, {
+      id,
+      object: "chat.completion.chunk",
+      created,
+      model,
+      choices:
+        usage === undefined || Object.keys(delta).length > 0 || finishReason !== null
+          ? [{ index: 0, delta, finish_reason: finishReason }]
+          : [],
+      ...(usage === undefined ? {} : { usage }),
+    });
+
+  const start = (): SseFrame[] => {
+    if (started) return [];
+    started = true;
+    return [chunk({ role: "assistant", content: "" })];
+  };
+
+  const finish = (usage?: Record<string, unknown>): SseFrame[] => {
+    if (completed) return [];
+    completed = true;
+    return [...start(), chunk({}, sawToolCall ? "tool_calls" : "stop", usage), doneSseFrame()];
+  };
+
+  const frames = new TransformStream<SseFrame, SseFrame>({
+    transform(frame, controller) {
+      if (completed) return;
+      if (isDoneFrame(frame)) {
+        for (const output of finish()) controller.enqueue(output);
+        return;
+      }
+      const parsed = frameJson(frame);
+      if (parsed === undefined) return;
+      const event = frame.event ?? getString(parsed, "type");
+      const response = get(parsed, "response");
+      const responseModel = getString(response, "model") ?? getString(parsed, "model");
+      if (responseModel !== undefined) model = responseModel;
+      if (event === "error" || event === "response.failed" || get(parsed, "error") !== undefined) {
+        completed = true;
+        controller.enqueue(jsonSseFrame(undefined, errorEnvelope(parsed)));
+        controller.enqueue(doneSseFrame());
+        return;
+      }
+      if (event === "response.output_text.delta") {
+        for (const output of start()) controller.enqueue(output);
+        const delta = getString(parsed, "delta");
+        if (delta !== undefined) controller.enqueue(chunk({ content: delta }));
+        return;
+      }
+      if (event === "response.output_item.added") {
+        const item = get(parsed, "item");
+        if (getString(item, "type") !== "function_call") return;
+        for (const output of start()) controller.enqueue(output);
+        const callId =
+          getString(item, "call_id") ?? getString(item, "id") ?? `call_${toolIndexes.size}`;
+        const itemId = getString(item, "id");
+        const index = getUint(parsed, "output_index") ?? toolIndexes.size;
+        toolIndexes.set(callId, index);
+        if (itemId !== undefined) {
+          toolIndexes.set(itemId, index);
+          toolCallIds.set(itemId, callId);
+        }
+        sawToolCall = true;
+        controller.enqueue(
+          chunk({
+            tool_calls: [
+              {
+                index,
+                id: callId,
+                type: "function",
+                function: { name: getString(item, "name") ?? "", arguments: "" },
+              },
+            ],
+          }),
+        );
+        return;
+      }
+      if (event === "response.function_call_arguments.delta") {
+        for (const output of start()) controller.enqueue(output);
+        const itemId = getString(parsed, "item_id");
+        const callId =
+          getString(parsed, "call_id") ??
+          (itemId === undefined ? undefined : toolCallIds.get(itemId)) ??
+          itemId ??
+          "call_0";
+        const index =
+          getUint(parsed, "output_index") ??
+          toolIndexes.get(callId) ??
+          (itemId === undefined ? undefined : toolIndexes.get(itemId)) ??
+          0;
+        toolIndexes.set(callId, index);
+        sawToolCall = true;
+        controller.enqueue(
+          chunk({
+            tool_calls: [
+              {
+                index,
+                function: { arguments: getString(parsed, "delta") ?? "" },
+              },
+            ],
+          }),
+        );
+        return;
+      }
+      if (event === "response.completed") {
+        const usageValue = get(response, "usage") ?? get(parsed, "usage");
+        const usage =
+          usageValue === undefined
+            ? undefined
+            : {
+                prompt_tokens: getUint(usageValue, "input_tokens") ?? 0,
+                completion_tokens: getUint(usageValue, "output_tokens") ?? 0,
+                total_tokens: getUint(usageValue, "total_tokens") ?? 0,
+              };
+        for (const output of finish(usage)) controller.enqueue(output);
+      }
+    },
+    flush(controller) {
+      for (const output of finish()) controller.enqueue(output);
+    },
+  });
+  return bytesThroughFrames(frames, { preferRaw: false });
 }

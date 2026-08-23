@@ -316,6 +316,7 @@ export interface SeedProviderChannel {
   readonly name: string;
   readonly kind: string;
   readonly base_url: string;
+  readonly upstream_protocol?: "openai.chat.completions" | "openai.responses" | null;
   readonly cost_multiplier?: number;
   readonly api_key_var: string | null;
   readonly byok_alias: string | null;

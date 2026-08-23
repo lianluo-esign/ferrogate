@@ -70,6 +70,7 @@ async function seedPlatformCatalog(): Promise<void> {
     name: "platform-backup",
     kind: "openai-compatible",
     base_url: "https://api.backup.example/v1",
+    upstream_protocol: "openai.responses",
     api_key_var: "PLATFORM_KEY",
     enabled: true,
   });
@@ -198,6 +199,10 @@ describe("platform model catalog projected into the data plane (#890)", () => {
     const model = loaded.inputs.models.find((candidate) => candidate.name === MODEL_NAME);
     expect(model?.input_price_per_1m).toBe(5);
     expect(model?.output_price_per_1m).toBe(25);
+    const fallback = loaded.models
+      ?.candidates?.(MODEL_NAME)
+      .find((candidate) => candidate.provider === "platform-backup");
+    expect(fallback?.upstreamProtocol).toBe("openai.responses");
   });
 
   it("dispatches the platform model's primary leg", async () => {

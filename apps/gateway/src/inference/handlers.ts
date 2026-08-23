@@ -63,6 +63,7 @@ import { conversationReplayScreenerFor } from "../guardrails/conversation-replay
 import { effectiveResidencyPolicy } from "../residency/policy.js";
 import type { ResidencyPolicy } from "../residency/policy.js";
 import { genAiOperationForRouteLabel, observeGenAiInvocation } from "../telemetry/genai.js";
+import { canonicalProviderKind } from "./adapters.js";
 import { parseAudioObjectReference } from "./audio-objects.js";
 import { byokScopedModels } from "./byok.js";
 import {
@@ -140,6 +141,7 @@ import type {
 } from "./identity.js";
 import { describeModel } from "./model-metadata.js";
 import type { ModelDescriptor } from "./model-metadata.js";
+import { responsesToChatCompletion, validOpenAiSuccessPayload } from "./openai-protocol.js";
 import {
   adapterErrorMessage,
   callerCanUseModel,
@@ -1200,7 +1202,14 @@ async function dispatchCandidates(
     // success arm, so a provider that fails fast never looks fast.
     attempt: async (candidate) => {
       const startedAt = Date.now();
-      const result = await dispatchUpstream(deps, candidate.upstream, signal);
+      const dispatched = await dispatchUpstream(deps, candidate.upstream, signal);
+      const result = isRejection(dispatched)
+        ? dispatched
+        : validateInferenceSuccessContentType(
+            dispatched,
+            planned.coverageInput.operation,
+            c.get("requestId"),
+          );
       const provider = candidate.route.provider;
       if (isRejection(result) || !result.ok) {
         deps.routingMetrics.recordFailure(provider);
@@ -1268,6 +1277,39 @@ async function dispatchCandidates(
     attemptIndex: Math.max(0, outcome.attempts - 1),
     failedOver: outcome.candidateIndex > 0,
   };
+}
+
+const JSON_INFERENCE_OPERATIONS = new Set<InferenceOperation>(["chat.completions", "responses"]);
+
+function jsonMediaType(contentType: string): boolean {
+  const mediaType = (contentType.split(";", 1)[0] ?? "").trim().toLowerCase();
+  return mediaType === "application/json" || mediaType.endsWith("+json");
+}
+
+/** Turn a 2xx HTML/text inference answer into a retryable provider failure. */
+function validateInferenceSuccessContentType(
+  response: Response,
+  operation: InferenceOperation,
+  requestId: string,
+): Response {
+  if (!response.ok || !JSON_INFERENCE_OPERATIONS.has(operation)) return response;
+  const contentType = response.headers.get("content-type") ?? "";
+  if (jsonMediaType(contentType) || contentType.toLowerCase().includes("text/event-stream")) {
+    return response;
+  }
+  try {
+    void response.body?.cancel();
+  } catch {
+    // The response is already unusable; cancellation is only connection cleanup.
+  }
+  return errorResponse(
+    reject(
+      502,
+      "provider_invalid_success_body",
+      "provider returned a successful status without a JSON or event-stream AI response",
+    ),
+    requestId,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -1839,6 +1881,7 @@ function streamResponse(
   const normalizer = deps.normalizers.normalizerFor({
     dialect,
     providerKind: route.providerKind,
+    ...(route.upstreamProtocol === undefined ? {} : { upstreamProtocol: route.upstreamProtocol }),
     logicalModel: route.logicalModel,
     requestId,
     contentType,
@@ -2507,6 +2550,37 @@ async function handleOpenAiInference(
   }
 
   const parsed = safeJson(text);
+  // Dedicated families translate their native envelope. OpenAI-wire families
+  // stay byte-compatible unless this route explicitly uses the Responses API.
+  const translatedChat =
+    parsed === undefined
+      ? null
+      : operation === "chat.completions" && servedRoute.upstreamProtocol === "openai.responses"
+        ? responsesToChatCompletion(parsed, logicalModel)
+        : (servedAdapter?.translateChatCompletionResponse(parsed, logicalModel) ?? null);
+  const canonicalKind = canonicalProviderKind(servedRoute.providerKind);
+  const openAiWire =
+    canonicalKind === "openai-compatible" ||
+    canonicalKind === "grok" ||
+    canonicalKind === "openrouter" ||
+    canonicalKind === "azure-openai";
+  const validPayload =
+    record(parsed) !== undefined &&
+    (!openAiWire ||
+      (translatedChat !== null && translatedChat !== undefined) ||
+      validOpenAiSuccessPayload(parsed, servedRoute.upstreamProtocol, operation));
+  if (!validPayload) {
+    recordUsage(c, deps, { ...meterBase, status: 502 }, servedRoute.providerKind, undefined);
+    settleWorkflowStep(c, deps, gate, false, undefined);
+    return errorResponse(
+      reject(
+        502,
+        "provider_invalid_success_body",
+        "provider returned a successful status with an invalid AI response body",
+      ),
+      requestId,
+    );
+  }
   // Buffered responses are still in the upstream provider's native dialect at
   // this point, so Anthropic and Gemini must use their own extractors just as
   // the pre-normalization streaming tap does.
@@ -2517,10 +2591,6 @@ async function handleOpenAiInference(
   // Dedicated provider families answer in their own dialect. Translate those
   // answers before serving an OpenAI ingress; compatible families return null
   // and continue to relay their already-canonical body byte-for-byte.
-  const translatedChat =
-    parsed !== undefined && servedAdapter
-      ? servedAdapter.translateChatCompletionResponse(parsed, logicalModel)
-      : null;
   if (translatedChat !== null && translatedChat !== undefined) {
     const translated =
       operation === "responses"

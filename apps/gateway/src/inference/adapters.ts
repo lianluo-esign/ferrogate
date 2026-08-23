@@ -73,6 +73,7 @@ import type {
   ProviderHttpRequest as PackageProviderHttpRequest,
 } from "@ferrogate/providers";
 import { chatCompletionsToMessages, messageToChatCompletion } from "./anthropic.js";
+import { chatRequestToResponses, usesResponsesUpstream } from "./openai-protocol.js";
 import type {
   AdapterError,
   AdapterRegistry,
@@ -330,6 +331,20 @@ export const openAiCompatibleAdapter: ProviderAdapter = {
 
     switch (plan.operation) {
       case "chat.completions": {
+        if (usesResponsesUpstream(plan.route.upstreamProtocol)) {
+          const responsesBody = chatRequestToResponses(body);
+          responsesBody.model = plan.providerModel;
+          responsesBody.stream = plan.stream;
+          return {
+            ok: true,
+            request: {
+              ...base,
+              endpoint: endpoint(plan.route.baseUrl, "/responses"),
+              body: responsesBody,
+              stream: plan.stream,
+            },
+          };
+        }
         body.stream = plan.stream;
         if (plan.stream) {
           requestOpenAiStreamUsage(body);

@@ -152,6 +152,8 @@ export const providerRecordSchema = z
     kind: z.string().trim().min(1),
     /** `ProviderConfig.base_url`; adapters append their endpoint path. */
     base_url: z.string().trim().url(),
+    /** Explicit OpenAI-family upstream inference endpoint. */
+    upstream_protocol: z.enum(["openai.chat.completions", "openai.responses"]).optional(),
     /**
      * Where the provider's credential comes from: a Worker SECRET binding NAME
      * (`OPENAI_API_KEY`, the legacy form), or a secret REFERENCE resolved
@@ -881,6 +883,9 @@ export function buildModelCatalog(
         providerModel: leg.provider_model,
         providerKind: provider.kind,
         baseUrl: provider.base_url,
+        ...(provider.upstream_protocol === undefined
+          ? {}
+          : { upstreamProtocol: provider.upstream_protocol }),
         ...(apiKey !== undefined ? { apiKey } : {}),
         // The ALIAS only. `src/inference/byok.ts` turns it into a credential
         // per request, inside the caller's tenant scope.

@@ -66,6 +66,7 @@ const CATALOG_SQL = `
     p.name AS provider_name,
     p.kind AS provider_kind,
     p.base_url AS provider_base_url,
+    NULL AS provider_upstream_protocol,
     p.cost_multiplier AS provider_cost_multiplier,
     p.api_key_var AS provider_api_key_var,
     p.byok_alias AS provider_byok_alias,
@@ -118,6 +119,7 @@ export interface CatalogJoinRow {
   readonly provider_name: string;
   readonly provider_kind: string;
   readonly provider_base_url: string;
+  readonly provider_upstream_protocol?: string | null;
   readonly provider_cost_multiplier?: number | null;
   readonly provider_api_key_var: string | null;
   readonly provider_byok_alias: string | null;
@@ -349,6 +351,10 @@ function dbProvider(
     name: row.provider_name,
     kind: row.provider_kind,
     base_url: row.provider_base_url,
+    ...(row.provider_upstream_protocol === "openai.chat.completions" ||
+    row.provider_upstream_protocol === "openai.responses"
+      ? { upstream_protocol: row.provider_upstream_protocol }
+      : {}),
     ...(row.provider_api_key_var === null ? {} : { api_key_var: row.provider_api_key_var }),
     ...(row.provider_byok_alias === null ? {} : { byok_alias: row.provider_byok_alias }),
     ...(row.provider_auth_scheme === null ? {} : { auth_scheme: row.provider_auth_scheme }),

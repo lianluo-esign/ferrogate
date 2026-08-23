@@ -98,6 +98,7 @@ export const PLATFORM_CATALOG_ROWS_SQL = `
     p.name AS provider_name,
     p.kind AS provider_kind,
     p.base_url AS provider_base_url,
+    p.upstream_protocol AS provider_upstream_protocol,
     p.cost_multiplier AS provider_cost_multiplier,
     p.api_key_var AS provider_api_key_var,
     p.byok_alias AS provider_byok_alias,
@@ -161,7 +162,7 @@ function isMissingPlatformCatalogError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return (
     /no such table:\s*(main\.)?platform_/i.test(message) ||
-    /no such column:\s*(o\.pricing_model_id|p\.cost_multiplier)/i.test(message)
+    /no such column:\s*(o\.pricing_model_id|p\.(cost_multiplier|upstream_protocol))/i.test(message)
   );
 }
 

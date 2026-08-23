@@ -58,6 +58,8 @@ import type { WorkflowCatalogSource, WorkflowRunHistory } from "./workflow.js";
 
 export type ProviderAuthScheme = "bearer" | "x-api-key";
 
+export type ProviderUpstreamProtocol = "openai.chat.completions" | "openai.responses";
+
 /**
  * `ferrogate_providers::ModelCapability` — the closed capability vocabulary.
  *
@@ -181,6 +183,12 @@ export interface PhysicalRoute {
   readonly providerKind: string;
   /** Provider base URL; adapters append their endpoint path to it. */
   readonly baseUrl: string;
+  /**
+   * OpenAI-family upstream surface. Absent keeps the adapter's native default.
+   * `openai.responses` makes Chat and Responses ingresses share `/responses`;
+   * the gateway translates the Chat wire format at the edge.
+   */
+  readonly upstreamProtocol?: ProviderUpstreamProtocol | undefined;
   /** Provider credential. Resolved from Secrets Store in production. */
   readonly apiKey?: string | undefined;
   /**
@@ -1093,6 +1101,8 @@ export interface StreamNormalizerContext {
   readonly dialect: StreamDialect;
   /** Canonical-or-alias provider kind of the resolved upstream. */
   readonly providerKind: string;
+  /** Explicit upstream surface when it differs from the adapter default. */
+  readonly upstreamProtocol?: ProviderUpstreamProtocol | undefined;
   /** Logical model, used as the `model` a synthesized frame reports. */
   readonly logicalModel: string;
   /** Gateway request id, echoed into `response.*` events. */

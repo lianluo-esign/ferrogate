@@ -43,6 +43,10 @@ const providerCreateSchema = z
     provider_type_id: z.enum(PROVIDER_TYPE_IDS).optional(),
     kind: z.string().trim().min(1),
     base_url: z.string().trim().url(),
+    upstream_protocol: z
+      .enum(["openai.chat.completions", "openai.responses"])
+      .nullable()
+      .optional(),
     cost_multiplier: z.number().nonnegative().optional(),
     api_key_var: z.string().trim().min(1).nullable().optional(),
     byok_alias: z.string().trim().min(1).nullable().optional(),
@@ -462,6 +466,11 @@ function providerInput(body: Body, id: string): ProviderChannelInput {
     provider_type_id: body.provider_type_id as string | undefined,
     kind: body.kind as string,
     base_url: body.base_url as string,
+    upstream_protocol: body.upstream_protocol as
+      | "openai.chat.completions"
+      | "openai.responses"
+      | null
+      | undefined,
     cost_multiplier: body.cost_multiplier as number | undefined,
     api_key_var: body.api_key_var as string | null | undefined,
     byok_alias: body.byok_alias as string | null | undefined,

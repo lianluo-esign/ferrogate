@@ -474,7 +474,8 @@ describe("#790: a refused self-credit moves no money in the TENANT database", ()
   });
 
   it("still lets the tenant READ the balance it is billed against", async () => {
-    await seedExhaustedWallet(tenantDbA(), TENANT_A, String(100n * CREDITS_PER_CENT));
+    const settledBalance = 99n * CREDITS_PER_CENT + 5_000n;
+    await seedExhaustedWallet(tenantDbA(), TENANT_A, String(settledBalance));
     expect((await createWalletDocument(TENANT_A, 100)).status).toBe(201);
     await armWithTenantKey();
 
@@ -482,6 +483,11 @@ describe("#790: a refused self-credit moves no money in the TENANT database", ()
       headers: bearer(TENANT_A_KEY),
     });
     expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      wallet: { balance_cents: number; balance_credits: string };
+    };
+    expect(body.wallet.balance_cents).toBe(99);
+    expect(body.wallet.balance_credits).toBe(String(settledBalance));
   });
 });
 

@@ -15,6 +15,7 @@ import {
   nativeToOpenAiChatStream,
   openAiToAnthropicStream,
   responsesNormalizeStream,
+  responsesToOpenAiChatStream,
 } from "../streaming/index.js";
 import type { ResponsesStreamProviderKind } from "../streaming/index.js";
 import { canonicalProviderKind, defaultAdapterRegistry } from "./adapters.js";
@@ -368,6 +369,12 @@ export const defaultStreamNormalizers: StreamNormalizers = {
           contentType: context.contentType,
         });
       case "openai.chat":
+        if (context.upstreamProtocol === "openai.responses") {
+          return responsesToOpenAiChatStream({
+            requestId: context.requestId,
+            fallbackModel: context.logicalModel,
+          });
+        }
         switch (canonicalProviderKind(context.providerKind)) {
           case "anthropic":
             return nativeToOpenAiChatStream({

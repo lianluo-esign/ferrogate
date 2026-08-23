@@ -130,7 +130,9 @@ describe("grok / xai", () => {
   });
 
   it("serves /v1/responses", async () => {
-    const provider = interceptProviderFetch(() => providerJson({ id: "resp_1" }));
+    const provider = interceptProviderFetch(() =>
+      providerJson({ id: "resp_1", object: "response", output: [] }),
+    );
     try {
       const res = await family().post("/v1/responses", {
         model: "grok-chat",

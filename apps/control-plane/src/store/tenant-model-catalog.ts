@@ -22,6 +22,8 @@ export interface ProviderChannelInput {
   readonly provider_type_id?: string;
   readonly kind: string;
   readonly base_url: string;
+  /** Platform-only upstream surface; tenant catalogs continue to inherit it. */
+  readonly upstream_protocol?: "openai.chat.completions" | "openai.responses" | null;
   readonly cost_multiplier?: number;
   readonly api_key_var?: string | null;
   readonly byok_alias?: string | null;

@@ -118,7 +118,10 @@ const PLATFORM_COMMIT_ATTEMPTS = 5;
  */
 export function isMissingPlatformCatalogError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  return /no such table:\s*(main\.)?platform_/i.test(message);
+  return (
+    /no such table:\s*(main\.)?platform_/i.test(message) ||
+    /no such column:\s*(p\.)?upstream_protocol/i.test(message)
+  );
 }
 
 /**
@@ -142,6 +145,7 @@ interface ProviderRow {
   readonly provider_type_id: string | null;
   readonly kind: string;
   readonly base_url: string;
+  readonly upstream_protocol: string | null;
   readonly cost_multiplier: number;
   readonly api_key_var: string | null;
   readonly byok_alias: string | null;
@@ -242,7 +246,7 @@ type CatalogRecord = StoreRecord;
 type UpdateField = readonly [string, string | number | null];
 
 const PROVIDER_SELECT = `
-  SELECT id, name, provider_type_id, kind, base_url, cost_multiplier, api_key_var, byok_alias,
+  SELECT id, name, provider_type_id, kind, base_url, upstream_protocol, cost_multiplier, api_key_var, byok_alias,
          auth_scheme, region, zero_data_retention, openrouter_http_referer,
          openrouter_x_title, cloudflare_ai_gateway_json, enabled
     FROM ${PLATFORM_PROVIDER_TABLE}`;
@@ -295,6 +299,11 @@ function seedProvider(row: ProviderRow): SeedProviderChannel {
     name: row.name,
     kind: row.kind,
     base_url: row.base_url,
+    upstream_protocol:
+      row.upstream_protocol === "openai.chat.completions" ||
+      row.upstream_protocol === "openai.responses"
+        ? row.upstream_protocol
+        : null,
     cost_multiplier: row.cost_multiplier,
     api_key_var: row.api_key_var,
     byok_alias: row.byok_alias,
@@ -368,6 +377,7 @@ function providerRecord(row: ProviderRow): CatalogRecord {
     kind: row.kind,
     compatibility: providerCompatibility(row.kind),
     base_url: row.base_url,
+    upstream_protocol: row.upstream_protocol,
     cost_multiplier: row.cost_multiplier,
     has_api_key: Boolean(row.api_key_var || row.byok_alias),
     byok_alias: row.byok_alias,
@@ -819,11 +829,11 @@ export class PlatformModelCatalogStore {
     return this.#db
       .prepare(
         `INSERT OR IGNORE INTO ${PLATFORM_PROVIDER_TABLE}
-           (id, name, provider_type_id, kind, base_url, cost_multiplier, api_key_var, byok_alias,
+           (id, name, provider_type_id, kind, base_url, upstream_protocol, cost_multiplier, api_key_var, byok_alias,
             auth_scheme, region, zero_data_retention, openrouter_http_referer,
             openrouter_x_title, cloudflare_ai_gateway_json, enabled,
             created_at_unix, updated_at_unix)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
         provider.id,
@@ -831,6 +841,7 @@ export class PlatformModelCatalogStore {
         providerTypeId,
         provider.kind,
         provider.base_url,
+        provider.upstream_protocol ?? null,
         provider.cost_multiplier ?? 1,
         provider.api_key_var,
         provider.byok_alias,
@@ -1170,11 +1181,11 @@ export class PlatformModelCatalogStore {
       this.#db
         .prepare(
           `INSERT OR IGNORE INTO ${PLATFORM_PROVIDER_TABLE}
-             (id, name, provider_type_id, kind, base_url, cost_multiplier, api_key_var, byok_alias,
+             (id, name, provider_type_id, kind, base_url, upstream_protocol, cost_multiplier, api_key_var, byok_alias,
               auth_scheme, region, zero_data_retention, openrouter_http_referer,
               openrouter_x_title, cloudflare_ai_gateway_json, enabled,
               created_at_unix, updated_at_unix)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .bind(
           input.id,
@@ -1182,6 +1193,7 @@ export class PlatformModelCatalogStore {
           normalized.provider_type_id,
           normalized.kind,
           normalized.base_url,
+          normalized.upstream_protocol,
           normalized.cost_multiplier,
           input.api_key_var ?? null,
           input.byok_alias ?? null,
@@ -1228,6 +1240,7 @@ export class PlatformModelCatalogStore {
         ["provider_type_id", providerTypeId],
         ["kind", kind],
         ["base_url", baseUrl],
+        ["upstream_protocol", this.#requiredUpstreamProtocol(input.upstream_protocol, kind)],
       );
       fields.push(["cost_multiplier", this.#requiredCostMultiplier(input.cost_multiplier ?? 1)]);
       fields.push(["api_key_var", input.api_key_var ?? null]);
@@ -1254,7 +1267,19 @@ export class PlatformModelCatalogStore {
         await this.#assertProviderTypeCompatibleWithGroups(id, providerTypeId);
         fields.push(["provider_type_id", providerTypeId]);
       }
-      if (input.kind !== undefined) fields.push(["kind", this.#requiredKind(input.kind)]);
+      if (input.kind !== undefined) {
+        const kind = this.#requiredKind(input.kind);
+        fields.push(["kind", kind]);
+        if (!hasOwn(input, "upstream_protocol") && kind !== "openai-compatible") {
+          fields.push(["upstream_protocol", null]);
+        }
+      }
+      if (hasOwn(input, "upstream_protocol")) {
+        fields.push([
+          "upstream_protocol",
+          this.#requiredUpstreamProtocol(input.upstream_protocol, input.kind ?? current.kind),
+        ]);
+      }
       if (input.base_url !== undefined) {
         const baseUrl = this.#requiredText(input.base_url, "base_url");
         if (!urlIsValid(baseUrl)) throw new TenantCatalogValidationError("base_url must be a URL");
@@ -1366,6 +1391,22 @@ export class PlatformModelCatalogStore {
     return value;
   }
 
+  #requiredUpstreamProtocol(
+    value: ProviderChannelInput["upstream_protocol"],
+    kind: string,
+  ): "openai.chat.completions" | "openai.responses" | null {
+    if (value === undefined || value === null) return null;
+    if (canonicalProviderKind(kind) !== "openai-compatible") {
+      throw new TenantCatalogValidationError(
+        "upstream_protocol is only supported by openai-compatible providers",
+      );
+    }
+    if (value !== "openai.chat.completions" && value !== "openai.responses") {
+      throw new TenantCatalogValidationError("upstream_protocol is not supported");
+    }
+    return value;
+  }
+
   /**
    * `kind` is validated by the SAME `canonicalProviderKind` the tenant store
    * uses, which is what rejects `"platform"` here: that kind is a tenant-side
@@ -1414,6 +1455,7 @@ export class PlatformModelCatalogStore {
     provider_type_id: ProviderTypeId;
     kind: string;
     base_url: string;
+    upstream_protocol: "openai.chat.completions" | "openai.responses" | null;
     cost_multiplier: number;
   } {
     const name = this.#requiredText(input.name, "name");
@@ -1425,6 +1467,7 @@ export class PlatformModelCatalogStore {
       provider_type_id: this.#requiredProviderType(input.provider_type_id, kind),
       kind,
       base_url: baseUrl,
+      upstream_protocol: this.#requiredUpstreamProtocol(input.upstream_protocol, kind),
       cost_multiplier: this.#requiredCostMultiplier(input.cost_multiplier ?? 1),
     };
   }

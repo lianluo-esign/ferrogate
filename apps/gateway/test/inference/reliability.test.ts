@@ -245,6 +245,32 @@ describe("failover ladder", () => {
     }
   });
 
+  it("treats a 2xx HTML page as retryable and serves the next candidate", async () => {
+    const provider = interceptProviderFetch((request) =>
+      providerOf(request.url) === "primary"
+        ? new Response("<html>dashboard</html>", {
+            headers: { "content-type": "text/html" },
+          })
+        : providerJson(CHAT_OK),
+    );
+    try {
+      const app = harness({}, [
+        route({ provider: "primary", priority: 0 }),
+        route({ provider: "backup", priority: 1 }),
+      ]);
+      const res = await app.post("/v1/chat/completions", CHAT_BODY);
+
+      expect(res.status).toBe(200);
+      expect(provider.requests.map((request) => providerOf(request.url))).toEqual([
+        "primary",
+        "backup",
+      ]);
+      expect(app.usage.last?.provider).toBe("backup");
+    } finally {
+      provider.restore();
+    }
+  });
+
   it("fails over on a transport failure, not only on a status", async () => {
     const provider = interceptProviderFetch((request) => {
       if (providerOf(request.url) === "primary") {

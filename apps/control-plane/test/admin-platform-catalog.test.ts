@@ -15,6 +15,7 @@
 import { SELF, env } from "cloudflare:test";
 import { controlDataObjectDatabase } from "@ferrogate/storage";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { PLATFORM_CATALOG_SNAPSHOT_KEY } from "../../gateway/src/inference/platform-catalog.js";
 import { resolveTenantStorage } from "../src/adapters.js";
 import type { ControlPlaneBindings } from "../src/ports.js";
 import { applySchema, db, resetD1 } from "./d1.js";
@@ -22,6 +23,7 @@ import { BASE, arm, bearer, jsonRequest, operatorKey, tenantKey } from "./harnes
 import { applyTenantSchema } from "./tenant-db.js";
 
 const OPERATOR = operatorKey.secret;
+const platformConfig = (env as unknown as { PLATFORM_CONFIG: KVNamespace }).PLATFORM_CONFIG;
 
 /** The posture `wrangler.toml` pins for this app today; restored after every test. */
 const DEFAULT_CONTROL_STORAGE = "durable_object";
@@ -231,6 +233,7 @@ beforeEach(async () => {
   controlStorage(DEFAULT_CONTROL_STORAGE);
   await resetD1();
   arm({ store: "d1", staticKeys: [operatorKey] });
+  await platformConfig.delete(PLATFORM_CATALOG_SNAPSHOT_KEY);
 });
 
 afterEach(() => {
@@ -240,12 +243,83 @@ afterEach(() => {
 });
 
 describe("platform model catalog admin surface", () => {
+  it("publishes every platform provider and model mutation to one shared KV snapshot", async () => {
+    expect(
+      (
+        await createPlatformProvider("cached_provider", {
+          upstream_protocol: "openai.responses",
+        })
+      ).status,
+    ).toBe(201);
+    expect((await createPlatformModel("cached_model")).status).toBe(201);
+    expect(
+      (await createPlatformOffering("cached_model", "cached_offering", "cached_provider")).status,
+    ).toBe(201);
+
+    const snapshot = async (): Promise<{
+      revision: number;
+      rows: Array<Record<string, unknown>>;
+    }> => {
+      const raw = await platformConfig.get(PLATFORM_CATALOG_SNAPSHOT_KEY);
+      expect(raw).not.toBeNull();
+      return JSON.parse(raw ?? "{}") as {
+        revision: number;
+        rows: Array<Record<string, unknown>>;
+      };
+    };
+
+    expect(await snapshot()).toMatchObject({
+      revision: 3,
+      rows: [
+        {
+          provider_id: "cached_provider",
+          provider_upstream_protocol: "openai.responses",
+          model_id: "cached_model",
+          model_name: "cached_model-name",
+        },
+      ],
+    });
+
+    expect(
+      (
+        await request(OPERATOR, "PATCH", "/admin/v1/providers/cached_provider", {
+          upstream_protocol: "openai.chat.completions",
+        })
+      ).status,
+    ).toBe(200);
+    expect(await snapshot()).toMatchObject({
+      revision: 4,
+      rows: [{ provider_upstream_protocol: "openai.chat.completions" }],
+    });
+
+    expect(
+      (
+        await request(OPERATOR, "PATCH", "/admin/v1/models/cached_model", {
+          name: "cached-model-renamed",
+        })
+      ).status,
+    ).toBe(200);
+    expect(await snapshot()).toMatchObject({
+      revision: 5,
+      rows: [{ model_name: "cached-model-renamed" }],
+    });
+
+    expect(
+      (await request(OPERATOR, "DELETE", "/admin/v1/models/cached_model/offerings/cached_offering"))
+        .status,
+    ).toBe(200);
+    expect(await snapshot()).toMatchObject({ revision: 6, rows: [] });
+  });
+
   it("round-trips providers, models and offerings for a platform operator with no tenant_id", async () => {
-    const created = await createPlatformProvider("platform_channel");
+    const created = await createPlatformProvider("platform_channel", {
+      upstream_protocol: "openai.responses",
+    });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
     expect(created.body.scope).toBe("platform");
     expect((created.body.provider as JsonBody).scope).toBe("platform");
     expect((created.body.provider as JsonBody).provider_type_id).toBe("openai");
+    expect((created.body.provider as JsonBody).upstream_protocol).toBe("openai.responses");
     expect((created.body.provider as JsonBody).tenant_id).toBeUndefined();
 
     const model = await createPlatformModel("platform_model");
@@ -295,11 +369,18 @@ describe("platform model catalog admin surface", () => {
     expect(patched.status).toBe(200);
     expect((patched.body.provider as JsonBody).region).toBe("us-east-1");
     const storedRegion = await db()
-      .prepare("SELECT region, provider_type_id FROM platform_provider_channels WHERE id = ?")
+      .prepare(
+        "SELECT region, provider_type_id, upstream_protocol FROM platform_provider_channels WHERE id = ?",
+      )
       .bind("platform_channel")
-      .first<{ region: string | null; provider_type_id: string | null }>();
+      .first<{
+        region: string | null;
+        provider_type_id: string | null;
+        upstream_protocol: string | null;
+      }>();
     expect(storedRegion?.region).toBe("us-east-1");
     expect(storedRegion?.provider_type_id).toBe("openai");
+    expect(storedRegion?.upstream_protocol).toBe("openai.responses");
 
     const replacedOffering = await request(
       OPERATOR,

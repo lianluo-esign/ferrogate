@@ -9,6 +9,7 @@ describe("platform config cache", () => {
       model_name: "gpt-current",
       offering_id: "offering-1",
       provider_id: "provider-1",
+      provider_upstream_protocol: "openai.responses",
       provider_api_key_var: "UPSTREAM_API_KEY",
     };
     const prepared: string[] = [];

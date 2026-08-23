@@ -51,6 +51,7 @@
  * from the same old one and lose a charge entirely.
  */
 import {
+  D1WalletStore,
   type TenantDatabaseHandle,
   bindCredits,
   centsToCredits,
@@ -437,12 +438,25 @@ export const walletsRoutes: GroupModule = crudGroup(
     },
 
     getWallet: async (c) => {
+      const deps = c.get("deps");
       const scope = scopeOf(c);
       const tenantId = pathParam(c, "tenant_id");
       authorizeWalletTenant(scope, tenantId);
-      const record = await c.get("deps").store.get(WALLETS, scope, tenantId);
+      const record = await deps.store.get(WALLETS, scope, tenantId);
       if (record === null) throw new HttpError(404, "not_found", `wallet ${tenantId} not found`);
-      return json(c, 200, adminItem("wallet", record));
+      const handle = await tenantDatabaseFor(deps.tenantDatabases, tenantId);
+      if (handle === null) return json(c, 200, adminItem("wallet", record));
+
+      const balanceCredits = await new D1WalletStore(handle).balanceCreditsExact(tenantId);
+      const current =
+        balanceCredits === undefined
+          ? record
+          : {
+              ...record,
+              balance_cents: Number(creditsToCents(balanceCredits)),
+              balance_credits: bindCredits(balanceCredits),
+            };
+      return json(c, 200, adminItem("wallet", current));
     },
 
     updateWallet: async (c) => {

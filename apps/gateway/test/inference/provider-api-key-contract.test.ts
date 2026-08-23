@@ -207,6 +207,228 @@ describe("API-key provider protocol and billing contract", () => {
     }
   });
 
+  it("serves Chat clients through an explicitly Responses-only provider", async () => {
+    const entry = CHAT_CASES[0] as ProviderCase;
+    const upstream = interceptProviderFetch(() =>
+      providerJson({
+        id: "resp-chat-bridge",
+        object: "response",
+        model: entry.model,
+        output: [
+          {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "hi" }],
+          },
+        ],
+        usage: { input_tokens: 100, output_tokens: 50, total_tokens: 150 },
+      }),
+    );
+    try {
+      const physicalRoute: PhysicalRoute = {
+        ...route(entry),
+        upstreamProtocol: "openai.responses",
+      };
+      const gateway = harness({}, [physicalRoute]);
+      const response = await gateway.post("/v1/chat/completions", {
+        model: physicalRoute.logicalModel,
+        messages: [{ role: "user", content: "hi" }],
+      });
+
+      expect(response.status).toBe(200);
+      expect(upstream.lastRequest()).toMatchObject({
+        url: "https://api.openai.test/v1/responses",
+        body: {
+          model: entry.model,
+          input: [{ role: "user", content: "hi" }],
+          stream: false,
+        },
+      });
+      const body = (await response.json()) as {
+        object?: string;
+        choices?: Array<{ message?: { content?: string } }>;
+      };
+      expect(body.object).toBe("chat.completion");
+      expect(body.choices?.[0]?.message?.content).toBe("hi");
+      expect(gateway.usage.last).toMatchObject({
+        promptTokens: 100,
+        completionTokens: 50,
+        totalTokens: 150,
+      });
+    } finally {
+      upstream.restore();
+    }
+  });
+
+  it("maps Chat tool and image turns onto the Responses input contract", async () => {
+    const entry = CHAT_CASES[0] as ProviderCase;
+    const upstream = interceptProviderFetch(() =>
+      providerJson({
+        id: "resp-agent-bridge",
+        object: "response",
+        model: entry.model,
+        output: [
+          {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "done" }],
+          },
+        ],
+        usage: { input_tokens: 20, output_tokens: 5, total_tokens: 25 },
+      }),
+    );
+    try {
+      const physicalRoute: PhysicalRoute = {
+        ...route(entry),
+        upstreamProtocol: "openai.responses",
+      };
+      const gateway = harness({}, [physicalRoute]);
+      const response = await gateway.post("/v1/chat/completions", {
+        model: physicalRoute.logicalModel,
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "inspect" },
+              { type: "image_url", image_url: { url: "https://example.test/a.png" } },
+            ],
+          },
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              {
+                id: "call_weather",
+                type: "function",
+                function: { name: "weather", arguments: '{"city":"Singapore"}' },
+              },
+            ],
+          },
+          { role: "tool", tool_call_id: "call_weather", content: '{"degrees":30}' },
+        ],
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: "weather",
+              description: "Read weather",
+              parameters: { type: "object" },
+            },
+          },
+        ],
+        max_completion_tokens: 50,
+        response_format: { type: "json_object" },
+        frequency_penalty: 0.5,
+      });
+
+      expect(response.status).toBe(200);
+      expect(upstream.lastRequest().body).toMatchObject({
+        model: entry.model,
+        input: [
+          {
+            role: "user",
+            content: [
+              { type: "input_text", text: "inspect" },
+              { type: "input_image", image_url: "https://example.test/a.png" },
+            ],
+          },
+          {
+            type: "function_call",
+            call_id: "call_weather",
+            name: "weather",
+            arguments: '{"city":"Singapore"}',
+          },
+          {
+            type: "function_call_output",
+            call_id: "call_weather",
+            output: '{"degrees":30}',
+          },
+        ],
+        tools: [
+          {
+            type: "function",
+            name: "weather",
+            description: "Read weather",
+            parameters: { type: "object" },
+          },
+        ],
+        max_output_tokens: 50,
+        text: { format: { type: "json_object" } },
+      });
+      expect(upstream.lastRequest().body).not.toHaveProperty("frequency_penalty");
+    } finally {
+      upstream.restore();
+    }
+  });
+
+  it("normalizes Responses SSE for a streaming Chat client", async () => {
+    const entry = CHAT_CASES[0] as ProviderCase;
+    const upstream = interceptProviderFetch(() =>
+      providerSse([
+        'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"hi"}',
+        'event: response.completed\ndata: {"type":"response.completed","response":{"model":"gpt-5.5","usage":{"input_tokens":100,"output_tokens":50,"total_tokens":150}}}',
+      ]),
+    );
+    try {
+      const physicalRoute: PhysicalRoute = {
+        ...route(entry),
+        upstreamProtocol: "openai.responses",
+      };
+      const gateway = harness({}, [physicalRoute]);
+      const response = await gateway.post("/v1/chat/completions", {
+        model: physicalRoute.logicalModel,
+        messages: [{ role: "user", content: "hi" }],
+        stream: true,
+      });
+      const text = await response.text();
+
+      expect(response.status).toBe(200);
+      expect(upstream.lastRequest().url).toBe("https://api.openai.test/v1/responses");
+      expect(text).toContain('"object":"chat.completion.chunk"');
+      expect(text).toContain('"content":"hi"');
+      expect(text.endsWith("data: [DONE]\n\n")).toBe(true);
+      expect(gateway.usage.last).toMatchObject({
+        promptTokens: 100,
+        completionTokens: 50,
+        totalTokens: 150,
+      });
+    } finally {
+      upstream.restore();
+    }
+  });
+
+  it("keeps the Responses call_id stable across streamed tool argument deltas", async () => {
+    const entry = CHAT_CASES[0] as ProviderCase;
+    const upstream = interceptProviderFetch(() =>
+      providerSse([
+        'event: response.output_item.added\ndata: {"type":"response.output_item.added","output_index":0,"item":{"id":"fc_weather","type":"function_call","call_id":"call_weather","name":"weather","arguments":""}}',
+        'event: response.function_call_arguments.delta\ndata: {"type":"response.function_call_arguments.delta","item_id":"fc_weather","output_index":0,"delta":"{\\"city\\":\\"Singapore\\"}"}',
+        'event: response.completed\ndata: {"type":"response.completed","response":{"model":"gpt-5.5","usage":{"input_tokens":20,"output_tokens":5,"total_tokens":25}}}',
+      ]),
+    );
+    try {
+      const physicalRoute: PhysicalRoute = {
+        ...route(entry),
+        upstreamProtocol: "openai.responses",
+      };
+      const gateway = harness({}, [physicalRoute]);
+      const response = await gateway.post("/v1/chat/completions", {
+        model: physicalRoute.logicalModel,
+        messages: [{ role: "user", content: "weather" }],
+        stream: true,
+      });
+      const text = await response.text();
+
+      expect(response.status).toBe(200);
+      expect(text).toContain('"id":"call_weather"');
+      expect(text).not.toContain('"id":"fc_weather"');
+      expect(text).toContain('"arguments":"{\\"city\\":\\"Singapore\\"}"');
+      expect(text.endsWith("data: [DONE]\n\n")).toBe(true);
+    } finally {
+      upstream.restore();
+    }
+  });
+
   it("bills usage nested in a streamed OpenAI response.completed event", async () => {
     const entry = CHAT_CASES[0] as ProviderCase;
     const upstream = interceptProviderFetch(() =>

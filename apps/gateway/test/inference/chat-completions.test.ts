@@ -142,6 +142,43 @@ describe("POST /v1/chat/completions", () => {
     }
   });
 
+  it("rejects a 2xx HTML page before it can be recorded as successful usage", async () => {
+    const provider = interceptProviderFetch(
+      () => new Response("<html>dashboard</html>", { headers: { "content-type": "text/html" } }),
+    );
+    try {
+      const h = harness();
+      const res = await h.post("/v1/chat/completions", {
+        model: "gpt-4o-mini",
+        messages: [{ role: "user", content: "hi" }],
+      });
+
+      expect(res.status).toBe(502);
+      expect((await errorBody(res)).error.code).toBe("provider_invalid_success_body");
+      expect(h.usage.last).toMatchObject({ status: 502 });
+      expect(h.usage.last?.totalTokens).toBeUndefined();
+    } finally {
+      provider.restore();
+    }
+  });
+
+  it("rejects a malformed JSON success before token settlement", async () => {
+    const provider = interceptProviderFetch(() => providerJson({ dashboard: true }));
+    try {
+      const h = harness();
+      const res = await h.post("/v1/chat/completions", {
+        model: "gpt-4o-mini",
+        messages: [{ role: "user", content: "hi" }],
+      });
+
+      expect(res.status).toBe(502);
+      expect((await errorBody(res)).error.code).toBe("provider_invalid_success_body");
+      expect(h.usage.last).toMatchObject({ status: 502 });
+    } finally {
+      provider.restore();
+    }
+  });
+
   it("maps a transport failure to 502 provider_dispatch_error", async () => {
     const provider = interceptProviderFetch(() => {
       throw new TypeError("network unreachable");
