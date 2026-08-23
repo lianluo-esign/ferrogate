@@ -54,6 +54,7 @@ export interface FleetReportRow {
   readonly key: string;
   readonly offer_usd: number;
   readonly final_usd: number;
+  readonly provider_cost_usd: number;
   readonly prompt_tokens: number;
   readonly completion_tokens: number;
   readonly events: number;
@@ -114,6 +115,7 @@ export function buildFleetSql(dataset: string, query: FleetQuery): string {
     `SELECT ${column} AS key,`,
     "       SUM(double1 * _sample_interval) AS offer_usd,",
     "       SUM(double2 * _sample_interval) AS final_usd,",
+    "       SUM(double6 * _sample_interval) AS provider_cost_usd,",
     "       SUM(double4 * _sample_interval) AS prompt_tokens,",
     "       SUM(double5 * _sample_interval) AS completion_tokens,",
     "       SUM(_sample_interval) AS events",
@@ -137,6 +139,7 @@ export function mapFleetRows(rows: readonly Record<string, unknown>[]): FleetRep
     key: typeof row.key === "string" ? row.key : String(row.key ?? ""),
     offer_usd: numberField(row, "offer_usd"),
     final_usd: numberField(row, "final_usd"),
+    provider_cost_usd: numberField(row, "provider_cost_usd"),
     prompt_tokens: numberField(row, "prompt_tokens"),
     completion_tokens: numberField(row, "completion_tokens"),
     events: numberField(row, "events"),

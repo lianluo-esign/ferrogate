@@ -704,6 +704,7 @@ describe("billing-group multiplier settlement (#945)", () => {
     priority: 0,
     inputPricePer1m: 10,
     outputPricePer1m: 20,
+    providerCostMultiplier: 0.5,
   };
   /** The official settled price for the fixture usage frame (11 in, 4 out). */
   const OFFICIAL = (11 / 1_000_000) * 10 + (4 / 1_000_000) * 20;
@@ -805,6 +806,9 @@ describe("billing-group multiplier settlement (#945)", () => {
     // The applied multiplier and group id are recorded on the event.
     expect(charge.event.metadata?.billing_group_id).toBe("premium");
     expect(charge.event.metadata?.billing_multiplier).toBe("1.5");
+    expect(Number(charge.event.metadata?.offer_cost_usd)).toBeCloseTo(OFFICIAL, 12);
+    expect(charge.event.metadata?.provider_cost_multiplier).toBe("0.5");
+    expect(Number(charge.event.metadata?.provider_cost_usd)).toBeCloseTo(OFFICIAL * 0.5, 12);
     expect(h.scheduler.errors).toEqual([]);
   });
 
@@ -823,10 +827,11 @@ describe("billing-group multiplier settlement (#945)", () => {
     const charge = h.ledger.charges[0];
     if (charge === undefined) throw new Error("expected a recorded charge");
     expect(charge.entry.cost.total_cost).toBeCloseTo(OFFICIAL, 12);
-    // A no-group request carries byte-identical metadata to before this slice:
-    // the group fields are stamped only when a group actually applied.
+    // Group fields are absent, but supplier economics remain available to the
+    // operator and do not change the customer charge.
     expect(charge.event.metadata?.billing_group_id).toBeUndefined();
     expect(charge.event.metadata?.billing_multiplier).toBeUndefined();
+    expect(Number(charge.event.metadata?.provider_cost_usd)).toBeCloseTo(OFFICIAL * 0.5, 12);
   });
 
   it("fails open to the official price when the bound group is unknown to the source", async () => {

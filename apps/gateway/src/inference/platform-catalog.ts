@@ -43,10 +43,10 @@ export const PLATFORM_CATALOG_REVISION_SQL =
   "SELECT revision FROM platform_catalog_revisions WHERE id = 1";
 
 /** One shared KV object, atomically replaced after a platform catalog commit. */
-export const PLATFORM_CATALOG_SNAPSHOT_KEY = "platform-config:model-catalog:v1";
+export const PLATFORM_CATALOG_SNAPSHOT_KEY = "platform-config:model-catalog:v2";
 
 export interface PlatformCatalogSnapshot {
-  readonly schema_version: 1;
+  readonly schema_version: 2;
   readonly revision: number;
   readonly published_at_unix: number;
   readonly rows: readonly CatalogJoinRow[];
@@ -80,19 +80,19 @@ export const PLATFORM_CATALOG_ROWS_SQL = `
     o.region AS offering_region,
     o.zero_data_retention AS offering_zero_data_retention,
     CASE WHEN o.pricing_model_id IS NULL THEN o.input_price_per_1m
-         WHEN price.enabled = 1 THEN price.input_price_per_1m * p.cost_multiplier END AS input_price_per_1m,
+         WHEN price.enabled = 1 THEN price.input_price_per_1m END AS input_price_per_1m,
     CASE WHEN o.pricing_model_id IS NULL THEN o.output_price_per_1m
-         WHEN price.enabled = 1 THEN price.output_price_per_1m * p.cost_multiplier END AS output_price_per_1m,
+         WHEN price.enabled = 1 THEN price.output_price_per_1m END AS output_price_per_1m,
     CASE WHEN o.pricing_model_id IS NULL THEN o.cached_input_price_per_1m
-         WHEN price.enabled = 1 THEN price.cached_input_price_per_1m * p.cost_multiplier END AS cached_input_price_per_1m,
+         WHEN price.enabled = 1 THEN price.cached_input_price_per_1m END AS cached_input_price_per_1m,
     CASE WHEN o.pricing_model_id IS NULL THEN o.cache_write_price_per_1m
-         WHEN price.enabled = 1 THEN price.cache_write_price_per_1m * p.cost_multiplier END AS cache_write_price_per_1m,
+         WHEN price.enabled = 1 THEN price.cache_write_price_per_1m END AS cache_write_price_per_1m,
     CASE WHEN o.pricing_model_id IS NULL THEN o.reasoning_price_per_1m
-         WHEN price.enabled = 1 THEN price.reasoning_price_per_1m * p.cost_multiplier END AS reasoning_price_per_1m,
+         WHEN price.enabled = 1 THEN price.reasoning_price_per_1m END AS reasoning_price_per_1m,
     CASE WHEN o.pricing_model_id IS NULL THEN o.audio_second_price_per_1m
-         WHEN price.enabled = 1 THEN price.audio_second_price_per_1m * p.cost_multiplier END AS audio_second_price_per_1m,
+         WHEN price.enabled = 1 THEN price.audio_second_price_per_1m END AS audio_second_price_per_1m,
     CASE WHEN o.pricing_model_id IS NULL THEN o.audio_character_price_per_1m
-         WHEN price.enabled = 1 THEN price.audio_character_price_per_1m * p.cost_multiplier END AS audio_character_price_per_1m,
+         WHEN price.enabled = 1 THEN price.audio_character_price_per_1m END AS audio_character_price_per_1m,
     o.enabled AS offering_enabled,
     p.id AS provider_id,
     p.name AS provider_name,
@@ -224,7 +224,7 @@ function parsePlatformCatalogSnapshot(raw: string): PlatformCatalogSnapshot | nu
   try {
     const parsed = JSON.parse(raw) as Partial<PlatformCatalogSnapshot>;
     if (
-      parsed.schema_version !== 1 ||
+      parsed.schema_version !== 2 ||
       !Number.isSafeInteger(parsed.revision) ||
       (parsed.revision ?? -1) < 0 ||
       !Number.isSafeInteger(parsed.published_at_unix) ||

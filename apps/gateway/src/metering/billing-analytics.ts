@@ -82,6 +82,9 @@ export function writeBillingAnalyticsForEvent(
     // A group's real offer is stamped on metadata (recoverable even for a 0×
     // comp, where final is $0); with no group the offer is the final cost.
     const offerCostUsd = finiteOrZero(parseNumber(event.metadata?.offer_cost_usd) ?? finalCostUsd);
+    const providerCostUsd = finiteOrZero(
+      parseNumber(event.metadata?.provider_cost_usd) ?? offerCostUsd,
+    );
     dataset.writeDataPoint({
       blobs: [
         event.tenant.organization_id ?? "",
@@ -97,6 +100,8 @@ export function writeBillingAnalyticsForEvent(
         Number.isFinite(multiplier) ? multiplier : 1,
         finiteOrZero(event.usage?.prompt_tokens),
         finiteOrZero(event.usage?.completion_tokens),
+        // double6: operator-only supplier cost; keep preceding slots stable.
+        providerCostUsd,
       ],
       indexes: [event.tenant.organization_id ?? ""],
     });

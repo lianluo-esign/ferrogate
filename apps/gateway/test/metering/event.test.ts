@@ -180,6 +180,8 @@ describe("billingEventFromUsage", () => {
       billing_group_id: "spoofed-group",
       billing_multiplier: "999",
       offer_cost_usd: "0",
+      provider_cost_multiplier: "999",
+      provider_cost_usd: "0",
       team: "search",
     };
     const ungrouped = billingEventFromUsage(usageFixture({ metadata: spoofed }), {
@@ -192,14 +194,17 @@ describe("billingEventFromUsage", () => {
         metadata: spoofed,
         billingGroupId: "actual-group",
         billingMultiplier: 1.5,
+        providerCostMultiplier: 0.5,
       }),
-      { nowUnixSeconds: 1, offerCostUsd: 0.25 },
+      { nowUnixSeconds: 1, offerCostUsd: 0.25, providerCostUsd: 0.125 },
     );
     expect(grouped.metadata).toEqual({
       team: "search",
       billing_group_id: "actual-group",
       billing_multiplier: "1.5",
       offer_cost_usd: "0.25",
+      provider_cost_multiplier: "0.5",
+      provider_cost_usd: "0.125",
     });
   });
 });

@@ -271,6 +271,18 @@ function billingEventDocument(row: BillingEventAuthorityRow): StoreRecord {
   };
 }
 
+/** Supplier economics are operator-only even though tenant billing is authoritative here. */
+function tenantSafeBillingDocument(record: StoreRecord): StoreRecord {
+  const metadata = record.metadata;
+  if (typeof metadata !== "object" || metadata === null || Array.isArray(metadata)) return record;
+  const {
+    provider_cost_multiplier: _providerCostMultiplier,
+    provider_cost_usd: _providerCostUsd,
+    ...safeMetadata
+  } = metadata as Record<string, unknown>;
+  return { ...record, metadata: safeMetadata };
+}
+
 function billingOutboxDocument(row: BillingOutboxAuthorityRow): StoreRecord {
   return {
     ...documentOf(row.event_json),
@@ -505,7 +517,9 @@ async function listBillingAuthority(
         ? tenantBillingEventPage(deps, scope.tenantId, fetchLimit, filters, url)
         : tenantBillingOutboxPage(deps, scope.tenantId, fetchLimit);
     return page.then((result) => ({
-      items: result.items.slice(query.offset, query.offset + query.limit),
+      items: result.items
+        .slice(query.offset, query.offset + query.limit)
+        .map(tenantSafeBillingDocument),
       total: result.total,
     }));
   }

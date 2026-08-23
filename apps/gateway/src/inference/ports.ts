@@ -261,13 +261,21 @@ export interface PhysicalRoute {
   /** `ModelRoute.weight` — DESCENDING within a priority group. Absent is `0`. */
   readonly weight?: number | undefined;
   /**
+   * Supplier cost as a scalar over the official route prices.
+   *
+   * This is deliberately separate from the seven price fields below: those
+   * are the customer-facing official baseline used by settlement, while this
+   * multiplier is used only for provider-cost routing and operator margin
+   * analytics. Absent means the provider did not declare a cost basis.
+   */
+  readonly providerCostMultiplier?: number | undefined;
+  /**
    * `ModelRoute.input_price_per_1m` — USD per 1,000,000 PROMPT tokens.
    *
-   * Read only by `strategy.ts::routeEstimatedCost` / `balancedRouteScore`; it is
-   * NOT the billing price (metering prices the provider's REPORTED usage from
-   * its own tables). Absent means "unpriced", which `lowest_cost` treats as
-   * infinitely expensive and `balanced` treats as 1,000 — the two Rust readings,
-   * and they differ on purpose.
+   * This is the official customer-price baseline. Settlement applies the key's
+   * billing-group multiplier to it; cost-aware routing applies the separate
+   * {@link providerCostMultiplier}. Absent means "unpriced", which
+   * `lowest_cost` treats as infinitely expensive and `balanced` treats as 1,000.
    */
   readonly inputPricePer1m?: number | undefined;
   /** `ModelRoute.output_price_per_1m` — USD per 1,000,000 COMPLETION tokens. */
@@ -869,6 +877,12 @@ export interface Usage {
   readonly audioSecondPricePer1m?: number | undefined;
   /** `[[models]].audio_character_price_per_1m` — USD per 1M synthesized characters. */
   readonly audioCharacterPricePer1m?: number | undefined;
+  /**
+   * The served provider's cost multiplier. The sink derives provider cost from
+   * the same observed usage as the customer charge, but never applies this
+   * scalar to the tenant wallet debit.
+   */
+  readonly providerCostMultiplier?: number | undefined;
   /**
    * #945 — the billing GROUP this request's key belongs to, when any, carried
    * so the settled cost record and its billing event can attribute the applied

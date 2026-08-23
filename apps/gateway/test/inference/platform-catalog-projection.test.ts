@@ -188,7 +188,7 @@ describe("platform model catalog projected into the data plane (#890)", () => {
     expect(await listedModelIds(res)).toContain(MODEL_NAME);
   });
 
-  it("prices a bound supplier route at public baseline times its cost multiplier", async () => {
+  it("keeps the public price for billing and carries supplier cost separately", async () => {
     const source = platformModelCatalogFromControlData({ ttlMs: 0 });
     const loaded = await source.load({
       env: { ...bindings, PLATFORM_KEY: "sk-platform" } as never,
@@ -197,11 +197,14 @@ describe("platform model catalog projected into the data plane (#890)", () => {
     expect(loaded.ok).toBe(true);
     if (!loaded.ok) return;
     const model = loaded.inputs.models.find((candidate) => candidate.name === MODEL_NAME);
-    expect(model?.input_price_per_1m).toBe(5);
-    expect(model?.output_price_per_1m).toBe(25);
-    const fallback = loaded.models
-      ?.candidates?.(MODEL_NAME)
-      .find((candidate) => candidate.provider === "platform-backup");
+    expect(model?.input_price_per_1m).toBe(10);
+    expect(model?.output_price_per_1m).toBe(50);
+    const candidates = loaded.models?.candidates?.(MODEL_NAME) ?? [];
+    const primary = candidates.find((candidate) => candidate.provider === "platform-openai");
+    expect(primary?.inputPricePer1m).toBe(10);
+    expect(primary?.outputPricePer1m).toBe(50);
+    expect(primary?.providerCostMultiplier).toBe(0.5);
+    const fallback = candidates.find((candidate) => candidate.provider === "platform-backup");
     expect(fallback?.upstreamProtocol).toBe("openai.responses");
   });
 

@@ -1623,8 +1623,12 @@ function routePricing(route: PhysicalRoute): {
   cachedInputPricePer1m?: number;
   cacheWritePricePer1m?: number;
   reasoningPricePer1m?: number;
+  providerCostMultiplier?: number;
 } {
   return {
+    ...(route.providerCostMultiplier !== undefined
+      ? { providerCostMultiplier: route.providerCostMultiplier }
+      : {}),
     ...(route.inputPricePer1m !== undefined ? { inputPricePer1m: route.inputPricePer1m } : {}),
     ...(route.outputPricePer1m !== undefined ? { outputPricePer1m: route.outputPricePer1m } : {}),
     // #667 — the cached/reasoning rates travel with the other two, for the same

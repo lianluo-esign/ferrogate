@@ -567,6 +567,10 @@ export class MeteringUsageSink implements UsageSink {
     // an absent settled cost stays absent so the rate-card path is unchanged.
     const offerCostUsd = this.#settledCostUsd?.(usage);
     const candidateSettledCostUsd = applyBillingMultiplier(offerCostUsd, usage.billingMultiplier);
+    const providerCostUsd =
+      usage.providerCostMultiplier === undefined
+        ? undefined
+        : applyBillingMultiplier(offerCostUsd, usage.providerCostMultiplier);
     const settledCostUsd =
       this.#settlementMode === "serving_offering"
         ? usableSettledCostUsd(candidateSettledCostUsd)
@@ -580,6 +584,7 @@ export class MeteringUsageSink implements UsageSink {
       nowUnixSeconds: now,
       ...(settledCostUsd !== undefined ? { settledCostUsd } : {}),
       ...(offerCostUsd !== undefined ? { offerCostUsd } : {}),
+      ...(providerCostUsd !== undefined ? { providerCostUsd } : {}),
       ...(this.#clusterId !== undefined ? { clusterId: this.#clusterId } : {}),
       ...(this.#nodeId !== undefined ? { nodeId: this.#nodeId } : {}),
       diagnostics: this.#diagnostics,

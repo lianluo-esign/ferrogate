@@ -133,6 +133,25 @@ describe("route cost scoring reproduces state.rs", () => {
     expect(cost).toBeCloseTo(0.00135, 12);
   });
 
+  it("uses supplier cost for routing without changing the official route price", () => {
+    const priced = route({
+      provider: "a",
+      inputPricePer1m: 10,
+      outputPricePer1m: 50,
+      providerCostMultiplier: 0.5,
+    });
+    expect(routeEstimatedUnitCost(priced)).toBe(30);
+    expect(
+      routeEstimatedCost(priced, {
+        promptTokens: 1_000_000,
+        completionTokens: 1_000_000,
+        totalTokens: 2_000_000,
+      }),
+    ).toBe(30);
+    expect(priced.inputPricePer1m).toBe(10);
+    expect(priced.outputPricePer1m).toBe(50);
+  });
+
   it("falls back to the unit cost when the route is only half priced", () => {
     // Rust's `_ => route_estimated_unit_cost(route)` arm: a half-priced route
     // cannot be scored against usage without inventing the missing rate.

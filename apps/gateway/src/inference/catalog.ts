@@ -154,6 +154,8 @@ export const providerRecordSchema = z
     base_url: z.string().trim().url(),
     /** Explicit OpenAI-family upstream inference endpoint. */
     upstream_protocol: z.enum(["openai.chat.completions", "openai.responses"]).optional(),
+    /** Supplier cost as a scalar over the model's official prices. */
+    cost_multiplier: z.number().nonnegative().optional(),
     /**
      * Where the provider's credential comes from: a Worker SECRET binding NAME
      * (`OPENAI_API_KEY`, the legacy form), or a secret REFERENCE resolved
@@ -912,6 +914,9 @@ export function buildModelCatalog(
         ...(leg.context_window !== undefined ? { contextWindow: leg.context_window } : {}),
         ...(leg.priority !== undefined ? { priority: leg.priority } : {}),
         ...(leg.weight !== undefined ? { weight: leg.weight } : {}),
+        ...(provider.cost_multiplier !== undefined
+          ? { providerCostMultiplier: provider.cost_multiplier }
+          : {}),
         ...(leg.input_price_per_1m !== undefined
           ? { inputPricePer1m: leg.input_price_per_1m }
           : {}),

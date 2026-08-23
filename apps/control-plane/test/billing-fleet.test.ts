@@ -32,6 +32,7 @@ describe("buildFleetSql", () => {
     // Sampling correction: every aggregate multiplies by _sample_interval.
     expect(sql).toContain("SUM(double1 * _sample_interval) AS offer_usd");
     expect(sql).toContain("SUM(double2 * _sample_interval) AS final_usd");
+    expect(sql).toContain("SUM(double6 * _sample_interval) AS provider_cost_usd");
     expect(sql).toContain("SUM(_sample_interval) AS events");
     expect(sql).toContain("FROM ferrogate_billing");
     expect(sql).toContain("WHERE timestamp >= toDateTime(1000) AND timestamp < toDateTime(2000)");
@@ -65,6 +66,7 @@ describe("mapFleetRows", () => {
         key: "tenant-a",
         offer_usd: 10,
         final_usd: 8,
+        provider_cost_usd: 4,
         prompt_tokens: 100,
         completion_tokens: 50,
         events: 3,
@@ -75,6 +77,7 @@ describe("mapFleetRows", () => {
       key: "tenant-a",
       offer_usd: 10,
       final_usd: 8,
+      provider_cost_usd: 4,
       prompt_tokens: 100,
       completion_tokens: 50,
       events: 3,

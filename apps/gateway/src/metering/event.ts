@@ -142,6 +142,8 @@ export interface BillingEventContext {
    * final. Absent ⇒ no group, and offer == the final cost.
    */
   readonly offerCostUsd?: number | undefined;
+  /** Supplier cost (official offer price x provider cost multiplier). */
+  readonly providerCostUsd?: number | undefined;
   /** `cluster_identity.cluster_id` — a Worker's colo/deployment identity. */
   readonly clusterId?: string | undefined;
   /** `cluster_identity.node_id`. */
@@ -224,14 +226,16 @@ export function billingEventFromUsage(
     billing_group_id: _untrustedBillingGroupId,
     billing_multiplier: _untrustedBillingMultiplier,
     offer_cost_usd: _untrustedOfferCostUsd,
+    provider_cost_multiplier: _untrustedProviderCostMultiplier,
+    provider_cost_usd: _untrustedProviderCostUsd,
     ...metadata
   }: Record<string, string> = usage.metadata ?? {};
   // #945 — record the applied billing group and multiplier ON the event, so a
   // cost record / chargeback export shows WHY the settled cost differs from the
-  // official price. Stamped ONLY when a group applied, so a request bound to no
-  // group carries byte-identical metadata to before this slice. The multiplier
-  // is the value actually applied at settlement (`sink.ts::applyBillingMultiplier`
-  // reads the same `Usage.billingMultiplier`), defaulting to `1.0` for display.
+  // official price. Group fields are stamped ONLY when a group applied. The
+  // multiplier is the value actually applied at settlement
+  // (`sink.ts::applyBillingMultiplier` reads the same
+  // `Usage.billingMultiplier`), defaulting to `1.0` for display.
   if (usage.billingGroupId !== undefined) {
     metadata.billing_group_id = usage.billingGroupId;
     metadata.billing_multiplier = String(usage.billingMultiplier ?? 1);
@@ -239,6 +243,12 @@ export function billingEventFromUsage(
     // offer vs final even for a 0× comp (whose final is $0).
     if (context.offerCostUsd !== undefined) {
       metadata.offer_cost_usd = String(context.offerCostUsd);
+    }
+  }
+  if (usage.providerCostMultiplier !== undefined) {
+    metadata.provider_cost_multiplier = String(usage.providerCostMultiplier);
+    if (context.providerCostUsd !== undefined) {
+      metadata.provider_cost_usd = String(context.providerCostUsd);
     }
   }
   if (usage.metadata !== undefined) {

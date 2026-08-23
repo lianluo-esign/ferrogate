@@ -37,7 +37,7 @@ export async function publishPlatformCatalogCache(options: {
   }
 
   const snapshot: PlatformCatalogSnapshot = {
-    schema_version: 1,
+    schema_version: 2,
     revision,
     published_at_unix: options.nowUnix ?? Math.floor(Date.now() / 1000),
     rows: rows.results,

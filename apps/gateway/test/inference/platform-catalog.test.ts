@@ -496,7 +496,7 @@ describe("KvFirstPlatformModelCatalogSource", () => {
     db.failRevision = true;
     db.failCatalog = true;
     const snapshot = JSON.stringify({
-      schema_version: 1,
+      schema_version: 2,
       revision: 9,
       published_at_unix: 100,
       rows: [routeRow({ input_price_per_1m: 7 })],
@@ -519,6 +519,31 @@ describe("KvFirstPlatformModelCatalogSource", () => {
     expect(loaded.models.resolve("platform-model")?.inputPricePer1m).toBe(7);
     expect(db.revisionReads).toBe(0);
     expect(db.catalogReads).toBe(0);
+  });
+
+  it("rejects a v1 snapshot whose prices may have supplier cost baked in", async () => {
+    const db = fakeDb([routeRow({ input_price_per_1m: 11 })], 10);
+    const stale = JSON.stringify({
+      schema_version: 1,
+      revision: 99,
+      published_at_unix: 100,
+      rows: [routeRow({ input_price_per_1m: 5.5 })],
+    });
+    const kv = { get: async () => stale } as unknown as KVNamespace;
+    const source = new KvFirstPlatformModelCatalogSource({
+      fallback: new ControlDataPlatformModelCatalogSource(),
+    });
+
+    const loaded = await source.load({
+      env: controlEnv(db, { PLATFORM_CONFIG: kv }),
+      fallback: emptyFallback(),
+    });
+
+    expect(loaded.ok).toBe(true);
+    if (!loaded.ok) return;
+    expect(loaded.revision).toBe(10);
+    expect(loaded.models.resolve("platform-model")?.inputPricePer1m).toBe(11);
+    expect(db.catalogReads).toBe(1);
   });
 
   it("falls back to the authoritative control database for a malformed snapshot", async () => {

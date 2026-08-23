@@ -223,9 +223,10 @@ function withPublicModelPrices(
     }
     const multiplier = providerCostMultiplier(row, platformCosts, tenantId);
     const projected = { ...row } as Record<string, unknown>;
+    projected.provider_cost_multiplier = multiplier;
     for (const field of PUBLIC_PRICE_FIELDS) {
       const value = price.enabled === 1 || price.enabled === "1" ? price[field] : null;
-      projected[field] = value === null ? null : value * multiplier;
+      projected[field] = value;
     }
     return projected as unknown as CatalogJoinRow;
   });
@@ -351,6 +352,9 @@ function dbProvider(
     name: row.provider_name,
     kind: row.provider_kind,
     base_url: row.provider_base_url,
+    ...(row.provider_cost_multiplier === null
+      ? {}
+      : { cost_multiplier: row.provider_cost_multiplier }),
     ...(row.provider_upstream_protocol === "openai.chat.completions" ||
     row.provider_upstream_protocol === "openai.responses"
       ? { upstream_protocol: row.provider_upstream_protocol }

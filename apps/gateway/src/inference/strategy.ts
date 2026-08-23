@@ -209,14 +209,15 @@ export const NO_ROUTING_METRICS: RoutingMetrics = {
 export function routeEstimatedUnitCost(route: PhysicalRoute): number {
   const input = route.inputPricePer1m;
   const output = route.outputPricePer1m;
+  const factor = providerCostFactor(route);
   if (input !== undefined && output !== undefined) {
-    return input + output;
+    return (input + output) * factor;
   }
   if (input !== undefined) {
-    return input;
+    return input * factor;
   }
   if (output !== undefined) {
-    return output;
+    return output * factor;
   }
   return Number.POSITIVE_INFINITY;
 }
@@ -238,11 +239,19 @@ export function routeEstimatedCost(
   if (input === undefined || output === undefined) {
     return routeEstimatedUnitCost(route);
   }
-  return estimateCost(modelPriceUsd(input, output), {
-    prompt_tokens: usage.promptTokens,
-    completion_tokens: usage.completionTokens,
-    total_tokens: usage.totalTokens,
-  }).total_cost;
+  return (
+    estimateCost(modelPriceUsd(input, output), {
+      prompt_tokens: usage.promptTokens,
+      completion_tokens: usage.completionTokens,
+      total_tokens: usage.totalTokens,
+    }).total_cost * providerCostFactor(route)
+  );
+}
+
+/** A missing/invalid supplier multiplier cannot make a route look free. */
+function providerCostFactor(route: PhysicalRoute): number {
+  const value = route.providerCostMultiplier;
+  return value !== undefined && Number.isFinite(value) && value >= 0 ? value : 1;
 }
 
 /**

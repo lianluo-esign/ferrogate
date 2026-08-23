@@ -50,6 +50,8 @@ function markupEvent(overrides: Partial<BillingEvent> = {}): BillingEvent {
       billing_group_id: "grp-markup",
       billing_multiplier: "1.5",
       offer_cost_usd: "0.001161",
+      provider_cost_multiplier: "0.5",
+      provider_cost_usd: "0.0005805",
     },
     ...overrides,
   } as BillingEvent;
@@ -69,8 +71,8 @@ describe("billing-analytics data point (#956)", () => {
       "grp-markup",
       "claude-sonnet-4-6",
     ]);
-    // [offer, final, multiplier, promptTokens, completionTokens]
-    expect(points[0]?.doubles).toEqual([0.001161, 0.0017415, 1.5, 367, 4]);
+    // [offer, final, multiplier, promptTokens, completionTokens, providerCost]
+    expect(points[0]?.doubles).toEqual([0.001161, 0.0017415, 1.5, 367, 4, 0.0005805]);
     expect(points[0]?.indexes).toEqual(["t-1"]);
   });
 

@@ -38,7 +38,7 @@ describe("platform config cache", () => {
     expect(result).toEqual({ status: "published", revision: 17, rows: 1 });
     expect(writtenKey).toBe(PLATFORM_CATALOG_SNAPSHOT_KEY);
     expect(JSON.parse(writtenValue)).toEqual({
-      schema_version: 1,
+      schema_version: 2,
       revision: 17,
       published_at_unix: 123,
       rows: [row],

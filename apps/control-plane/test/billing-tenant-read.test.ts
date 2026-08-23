@@ -278,7 +278,14 @@ function filterEventJson(input: {
     cost_usd: 1,
     ...(input.group === undefined
       ? {}
-      : { metadata: { billing_group_id: input.group, billing_multiplier: "2" } }),
+      : {
+          metadata: {
+            billing_group_id: input.group,
+            billing_multiplier: "2",
+            provider_cost_multiplier: "0.5",
+            provider_cost_usd: "0.25",
+          },
+        }),
   });
 }
 
@@ -326,12 +333,35 @@ describe("the billing feed narrows on filters instead of shipping everything", (
       headers: bearer(TENANT_SECRET),
     });
     expect(response.status, await response.clone().text()).toBe(200);
-    return (await response.json()) as { data: { id: string }[]; total: number };
+    return (await response.json()) as {
+      data: { id: string; metadata?: Record<string, string> }[];
+      total: number;
+    };
   };
 
   it("filters by provider", async () => {
     const page = await read("?provider=anthropic");
     expect(page.data.map((e) => e.id)).toEqual(["evt_anthropic"]);
+  });
+
+  it("does not expose supplier economics to a tenant", async () => {
+    const page = await read("?provider=anthropic");
+    expect(page.data[0]?.metadata).toEqual({
+      billing_group_id: "g_premium",
+      billing_multiplier: "2",
+    });
+  });
+
+  it("retains supplier economics for a platform operator", async () => {
+    const response = await SELF.fetch(`${BASE}/admin/v1/billing-events?provider=anthropic`, {
+      headers: bearer(operatorKey.secret),
+    });
+    expect(response.status, await response.clone().text()).toBe(200);
+    const body = (await response.json()) as {
+      data: { metadata?: Record<string, string> }[];
+    };
+    expect(body.data[0]?.metadata?.provider_cost_multiplier).toBe("0.5");
+    expect(body.data[0]?.metadata?.provider_cost_usd).toBe("0.25");
   });
 
   it("filters by model, accepting either the logical or the provider spelling", async () => {
