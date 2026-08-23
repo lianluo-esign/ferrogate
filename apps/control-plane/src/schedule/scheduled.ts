@@ -18,6 +18,10 @@ import { anchorAuditChains } from "../audit/anchor.js";
 import { type SpendAnomalyReport, runSpendAnomalyPass } from "../finops/pass.js";
 import type { ControlPlaneBindings, ControlPlaneDeps } from "../ports.js";
 import { type SiemExportReport, runSiemExportPass } from "../siem/pump.js";
+import {
+  type PlatformConfigCachePublishResult,
+  publishPlatformCatalogCache,
+} from "../store/platform-config-cache.js";
 import { type SharedConfigPassReport, fanOutSharedConfig } from "../store/shared-config.js";
 import {
   type TenantAccountMirrorBackfillReport,
@@ -71,6 +75,8 @@ export interface ScheduledTickReport extends ScheduleTickSummary {
    * on the tick after an operator edits a plan/group/announcement.
    */
   readonly sharedConfig: SharedConfigPassReport;
+  /** The global provider/model snapshot refreshed into shared KV on this tick. */
+  readonly platformConfigCache: PlatformConfigCachePublishResult | { readonly status: "failed" };
   /**
    * What the one-time tenant-account mirror backfill (#75) did: `skipped:
    * "complete"` on every tick once the fleet's pre-migration `tenants` rows have
@@ -124,8 +130,29 @@ export async function runScheduledTick(
     spendAnomaly: await runSpendAnomalyPass(env, now),
     tenantCatalogAudit,
     sharedConfig: await sharedConfigPass(deps, now),
+    platformConfigCache: await platformConfigCachePass(env, deps, now),
     tenantAccountMirror: await tenantAccountMirrorPass(deps, now),
   };
+}
+
+async function platformConfigCachePass(
+  env: ControlPlaneBindings,
+  deps: Pick<ControlPlaneDeps, "controlDatabase">,
+  now: number,
+): Promise<PlatformConfigCachePublishResult | { readonly status: "failed" }> {
+  if (deps.controlDatabase === null) return { status: "unconfigured" };
+  try {
+    return await publishPlatformCatalogCache({
+      db: deps.controlDatabase,
+      kv: env.PLATFORM_CONFIG,
+      nowUnix: now,
+    });
+  } catch (error) {
+    console.warn("control-plane: scheduled platform catalog cache publish failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return { status: "failed" };
+  }
 }
 
 /**

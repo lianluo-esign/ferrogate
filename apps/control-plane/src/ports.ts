@@ -793,6 +793,11 @@ export interface ControlPlaneBindings {
    */
   readonly KEY_DIRECTORY?: KVNamespace;
   /**
+   * Shared, non-secret provider/model routing snapshot. This Worker writes it
+   * after platform catalog commits; the gateway reads the same namespace.
+   */
+  readonly PLATFORM_CONFIG?: KVNamespace;
+  /**
    * The KV namespace the login-bootstrap projection is written into and read from
    * (#66, Phase B login leg). UNLIKE {@link KEY_DIRECTORY}, this namespace is
    * private to the control-plane Worker — it is both writer and reader — so no

@@ -468,9 +468,13 @@ describe("the env-var drift gate itself", () => {
       // projection this Worker WRITES and `apps/gateway` reads on the auth hot
       // path. Declared right after PROMPT_LABELS, so kv order is preserved.
       "KEY_DIRECTORY",
-      // `IDENTITY_DIRECTORY` (#66) is the THIRD KV namespace: the login-bootstrap
+      // `PLATFORM_CONFIG` is the THIRD KV namespace: one deployment-wide,
+      // non-secret provider/model projection written here and read by the
+      // gateway. Polaris catalog writes never fan this graph out per tenant.
+      "PLATFORM_CONFIG",
+      // `IDENTITY_DIRECTORY` (#66) is the FOURTH KV namespace: the login-bootstrap
       // projection this Worker both writes and reads (CONTROL-PLANE-PRIVATE — the
-      // gateway neither binds nor reads it). Declared right after KEY_DIRECTORY.
+      // gateway neither binds nor reads it). Declared after PLATFORM_CONFIG.
       "IDENTITY_DIRECTORY",
       "AUDIT_ANCHORS",
       "SIEM_EXPORTS",

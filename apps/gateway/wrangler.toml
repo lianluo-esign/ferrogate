@@ -1152,6 +1152,12 @@ id = "PLACEHOLDER_SET_AT_DEPLOY_TIME"
 binding = "KEY_DIRECTORY"
 id = "PLACEHOLDER_SET_AT_DEPLOY_TIME"
 
+# Shared non-secret provider/model routing snapshot. The control plane is the
+# sole writer; this gateway reads it before falling back to CONTROL_DATA.
+[[kv_namespaces]]
+binding = "PLATFORM_CONFIG"
+id = "00000000000000000000000000000000"
+
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 # Zero-D1 #821 PR2-delete: the tenant `[[d1_databases]] DB` stanza is DELETED

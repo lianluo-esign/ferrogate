@@ -721,7 +721,14 @@ export class D1TenantModelCatalogSource implements TenantModelCatalogSource {
       return failure(`tenant ${input.tenantId} catalog read failed`, error);
     }
 
-    if (rows.length === 0) {
+    // A catalog copied from the platform at onboarding is a cache, not a tenant
+    // override. Keeping that seed authoritative forever strands the tenant on
+    // provider ids and model bindings that no longer exist after an operator
+    // updates the live platform catalog. Only a catalog containing at least one
+    // tenant-owned offering opts out of the live platform resolver.
+    const platformSeedOnly =
+      rows.length > 0 && rows.every((row) => row.offering_source === "platform_seed");
+    if (rows.length === 0 || platformSeedOnly) {
       entries.set(input.tenantId, {
         revision,
         platformRevision: input.platformRevision,

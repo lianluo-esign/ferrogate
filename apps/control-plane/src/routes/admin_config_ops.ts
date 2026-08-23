@@ -44,6 +44,7 @@ import {
   mergeImportGraphs,
   rateCardToImportGraph,
 } from "../store/platform-catalog-import.js";
+import { publishPlatformCatalogCache } from "../store/platform-config-cache.js";
 import {
   PlatformModelCatalogStore,
   isMissingPlatformCatalogError,
@@ -458,6 +459,21 @@ export const adminConfigOpsRoutes: GroupModule = crudGroup("admin_config_ops", [
         );
       }
       throw error;
+    }
+
+    try {
+      await publishPlatformCatalogCache({
+        db: deps.controlDatabase,
+        kv: c.env.PLATFORM_CONFIG,
+      });
+    } catch (error) {
+      // The import transaction is authoritative. The scheduled publisher will
+      // repair a transient KV failure without making a committed import look
+      // unsuccessful to the operator.
+      console.warn("control-plane: platform catalog cache publish failed", {
+        request_id: c.get("requestId"),
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
 
     return json(c, 200, {

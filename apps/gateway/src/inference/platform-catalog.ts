@@ -39,14 +39,25 @@ import { type CatalogJoinRow, projectCatalog } from "./tenant-catalog.js";
 /** Thirty seconds bounds staleness when an editor forgets to bump a revision. */
 export const DEFAULT_PLATFORM_MODEL_CATALOG_CACHE_TTL_MS = 30_000;
 
-const REVISION_SQL = "SELECT revision FROM platform_catalog_revisions WHERE id = 1";
+export const PLATFORM_CATALOG_REVISION_SQL =
+  "SELECT revision FROM platform_catalog_revisions WHERE id = 1";
+
+/** One shared KV object, atomically replaced after a platform catalog commit. */
+export const PLATFORM_CATALOG_SNAPSHOT_KEY = "platform-config:model-catalog:v1";
+
+export interface PlatformCatalogSnapshot {
+  readonly schema_version: 1;
+  readonly revision: number;
+  readonly published_at_unix: number;
+  readonly rows: readonly CatalogJoinRow[];
+}
 
 /**
  * One graph read: platform models, offerings and provider channels joined,
  * ordered `(name, priority ASC, weight DESC)`. Same column aliases as the tenant
  * {@link CatalogJoinRow} so the shared projection consumes it unchanged.
  */
-const CATALOG_SQL = `
+export const PLATFORM_CATALOG_ROWS_SQL = `
   SELECT
     m.id AS model_id,
     m.name AS model_name,
@@ -208,6 +219,25 @@ function buildPlatformCatalog(
   };
 }
 
+function parsePlatformCatalogSnapshot(raw: string): PlatformCatalogSnapshot | null {
+  try {
+    const parsed = JSON.parse(raw) as Partial<PlatformCatalogSnapshot>;
+    if (
+      parsed.schema_version !== 1 ||
+      !Number.isSafeInteger(parsed.revision) ||
+      (parsed.revision ?? -1) < 0 ||
+      !Number.isSafeInteger(parsed.published_at_unix) ||
+      (parsed.published_at_unix ?? -1) < 0 ||
+      !Array.isArray(parsed.rows)
+    ) {
+      return null;
+    }
+    return parsed as PlatformCatalogSnapshot;
+  } catch {
+    return null;
+  }
+}
+
 /** Control-object-backed source with revision-aware, per-env caching. */
 export class ControlDataPlatformModelCatalogSource implements PlatformModelCatalogSource {
   readonly #ttlMs: number;
@@ -237,7 +267,9 @@ export class ControlDataPlatformModelCatalogSource implements PlatformModelCatal
 
     let revision: number;
     try {
-      const row = await db.prepare(REVISION_SQL).first<{ revision: number | string | null }>();
+      const row = await db
+        .prepare(PLATFORM_CATALOG_REVISION_SQL)
+        .first<{ revision: number | string | null }>();
       revision = row === null || row.revision === null ? 0 : Number(row.revision);
       if (!Number.isSafeInteger(revision) || revision < 0) {
         return this.#lastGoodOrRefuse(cached, "platform catalog revision is invalid");
@@ -259,7 +291,7 @@ export class ControlDataPlatformModelCatalogSource implements PlatformModelCatal
 
     let rows: CatalogJoinRow[];
     try {
-      const result = await db.prepare(CATALOG_SQL).all<CatalogJoinRow>();
+      const result = await db.prepare(PLATFORM_CATALOG_ROWS_SQL).all<CatalogJoinRow>();
       rows = result.results;
     } catch (error) {
       if (isMissingPlatformCatalogError(error)) {
@@ -319,9 +351,100 @@ export class ControlDataPlatformModelCatalogSource implements PlatformModelCatal
   }
 }
 
+/**
+ * KV-first shared platform catalog. The control database remains authoritative
+ * and is the fallback for an absent, malformed, or temporarily unavailable KV
+ * projection. Only binding names such as `OPENAI_API_KEY` enter the snapshot;
+ * resolved provider secret values remain Worker secrets on this env.
+ */
+export class KvFirstPlatformModelCatalogSource implements PlatformModelCatalogSource {
+  readonly #fallback: PlatformModelCatalogSource;
+  readonly #ttlMs: number;
+  readonly #now: () => number;
+  readonly #byEnv = new WeakMap<object, CacheEntry>();
+
+  constructor(options: {
+    fallback: PlatformModelCatalogSource;
+    ttlMs?: number;
+    now?: () => number;
+  }) {
+    this.#fallback = options.fallback;
+    this.#ttlMs = options.ttlMs ?? DEFAULT_PLATFORM_MODEL_CATALOG_CACHE_TTL_MS;
+    this.#now = options.now ?? Date.now;
+  }
+
+  async load(input: {
+    env: InferenceBindings;
+    fallback: ModelResolver;
+  }): Promise<PlatformModelCatalogLoadResult> {
+    const kv = input.env.PLATFORM_CONFIG as KVNamespace | undefined;
+    if (kv === undefined) return this.#fallback.load(input);
+
+    const envKey = input.env as unknown as object;
+    const cached = this.#byEnv.get(envKey);
+    const now = this.#now();
+    if (cached !== undefined && cached.expiresAt > now) {
+      return {
+        ok: true,
+        models: cached.resolver,
+        inputs: cached.inputs,
+        revision: cached.revision,
+      };
+    }
+
+    let raw: string | null;
+    try {
+      raw = await kv.get(PLATFORM_CATALOG_SNAPSHOT_KEY, { cacheTtl: 30 });
+    } catch {
+      return this.#fallback.load(input);
+    }
+    if (raw === null) return this.#fallback.load(input);
+
+    const snapshot = parsePlatformCatalogSnapshot(raw);
+    if (snapshot === null) return this.#fallback.load(input);
+    if (cached !== undefined && snapshot.revision < cached.revision) {
+      return {
+        ok: true,
+        models: cached.resolver,
+        inputs: cached.inputs,
+        revision: cached.revision,
+      };
+    }
+
+    const routableRows = routableCatalogRows(snapshot.rows);
+    if (routableRows.length === 0) return this.#fallback.load(input);
+    const built = buildPlatformCatalog(routableRows, input.env);
+    if (!built.ok) return this.#fallback.load(input);
+
+    const entry: CacheEntry = {
+      revision: snapshot.revision,
+      resolver: built.resolver,
+      inputs: built.inputs,
+      expiresAt: now + this.#ttlMs,
+    };
+    this.#byEnv.set(envKey, entry);
+    return {
+      ok: true,
+      models: entry.resolver,
+      inputs: entry.inputs,
+      revision: entry.revision,
+    };
+  }
+}
+
 /** Construct the production source; the returned object owns isolate-local cache state. */
 export function platformModelCatalogFromControlData(
   options: { ttlMs?: number; now?: () => number } = {},
 ): PlatformModelCatalogSource {
   return new ControlDataPlatformModelCatalogSource(options);
+}
+
+/** Production source: shared KV cache in front of the authoritative control DB. */
+export function platformModelCatalogFromSharedConfig(
+  options: { ttlMs?: number; now?: () => number } = {},
+): PlatformModelCatalogSource {
+  return new KvFirstPlatformModelCatalogSource({
+    fallback: platformModelCatalogFromControlData(options),
+    ...options,
+  });
 }

@@ -146,8 +146,15 @@ describe("POST /admin/v1/tenant-accounts", () => {
 
     const created = await SELF.fetch(`${BASE}/admin/v1/tenant-accounts`, {
       method: "POST",
-      headers: { authorization: `Bearer ${OPERATOR}`, "content-type": "application/json" },
-      body: JSON.stringify({ id: tenantId, name: "Acme", slug: `acme-${tenantId}` }),
+      headers: {
+        authorization: `Bearer ${OPERATOR}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        id: tenantId,
+        name: "Acme",
+        slug: `acme-${tenantId}`,
+      }),
     });
     expect(created.status).toBe(201);
 
@@ -184,8 +191,15 @@ describe("POST /admin/v1/tenant-accounts", () => {
     const tenantId = freshTenantId("roster");
     await SELF.fetch(`${BASE}/admin/v1/tenant-accounts`, {
       method: "POST",
-      headers: { authorization: `Bearer ${OPERATOR}`, "content-type": "application/json" },
-      body: JSON.stringify({ id: tenantId, name: "Roster", slug: `roster-${tenantId}` }),
+      headers: {
+        authorization: `Bearer ${OPERATOR}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        id: tenantId,
+        name: "Roster",
+        slug: `roster-${tenantId}`,
+      }),
     });
     // A Durable Object namespace cannot be listed in production, so a tenant
     // missing from here is invisible to `store/asset_fleet.ts` and every other
@@ -197,8 +211,15 @@ describe("POST /admin/v1/tenant-accounts", () => {
     const tenantId = freshTenantId("mirror");
     await SELF.fetch(`${BASE}/admin/v1/tenant-accounts`, {
       method: "POST",
-      headers: { authorization: `Bearer ${OPERATOR}`, "content-type": "application/json" },
-      body: JSON.stringify({ id: tenantId, name: "Mirror", slug: `mirror-${tenantId}` }),
+      headers: {
+        authorization: `Bearer ${OPERATOR}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        id: tenantId,
+        name: "Mirror",
+        slug: `mirror-${tenantId}`,
+      }),
     });
 
     // The write-through hook filled `tenants.document_json` with the full admin
@@ -227,8 +248,15 @@ describe("POST /admin/v1/tenant-accounts", () => {
     const tenantId = freshTenantId("patch");
     await SELF.fetch(`${BASE}/admin/v1/tenant-accounts`, {
       method: "POST",
-      headers: { authorization: `Bearer ${OPERATOR}`, "content-type": "application/json" },
-      body: JSON.stringify({ id: tenantId, name: "Patchy", slug: `patchy-${tenantId}` }),
+      headers: {
+        authorization: `Bearer ${OPERATOR}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        id: tenantId,
+        name: "Patchy",
+        slug: `patchy-${tenantId}`,
+      }),
     });
 
     const handle = await router().forTenant(tenantId);
@@ -239,7 +267,10 @@ describe("POST /admin/v1/tenant-accounts", () => {
 
     const patched = await SELF.fetch(`${BASE}/admin/v1/tenant-accounts/${tenantId}`, {
       method: "PATCH",
-      headers: { authorization: `Bearer ${OPERATOR}`, "content-type": "application/json" },
+      headers: {
+        authorization: `Bearer ${OPERATOR}`,
+        "content-type": "application/json",
+      },
       body: JSON.stringify({ name: "Patchy Renamed" }),
     });
     expect(patched.status).toBe(200);
@@ -259,7 +290,10 @@ describe("POST /admin/v1/tenant-accounts", () => {
     for (const tenantId of [first, second]) {
       await SELF.fetch(`${BASE}/admin/v1/tenant-accounts`, {
         method: "POST",
-        headers: { authorization: `Bearer ${OPERATOR}`, "content-type": "application/json" },
+        headers: {
+          authorization: `Bearer ${OPERATOR}`,
+          "content-type": "application/json",
+        },
         body: JSON.stringify({ id: tenantId, name: tenantId, slug: tenantId }),
       });
     }
@@ -410,12 +444,78 @@ describe("seeding from the platform catalog (#891)", () => {
 
     const created = await SELF.fetch(`${BASE}/admin/v1/tenant-accounts`, {
       method: "POST",
-      headers: { authorization: `Bearer ${OPERATOR}`, "content-type": "application/json" },
-      body: JSON.stringify({ id: tenantId, name: "Platformy", slug: `platformy-${tenantId}` }),
+      headers: {
+        authorization: `Bearer ${OPERATOR}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        id: tenantId,
+        name: "Platformy",
+        slug: `platformy-${tenantId}`,
+      }),
     });
     expect(created.status).toBe(201);
 
     await assertSeededFromPlatform(tenantId, 5);
+  });
+
+  it("serves the current platform catalog to a tenant dashboard after its snapshot is stale", async () => {
+    await seedPlatformCatalog(5);
+    const tenantId = freshTenantId("live-platform-catalog");
+    const created = await SELF.fetch(`${BASE}/admin/v1/tenant-accounts`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${OPERATOR}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        id: tenantId,
+        name: "Platformy",
+        slug: `platformy-${tenantId}`,
+      }),
+    });
+    expect(created.status).toBe(201);
+
+    await db().batch([
+      db().prepare(
+        "INSERT INTO platform_catalog_models " +
+          "(id, name, capabilities_json, routing_strategy, enabled, created_at_unix, updated_at_unix) " +
+          "VALUES ('m-current', 'gpt-current', '[]', 'priority', 1, 2, 2)",
+      ),
+      db().prepare(
+        "INSERT INTO platform_catalog_offerings " +
+          "(id, model_id, provider_id, upstream_model_id, role, priority, weight, " +
+          "input_price_per_1m, output_price_per_1m, currency, source, enabled, " +
+          "created_at_unix, updated_at_unix) " +
+          "VALUES ('o-current', 'm-current', 'p-openai', 'gpt-current', 'fallback', 100, 1, " +
+          "3.0, 12.0, 'USD', 'provider_sync', 1, 2, 2)",
+      ),
+      db().prepare(
+        "UPDATE platform_catalog_revisions SET revision = 6, updated_at_unix = 2 WHERE id = 1",
+      ),
+    ]);
+
+    const snapshot = await SELF.fetch(
+      `${BASE}/admin/v1/models?tenant_id=${encodeURIComponent(tenantId)}&limit=1000`,
+      { headers: { authorization: `Bearer ${OPERATOR}` } },
+    );
+    expect(snapshot.status).toBe(200);
+    const snapshotBody = (await snapshot.json()) as {
+      data: Array<{ name: string }>;
+    };
+    expect(snapshotBody.data.map((model) => model.name)).toEqual(["gpt-4o"]);
+
+    const current = await SELF.fetch(
+      `${BASE}/admin/v1/models?tenant_id=${encodeURIComponent(tenantId)}&catalog_scope=platform&limit=1000`,
+      { headers: { authorization: `Bearer ${OPERATOR}` } },
+    );
+    expect(current.status).toBe(200);
+    const currentBody = (await current.json()) as {
+      scope: string;
+      data: Array<{ name: string }>;
+    };
+    expect(currentBody.scope).toBe("platform");
+    expect(currentBody.data.map((model) => model.name).sort()).toEqual(["gpt-4o", "gpt-current"]);
   });
 
   it("the self-service register path also seeds the platform graph", async () => {
@@ -460,7 +560,9 @@ describe("seeding from the platform catalog (#891)", () => {
       .bind(tenantId, "Read Fault", `readfault-${tenantId}`)
       .run();
 
-    const deps = resolveDeps(env as unknown as ControlPlaneBindings, { requestId: "readfault" });
+    const deps = resolveDeps(env as unknown as ControlPlaneBindings, {
+      requestId: "readfault",
+    });
     const realControl = deps.controlDatabase;
     if (realControl === null) throw new Error("expected a control database under store=d1");
     // A statement whose reads reject with a non-missing-table D1 error, returned
@@ -525,8 +627,15 @@ describe("seeding from the platform catalog (#891)", () => {
     const tenantId = freshTenantId("nocatalog");
     const created = await SELF.fetch(`${BASE}/admin/v1/tenant-accounts`, {
       method: "POST",
-      headers: { authorization: `Bearer ${OPERATOR}`, "content-type": "application/json" },
-      body: JSON.stringify({ id: tenantId, name: "Cardy", slug: `cardy-${tenantId}` }),
+      headers: {
+        authorization: `Bearer ${OPERATOR}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        id: tenantId,
+        name: "Cardy",
+        slug: `cardy-${tenantId}`,
+      }),
     });
     expect(created.status).toBe(201);
 
@@ -582,8 +691,15 @@ describe("the control plane writes into the object the data plane reads", () => 
   async function createTenant(tenantId: string): Promise<void> {
     const created = await SELF.fetch(`${BASE}/admin/v1/tenant-accounts`, {
       method: "POST",
-      headers: { authorization: `Bearer ${OPERATOR}`, "content-type": "application/json" },
-      body: JSON.stringify({ id: tenantId, name: "Routed", slug: `routed-${tenantId}` }),
+      headers: {
+        authorization: `Bearer ${OPERATOR}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        id: tenantId,
+        name: "Routed",
+        slug: `routed-${tenantId}`,
+      }),
     });
     expect(created.status).toBe(201);
   }
@@ -594,15 +710,24 @@ describe("the control plane writes into the object the data plane reads", () => 
 
     const wallet = await SELF.fetch(`${BASE}/admin/v1/wallets`, {
       method: "POST",
-      headers: { authorization: `Bearer ${OPERATOR}`, "content-type": "application/json" },
+      headers: {
+        authorization: `Bearer ${OPERATOR}`,
+        "content-type": "application/json",
+      },
       body: JSON.stringify({ tenant_id: tenantId, balance_cents: 0 }),
     });
     expect(wallet.status).toBe(201);
 
     const credited = await SELF.fetch(`${BASE}/admin/v1/wallets/${tenantId}/adjust`, {
       method: "POST",
-      headers: { authorization: `Bearer ${OPERATOR}`, "content-type": "application/json" },
-      body: JSON.stringify({ amount_cents: 50_000, reason: "prepaid top-up" }),
+      headers: {
+        authorization: `Bearer ${OPERATOR}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        amount_cents: 50_000,
+        reason: "prepaid top-up",
+      }),
     });
     expect(credited.status).toBe(200);
 
@@ -623,7 +748,10 @@ describe("the control plane writes into the object the data plane reads", () => 
     // running total: 6,000 cents is affordable, so this is 200 and not a 409.
     const charged = await SELF.fetch(`${BASE}/admin/v1/wallets/${tenantId}/charge`, {
       method: "POST",
-      headers: { authorization: `Bearer ${OPERATOR}`, "content-type": "application/json" },
+      headers: {
+        authorization: `Bearer ${OPERATOR}`,
+        "content-type": "application/json",
+      },
       body: JSON.stringify({ amount_cents: 6_000, reason: "usage" }),
     });
     expect(charged.status).toBe(200);
@@ -683,7 +811,10 @@ describe("the control plane writes into the object the data plane reads", () => 
 
     const deleted = await SELF.fetch(`${BASE}/admin/v1/tenant-accounts/${tenantId}`, {
       method: "PATCH",
-      headers: { authorization: `Bearer ${OPERATOR}`, "content-type": "application/json" },
+      headers: {
+        authorization: `Bearer ${OPERATOR}`,
+        "content-type": "application/json",
+      },
       body: JSON.stringify({ status: "deleted" }),
     });
     expect(deleted.status).toBe(200);

@@ -19,6 +19,8 @@ import { describe, expect, it } from "vitest";
 import { InMemoryModelResolver } from "../../src/inference/defaults.js";
 import {
   ControlDataPlatformModelCatalogSource,
+  KvFirstPlatformModelCatalogSource,
+  PLATFORM_CATALOG_SNAPSHOT_KEY,
   platformModelCatalogFromControlData,
 } from "../../src/inference/platform-catalog.js";
 import type { ModelResolver, PhysicalRoute } from "../../src/inference/ports.js";
@@ -89,10 +91,14 @@ function fakeDb(rows: CatalogRow[], revision: number | null = 2): FakeDatabase {
     },
     async all<T>() {
       const isRevision = sql.includes("platform_catalog_revisions");
-      return { results: (isRevision ? revisionResult() : catalogResult()) as T[] };
+      return {
+        results: (isRevision ? revisionResult() : catalogResult()) as T[],
+      };
     },
   });
-  state.db = { prepare: (sql: string) => chainFor(sql) } as unknown as D1Database;
+  state.db = {
+    prepare: (sql: string) => chainFor(sql),
+  } as unknown as D1Database;
   return state;
 }
 
@@ -188,7 +194,10 @@ describe("ControlDataPlatformModelCatalogSource", () => {
     ]);
     const source = new ControlDataPlatformModelCatalogSource();
 
-    const loaded = await source.load({ env: controlEnv(db), fallback: emptyFallback() });
+    const loaded = await source.load({
+      env: controlEnv(db),
+      fallback: emptyFallback(),
+    });
 
     expect(loaded.ok).toBe(true);
     if (!loaded.ok) return;
@@ -220,12 +229,18 @@ describe("ControlDataPlatformModelCatalogSource", () => {
     // tenant loader does — otherwise cloudflareAiGatewayRouting sees no account and
     // fails the WHOLE platform catalog, a deployment-wide 503.
     const db = fakeDb([
-      routeRow({ provider_cloudflare_ai_gateway_json: JSON.stringify({ gateway_id: "gw-plat" }) }),
+      routeRow({
+        provider_cloudflare_ai_gateway_json: JSON.stringify({
+          gateway_id: "gw-plat",
+        }),
+      }),
     ]);
     const source = new ControlDataPlatformModelCatalogSource();
 
     const loaded = await source.load({
-      env: controlEnv(db, { GATEWAY_CLOUDFLARE: JSON.stringify({ account_id: "acct-123" }) }),
+      env: controlEnv(db, {
+        GATEWAY_CLOUDFLARE: JSON.stringify({ account_id: "acct-123" }),
+      }),
       fallback: emptyFallback(),
     });
 
@@ -241,13 +256,20 @@ describe("ControlDataPlatformModelCatalogSource", () => {
 
   it("fails the platform catalog closed when a cloudflare provider lacks the account block", async () => {
     const db = fakeDb([
-      routeRow({ provider_cloudflare_ai_gateway_json: JSON.stringify({ gateway_id: "gw-plat" }) }),
+      routeRow({
+        provider_cloudflare_ai_gateway_json: JSON.stringify({
+          gateway_id: "gw-plat",
+        }),
+      }),
     ]);
     const source = new ControlDataPlatformModelCatalogSource();
 
     // No GATEWAY_CLOUDFLARE: the provider that asked to be routed cannot be, so
     // the build refuses (fail-closed) rather than silently dropping the routing.
-    const loaded = await source.load({ env: controlEnv(db), fallback: emptyFallback() });
+    const loaded = await source.load({
+      env: controlEnv(db),
+      fallback: emptyFallback(),
+    });
 
     expect(loaded.ok).toBe(false);
     if (loaded.ok) return;
@@ -256,7 +278,9 @@ describe("ControlDataPlatformModelCatalogSource", () => {
 
   it("reuses a same-revision catalog and reloads immediately after a revision bump", async () => {
     const db = fakeDb([routeRow()]);
-    const source = new ControlDataPlatformModelCatalogSource({ now: () => 1000 });
+    const source = new ControlDataPlatformModelCatalogSource({
+      now: () => 1000,
+    });
     const env = controlEnv(db);
 
     const first = await source.load({ env, fallback: emptyFallback() });
@@ -320,7 +344,10 @@ describe("ControlDataPlatformModelCatalogSource", () => {
     // one and not the env fallback.
     db.failCatalog = true;
     clock.now = 1000 + 6_000;
-    const stale = await source.load({ env, fallback: new InMemoryModelResolver([FALLBACK_ROUTE]) });
+    const stale = await source.load({
+      env,
+      fallback: new InMemoryModelResolver([FALLBACK_ROUTE]),
+    });
     expect(stale.ok).toBe(true);
     if (!stale.ok) return;
     expect(stale.models.resolve("platform-model")?.inputPricePer1m).toBe(5);
@@ -348,7 +375,10 @@ describe("ControlDataPlatformModelCatalogSource", () => {
     db.failCatalog = true;
     const source = new ControlDataPlatformModelCatalogSource();
 
-    const loaded = await source.load({ env: controlEnv(db), fallback: emptyFallback() });
+    const loaded = await source.load({
+      env: controlEnv(db),
+      fallback: emptyFallback(),
+    });
     expect(loaded.ok).toBe(false);
     if (loaded.ok) return;
     expect(loaded.reason).toMatch(/platform catalog read failed/);
@@ -359,7 +389,10 @@ describe("ControlDataPlatformModelCatalogSource", () => {
     db.failRevision = true;
     const source = new ControlDataPlatformModelCatalogSource();
 
-    const loaded = await source.load({ env: controlEnv(db), fallback: emptyFallback() });
+    const loaded = await source.load({
+      env: controlEnv(db),
+      fallback: emptyFallback(),
+    });
     expect(loaded.ok).toBe(false);
     if (loaded.ok) return;
     expect(loaded.reason).toMatch(/platform catalog revision read failed/);
@@ -446,8 +479,67 @@ describe("ControlDataPlatformModelCatalogSource", () => {
   it("propagates the 503 refusal on an unrecognized control-storage posture", async () => {
     const source = platformModelCatalogFromControlData();
     await expect(
-      source.load({ env: { GATEWAY_CONTROL_STORAGE: "bogus" }, fallback: emptyFallback() }),
-    ).rejects.toMatchObject({ status: 503, code: "control_storage_misconfigured" });
+      source.load({
+        env: { GATEWAY_CONTROL_STORAGE: "bogus" },
+        fallback: emptyFallback(),
+      }),
+    ).rejects.toMatchObject({
+      status: 503,
+      code: "control_storage_misconfigured",
+    });
+  });
+});
+
+describe("KvFirstPlatformModelCatalogSource", () => {
+  it("serves the shared snapshot without reading the control database", async () => {
+    const db = fakeDb([routeRow()]);
+    db.failRevision = true;
+    db.failCatalog = true;
+    const snapshot = JSON.stringify({
+      schema_version: 1,
+      revision: 9,
+      published_at_unix: 100,
+      rows: [routeRow({ input_price_per_1m: 7 })],
+    });
+    const kv = {
+      get: async (key: string) => (key === PLATFORM_CATALOG_SNAPSHOT_KEY ? snapshot : null),
+    } as unknown as KVNamespace;
+    const source = new KvFirstPlatformModelCatalogSource({
+      fallback: new ControlDataPlatformModelCatalogSource(),
+    });
+
+    const loaded = await source.load({
+      env: controlEnv(db, { PLATFORM_CONFIG: kv }),
+      fallback: emptyFallback(),
+    });
+
+    expect(loaded.ok).toBe(true);
+    if (!loaded.ok) return;
+    expect(loaded.revision).toBe(9);
+    expect(loaded.models.resolve("platform-model")?.inputPricePer1m).toBe(7);
+    expect(db.revisionReads).toBe(0);
+    expect(db.catalogReads).toBe(0);
+  });
+
+  it("falls back to the authoritative control database for a malformed snapshot", async () => {
+    const db = fakeDb([routeRow({ input_price_per_1m: 11 })], 10);
+    const kv = {
+      get: async () => "{not-json",
+    } as unknown as KVNamespace;
+    const source = new KvFirstPlatformModelCatalogSource({
+      fallback: new ControlDataPlatformModelCatalogSource(),
+    });
+
+    const loaded = await source.load({
+      env: controlEnv(db, { PLATFORM_CONFIG: kv }),
+      fallback: emptyFallback(),
+    });
+
+    expect(loaded.ok).toBe(true);
+    if (!loaded.ok) return;
+    expect(loaded.revision).toBe(10);
+    expect(loaded.models.resolve("platform-model")?.inputPricePer1m).toBe(11);
+    expect(db.catalogReads).toBe(1);
   });
 });
 
@@ -480,7 +572,11 @@ const ENV_REGISTRY = {
     },
   ]),
   GATEWAY_MODELS: JSON.stringify([
-    { name: "shared-model", provider: "env-provider", provider_model: "env-upstream" },
+    {
+      name: "shared-model",
+      provider: "env-provider",
+      provider_model: "env-upstream",
+    },
   ]),
   ENV_KEY: "env-secret",
 };
@@ -529,7 +625,9 @@ describe("tenant platform-kind arm against the platform catalog", () => {
     // the new leg on its next load, not wait out its own 5s TTL. The tenant cache
     // key therefore folds in the platform revision.
     const clock = { now: 1000 };
-    const platformSource = new ControlDataPlatformModelCatalogSource({ now: () => clock.now });
+    const platformSource = new ControlDataPlatformModelCatalogSource({
+      now: () => clock.now,
+    });
 
     // Platform catalog rev 10: shared-model -> platform-a.
     const platformA = await platformSource.load({

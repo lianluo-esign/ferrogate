@@ -323,6 +323,11 @@ id = "PLACEHOLDER_SET_AT_DEPLOY_TIME"
 binding = "KEY_DIRECTORY"
 id = "PLACEHOLDER_SET_AT_DEPLOY_TIME"
 
+# D1-authoritative, shared routing projection written after catalog commits.
+[[kv_namespaces]]
+binding = "PLATFORM_CONFIG"
+id = "00000000000000000000000000000000"
+
 # ---------------------------------------------------------------------------
 # KV: the admin-identity PROJECTION — the LOGIN hot-path bootstrap (#66, Phase B)
 # ---------------------------------------------------------------------------

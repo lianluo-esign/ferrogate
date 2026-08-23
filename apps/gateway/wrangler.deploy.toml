@@ -1132,6 +1132,10 @@ id = "b6596d54318642ce96618c949f757c9c"
 binding = "KEY_DIRECTORY"
 id = "76c175ed441048a0924fa4bc95e33740"
 
+[[kv_namespaces]]
+binding = "PLATFORM_CONFIG"
+id = "PLATFORM_CONFIG_KV_ID_SET_BY_WORKFLOW"
+
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 # Zero-D1 #821 PR2-delete: the tenant `[[d1_databases]] DB` stanza is DELETED

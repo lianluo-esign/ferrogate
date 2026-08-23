@@ -6,6 +6,7 @@ import { providerSecretRefusal, resolveProviderSecret } from "../../../gateway/s
 import { HttpError } from "../middleware/errors.js";
 import type { StoreRecord } from "../ports.js";
 import { adminDeleted, adminItem, listResponse, parseListQuery } from "../responses.js";
+import { publishPlatformCatalogCache } from "../store/platform-config-cache.js";
 import {
   PlatformModelCatalogStore,
   type PlatformModelPriceInput,
@@ -382,7 +383,31 @@ async function legacyList(
 function catalogHandler(handler: Handler): Handler {
   return async (c) => {
     try {
-      return await handler(c);
+      const response = await handler(c);
+      const method = c.req.method.toUpperCase();
+      const controlDatabase = depsOf(c).controlDatabase;
+      if (
+        response.ok &&
+        method !== "GET" &&
+        method !== "HEAD" &&
+        scopeOf(c).kind === "platform_operator" &&
+        controlDatabase !== null
+      ) {
+        try {
+          await publishPlatformCatalogCache({
+            db: controlDatabase,
+            kv: c.env.PLATFORM_CONFIG,
+          });
+        } catch (error) {
+          // The D1 mutation is already committed. Keep it authoritative and let
+          // the scheduled publisher repair a failed cache write.
+          console.warn("control-plane: platform catalog cache publish failed", {
+            request_id: c.get("requestId"),
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+      return response;
     } catch (error) {
       // Migration 0025 not applied yet. Reads degrade to the pre-#889 answer in
       // `platformCatalogAdopted`; a WRITE cannot, and "not deployed yet" is a
@@ -418,7 +443,11 @@ function filterAndList(
     depsOf(c).listDefaultLimit,
     depsOf(c).listMaxLimit,
   );
-  const { tenant_id: _tenantFilter, ...filters } = query.filters;
+  const {
+    tenant_id: _tenantFilter,
+    catalog_scope: _catalogScopeFilter,
+    ...filters
+  } = query.filters;
   const filtered = records.filter(
     (record) => matchesSearch(record, query.search) && matchesFilters(record, filters),
   );
@@ -612,6 +641,18 @@ async function providerDelete(c: Parameters<Handler>[0]): Promise<Response> {
 
 async function modelList(c: Parameters<Handler>[0]): Promise<Response> {
   const target = targetScope(c);
+  // Tenant dashboards need the current shared catalog when joining a billing
+  // group's platform provider ids to model offerings. The tenant's ordinary
+  // model list remains its editable catalog; this explicit read-only view
+  // avoids serving the one-time onboarding snapshot after platform changes.
+  if (
+    target.kind === "tenant" &&
+    new URL(c.req.url).searchParams.get("catalog_scope") === "platform"
+  ) {
+    return filterAndList(c, await platformCatalogStore(c).listModels(), {
+      kind: "platform",
+    });
+  }
   const platformRows = await platformRowsForList(c, target, (store) => store.listModels());
   if (platformRows !== null) return filterAndList(c, platformRows, target);
   const tenantIds = await listTenants(c);

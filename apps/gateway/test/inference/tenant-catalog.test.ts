@@ -211,7 +211,11 @@ describe("D1TenantModelCatalogSource", () => {
         },
       ]),
       GATEWAY_MODELS: JSON.stringify([
-        { name: "tenant-model", provider: "env-provider", provider_model: "env-upstream" },
+        {
+          name: "tenant-model",
+          provider: "env-provider",
+          provider_model: "env-upstream",
+        },
       ]),
       ENV_KEY: "env-secret",
     };
@@ -275,6 +279,71 @@ describe("D1TenantModelCatalogSource", () => {
 
     expect(loaded).toMatchObject({ ok: true, models: fallback, revision: 1 });
     expect(db.catalogReads).toBe(1);
+  });
+
+  it("uses the live platform catalog when the tenant only has an onboarding snapshot", async () => {
+    const db = fakeDb([
+      routeRow("stale-provider", 0, {
+        offering_source: "platform_seed",
+        provider_id: "tenant-a:stale-provider-id",
+      }),
+    ]);
+    const liveRoute = {
+      logicalModel: "current-model",
+      provider: "current-provider",
+      providerId: "current-provider-id",
+      providerModel: "current-upstream",
+      providerKind: "openai",
+      baseUrl: "https://current.example.test/v1",
+      enabled: true,
+    } satisfies PhysicalRoute;
+    const fallback = new InMemoryModelResolver([liveRoute]);
+    const source = new D1TenantModelCatalogSource();
+
+    const loaded = await source.load({
+      tenantId: "tenant-a",
+      db: db.db,
+      env: {},
+      fallback,
+      platformRevision: 12,
+    });
+
+    expect(loaded).toMatchObject({ ok: true, models: fallback, revision: 1 });
+    if (!loaded.ok) return;
+    expect(loaded.models.resolve("tenant-model")).toBeNull();
+    expect(loaded.models.resolve("current-model")?.providerId).toBe("current-provider-id");
+  });
+
+  it("keeps a tenant-owned catalog authoritative over the live platform catalog", async () => {
+    const db = fakeDb([
+      routeRow("tenant-provider", 0, {
+        offering_source: "tenant",
+      }),
+    ]);
+    const fallback = new InMemoryModelResolver([
+      {
+        logicalModel: "current-model",
+        provider: "current-provider",
+        providerId: "current-provider-id",
+        providerModel: "current-upstream",
+        providerKind: "openai",
+        baseUrl: "https://current.example.test/v1",
+        enabled: true,
+      },
+    ]);
+    const source = new D1TenantModelCatalogSource();
+
+    const loaded = await source.load({
+      tenantId: "tenant-a",
+      db: db.db,
+      env: ENV,
+      fallback,
+    });
+
+    expect(loaded.ok).toBe(true);
+    if (!loaded.ok) return;
+    expect(loaded.models.resolve("tenant-model")?.provider).toBe("tenant-provider");
+    expect(loaded.models.resolve("current-model")).toBeNull();
   });
 
   it("reuses a same-revision catalog and reloads after a revision bump", async () => {

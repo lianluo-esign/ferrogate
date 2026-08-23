@@ -18,12 +18,14 @@ import { SELF, env } from "cloudflare:test";
  */
 import { PriceBook } from "@ferrogate/billing";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { PLATFORM_CATALOG_SNAPSHOT_KEY } from "../../gateway/src/inference/platform-catalog.js";
 import { PlatformModelCatalogStore } from "../src/store/platform-model-catalog.js";
 import { applySchema, db, resetD1 } from "./d1.js";
 import { BASE, arm, bearer, jsonRequest, operatorKey, tenantKey } from "./harness.js";
 
 const OPERATOR = operatorKey.secret;
 const DEFAULT_CONTROL_STORAGE = "durable_object";
+const platformConfig = (env as unknown as { PLATFORM_CONFIG: KVNamespace }).PLATFORM_CONFIG;
 
 interface JsonBody {
   readonly [key: string]: unknown;
@@ -140,6 +142,7 @@ beforeEach(async () => {
     staticKeys: [operatorKey],
     nativeKeys: [tenantKey("tenant-secret", "tenant_a")],
   });
+  await platformConfig.delete(PLATFORM_CATALOG_SNAPSHOT_KEY);
 });
 
 afterEach(() => {
@@ -164,6 +167,12 @@ describe("platform catalog bootstrap import (#892)", () => {
     });
     expect(response.body.inserted).toEqual(response.body.counts);
     expect(response.body.revision).toBe(1);
+
+    const cached = JSON.parse(
+      (await platformConfig.get(PLATFORM_CATALOG_SNAPSHOT_KEY)) ?? "null",
+    ) as { revision?: number; rows?: Array<{ provider_id?: string }> } | null;
+    expect(cached?.revision).toBe(1);
+    expect(cached?.rows?.some((row) => row.provider_id === "platform:provider:openai")).toBe(true);
 
     // Real providers keep their real kind; only the rate-card channel is platform.
     const kinds = new Map(
