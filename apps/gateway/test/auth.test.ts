@@ -303,7 +303,7 @@ describe("error envelope", () => {
     expect(res.headers.get("x-trace-id")).toBe("req_fixed_1");
     expect(await res.json()).toEqual({
       error: {
-        message: "missing API key; use Authorization: Bearer or x-api-key",
+        message: "missing API key; use Authorization: Bearer, x-api-key, or x-goog-api-key",
         type: "ferrogate_error",
         code: "missing_api_key",
         request_id: "req_fixed_1",

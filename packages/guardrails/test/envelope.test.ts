@@ -58,6 +58,79 @@ describe("normalizeResponse (chat SSE)", () => {
   });
 });
 
+describe("normalizeRequest (gemini)", () => {
+  test("walks systemInstruction, contents turns, functionCall and functionResponse", () => {
+    const env = normalizeRequest("gemini", {
+      systemInstruction: { parts: [{ text: "be terse" }] },
+      contents: [
+        { role: "user", parts: [{ text: "hello" }] },
+        {
+          role: "model",
+          parts: [
+            { text: "one moment" },
+            { functionCall: { name: "search", args: { q: "x" } } },
+          ],
+        },
+        { role: "user", parts: [{ functionResponse: { name: "search", response: { hits: 2 } } }] },
+        // inlineData carries nothing a text detector can read — it is skipped.
+        { role: "user", parts: [{ inlineData: { mimeType: "image/png", data: "AAAA" } }] },
+      ],
+    });
+    const sources = env.segments.map((s) => s.source);
+    expect(sources).toContain("system"); // systemInstruction
+    expect(sources).toContain("user"); // contents[user].text
+    expect(sources).toContain("assistant"); // role:model text
+    expect(sources).toContain("tool_arguments"); // functionCall.args (model-authored)
+    expect(sources).toContain("tool_result"); // functionResponse.response (external input)
+
+    // functionCall.args is an OBJECT on this protocol; it is serialized as JSON.
+    const toolArgs = env.segments.find((s) => s.source === "tool_arguments")!;
+    expect(toolArgs.text).toBe('{"q":"x"}');
+    const toolResult = env.segments.find((s) => s.source === "tool_result")!;
+    expect(toolResult.text).toBe('{"hits":2}');
+    // inlineData produced no segment.
+    expect(env.segments.filter((s) => s.text.includes("AAAA"))).toHaveLength(0);
+    expect(env.segments[0]?.fingerprint).toMatch(/^sha256:[0-9a-f]{64}$/);
+  });
+
+  test("accepts the snake_case system_instruction spelling too", () => {
+    const env = normalizeRequest("gemini", {
+      system_instruction: { parts: [{ text: "policy text" }] },
+      contents: [{ role: "user", parts: [{ text: "hi" }] }],
+    });
+    const system = env.segments.find((s) => s.source === "system");
+    expect(system?.text).toBe("policy text");
+  });
+});
+
+describe("normalizeResponse (gemini)", () => {
+  test("buffered candidates.parts become an assistant segment", () => {
+    const body = new TextEncoder().encode(
+      JSON.stringify({
+        candidates: [{ content: { role: "model", parts: [{ text: "an answer" }] } }],
+        usageMetadata: { promptTokenCount: 3, candidatesTokenCount: 2, totalTokenCount: 5 },
+      }),
+    );
+    const env = normalizeResponse("gemini", body, false);
+    expect(env.segments).toHaveLength(1);
+    expect(env.segments[0]?.source).toBe("assistant");
+    expect(env.segments[0]?.text).toBe("an answer");
+  });
+
+  test("SSE accumulates a candidate's text split across frames", () => {
+    const sse = [
+      'data: {"candidates":[{"content":{"parts":[{"text":"Hel"}]}}]}',
+      "",
+      'data: {"candidates":[{"content":{"parts":[{"text":"lo"}]}}]}',
+      "",
+    ].join("\n");
+    const env = normalizeResponse("gemini", new TextEncoder().encode(sse), true);
+    expect(env.segments).toHaveLength(1);
+    expect(env.segments[0]?.text).toBe("Hello");
+    expect(env.segments[0]?.source).toBe("assistant");
+  });
+});
+
 describe("content patches", () => {
   const doc = { messages: [{ role: "user", content: "leak AKIA1234 here" }] };
   const env = normalizeRequest("chat_completions", doc);

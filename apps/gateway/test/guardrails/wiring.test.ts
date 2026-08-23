@@ -162,6 +162,10 @@ describe("guardrail operation bindings match the contract", () => {
       "createResponse",
       "createTranscription",
       "createTranslation",
+      // Gemini-native ingress screens its answer's `candidates[].content.
+      // parts[].text`, so it is RESPONSE-screened like the generative surfaces
+      // beside it.
+      "geminiGenerateContent",
       "getResponse",
     ]);
   });
@@ -216,6 +220,8 @@ describe("guardrail operation bindings match the contract", () => {
       documents: ["a document"],
       // images
       prompt: "a picture of a cat",
+      // gemini (native ingress)
+      contents: [{ role: "user", parts: [{ text: "hello" }] }],
     };
     const RESPONSE_BODY = new TextEncoder().encode(
       JSON.stringify({
@@ -225,6 +231,8 @@ describe("guardrail operation bindings match the contract", () => {
         output: [{ content: [{ type: "output_text", text: "an answer" }] }],
         // audio_transcription
         text: "an answer",
+        // gemini (native ingress)
+        candidates: [{ content: { role: "model", parts: [{ text: "an answer" }] } }],
       }),
     );
     for (const [id, binding] of Object.entries(GUARDRAIL_OPERATIONS)) {

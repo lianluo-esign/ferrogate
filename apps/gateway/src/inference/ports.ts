@@ -574,6 +574,14 @@ export interface UpstreamPlan {
   /** The caller's body, already validated; adapters rewrite it in place-ish. */
   readonly body: Record<string, unknown>;
   /**
+   * Original client body when the ingress protocol can be sent unchanged to a
+   * matching provider family. `body` remains the canonical cross-provider
+   * representation used for eligibility and fallback adapters.
+   */
+  readonly nativeBody?: Record<string, unknown> | undefined;
+  /** Protocol spoken by {@link nativeBody}; absent means no native fast path. */
+  readonly nativeProtocol?: "anthropic.messages" | "gemini.generateContent" | undefined;
+  /**
    * Protocol capability headers selected by the ingress. This is never the
    * caller's complete header map: authentication, cookies and client/session
    * identifiers must not cross the provider boundary.
@@ -1113,7 +1121,11 @@ export function scopeCanSeeModel(
  * protocol rather than the upstream one — the Rust normalizers translate the
  * provider's dialect into the one the client asked for.
  */
-export type StreamDialect = "openai.chat" | "openai.responses" | "anthropic.messages";
+export type StreamDialect =
+  | "openai.chat"
+  | "openai.responses"
+  | "anthropic.messages"
+  | "gemini.generateContent";
 
 /** Everything a normalizer needs to be constructed for one request. */
 export interface StreamNormalizerContext {

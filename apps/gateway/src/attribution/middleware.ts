@@ -88,6 +88,11 @@ export const ATTRIBUTED_OPERATION_IDS: readonly string[] = [
   "createChatCompletion",
   "createResponse",
   "createMessage",
+  // `geminiGenerateContent` — the Gemini-native ingress dispatches to a
+  // provider and settles a `billing_events` row like the generative surfaces
+  // beside it, so an untagged call produces the same unattributable cost this
+  // gate exists to prevent.
+  "geminiGenerateContent",
   "createEmbedding",
   "createImage",
 ];

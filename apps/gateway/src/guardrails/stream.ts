@@ -135,7 +135,11 @@ import { evidenceTarget } from "./engine.js";
 import type { GuardrailEvaluationContext, GuardrailMatch } from "./ports.js";
 
 /** Which SSE dialect the CLIENT was promised (mirrors `inference/ports.ts`). */
-export type StreamDialect = "openai.chat" | "openai.responses" | "anthropic.messages";
+export type StreamDialect =
+  | "openai.chat"
+  | "openai.responses"
+  | "anthropic.messages"
+  | "gemini";
 
 /** How the screened stream ended. */
 export type StreamScreenOutcome =
@@ -601,6 +605,35 @@ function frameTextSlots(dialect: StreamDialect, json: Record<string, unknown>): 
       }
       return slots;
     }
+    case "gemini": {
+      // `streamGenerateContent?alt=sse` — each frame is a partial
+      // `GenerateContentResponse`. The only model TEXT is
+      // `candidates[].content.parts[].text`. A `functionCall` part carries its
+      // `args` as an OBJECT on this protocol (not a stringified `arguments`
+      // field), so there is no string slot to rewrite in place — detection over
+      // it lives in the buffered/whole-body path (`envelope.ts`), and the live
+      // screener stays narrow, exactly as it is for every other dialect.
+      // `usageMetadata`, `promptFeedback` and a `finishReason`-only terminal
+      // frame carry no model text and yield no slot.
+      const candidates = json.candidates;
+      if (!Array.isArray(candidates)) {
+        return slots;
+      }
+      for (const candidate of candidates) {
+        const content = asRecord(asRecord(candidate)?.content);
+        const parts = content?.parts;
+        if (!Array.isArray(parts)) {
+          continue;
+        }
+        for (const part of parts) {
+          const partRecord = asRecord(part);
+          if (partRecord !== undefined) {
+            pushStringSlot(slots, partRecord, "text");
+          }
+        }
+      }
+      return slots;
+    }
   }
 }
 
@@ -740,6 +773,31 @@ export function terminalErrorFrames(
           },
         }),
         sseFrame({ data: "[DONE]" }),
+      ];
+    case "gemini":
+      // NO native byte-shape exists to port: Gemini-native ingress is new to
+      // this gateway, and Gemini's `alt=sse` transport defines no mid-stream
+      // error frame. The approximation, stated exactly: the frame carries the
+      // IDENTICAL FerroGate `ErrorBody` the buffered 403 would have carried —
+      // same `message`/`type`/`code`/`request_id` — as an unnamed `data:`
+      // event. A Gemini SSE client parses each frame as a
+      // `GenerateContentResponse`-shaped object and finds an `error` member in
+      // place of `candidates`, which is the same place Gemini's OWN transport
+      // reports a request error. NO `[DONE]` follows: unlike the two OpenAI
+      // dialects the Gemini SSE transport has no such sentinel, so synthesizing
+      // one would be a second fabrication. The `"gemini native streaming is
+      // screened"` block in `test/guardrails/stream.test.ts` pins this frame
+      // (unnamed `data:` error, no `[DONE]`), so it is a decision on record
+      // rather than an accident.
+      return [
+        jsonSseFrame(undefined, {
+          error: {
+            message: match.message,
+            type: "ferrogate_error",
+            code: match.code,
+            request_id: requestId,
+          },
+        }),
       ];
   }
 }

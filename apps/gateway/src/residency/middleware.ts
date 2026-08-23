@@ -116,6 +116,11 @@ export const RESIDENCY_GOVERNED_OPERATION_IDS: readonly string[] = [
   "createChatCompletion",
   "createResponse",
   "createMessage",
+  // `geminiGenerateContent` ships the caller's `contents` to a provider exactly
+  // as the generative surfaces beside it do, so it is governed for the same
+  // reason: a residency policy that fenced the others but not this one would be
+  // bypassable by choosing the Gemini-native surface.
+  "geminiGenerateContent",
   "createEmbedding",
   "createImage",
   "createRerank",

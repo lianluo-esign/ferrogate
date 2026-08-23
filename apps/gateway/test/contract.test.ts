@@ -48,11 +48,11 @@ function census<T extends string>(values: readonly T[]): Record<string, number> 
 }
 
 describe("contract table", () => {
-  it("carries exactly 340 operations", () => {
+  it("carries exactly 341 operations", () => {
     expect(OPERATIONS).toHaveLength(EXPECTED_OPERATION_COUNT);
   });
 
-  it("has 340 unique operation ids", () => {
+  it("has 341 unique operation ids", () => {
     expect(new Set(operationIds()).size).toBe(EXPECTED_OPERATION_COUNT);
   });
 
@@ -136,7 +136,13 @@ describe("contract table", () => {
       // an admin bearer op — the console's edit-group write.
       // +1 for the operator-only provider connectivity probe used by Polaris.
       // +3 for public-model-price list, bulk import and source update.
-      bearer: 326,
+      // +1 for `geminiGenerateContent` (POST /v1beta/models/{model_action}),
+      // the Gemini-native ingress. Bearer on the existing `chat.completions`
+      // scope — a reuse, not a new scope, for the same reason `getResponse`
+      // reuses `responses.create`: every key that can run an inference request
+      // already holds it, and minting `gemini.*` would silently 403 every key
+      // in the field. See `src/inference/handlers.ts`.
+      bearer: 327,
       internal: 6,
       anonymous: 7,
       method_dependent: 1,
@@ -180,6 +186,7 @@ describe("contract table", () => {
       // +1 for the operator-only provider connectivity probe used by Polaris.
       // +3 for public-model-price list, bulk import and source update.
       admin: 264,
+      // NOTE: `public` is bumped below for `geminiGenerateContent`.
       // 51 -> 52 with `countMessageTokens` (issue #671): a data-plane
       // operation, publicly reachable, bearer-guarded; then 52 -> 53 with
       // `getModel` (issue #670), public for the same reason as `listModels`.
@@ -200,7 +207,9 @@ describe("contract table", () => {
       // again for #697, whose spend-anomaly read is admin, not public: both
       // parents of THIS merge also wrote 60, and re-counting the merged
       // document is still what says 60 is right.
-      public: 69,
+      // +1 for `geminiGenerateContent`, a data-plane operation publicly
+      // reachable and bearer-guarded like every other inference ingress.
+      public: 70,
       internal: 7,
     });
   });
@@ -274,7 +283,8 @@ describe("contract table", () => {
       // more POST, taking POST 100 -> 101.
       // +1 for the provider connectivity probe.
       // Public-model-price bulk import adds one POST.
-      POST: 106,
+      // +1 for `geminiGenerateContent` (POST /v1beta/models/{model_action}).
+      POST: 107,
       DELETE: 36,
       PUT: 25,
       // `updateVirtualKey` (edit-group) is one more PATCH, 21 -> 22.
@@ -496,7 +506,9 @@ describe("route registration", () => {
     // four lists rather than three.
     // 38 -> 40 with #689's `getResponse` / `deleteResponse`, COUNTED off
     // `GATEWAY_OWNED_OPERATION_IDS` after the merge like every number above it.
-    expect(GATEWAY_OWNED_OPERATION_IDS).toHaveLength(49);
+    // 49 -> 50 with `geminiGenerateContent`, the Gemini-native ingress — a
+    // gateway-owned inference operation, COUNTED off the list.
+    expect(GATEWAY_OWNED_OPERATION_IDS).toHaveLength(50);
     for (const operationId of GATEWAY_OWNED_OPERATION_IDS) {
       expect(operationById(operationId), operationId).toBeDefined();
     }
@@ -620,7 +632,7 @@ async function envelope(response: Response): Promise<{ code: string; message: st
 }
 
 describe("the deployed Worker serves the mounted modules", () => {
-  it("mounts the 9 inference operations", async () => {
+  it("mounts the 10 inference operations", async () => {
     // GET /v1/models reaches the inference handler: an empty catalog, not a 404.
     const models = await SELF.fetch(`${BASE}/v1/models`, { headers: ROOT });
     expect(models.status).toBe(200);
@@ -645,6 +657,10 @@ describe("the deployed Worker serves the mounted modules", () => {
       "/v1/messages/count_tokens",
       "/v1/embeddings",
       "/v1/images/generations",
+      // Gemini-native ingress. A valid model:action URL whose `{}` body fails
+      // the `contents`-required check is the module's own `invalid_request`,
+      // which only the mounted body-reader + Zod chain produces.
+      "/v1beta/models/gemini-2.5-pro:generateContent",
     ];
     for (const path of posts) {
       const res = await SELF.fetch(`${BASE}${path}`, {

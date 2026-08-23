@@ -63,9 +63,15 @@ import { conversationReplayScreenerFor } from "../guardrails/conversation-replay
 import { effectiveResidencyPolicy } from "../residency/policy.js";
 import type { ResidencyPolicy } from "../residency/policy.js";
 import { genAiOperationForRouteLabel, observeGenAiInvocation } from "../telemetry/genai.js";
-import { OPENAI_RESPONSES_CAPABILITY_HEADERS, canonicalProviderKind } from "./adapters.js";
+import {
+  ANTHROPIC_CAPABILITY_HEADERS,
+  GEMINI_CAPABILITY_HEADERS,
+  OPENAI_RESPONSES_CAPABILITY_HEADERS,
+  canonicalProviderKind,
+} from "./adapters.js";
 import { parseAudioObjectReference } from "./audio-objects.js";
 import { byokScopedModels } from "./byok.js";
+import { geminiRequestRoutingBody, geminiRequestTarget } from "./gemini-protocol.js";
 import {
   applyCanary,
   eligibleCandidates,
@@ -172,6 +178,7 @@ import {
   chatCompletionRequestSchema,
   embeddingsRequestSchema,
   formatZodError,
+  geminiGenerateContentRequestSchema,
   imagesRequestSchema,
   rerankRequestSchema,
   responsesRequestSchema,
@@ -305,6 +312,10 @@ const ROUTE_LABELS = {
   "audio.speech": "openai.audio.speech",
   images: "openai.images.generations",
   models: "openai.models",
+  // Gemini-native ingress. Vendor-prefixed like the `openai.*`/`anthropic.*`
+  // labels because `:generateContent` IS the Google dialect this surface ports,
+  // not a projection of one. Dashboards key off this string.
+  gemini: "gemini.generate_content",
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -685,11 +696,12 @@ const MAX_PROTOCOL_HEADER_VALUE_LENGTH = 1_024;
  * Responses upstream. Tenant credentials and Codex's request/session telemetry
  * deliberately never enter this map.
  */
-function openAiResponsesCapabilityHeaders(
+function selectedProtocolHeaders(
   headers: Headers,
+  names: readonly string[],
 ): Readonly<Record<string, string>> | undefined {
   const selected: Record<string, string> = {};
-  for (const name of OPENAI_RESPONSES_CAPABILITY_HEADERS) {
+  for (const name of names) {
     const value = headers.get(name)?.trim();
     if (
       value !== undefined &&
@@ -700,6 +712,24 @@ function openAiResponsesCapabilityHeaders(
     }
   }
   return Object.keys(selected).length === 0 ? undefined : selected;
+}
+
+function openAiResponsesCapabilityHeaders(
+  headers: Headers,
+): Readonly<Record<string, string>> | undefined {
+  return selectedProtocolHeaders(headers, OPENAI_RESPONSES_CAPABILITY_HEADERS);
+}
+
+function anthropicCapabilityHeaders(
+  headers: Headers,
+): Readonly<Record<string, string>> | undefined {
+  return selectedProtocolHeaders(headers, ANTHROPIC_CAPABILITY_HEADERS);
+}
+
+function geminiCapabilityHeaders(
+  headers: Headers,
+): Readonly<Record<string, string>> | undefined {
+  return selectedProtocolHeaders(headers, GEMINI_CAPABILITY_HEADERS);
 }
 
 /** `ModelEndpointKind` for the eligibility gate. */
@@ -756,6 +786,8 @@ function planUpstream(
   estimated?: EstimatedUsage,
   workflowConstraint: WorkflowProviderConstraint | null = null,
   protocolHeaders?: Readonly<Record<string, string>>,
+  nativeBody?: Record<string, unknown>,
+  nativeProtocol?: "anthropic.messages" | "gemini.generateContent",
 ): PlannedRequest | InferenceRejection {
   const inputTokenUpperBound = estimated?.promptTokens ?? 0;
   const metadataReason = validateRequestMetadata(metadata);
@@ -939,6 +971,8 @@ function planUpstream(
       stream,
       body,
       ...(protocolHeaders === undefined ? {} : { protocolHeaders }),
+      ...(nativeBody === undefined ? {} : { nativeBody }),
+      ...(nativeProtocol === undefined ? {} : { nativeProtocol }),
     });
     if (!built.ok) {
       // `UnsupportedCapability` is the fail-closed capability error from issue
@@ -2136,6 +2170,20 @@ export function createInferenceRouter(deps: InferenceDeps = {}): Hono<InferenceE
     (c) => handleCountMessageTokens(c, c.get("inferenceDeps")),
   );
 
+  // -- POST /v1beta/models/{model}:{generateContent|streamGenerateContent} ---
+  // Gemini-native ingress. Hono cannot capture the embedded `:generateContent`
+  // action suffix as a distinct parameter (its `:model:generateContent` syntax
+  // mis-binds), so the whole `{model}:{action}` segment is one `:model_action`
+  // parameter and `handleGeminiGenerateContent` parses it. The buffered/stream
+  // choice and the logical model both come from that URL segment, never the
+  // body, so the schema validates only the body shape.
+  app.post(
+    "/v1beta/models/:model_action",
+    body,
+    validateBody(geminiGenerateContentRequestSchema, "invalid Gemini generateContent request"),
+    (c) => handleGeminiGenerateContent(c, c.get("inferenceDeps")),
+  );
+
   // -- POST /v1/embeddings ---------------------------------------------------
   app.post(
     "/v1/embeddings",
@@ -3141,6 +3189,9 @@ async function handleMessages(c: InferenceContext, deps: ResolvedInferenceDeps):
     translated.body,
     estimated,
     workflowConstraintOf(gate),
+    anthropicCapabilityHeaders(c.req.raw.headers),
+    request,
+    "anthropic.messages",
   );
   if (isRejection(planned)) {
     return errorResponse(planned, requestId);
@@ -3226,8 +3277,11 @@ async function handleMessages(c: InferenceContext, deps: ResolvedInferenceDeps):
   }
 
   const parsed = safeJson(text);
+  const nativeAnthropic = canonicalProviderKind(servedRoute.providerKind) === "anthropic";
   const canonicalChat =
-    servedRoute.upstreamProtocol === "openai.responses"
+    nativeAnthropic
+      ? record(parsed)
+      : servedRoute.upstreamProtocol === "openai.responses"
       ? responsesToChatCompletion(parsed, logicalModel)
       : parsed;
   if (canonicalChat === null || canonicalChat === undefined) {
@@ -3246,11 +3300,202 @@ async function handleMessages(c: InferenceContext, deps: ResolvedInferenceDeps):
   recordUsage(c, deps, meterBase, servedRoute.providerKind, usage);
   await settleTokens(c, admission, usage?.totalTokens);
   settleWorkflowStep(c, deps, gate, true, usage?.totalTokens);
-  // An Anthropic upstream answered natively → passed through unchanged; an
-  // OpenAI-family upstream is reshaped so a Claude client sees a native Message
-  // either way.
+  if (nativeAnthropic) {
+    return rawUpstreamResponse(
+      upstreamResponse.status,
+      upstreamResponse.headers.get("content-type") ?? "application/json",
+      text,
+      requestId,
+      relay,
+    );
+  }
+  // Cross-protocol upstreams are reshaped so a Claude client still sees a
+  // native Message. The native Anthropic branch returned the original bytes
+  // above.
   const message = deps.translator.chatCompletionToMessage(canonicalChat, logicalModel);
   return jsonResponse(message, requestId, upstreamResponse.status, relay);
+}
+
+// ---------------------------------------------------------------------------
+// POST /v1beta/models/{model}:{generateContent|streamGenerateContent}
+// — Gemini-native ingress
+// ---------------------------------------------------------------------------
+
+/**
+ * The Gemini-native data plane.
+ *
+ * FerroGate owns auth, routing, admission, metering and billing; the selected
+ * Gemini supplier owns the upstream request. When client and supplier both
+ * speak Gemini `generateContent`, the request and the stream are preserved
+ * byte-for-byte — the supplier receives the exact body the client authored via
+ * `UpstreamPlan.nativeBody`, and its buffered bytes / SSE frames are relayed
+ * unchanged (`gemini.generateContent` has a null normalizer). The OpenAI-shaped
+ * `routingBody` exists ONLY so eligibility, estimation and cross-family
+ * fallback can reason about the request in the one canonical dialect.
+ *
+ * The model and the buffered/stream choice come from the URL, not the body:
+ * Gemini addresses `models/{model}:{action}`, so a native client never puts
+ * either in the payload.
+ *
+ * ## Protocol match is required, not faked
+ *
+ * The client is served Gemini frames, so metering reads Gemini usage. If the
+ * ladder selected a NON-Gemini supplier, there is no honest Gemini answer to
+ * return — no OpenAI→Gemini response translator exists, and inventing one would
+ * fabricate a capability the gateway does not own. That case is refused with a
+ * `502 provider_protocol_mismatch` rather than mis-served as a foreign shape.
+ */
+async function handleGeminiGenerateContent(
+  c: InferenceContext,
+  deps: ResolvedInferenceDeps,
+): Promise<Response> {
+  const requestId = c.get("requestId");
+  const caller = c.get("inferenceCaller");
+  const request = c.get("inferenceBody") as Record<string, unknown>;
+
+  const target = geminiRequestTarget(new URL(c.req.url).pathname);
+  if (target === null) {
+    // The route matched `/v1beta/models/:model_action` but the action suffix
+    // was neither `:generateContent` nor `:streamGenerateContent` (or the model
+    // was empty). This is the invalid-action-suffix rejection.
+    return errorResponse(
+      reject(
+        404,
+        "invalid_request",
+        "Gemini path must be /v1beta/models/{model}:generateContent or {model}:streamGenerateContent",
+      ),
+      requestId,
+    );
+  }
+  const { logicalModel, stream } = target;
+
+  // Internal OpenAI-shaped projection for routing / estimation / fallback only.
+  // The supplier still receives the ORIGINAL body via `nativeBody` below.
+  const routingBody = geminiRequestRoutingBody(request, logicalModel, stream);
+  const estimated = estimateChatCompletionUsage(routingBody, logicalModel);
+
+  const gate = await admitWorkflowStep(c, deps, caller, logicalModel, estimated);
+  if (isRejection(gate)) {
+    return errorResponse(gate, requestId);
+  }
+
+  const planned = planUpstream(
+    deps,
+    caller,
+    "chat.completions",
+    logicalModel,
+    undefined,
+    stream,
+    routingBody,
+    estimated,
+    workflowConstraintOf(gate),
+    geminiCapabilityHeaders(c.req.raw.headers),
+    request,
+    "gemini.generateContent",
+  );
+  if (isRejection(planned)) {
+    return errorResponse(planned, requestId);
+  }
+
+  const admitted = await admitTokens(c, estimated);
+  if (isRejection(admitted)) {
+    return errorResponse(admitted, requestId);
+  }
+  const admission = admissionHandle(admitted);
+
+  const dispatched = await dispatchCandidates(c, deps, planned);
+  if (isRejection(dispatched)) {
+    return errorResponse(dispatched, requestId);
+  }
+  const { route: servedRoute, response: upstreamResponse, attemptIndex, failedOver } = dispatched;
+  const relay: UpstreamRelay = { headers: upstreamResponse.headers, failedOver };
+
+  // The client is served Gemini-shaped frames, so the usage tap always reads
+  // the Gemini envelope (`usageMetadata`: prompt/candidates/cached/thoughts).
+  const usageDialect: UsageDialect = "gemini";
+  const nativeGemini = canonicalProviderKind(servedRoute.providerKind) === "gemini";
+
+  const billingGroup = await billingGroupMeterFields(deps, c.env, caller);
+  const meterBase = {
+    requestId,
+    route: ROUTE_LABELS.gemini,
+    logicalModel,
+    provider: servedRoute.provider,
+    providerModel: servedRoute.providerModel,
+    stream,
+    status: upstreamResponse.status,
+    ...(servedRoute.tenantId !== undefined ? { tenantId: servedRoute.tenantId } : {}),
+    providerAttemptIndex: attemptIndex,
+    ...routePricing(servedRoute),
+    ...billingGroup,
+  } satisfies Omit<Usage, "promptTokens" | "completionTokens" | "totalTokens">;
+  observeInvocation(c.get("inferenceOriginRequest"), meterBase, servedRoute.providerKind);
+
+  if (!nativeGemini) {
+    // Protocol mismatch: the ladder answered with a supplier that does not
+    // speak Gemini. Meter the attempt (it happened), fail the workflow edge
+    // (it did not advance the graph), and refuse rather than mis-serve.
+    recordUsage(c, deps, { ...meterBase, status: 502 }, servedRoute.providerKind, undefined);
+    settleWorkflowStep(c, deps, gate, false, undefined);
+    return errorResponse(
+      reject(
+        502,
+        "provider_protocol_mismatch",
+        "the Gemini-native request could not be served: the selected supplier does not speak the Gemini generateContent protocol",
+      ),
+      requestId,
+    );
+  }
+
+  if (stream && isStreamingUpstream(upstreamResponse)) {
+    // Native Gemini SSE is already in the client's dialect (null normalizer),
+    // so the frames pass through byte-for-byte while the tap meters
+    // `usageMetadata` off the streamed frames.
+    return streamResponse(
+      deps,
+      upstreamResponse,
+      "gemini.generateContent",
+      usageDialect,
+      servedRoute,
+      requestId,
+      (usage) => {
+        recordUsage(c, deps, meterBase, servedRoute.providerKind, usage);
+        settleTokensDetached(c, admission, usage?.totalTokens);
+        settleWorkflowStep(c, deps, gate, true, usage?.totalTokens);
+      },
+      relay,
+    );
+  }
+
+  const text = await readUpstreamBody(deps, upstreamResponse);
+  if (isRejection(text)) {
+    return errorResponse(text, requestId);
+  }
+  if (!upstreamResponse.ok) {
+    recordUsage(c, deps, meterBase, servedRoute.providerKind, undefined);
+    settleWorkflowStep(c, deps, gate, false, undefined);
+    return rawUpstreamResponse(
+      upstreamResponse.status,
+      upstreamResponse.headers.get("content-type") ?? "application/json",
+      text,
+      requestId,
+      relay,
+    );
+  }
+
+  // Buffered native Gemini success: meter `usageMetadata` off the parsed body,
+  // then return the ORIGINAL upstream bytes unchanged.
+  const usage = usageFromResponseBody(usageDialect, safeJson(text));
+  recordUsage(c, deps, meterBase, servedRoute.providerKind, usage);
+  await settleTokens(c, admission, usage?.totalTokens);
+  settleWorkflowStep(c, deps, gate, true, usage?.totalTokens);
+  return rawUpstreamResponse(
+    upstreamResponse.status,
+    upstreamResponse.headers.get("content-type") ?? "application/json",
+    text,
+    requestId,
+    relay,
+  );
 }
 
 // ---------------------------------------------------------------------------

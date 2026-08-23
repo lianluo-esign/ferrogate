@@ -416,6 +416,11 @@ export const defaultStreamNormalizers: StreamNormalizers = {
           default:
             return null;
         }
+      case "gemini.generateContent":
+        // Native Gemini ingress addresses a Gemini supplier: the upstream SSE
+        // frames are already in the client's dialect, so they pass through
+        // byte-for-byte. Metering taps the provider frames separately.
+        return null;
     }
   },
 };

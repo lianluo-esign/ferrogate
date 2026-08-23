@@ -104,6 +104,15 @@ export const INFERENCE_OPERATION_IDS = [
   "createEmbedding",
   "createMessage",
   "countMessageTokens",
+  // `geminiGenerateContent` — `POST /v1beta/models/{model}:{generateContent |
+  // streamGenerateContent}`, the Gemini-native ingress. An inference operation
+  // for the same reason the surfaces above are: it resolves a logical model out
+  // of the same registry, plans against the same candidate ladder, spends the
+  // same TPM window and lands in the same usage sink. Bearer-guarded on the
+  // existing `chat.completions` scope rather than a `gemini.*` scope of its own
+  // — see the registration note on `handleGeminiGenerateContent` in
+  // `../inference/handlers.ts` for why a new scope would 403 every existing key.
+  "geminiGenerateContent",
   "createImage",
   // `createRerank` — `POST /v1/rerank` (issue #676). Reranking is an inference
   // operation in the only sense that matters here: it resolves a logical model

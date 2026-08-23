@@ -13,7 +13,7 @@ import { classifyError, writeJsonError } from "./errors.js";
 /** Rust-compatible response contract plus the headers used by site uploads. */
 export const PREFLIGHT_ALLOW_METHODS = "GET, POST, PUT, PATCH, DELETE, OPTIONS";
 export const PREFLIGHT_ALLOW_HEADERS =
-  "authorization, content-type, x-api-key, x-site-cache-control, x-site-public, x-site-spa-fallback";
+  "authorization, content-type, x-api-key, x-goog-api-key, x-goog-api-client, x-site-cache-control, x-site-public, x-site-spa-fallback";
 export const PREFLIGHT_MAX_AGE = "600";
 
 /**

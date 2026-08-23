@@ -84,6 +84,10 @@ export const DRAIN_GUARDED_OPERATION_IDS: readonly string[] = [
   "createChatCompletion",
   "createResponse",
   "createMessage",
+  // `geminiGenerateContent` (Gemini-native ingress) dispatches to a provider
+  // and costs money, which is exactly the work a drained node is being told to
+  // stop taking — same rule as `createRerank` below.
+  "geminiGenerateContent",
   "createEmbedding",
   // `createRerank` (issue #676) has no Rust site to count against — the
   // operation is new — but it belongs here on the rule the list encodes rather

@@ -62,6 +62,19 @@ export const guardrailProtocolSchema = z.enum([
   // exactly as `apps/agent-runtime` does for `a2a`, so both extraction arms
   // below are deliberately empty rather than absent.
   "asset",
+  // Gemini-native ingress (`POST /v1beta/models/{model}:generateContent`).
+  //
+  // Its own member and NOT `chat_completions`, for the reason `rerank` and
+  // `asset` are: the chat extractor walks `messages[].content`, and a Gemini
+  // body carries `contents[].parts[].text` with `systemInstruction` beside it,
+  // so binding this surface to `chat_completions` would produce an EMPTY
+  // envelope — a screening that passes on nothing while writing an evidence row
+  // that says it ran. Both a REQUEST-stage (the caller's `contents` on their way
+  // to a provider) and a RESPONSE-stage (`candidates[].content.parts[].text`,
+  // the model's answer) are screenable, so unlike `audio_speech`/
+  // `audio_transcription` this one member covers both directions. See
+  // `GUARDRAIL_OPERATIONS` in `apps/gateway/src/guardrails/middleware.ts`.
+  "gemini",
 ]);
 export type GuardrailProtocol = z.infer<typeof guardrailProtocolSchema>;
 
@@ -166,6 +179,8 @@ function protocolName(protocol: GuardrailProtocol): string {
       return "a2a";
     case "asset":
       return "asset";
+    case "gemini":
+      return "gemini";
   }
 }
 
@@ -299,6 +314,9 @@ export function normalizeRequest(protocol: GuardrailProtocol, body: unknown): Gu
     case "images":
       extractImagesRequest(body, builder);
       break;
+    case "gemini":
+      extractGeminiRequest(body, builder);
+      break;
     // A transcription request is `multipart/form-data` wrapping opaque audio.
     // Extracting the `model`/`language`/`prompt` fields beside it would produce
     // a "screened" request whose envelope contains none of the content the
@@ -376,6 +394,8 @@ export function normalizeResponse(
         extractChatResponse(value, builder);
       } else if (protocol === "responses") {
         extractResponsesResponse(value, builder);
+      } else if (protocol === "gemini") {
+        extractGeminiResponse(value, builder);
       }
     }
   }
@@ -562,6 +582,122 @@ function extractImagesRequest(body: unknown, builder: EnvelopeBuilder): void {
   extractMetadata(get(body, "metadata"), builder);
 }
 
+/**
+ * The Gemini `ContentSource` for a `contents[].role` (Gemini-native ingress).
+ *
+ * Gemini names exactly two turn roles — `user` and `model` — plus the implicit
+ * "no role" of a single-turn request, which the API treats as `user`. A
+ * `functionResponse` part is tool output regardless of the turn it rides in and
+ * is classified at the part level (below), so it never reaches here.
+ */
+function geminiSource(role: string | undefined): ContentSource {
+  switch (role) {
+    case "model":
+      return "assistant";
+    case "user":
+      return "user";
+    default:
+      // A `contents` entry with no role is a single-turn user prompt.
+      return "user";
+  }
+}
+
+/**
+ * Walk a Gemini `parts[]` array — the shape shared by `contents[]` (request),
+ * `systemInstruction` (request) and `candidates[].content` (response).
+ *
+ *  - `text` is ordinary content, classed by the enclosing turn's `source`.
+ *  - `functionCall.args` is MODEL-authored tool input; it is an OBJECT on this
+ *    protocol (unlike OpenAI's stringified `arguments`), so it is serialized for
+ *    the detector to read. A redaction patch targeting it would be refused by
+ *    `applyContentPatchesToDocument` (the path resolves to an object, not a
+ *    string) — the same honest failure `rerank`'s object documents take, and the
+ *    reason detection is stringified while rewriting stays a no-op here.
+ *  - `functionResponse.response` is TOOL output — content that arrived from
+ *    outside the model — so it is `tool_result` and screened as the injection
+ *    surface it is.
+ *  - `inlineData` / `fileData` are binary or references with nothing a text
+ *    detector can read, and are deliberately skipped.
+ */
+function extractGeminiParts(
+  parts: unknown,
+  source: ContentSource,
+  location: string,
+  builder: EnvelopeBuilder,
+): void {
+  const arr = asArray(parts);
+  if (!arr) {
+    return;
+  }
+  arr.forEach((part, index) => {
+    const partLocation = `${location}.parts[${index}]`;
+    const text = asString(get(part, "text"));
+    if (text !== undefined) {
+      builder.push(source, `${partLocation}.text`, "text", text);
+      return;
+    }
+    const functionCall = get(part, "functionCall");
+    if (functionCall !== undefined) {
+      const args = get(functionCall, "args");
+      if (args !== undefined) {
+        builder.push(
+          "tool_arguments",
+          `${partLocation}.functionCall.args`,
+          "json",
+          JSON.stringify(args),
+        );
+      }
+      return;
+    }
+    const functionResponse = get(part, "functionResponse");
+    if (functionResponse !== undefined) {
+      const response = get(functionResponse, "response");
+      if (response !== undefined) {
+        builder.push(
+          "tool_result",
+          `${partLocation}.functionResponse.response`,
+          "json",
+          JSON.stringify(response),
+        );
+      }
+    }
+  });
+}
+
+/**
+ * `POST /v1beta/models/{model}:generateContent` request — the caller's
+ * `contents` and `systemInstruction` on their way to a provider (Gemini-native
+ * ingress). `systemInstruction` is accepted under both its camelCase REST
+ * spelling and the snake_case one, since the gateway forwards whichever the
+ * client sent byte-for-byte.
+ */
+function extractGeminiRequest(body: unknown, builder: EnvelopeBuilder): void {
+  const systemInstruction = get(body, "systemInstruction") ?? get(body, "system_instruction");
+  extractGeminiParts(get(systemInstruction, "parts"), "system", "systemInstruction", builder);
+  const contents = asArray(get(body, "contents"));
+  contents?.forEach((content, index) => {
+    const source = geminiSource(asString(get(content, "role")));
+    extractGeminiParts(get(content, "parts"), source, `contents[${index}]`, builder);
+  });
+}
+
+/**
+ * `generateContent` buffered response — `candidates[].content.parts[].text` and
+ * any `functionCall` arguments the model produced.
+ */
+function extractGeminiResponse(body: unknown, builder: EnvelopeBuilder): void {
+  const candidates = asArray(get(body, "candidates"));
+  if (!candidates) {
+    return;
+  }
+  candidates.forEach((candidate, index) => {
+    const content = get(candidate, "content");
+    const role = asString(get(content, "role"));
+    const source: ContentSource = role ? geminiSource(role) : "assistant";
+    extractGeminiParts(get(content, "parts"), source, `candidates[${index}].content`, builder);
+  });
+}
+
 function extractChatResponse(body: unknown, builder: EnvelopeBuilder): void {
   const choices = asArray(get(body, "choices"));
   if (!choices) {
@@ -730,6 +866,8 @@ function extractSse(protocol: GuardrailProtocol, body: Uint8Array, builder: Enve
       accumulateChatSse(value, append);
     } else if (protocol === "responses") {
       accumulateResponsesSse(event, value, append);
+    } else if (protocol === "gemini") {
+      accumulateGeminiSse(value, append);
     }
   }
 
@@ -792,6 +930,37 @@ function accumulateResponsesSse(event: string | undefined, value: unknown, appen
       append("tool_arguments", `output[${index}].arguments`, delta);
     }
   }
+}
+
+/**
+ * `streamGenerateContent?alt=sse` — each frame is a partial
+ * `GenerateContentResponse`, and a candidate's text arrives split across frames
+ * exactly as `choices[].delta.content` does on chat. Accumulation is keyed on
+ * `candidates[i].content.parts[j].text`, so the concatenation reassembles the
+ * answer for a marker that straddles a frame boundary.
+ */
+function accumulateGeminiSse(value: unknown, append: AppendFn): void {
+  const candidates = asArray(get(value, "candidates"));
+  if (!candidates) {
+    return;
+  }
+  candidates.forEach((candidate, candidateIndex) => {
+    const parts = asArray(get(get(candidate, "content"), "parts"));
+    if (!parts) {
+      return;
+    }
+    parts.forEach((part, partIndex) => {
+      const base = `candidates[${candidateIndex}].content.parts[${partIndex}]`;
+      const text = asString(get(part, "text"));
+      if (text !== undefined) {
+        append("assistant", `${base}.text`, text);
+      }
+      const args = get(get(part, "functionCall"), "args");
+      if (args !== undefined) {
+        append("tool_arguments", `${base}.functionCall.args`, JSON.stringify(args));
+      }
+    });
+  });
 }
 
 function numberOr(value: unknown, fallback: number): number {

@@ -116,7 +116,7 @@ describe("inferenceRouteModule", () => {
     expect(listing.data.map((model) => model.id)).toContain("tenant-model");
   });
 
-  it("claims exactly the 14 contract inference operation ids", () => {
+  it("claims exactly the 15 contract inference operation ids", () => {
     expect(new Set(inferenceRouteModule().operationIds)).toEqual(new Set(INFERENCE_OPERATION_IDS));
     // 6 -> 7 with `countMessageTokens` (issue #671), 7 -> 8 with `getModel`
     // (GET /v1/models/{model}, issue #670), 8 -> 9 with `createRerank`
@@ -124,12 +124,14 @@ describe("inferenceRouteModule", () => {
     // (`createTranscription`, `createTranslation`, `createSpeech`, issue #703).
     // #671 and #670 both wrote 7 independently, so that merge kept 7 silently;
     // this number is COUNTED off the list rather than incremented from a
-    // parent's. #689's `getResponse` / `deleteResponse` take it to 14, counted
-    // off the list the module actually claims.
-    expect(inferenceRouteModule().operationIds).toHaveLength(14);
+    // parent's. #689's `getResponse` / `deleteResponse` take it to 14, and the
+    // Gemini-native ingress (`geminiGenerateContent`,
+    // POST /v1beta/models/{model}:generateContent) to 15, counted off the list
+    // the module actually claims.
+    expect(inferenceRouteModule().operationIds).toHaveLength(15);
   });
 
-  it("registers all 14 on the contract-driven router", () => {
+  it("registers all 15 on the contract-driven router", () => {
     const { router } = gateway();
     for (const operationId of INFERENCE_OPERATION_IDS) {
       expect(router.registeredOperationIds(), operationId).toContain(operationId);

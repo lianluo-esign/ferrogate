@@ -263,6 +263,40 @@ export const anthropicTokenCountSchema = z.object({
 export type AnthropicTokenCount = z.infer<typeof anthropicTokenCountSchema>;
 
 // ---------------------------------------------------------------------------
+// POST /v1beta/models/{model}:{generateContent|streamGenerateContent}
+// (Gemini-native ingress). The model and the buffered/stream choice come from
+// the URL, never the body — so neither `model` nor `stream` appears here.
+// ---------------------------------------------------------------------------
+
+/** One Gemini content turn: `role` + `parts`, the rest left open. */
+export const geminiContentSchema = z
+  .object({
+    role: z.string().optional(),
+    parts: z.array(z.unknown()).optional(),
+  })
+  .passthrough();
+
+/**
+ * Native Gemini `generateContent` body. `contents` is required and must be a
+ * non-empty array — the one field every SDK request carries — while every
+ * other member (`systemInstruction`, `generationConfig`, `tools`, `toolConfig`,
+ * `safetySettings`, `cachedContent`, ...) passes through untouched so the
+ * supplier receives the exact request the client authored. Narrowing those
+ * would silently strip capabilities FerroGate does not own.
+ */
+export const geminiGenerateContentRequestSchema = z
+  .object({
+    contents: z
+      .array(geminiContentSchema, {
+        required_error: 'Gemini generateContent request must include a "contents" array',
+        invalid_type_error: 'Gemini generateContent request must include a "contents" array',
+      })
+      .min(1, 'Gemini generateContent request must include a non-empty "contents" array'),
+  })
+  .passthrough();
+export type GeminiGenerateContentRequest = z.infer<typeof geminiGenerateContentRequestSchema>;
+
+// ---------------------------------------------------------------------------
 // POST /v1/embeddings — operation `createEmbedding`
 // ---------------------------------------------------------------------------
 

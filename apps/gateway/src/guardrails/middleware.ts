@@ -205,6 +205,29 @@ export const GUARDRAIL_OPERATIONS: Readonly<Record<string, OperationBinding>> = 
     screensRequest: true,
     screensResponse: false,
   },
+  // ---- Gemini-native ingress -----------------------------------------------
+  //
+  // `POST /v1beta/models/{model}:{generateContent|streamGenerateContent}`. It
+  // is the first binding that screens BOTH stages over a single protocol member
+  // (chat/responses/messages do too, but each is its own translated shape),
+  // because both directions carry screenable text: the request's `contents[].
+  // parts[].text` and `systemInstruction` on their way to a provider, and the
+  // answer's `candidates[].content.parts[].text`. That symmetry is the whole
+  // reason `gemini` is one protocol and not the split the audio surface needed.
+  //
+  // A cross-protocol fallback cannot reach here: the handler refuses a
+  // Gemini-native request that would dispatch to a non-Gemini supplier with
+  // `502 provider_protocol_mismatch` rather than translating, so the bytes this
+  // screener sees are always the Gemini shape its extractor walks. Binding it to
+  // `chat_completions` would have produced an empty envelope — the exact no-op
+  // this table forbids — since the chat extractor reads `messages`, not
+  // `contents`.
+  geminiGenerateContent: {
+    protocol: "gemini",
+    dialect: "gemini",
+    screensRequest: true,
+    screensResponse: true,
+  },
   // ---- the stored conversation READ (issue #689) ---------------------------
   //
   // `GET /v1/responses/{id}`, RESPONSE-screened, and it is here because the

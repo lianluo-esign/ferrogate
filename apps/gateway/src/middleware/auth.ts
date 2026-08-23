@@ -47,12 +47,20 @@ import { HttpError } from "./errors.js";
 
 /**
  * Rust `auth::extract_api_key`: `x-api-key` wins over `Authorization: Bearer`,
- * both trimmed, and a blank value counts as absent.
+ * both trimmed, and a blank value counts as absent. `x-goog-api-key` is the
+ * native Gemini client's tenant-key channel; it carries a FerroGate virtual
+ * key on ingress and is never forwarded to the supplier (the Gemini adapter
+ * writes the supplier credential into `x-goog-api-key` itself).
  */
 export function extractApiKey(headers: Headers): string | null {
   const apiKeyHeader = headers.get("x-api-key");
   if (apiKeyHeader !== null) {
     const trimmed = apiKeyHeader.trim();
+    if (trimmed !== "") return trimmed;
+  }
+  const googApiKeyHeader = headers.get("x-goog-api-key");
+  if (googApiKeyHeader !== null) {
+    const trimmed = googApiKeyHeader.trim();
     if (trimmed !== "") return trimmed;
   }
   const authorization = headers.get("authorization");
@@ -64,7 +72,8 @@ export function extractApiKey(headers: Headers): string | null {
 }
 
 /** The Rust message for an absent credential, verbatim. */
-const MISSING_API_KEY_MESSAGE = "missing API key; use Authorization: Bearer or x-api-key";
+const MISSING_API_KEY_MESSAGE =
+  "missing API key; use Authorization: Bearer, x-api-key, or x-goog-api-key";
 
 /**
  * `ApiKeyResolution` → the `AuthContext` or the exact Rust refusal.

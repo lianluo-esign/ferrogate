@@ -75,6 +75,10 @@
       "group": "inference"
     },
     {
+      "pattern": "/v1beta/models/{model_action}",
+      "group": "inference"
+    },
+    {
       "pattern": "/v1/images/generations",
       "group": "inference"
     },
@@ -2709,6 +2713,17 @@
       "auth": {
         "kind": "bearer",
         "scope": "messages.create"
+      },
+      "rbac_action": null
+    },
+    {
+      "path": "/v1beta/models/{model_action}",
+      "method": "post",
+      "operation_id": "geminiGenerateContent",
+      "visibility": "public",
+      "auth": {
+        "kind": "bearer",
+        "scope": "chat.completions"
       },
       "rbac_action": null
     },

@@ -179,6 +179,87 @@ describe("incremental screening", () => {
   });
 });
 
+/** A native Gemini `streamGenerateContent?alt=sse` frame. */
+function geminiFrame(text: string): string {
+  return `data: ${JSON.stringify({
+    candidates: [{ content: { role: "model", parts: [{ text }] } }],
+  })}\n\n`;
+}
+
+/** Screen a native Gemini SSE stream — the `"gemini"` dialect + protocol. */
+function screenGemini(chunks: readonly string[]): {
+  text: Promise<string>;
+  outcome: () => StreamScreenOutcome | undefined;
+} {
+  let outcome: StreamScreenOutcome | undefined;
+  const engine = new GuardrailEngine({
+    policies: sourceFor(RESPONSE_BLOCK_POLICY),
+    evidence: new InMemoryGuardrailEvidenceSink(),
+  });
+  const stream = screenSseBody(byteStreamFrom([...chunks]), {
+    engine,
+    context: chatContext({
+      streaming: true,
+      envelope: { protocol: "gemini", stage: "response", segments: [] },
+    }),
+    dialect: "gemini",
+    protocol: "gemini",
+    requestId: "fg-0000000000000001",
+    onOutcome: (value) => {
+      outcome = value;
+    },
+  });
+  return { text: readAllText(stream), outcome: () => outcome };
+}
+
+describe("gemini native streaming is screened", () => {
+  test("a clean gemini stream passes through frame for frame", async () => {
+    const { text, outcome } = screenGemini([geminiFrame("Hello"), geminiFrame(" world")]);
+    const out = await text;
+    expect(out).toContain("Hello");
+    expect(out).toContain(" world");
+    expect(outcome()).toEqual({ kind: "clean" });
+  });
+
+  test("a secret in candidates[].content.parts[].text blocks the stream", async () => {
+    const { text, outcome } = screenGemini([
+      geminiFrame("here is the key: "),
+      geminiFrame(PROBE_SECRET),
+      geminiFrame(" keep it safe"),
+    ]);
+    const out = await text;
+    expect(out).toContain("here is the key: ");
+    // The offending frame — and everything after it — is never forwarded.
+    expect(out).not.toContain(PROBE_SECRET);
+    expect(out).not.toContain("keep it safe");
+
+    const settled = outcome();
+    expect(settled?.kind).toBe("blocked");
+    if (settled?.kind === "blocked") {
+      expect(settled.match.code).toBe("guardrail_blocked");
+      expect(settled.frameIndex).toBe(1);
+    }
+  });
+
+  test("the gemini block frame is the FerroGate error as an unnamed data event, with NO [DONE]", async () => {
+    const { text } = screenGemini([geminiFrame(PROBE_SECRET)]);
+    const frames = parseSse(await text);
+    // Exactly one frame: the synthesized error. Gemini's SSE transport has no
+    // `[DONE]` sentinel, so none is fabricated.
+    expect(frames).toHaveLength(1);
+    expect(frames[0]?.event).toBeUndefined();
+    expect(JSON.parse(frames[0]?.data ?? "{}")).toEqual({
+      error: {
+        message: "request blocked by guardrail policy",
+        type: "ferrogate_error",
+        code: "guardrail_blocked",
+        request_id: "fg-0000000000000001",
+      },
+    });
+    expect(frames.some((f) => f.data === "[DONE]")).toBe(false);
+  });
+});
+
 describe("a marker split across frames", () => {
   test("a secret straddling two frames is still caught", async () => {
     const half = Math.floor(PROBE_SECRET.length / 2);

@@ -73,6 +73,7 @@ import type {
   ProviderHttpRequest as PackageProviderHttpRequest,
 } from "@ferrogate/providers";
 import { chatCompletionsToMessages, messageToChatCompletion } from "./anthropic.js";
+import { geminiGenerateContentEndpoint } from "./gemini-protocol.js";
 import { chatRequestToResponses, usesResponsesUpstream } from "./openai-protocol.js";
 import type {
   AdapterError,
@@ -144,6 +145,11 @@ export const OPENAI_RESPONSES_CAPABILITY_HEADERS = [
 ] as const;
 const OPENAI_RESPONSES_CAPABILITY_HEADER_SET = new Set<string>(OPENAI_RESPONSES_CAPABILITY_HEADERS);
 
+export const ANTHROPIC_CAPABILITY_HEADERS = ["anthropic-version", "anthropic-beta"] as const;
+const ANTHROPIC_CAPABILITY_HEADER_SET = new Set<string>(ANTHROPIC_CAPABILITY_HEADERS);
+export const GEMINI_CAPABILITY_HEADERS = ["x-goog-api-client"] as const;
+const GEMINI_CAPABILITY_HEADER_SET = new Set<string>(GEMINI_CAPABILITY_HEADERS);
+
 /**
  * The credential scheme a family uses when the provider table does not say.
  *
@@ -178,12 +184,37 @@ function openAiHeaders(
 function anthropicHeaders(
   apiKey: string | undefined,
   scheme: ProviderAuthScheme = "x-api-key",
+  protocolHeaders?: Readonly<Record<string, string>>,
 ): Record<string, string> {
   const headers: Record<string, string> = {
     "content-type": "application/json",
     "anthropic-version": "2023-06-01",
   };
+  for (const [name, value] of Object.entries(protocolHeaders ?? {})) {
+    const normalized = name.trim().toLowerCase();
+    if (ANTHROPIC_CAPABILITY_HEADER_SET.has(normalized)) {
+      headers[normalized] = value;
+    }
+  }
+  // Provider credentials are written last and are never sourced from ingress.
   credentialHeader(headers, apiKey, scheme);
+  return headers;
+}
+
+function geminiHeaders(
+  apiKey: string | undefined,
+  protocolHeaders?: Readonly<Record<string, string>>,
+): Record<string, string> {
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  for (const [name, value] of Object.entries(protocolHeaders ?? {})) {
+    const normalized = name.trim().toLowerCase();
+    if (GEMINI_CAPABILITY_HEADER_SET.has(normalized)) {
+      headers[normalized] = value;
+    }
+  }
+  if (apiKey !== undefined && apiKey.trim() !== "") {
+    headers["x-goog-api-key"] = apiKey;
+  }
   return headers;
 }
 
@@ -553,6 +584,41 @@ export const anthropicAdapter: ProviderAdapter = {
         error: {
           kind: "unsupported_provider_kind",
           providerKind: plan.route.providerKind,
+        },
+      };
+    }
+
+    if (plan.nativeProtocol === "anthropic.messages" && plan.nativeBody !== undefined) {
+      const body = ownBody(plan.nativeBody as Record<string, Json>);
+      body.model = plan.providerModel;
+      body.stream = plan.stream;
+      body.max_tokens ??= 1024;
+      // The native ingress body is forwarded byte-for-byte EXCEPT for the
+      // prompt-cache seam: `prompt_cache` is FerroGate's own control member and
+      // must never reach the provider, and the canonical directive already
+      // resolved on `plan.body` (stated member winning over an inferred one, per
+      // `toChatCompletions`) is what decides the Anthropic `cache_control`
+      // markers — mirroring the OpenAI→Anthropic bridge below. `off` strips any
+      // markers the client sent; an explicit directive promotes the last system
+      // block; absent, the client's own markers pass through untouched.
+      const promptCache = promptCacheFromBody(plan.body as Json);
+      if (promptCache !== undefined) {
+        applyPromptCacheToAnthropic(body, promptCache, "anthropic");
+      }
+      stripPromptCacheDirective(body);
+      return {
+        ok: true,
+        request: {
+          provider: plan.route.provider,
+          method: "POST",
+          endpoint: endpoint(plan.route.baseUrl, "/messages"),
+          headers: anthropicHeaders(
+            plan.route.apiKey,
+            plan.route.authScheme ?? "x-api-key",
+            plan.protocolHeaders,
+          ),
+          body,
+          stream: plan.stream,
         },
       };
     }
@@ -1198,6 +1264,27 @@ export function packageProviderAdapter(
           error: {
             kind: "unsupported_provider_kind",
             providerKind: plan.route.providerKind.trim().toLowerCase(),
+          },
+        };
+      }
+      if (
+        canonicalKind === "gemini" &&
+        plan.nativeProtocol === "gemini.generateContent" &&
+        plan.nativeBody !== undefined
+      ) {
+        return {
+          ok: true,
+          request: {
+            provider: plan.route.provider,
+            method: "POST",
+            endpoint: geminiGenerateContentEndpoint(
+              plan.route.baseUrl,
+              plan.providerModel,
+              plan.stream,
+            ),
+            headers: geminiHeaders(plan.route.apiKey, plan.protocolHeaders),
+            body: ownBody(plan.nativeBody as Record<string, Json>),
+            stream: plan.stream,
           },
         };
       }
