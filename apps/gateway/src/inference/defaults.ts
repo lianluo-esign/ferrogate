@@ -340,14 +340,27 @@ function responsesProviderKind(providerKind: string): ResponsesStreamProviderKin
   }
 }
 
+/** Compose two byte transforms while preserving streaming backpressure. */
+function composeByteTransforms(
+  first: TransformStream<Uint8Array, Uint8Array>,
+  second: TransformStream<Uint8Array, Uint8Array>,
+): TransformStream<Uint8Array, Uint8Array> {
+  return {
+    writable: first.writable,
+    readable: first.readable.pipeThrough(second),
+  };
+}
+
 /**
  * The real normalizer tower (`inventory-request-path.md` §1.5), backed by
  * `apps/gateway/src/streaming/` — the `TransformStream` port of
  * `messages_stream.rs` and `responses_stream.rs`.
  *
- *  - `anthropic.messages` on a NON-Anthropic upstream → `openAiToAnthropicStream`
- *    (`MessagesStreamNormalizer`: `message_start` / `content_block_start|delta|
- *    stop` / `message_delta` / `message_stop`, with tool-call accumulation).
+ *  - `anthropic.messages` on a NON-Anthropic upstream → OpenAI Chat is
+ *    converted by `openAiToAnthropicStream`; Responses-only upstreams first
+ *    pass through `responsesToOpenAiChatStream`. The client always receives
+ *    `message_start` / `content_block_start|delta|stop` / `message_delta` /
+ *    `message_stop`, with tool-call accumulation.
  *  - `openai.responses` on ANY upstream → `responsesNormalizeStream`
  *    (`ResponsesStreamNormalizer`: the `response.*` event sequence). This runs
  *    even for an OpenAI upstream so every client sees one Responses event shape.
@@ -359,6 +372,15 @@ export const defaultStreamNormalizers: StreamNormalizers = {
   normalizerFor(context: StreamNormalizerContext): TransformStream<Uint8Array, Uint8Array> | null {
     switch (context.dialect) {
       case "anthropic.messages":
+        if (context.upstreamProtocol === "openai.responses") {
+          return composeByteTransforms(
+            responsesToOpenAiChatStream({
+              requestId: context.requestId,
+              fallbackModel: context.logicalModel,
+            }),
+            openAiToAnthropicStream({ fallbackModel: context.logicalModel }),
+          );
+        }
         return canonicalProviderKind(context.providerKind) === "anthropic"
           ? null
           : openAiToAnthropicStream({ fallbackModel: context.logicalModel });

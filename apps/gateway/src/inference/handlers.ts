@@ -3195,6 +3195,22 @@ async function handleMessages(c: InferenceContext, deps: ResolvedInferenceDeps):
   }
 
   const parsed = safeJson(text);
+  const canonicalChat =
+    servedRoute.upstreamProtocol === "openai.responses"
+      ? responsesToChatCompletion(parsed, logicalModel)
+      : parsed;
+  if (canonicalChat === null || canonicalChat === undefined) {
+    recordUsage(c, deps, { ...meterBase, status: 502 }, servedRoute.providerKind, undefined);
+    settleWorkflowStep(c, deps, gate, false, undefined);
+    return errorResponse(
+      reject(
+        502,
+        "provider_invalid_success_body",
+        "provider returned a successful status with an invalid AI response body",
+      ),
+      requestId,
+    );
+  }
   const usage = usageFromResponseBody(usageDialect, parsed);
   recordUsage(c, deps, meterBase, servedRoute.providerKind, usage);
   await settleTokens(c, admission, usage?.totalTokens);
@@ -3202,7 +3218,7 @@ async function handleMessages(c: InferenceContext, deps: ResolvedInferenceDeps):
   // An Anthropic upstream answered natively → passed through unchanged; an
   // OpenAI-family upstream is reshaped so a Claude client sees a native Message
   // either way.
-  const message = deps.translator.chatCompletionToMessage(parsed, logicalModel);
+  const message = deps.translator.chatCompletionToMessage(canonicalChat, logicalModel);
   return jsonResponse(message, requestId, upstreamResponse.status, relay);
 }
 

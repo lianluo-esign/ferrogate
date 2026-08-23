@@ -260,6 +260,101 @@ describe("API-key provider protocol and billing contract", () => {
     }
   });
 
+  it("serves Anthropic Messages clients through a Responses-only provider", async () => {
+    const entry = CHAT_CASES[0] as ProviderCase;
+    const upstream = interceptProviderFetch(() =>
+      providerJson({
+        id: "resp-messages-bridge",
+        object: "response",
+        model: entry.model,
+        output: [
+          {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "hi" }],
+          },
+        ],
+        usage: { input_tokens: 100, output_tokens: 50, total_tokens: 150 },
+      }),
+    );
+    try {
+      const physicalRoute: PhysicalRoute = {
+        ...route(entry),
+        upstreamProtocol: "openai.responses",
+      };
+      const gateway = harness({}, [physicalRoute]);
+      const response = await gateway.post("/v1/messages", {
+        model: physicalRoute.logicalModel,
+        messages: [{ role: "user", content: "hi" }],
+      });
+
+      expect(response.status).toBe(200);
+      expect(upstream.lastRequest()).toMatchObject({
+        url: "https://api.openai.test/v1/responses",
+        body: {
+          model: entry.model,
+          input: [{ role: "user", content: "hi" }],
+          stream: false,
+        },
+      });
+      expect(await response.json()).toMatchObject({
+        type: "message",
+        model: entry.model,
+        content: [{ type: "text", text: "hi" }],
+        usage: { input_tokens: 100, output_tokens: 50 },
+      });
+      expect(gateway.usage.last).toMatchObject({
+        promptTokens: 100,
+        completionTokens: 50,
+        totalTokens: 150,
+      });
+    } finally {
+      upstream.restore();
+    }
+  });
+
+  it("streams Anthropic Messages events through a Responses-only provider", async () => {
+    const entry = CHAT_CASES[0] as ProviderCase;
+    const upstream = interceptProviderFetch(() =>
+      providerSse([
+        'event: response.created\ndata: {"type":"response.created","response":{"id":"resp-stream","model":"gpt-5.5"}}',
+        'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"hi"}',
+        'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp-stream","model":"gpt-5.5","usage":{"input_tokens":100,"output_tokens":50,"total_tokens":150}}}',
+      ]),
+    );
+    try {
+      const physicalRoute: PhysicalRoute = {
+        ...route(entry),
+        upstreamProtocol: "openai.responses",
+      };
+      const gateway = harness({}, [physicalRoute]);
+      const response = await gateway.post("/v1/messages", {
+        model: physicalRoute.logicalModel,
+        messages: [{ role: "user", content: "hi" }],
+        stream: true,
+      });
+      const body = await response.text();
+
+      expect(response.status).toBe(200);
+      expect(upstream.lastRequest()).toMatchObject({
+        url: "https://api.openai.test/v1/responses",
+        body: { stream: true },
+      });
+      expect(body).toContain("event: message_start");
+      expect(body).toContain('"type":"text_delta","text":"hi"');
+      expect(body).toContain('"input_tokens":100');
+      expect(body).toContain('"output_tokens":50');
+      expect(body).toContain("event: message_stop");
+      expect(gateway.usage.last).toMatchObject({
+        promptTokens: 100,
+        completionTokens: 50,
+        totalTokens: 150,
+      });
+    } finally {
+      upstream.restore();
+    }
+  });
+
   it("maps Chat tool and image turns onto the Responses input contract", async () => {
     const entry = CHAT_CASES[0] as ProviderCase;
     const upstream = interceptProviderFetch(() =>
