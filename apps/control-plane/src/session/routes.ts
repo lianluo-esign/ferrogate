@@ -60,6 +60,7 @@ import {
 import { projectTenantAccount } from "../store/quota_registry.js";
 import { provisionTenantStorageFor } from "../store/tenant_storage.js";
 import {
+  constantTimeEqual,
   generateRefreshTokenSecret,
   hashPassword,
   isValidEmail,
@@ -110,6 +111,14 @@ type Ctx = Context<ControlPlaneEnv>;
  * `wrangler secret` for now.
  */
 export const ADMIN_CONSOLE_JWT_SECRET_BINDING = "ADMIN_CONSOLE_JWT_SECRET";
+
+/**
+ * The shared secret that authenticates the trusted OAuth-bridge login leg
+ * (`/v1/internal/oauth-bridge-login`). Set as a `wrangler secret` on BOTH this
+ * Worker and the vega BFF that calls it; the two must hold the same value.
+ * Absent ⇒ the endpoint fails closed (503).
+ */
+export const OAUTH_BRIDGE_LOGIN_SECRET_BINDING = "OAUTH_BRIDGE_LOGIN_SECRET";
 
 interface ConsoleContext {
   readonly deps: ControlPlaneDeps;
@@ -170,6 +179,13 @@ const registerSchema = z.object({
   display_name: z.string().nullish(),
 });
 const loginSchema = z.object({ email: z.string(), password: z.string() });
+// `provider`/`provider_user_id` are carried for audit/traceability only — the
+// email is the sole identity the trusted leg resolves a session from.
+const oauthBridgeLoginSchema = z.object({
+  email: z.string(),
+  provider: z.string().nullish(),
+  provider_user_id: z.string().nullish(),
+});
 const refreshSchema = z.object({ refresh_token: z.string() });
 const inviteSchema = z.object({ email: z.string(), role: z.string() });
 const changeRoleSchema = z.object({ role: z.string() });
@@ -602,28 +618,30 @@ interface ResolvedLogin {
  * would make every wrong password pay an authoritative read, the exact hot-path
  * cost this projection exists to remove.
  */
-async function resolveLoginContext(
+async function resolveLoginContextWith(
   console_: ConsoleContext,
   email: string,
-  password: string,
+  // Runs AFTER the disabled gate and BEFORE any tenant/workspace read, so the
+  // "authenticated caller only" posture of those reads is preserved for every
+  // caller. Throws to refuse; returns to admit. The password leg lives here for
+  // `/v1/admin/login`; the trusted OAuth-bridge leg passes a no-op because the
+  // caller already proved email ownership (verified IdP email) and its own
+  // identity (the bridge shared secret) before reaching this code.
+  authenticate: (user: AdminUserRow) => Promise<void>,
+  // How an unknown (or post-reload vanished) email is reported. `/v1/admin/login`
+  // collapses it into the SAME 401 as a wrong password — distinguishing them
+  // would turn the endpoint into an account-enumeration oracle. The bridge leg
+  // instead wants a distinct 404 so the BFF can fall through to registration.
+  onNotFound: () => never,
 ): Promise<ResolvedLogin> {
   let { bootstrap, fromCache } = await loginBootstrap(console_, email);
   for (let attempt = 0; ; attempt += 1) {
-    // An unknown email and a wrong password get the SAME answer. Distinguishing
-    // them turns this endpoint into an account-enumeration oracle.
-    if (bootstrap === null) throw new HttpError(401, "unauthorized", "invalid email or password");
+    if (bootstrap === null) onNotFound();
     const user = bootstrap.user;
     if (user.disabledAtUnix !== null) {
       throw new HttpError(401, "unauthorized", "this account has been disabled");
     }
-    // Password FIRST, before any tenant/workspace read: this preserves the prior
-    // posture that those reads only happen for an authenticated caller (no new
-    // pre-auth work), and the JOIN above already bought back the round trip the
-    // old code hid the KDF under.
-    const passwordOk = await verifyPassword(password, user.passwordHash);
-    if (!passwordOk) {
-      throw new HttpError(401, "unauthorized", "invalid email or password");
-    }
+    await authenticate(user);
 
     const membership = bootstrap.memberships[0];
     if (membership === undefined) {
@@ -660,17 +678,115 @@ async function resolveLoginContext(
   }
 }
 
+/**
+ * `/v1/admin/login`: password login. An unknown email and a wrong password are
+ * indistinguishable to the caller (both 401), keeping the endpoint from being an
+ * account-enumeration oracle. Password FIRST, before any tenant/workspace read.
+ */
+function resolveLoginContext(
+  console_: ConsoleContext,
+  email: string,
+  password: string,
+): Promise<ResolvedLogin> {
+  return resolveLoginContextWith(
+    console_,
+    email,
+    async (user) => {
+      const passwordOk = await verifyPassword(password, user.passwordHash);
+      if (!passwordOk) {
+        throw new HttpError(401, "unauthorized", "invalid email or password");
+      }
+    },
+    () => {
+      throw new HttpError(401, "unauthorized", "invalid email or password");
+    },
+  );
+}
+
+/**
+ * The trusted OAuth-bridge leg: mint a session for an email whose ownership was
+ * already proven by the IdP (a VERIFIED provider email) and whose caller already
+ * authenticated with the bridge shared secret. No password gate — that is the
+ * entire point, since an account first created via email/OTP has a user-chosen
+ * password the OAuth flow cannot know. A missing account is a distinct 404 so the
+ * BFF can fall through to seamless registration rather than seeing a 401.
+ */
+function resolveTrustedLoginContext(
+  console_: ConsoleContext,
+  email: string,
+): Promise<ResolvedLogin> {
+  return resolveLoginContextWith(
+    console_,
+    email,
+    async () => {
+      // Ownership proven upstream; no per-user secret to verify here.
+    },
+    () => {
+      throw new HttpError(404, "user_not_found", "no account exists for this email");
+    },
+  );
+}
+
 /** `POST /v1/admin/login` — Rust `handle_admin_login`. */
 async function handleLogin(c: Ctx): Promise<Response> {
   const console_ = consoleOf(c);
   const payload = await readBody(c, loginSchema);
   const email = payload.email.trim().toLowerCase();
 
-  const { user, membership, tenantAccount, workspace } = await resolveLoginContext(
-    console_,
-    email,
-    payload.password,
-  );
+  const resolved = await resolveLoginContext(console_, email, payload.password);
+  return mintConsoleSessionResponse(c, console_, resolved);
+}
+
+/**
+ * `POST /v1/internal/oauth-bridge-login` — mint a console session for a
+ * provider-verified email WITHOUT a password. Mounted OUTSIDE the API contract
+ * and OUTSIDE `/v1/admin/*` (so neither the contract guard nor the console CSRF
+ * middleware apply), it is instead gated by a shared secret compared in constant
+ * time. The vega BFF calls it over the internal service binding after an OAuth
+ * IdP returns `email_verified=true` for an email that already has an account.
+ *
+ * Auto-link posture (product decision): a provider-VERIFIED email logs into any
+ * existing account with that email, including one created via email/OTP. The
+ * trust anchor is the IdP's email verification plus this endpoint's shared
+ * secret; an unverified provider email never reaches here (the BFF gates it).
+ */
+async function handleOAuthBridgeLogin(c: Ctx): Promise<Response> {
+  const configured = (c.env as unknown as Record<string, unknown>)[
+    OAUTH_BRIDGE_LOGIN_SECRET_BINDING
+  ];
+  const expected = typeof configured === "string" ? configured.trim() : "";
+  if (expected === "") {
+    // Fail closed: without a configured secret the endpoint would authenticate
+    // no one — but returning 401 would masquerade as a credential problem. 503
+    // says "this leg is not wired", matching `consoleOf`'s missing-secret posture.
+    throw new HttpError(503, "service_unavailable", "oauth bridge login is not configured");
+  }
+  const presented = c.req.header("x-ferrogate-oauth-bridge-secret") ?? "";
+  if (!constantTimeEqual(presented, expected)) {
+    throw new HttpError(401, "unauthorized", "invalid bridge credential");
+  }
+
+  const console_ = consoleOf(c);
+  const payload = await readBody(c, oauthBridgeLoginSchema);
+  const email = payload.email.trim().toLowerCase();
+
+  const resolved = await resolveTrustedLoginContext(console_, email);
+  return mintConsoleSessionResponse(c, console_, resolved);
+}
+
+/**
+ * Mint the gateway key + refresh session for an already-resolved login context
+ * and shape the `/v1/admin/login` response. Extracted so the password login and
+ * the trusted OAuth-bridge login share ONE session-issuing path — a divergence
+ * between them (a different key scope, a skipped sweep) is the kind of bug that
+ * only shows up as a privilege gap, so there is exactly one copy.
+ */
+async function mintConsoleSessionResponse(
+  c: Ctx,
+  console_: ConsoleContext,
+  resolved: ResolvedLogin,
+): Promise<Response> {
+  const { user, membership, tenantAccount, workspace } = resolved;
 
   // The tier is derived from the caller's membership in THIS tenant (#517).
   // `membershipRoleFromStored` resolves an unrecognised legacy value to
@@ -1080,6 +1196,10 @@ export interface AdminConsoleSessionRoute {
 export const ADMIN_CONSOLE_SESSION_ROUTES: readonly AdminConsoleSessionRoute[] = [
   { method: "POST", path: "/v1/admin/register" },
   { method: "POST", path: "/v1/admin/login" },
+  // Trusted server-to-server leg: mints a session for a provider-verified email
+  // with NO password, gated by a shared secret (not the console JWT). Not a
+  // contract operation; the vega BFF is its only caller.
+  { method: "POST", path: "/v1/admin/oauth-bridge-login" },
   { method: "POST", path: "/v1/admin/refresh" },
   { method: "POST", path: "/v1/admin/logout" },
   { method: "GET", path: "/v1/admin/me" },
@@ -1126,6 +1246,7 @@ export function mountAdminConsoleSession(
   const handlers: Record<string, (c: Ctx) => Promise<Response>> = {
     "POST /v1/admin/register": handleRegister,
     "POST /v1/admin/login": handleLogin,
+    "POST /v1/admin/oauth-bridge-login": handleOAuthBridgeLogin,
     "POST /v1/admin/refresh": handleRefresh,
     "POST /v1/admin/logout": handleLogout,
     "GET /v1/admin/me": handleMe,

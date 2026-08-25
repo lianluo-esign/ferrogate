@@ -102,11 +102,14 @@ function buildApp(): Hono<ControlPlaneEnv> {
 const app = buildApp();
 
 const JWT_SECRET = "console-signing-secret-for-tests";
+const BRIDGE_SECRET = "oauth-bridge-shared-secret-for-tests";
 
-/** `arm()` plus the two bindings the session surface adds. */
+/** `arm()` plus the bindings the session surface adds. */
 function armConsole(world: Parameters<typeof arm>[0] = {}): void {
   arm({ ...world, store: "d1" });
-  (env as unknown as Record<string, string | undefined>).ADMIN_CONSOLE_JWT_SECRET = JWT_SECRET;
+  const bindings = env as unknown as Record<string, string | undefined>;
+  bindings.ADMIN_CONSOLE_JWT_SECRET = JWT_SECRET;
+  bindings.OAUTH_BRIDGE_LOGIN_SECRET = BRIDGE_SECRET;
 }
 
 interface Json {
@@ -625,6 +628,110 @@ describe("POST /v1/admin/login", () => {
       body: { email: "owner@acme.test", password: "correct horse b" },
     });
     expect(login.response.headers.get("set-cookie")).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST /v1/admin/oauth-bridge-login — the trusted, password-less leg the vega
+// BFF calls when an OAuth IdP returns a VERIFIED email that already has an
+// account (possibly created via email/OTP). Gated by a shared secret, NOT the
+// console JWT; auto-links a verified email to its existing account.
+// ---------------------------------------------------------------------------
+
+const BRIDGE_PATH = "/v1/admin/oauth-bridge-login";
+
+// `null` ⇒ send NO secret header at all (distinct from a wrong string). Explicit
+// `undefined` would trip JS default-parameter resolution and send the right one.
+const NO_HEADER = null;
+function bridge(
+  body: unknown,
+  secret: string | null = BRIDGE_SECRET,
+): Promise<{ status: number; body: Json; response: Response }> {
+  return call("POST", BRIDGE_PATH, {
+    body,
+    headers: secret === NO_HEADER ? {} : { "x-ferrogate-oauth-bridge-secret": secret },
+  });
+}
+
+describe("POST /v1/admin/oauth-bridge-login", () => {
+  it("mints a full session for an existing email WITHOUT a password (login hit)", async () => {
+    // The account was created by some OTHER means (register here stands in for an
+    // email/OTP signup) whose password the OAuth flow cannot know. The bridge
+    // resolves a session from the email alone.
+    await register("otp-user@acme.test", "the-users-own-secret");
+    const { status, body } = await bridge({
+      email: "otp-user@acme.test",
+      provider: "google",
+      provider_user_id: "google-123",
+    });
+    expect(status, JSON.stringify(body)).toBe(200);
+    const session = body as unknown as Session;
+    expect(session.tenant.role).toBe("owner");
+    expect(session.expires_in).toBe(ADMIN_SESSION_ACCESS_TOKEN_TTL_SECS);
+    expect(session.gateway_api_key.startsWith("fg_")).toBe(true);
+    expect(session.user.email).toBe("otp-user@acme.test");
+  });
+
+  it("is case-insensitive on email, matching register/login", async () => {
+    await register("owner@acme.test");
+    const { status } = await bridge({ email: "OWNER@Acme.test", provider: "github" });
+    expect(status).toBe(200);
+  });
+
+  it("returns 404 user_not_found for an unknown email — so the BFF can register", async () => {
+    const { status, body } = await bridge({ email: "nobody@acme.test", provider: "google" });
+    expect(status).toBe(404);
+    expect(errorOf(body).code).toBe("user_not_found");
+    // Must NOT leak a session for a non-existent account.
+    expect(JSON.stringify(body)).not.toContain("fg_");
+  });
+
+  it("refuses a WRONG shared secret with 401 and mints nothing", async () => {
+    await register("owner@acme.test");
+    const { status, body } = await bridge({ email: "owner@acme.test" }, "not-the-secret");
+    expect(status).toBe(401);
+    expect(errorOf(body).code).toBe("unauthorized");
+    expect(JSON.stringify(body)).not.toContain("fg_");
+  });
+
+  it("refuses a MISSING shared secret with 401", async () => {
+    await register("owner@acme.test");
+    const { status } = await bridge({ email: "owner@acme.test" }, NO_HEADER);
+    expect(status).toBe(401);
+  });
+
+  it("fails closed with 503 when the bridge secret is not configured", async () => {
+    await register("owner@acme.test");
+    (env as unknown as Record<string, string | undefined>).OAUTH_BRIDGE_LOGIN_SECRET = undefined;
+    const { status, body } = await bridge({ email: "owner@acme.test" });
+    expect(status).toBe(503);
+    expect(errorOf(body).code).toBe("service_unavailable");
+  });
+
+  it("refuses a DISABLED account with 401 even for a valid caller", async () => {
+    await register("owner@acme.test");
+    await db()
+      .prepare("UPDATE admin_users SET disabled_at_unix = 1 WHERE email = ?")
+      .bind("owner@acme.test")
+      .run();
+    const { status, body } = await bridge({ email: "owner@acme.test", provider: "google" });
+    expect(status).toBe(401);
+    expect(errorOf(body).message).toBe("this account has been disabled");
+  });
+
+  it("refuses a SUSPENDED tenancy with 403 and hands back NO key (#514)", async () => {
+    const session = await register("owner@acme.test");
+    await setTenantAccountStatus(session.tenant.id, "suspended");
+    const { status, body } = await bridge({ email: "owner@acme.test", provider: "google" });
+    expect(status).toBe(403);
+    expect(errorOf(body).code).toBe("tenancy_suspended");
+    expect(JSON.stringify(body)).not.toContain("fg_");
+  });
+
+  it("sets NO cookie — this stays a bearer-token API", async () => {
+    await register("owner@acme.test");
+    const { response } = await bridge({ email: "owner@acme.test", provider: "google" });
+    expect(response.headers.get("set-cookie")).toBeNull();
   });
 });
 
