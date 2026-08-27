@@ -187,6 +187,16 @@ export async function resetD1(): Promise<void> {
     db().prepare("DELETE FROM platform_provider_channels"),
     db().prepare("DELETE FROM platform_model_prices"),
     db().prepare("DELETE FROM platform_catalog_revisions"),
+    // The admin-console IDENTITY tables (`session/store.ts`). This app reads AND
+    // writes all three, so a membership or user left behind is the same lie the
+    // rest of this list guards against — a later test's `listTenantOwnerEmails`
+    // or `bootstrapLoginByEmail` assertion satisfied by a prior test's row.
+    // Existing suites only dodged it by keying every read on a unique email. No
+    // cross-table FOREIGN KEYs here (the migration's line-49 contract), so the
+    // delete order is free.
+    db().prepare("DELETE FROM admin_user_refresh_tokens"),
+    db().prepare("DELETE FROM admin_user_tenant_memberships"),
+    db().prepare("DELETE FROM admin_users"),
   ]);
 
   // `resetD1` is used by suites that do not also call `resetTenantD1`, while

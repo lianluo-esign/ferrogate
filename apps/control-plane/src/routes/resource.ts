@@ -319,6 +319,33 @@ export interface CollectionSpec {
     id: string,
     record: StoreRecord,
   ) => Promise<void>;
+  /**
+   * Enrich a page of records on the READ path with fields that are NOT in the
+   * stored document but are cheap to join from another control table.
+   *
+   * `tenant-accounts` is the first user: its document holds an opaque
+   * `tenant-…` / uuid id, but an operator reading the list needs a HUMAN — the
+   * tenant's owner email — which lives in the `admin_users` ⋈
+   * `admin_user_tenant_memberships` identity tables, not in the account
+   * document. This hook is the one place that join is expressed, so the field is
+   * projected at the single source instead of re-derived by every reader.
+   *
+   * Declared on the SPEC and, like {@link CollectionSpec.project}, called from
+   * BOTH read legs — {@link listHandler} AND {@link readHandler} — so a field
+   * present on the list can never be missing from the detail read of the same
+   * resource (the tenant-detail H1 reads through `readHandler`).
+   *
+   * It is a READ-side projection, so unlike `project` it does not gate on
+   * {@link ControlPlaneDeps.controlDatabase} here — the gate lives INSIDE the
+   * hook, which MUST be fail-safe: when its join source is unavailable it
+   * returns the records UNCHANGED rather than failing an otherwise-good read.
+   * The records are returned (not mutated in place) because {@link StoreRecord}
+   * is `readonly`.
+   */
+  readonly enrichList?: (
+    deps: ControlPlaneDeps,
+    records: readonly StoreRecord[],
+  ) => Promise<readonly StoreRecord[]>;
 }
 
 interface ResolvedSpec {
@@ -344,6 +371,9 @@ interface ResolvedSpec {
   readonly tenantUnprojectAfter:
     | ((deps: ControlPlaneDeps, id: string, record: StoreRecord) => Promise<void>)
     | null;
+  readonly enrichList:
+    | ((deps: ControlPlaneDeps, records: readonly StoreRecord[]) => Promise<readonly StoreRecord[]>)
+    | null;
 }
 
 function resolveSpec(spec: CollectionSpec): ResolvedSpec {
@@ -361,6 +391,7 @@ function resolveSpec(spec: CollectionSpec): ResolvedSpec {
     unproject: spec.unproject ?? null,
     tenantUnproject: spec.tenantUnproject ?? null,
     tenantUnprojectAfter: spec.tenantUnprojectAfter ?? null,
+    enrichList: spec.enrichList ?? null,
   };
 }
 
@@ -398,12 +429,29 @@ async function runProjection(
 // The six generic handlers
 // ---------------------------------------------------------------------------
 
+/**
+ * Run a spec's {@link CollectionSpec.enrichList} hook, if declared, over a set
+ * of records already read from the store. Shared by {@link listHandler} and
+ * {@link readHandler} so the read paths cannot diverge. A no-op (returns the
+ * input untouched) when no hook is declared or the set is empty — the latter
+ * spares the join a round trip on an empty page.
+ */
+async function runEnrichList(
+  c: Context<ControlPlaneEnv>,
+  spec: ResolvedSpec,
+  records: readonly StoreRecord[],
+): Promise<readonly StoreRecord[]> {
+  if (spec.enrichList === null || records.length === 0) return records;
+  return spec.enrichList(depsOf(c), records);
+}
+
 export function listHandler(spec: ResolvedSpec): Handler {
   return async (c) => {
     const deps = depsOf(c);
     const query = parseListQuery(new URL(c.req.url), deps.listDefaultLimit, deps.listMaxLimit);
     const page = await deps.store.list(spec.collection, scopeOf(c), query);
-    return json(c, 200, listResponse(page, query));
+    const items = await runEnrichList(c, spec, page.items);
+    return json(c, 200, listResponse({ ...page, items }, query));
   };
 }
 
@@ -436,7 +484,11 @@ export function readHandler(spec: ResolvedSpec, param: string): Handler {
     const id = pathParam(c, param);
     const record = await depsOf(c).store.get(spec.collection, scopeOf(c), id);
     if (record === null) throw notFound(spec, id);
-    return json(c, 200, adminItem(spec.object, record));
+    // Same enrichment as the list, on the single read: the tenant-detail H1
+    // reads through here, so it must resolve the owner email too. `?? record`
+    // keeps the original if a fail-safe hook returns an empty set.
+    const [enriched] = await runEnrichList(c, spec, [record]);
+    return json(c, 200, adminItem(spec.object, enriched ?? record));
   };
 }
 

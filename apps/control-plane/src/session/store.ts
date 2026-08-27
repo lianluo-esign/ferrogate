@@ -31,6 +31,7 @@
  * `membership.tenantId` — never on a tenant id taken from the request.
  */
 import type { MembershipRole } from "./membership_role.js";
+import { isOwner, membershipRoleFromStored } from "./membership_role.js";
 
 /** `admin_users`, column for column (Rust `StoredAdminUser`). */
 export interface AdminUserRow {
@@ -102,6 +103,20 @@ export interface AdminConsoleSessionStore {
   upsertUser(user: AdminUserRow): Promise<void>;
   listMembershipsByUser(userId: string): Promise<readonly AdminMembershipRow[]>;
   listMembershipsByTenant(tenantId: string): Promise<readonly AdminMembershipRow[]>;
+  /**
+   * The ONE representative email per tenant, for a batch of tenants, in ONE
+   * control round trip — the projection `tenant-accounts` hangs on its list rows
+   * so operators read a human, not a `tenant-…` opaque id.
+   *
+   * "Representative" is defined the same way a tenant's owner is everywhere else:
+   * the `owner`-role membership if one exists, else the OLDEST membership by
+   * `created_at_unix` (the founding member) — the same oldest-first tiebreak
+   * {@link listMembershipsByUser} makes load-bearing, applied per tenant. A
+   * tenant with no membership at all is simply absent from the returned map (the
+   * caller leaves that row's email null). An empty `tenantIds` returns an empty
+   * map WITHOUT touching the database — the fail-safe the enrich hook relies on.
+   */
+  listTenantOwnerEmails(tenantIds: readonly string[]): Promise<Map<string, string>>;
   upsertMembership(membership: AdminMembershipRow): Promise<void>;
   /** `true` when a row was removed. Rust `delete_admin_user_membership`. */
   deleteMembership(userId: string, tenantId: string): Promise<boolean>;
@@ -211,6 +226,13 @@ function decodeRefreshToken(row: RawRefreshToken): AdminRefreshTokenRow {
     revokedAtUnix: nullableNumber(row.revoked_at_unix),
   };
 }
+
+/**
+ * Max ids bound into a single `IN (?…)` query. D1 caps bound parameters at 100
+ * per statement; 90 leaves headroom and keeps `listTenantOwnerEmails` to one
+ * round trip per 90 tenants (one query total at today's tenant count).
+ */
+const D1_BATCH_IN_LIMIT = 90;
 
 /** The D1 implementation. The only one — there is no in-memory twin, on purpose. */
 export class D1AdminConsoleSessionStore implements AdminConsoleSessionStore {
@@ -350,6 +372,51 @@ export class D1AdminConsoleSessionStore implements AdminConsoleSessionStore {
       .bind(tenantId)
       .all<RawMembership>();
     return rows.results.map(decodeMembership);
+  }
+
+  /**
+   * Owner-or-oldest email per tenant, batched. Chunks the id list into groups of
+   * {@link D1_BATCH_IN_LIMIT} so the `IN (?…)` bind count stays under D1's
+   * hard 100-bound-parameter-per-query ceiling — the whole point of this method
+   * over N calls to {@link listMembershipsByTenant} is one round trip per chunk,
+   * not one per tenant. Ownership is resolved with `membershipRoleFromStored`
+   * (fail-closed) rather than a raw SQL `role = 'owner'`, so a legacy/hostile
+   * `"Owner"` string can never mint owner status here — the same READ-side
+   * asymmetry `membership_role.ts` documents.
+   */
+  async listTenantOwnerEmails(tenantIds: readonly string[]): Promise<Map<string, string>> {
+    const unique = [...new Set(tenantIds)].filter((id) => id !== "");
+    const out = new Map<string, string>();
+    if (unique.length === 0) return out;
+    // Ordered oldest-first: the first row a tenant contributes is its founding
+    // membership; the first OWNER row (if any) supersedes it.
+    const ownerEmail = new Map<string, string>();
+    const earliestEmail = new Map<string, string>();
+    for (let i = 0; i < unique.length; i += D1_BATCH_IN_LIMIT) {
+      const chunk = unique.slice(i, i + D1_BATCH_IN_LIMIT);
+      const placeholders = chunk.map(() => "?").join(", ");
+      const { results } = await this.#db
+        .prepare(
+          `SELECT m.tenant_id AS tenant_id, u.email AS email, m.role AS role
+             FROM admin_user_tenant_memberships m
+             JOIN admin_users u ON u.id = m.user_id
+            WHERE m.tenant_id IN (${placeholders})
+            ORDER BY m.created_at_unix ASC, m.id ASC`,
+        )
+        .bind(...chunk)
+        .all<{ tenant_id: string; email: string; role: string }>();
+      for (const row of results) {
+        if (row.email === "") continue;
+        if (!earliestEmail.has(row.tenant_id)) earliestEmail.set(row.tenant_id, row.email);
+        if (isOwner(membershipRoleFromStored(row.role)) && !ownerEmail.has(row.tenant_id)) {
+          ownerEmail.set(row.tenant_id, row.email);
+        }
+      }
+    }
+    for (const [tenantId, email] of earliestEmail) {
+      out.set(tenantId, ownerEmail.get(tenantId) ?? email);
+    }
+    return out;
   }
 
   /**

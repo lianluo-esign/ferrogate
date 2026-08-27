@@ -9755,6 +9755,7 @@ export interface components {
             created_at_unix: number;
             /** Format: int64 */
             updated_at_unix: number;
+            email?: string | null;
         };
         AdminTenantAccountCreateRequest: {
             id?: string | null;

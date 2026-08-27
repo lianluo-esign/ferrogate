@@ -37422,6 +37422,12 @@
           "updated_at_unix": {
             "type": "integer",
             "format": "int64"
+          },
+          "email": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "additionalProperties": false,

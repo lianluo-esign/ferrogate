@@ -38,8 +38,9 @@ import {
 import { LIFECYCLE_STATUS_ALL, type LifecycleStatus } from "@ferrogate/storage";
 import { z } from "zod";
 import { HttpError } from "../middleware/errors.js";
-import { StoreConflictError, type StoreRecord } from "../ports.js";
+import { type ControlPlaneDeps, StoreConflictError, type StoreRecord } from "../ports.js";
 import { adminDeleted, adminItem } from "../responses.js";
+import { D1AdminConsoleSessionStore } from "../session/store.js";
 import { projectTenantAccount, storedPlan, storedQuotaPolicy } from "../store/quota_registry.js";
 import {
   deleteProjectRow,
@@ -264,6 +265,40 @@ function deleteHierarchyRow(options: {
   };
 }
 
+/**
+ * Hang the tenant OWNER's email on each tenant-account record, for the READ path.
+ *
+ * The account document carries only the opaque tenant id (`tenant-9a03494f`,
+ * a uuid); the HUMAN an operator needs — the owner's email — lives one seam over
+ * in the `admin_users` ⋈ `admin_user_tenant_memberships` identity tables
+ * (`session/store.ts`), never in the account document. This is the
+ * {@link CollectionSpec.enrichList} hook, so it runs on BOTH the list and the
+ * single read (the tenant-detail H1), and it is the ONLY place the join is
+ * expressed — the email is projected at the single source instead of re-derived
+ * by every Polaris page.
+ *
+ * FAIL-SAFE by construction: with no control database (memory mode) or no
+ * resolvable owner it returns the records UNTOUCHED, never failing an
+ * otherwise-good read. The whole page resolves in ONE batched query
+ * ({@link D1AdminConsoleSessionStore.listTenantOwnerEmails}), keyed by the
+ * account's `id` — which IS the tenant id every membership row references and
+ * the value `provision`/`projectTenantAccount` already treat as the tenant.
+ */
+async function enrichTenantAccountOwnerEmail(
+  deps: ControlPlaneDeps,
+  records: readonly StoreRecord[],
+): Promise<readonly StoreRecord[]> {
+  const db = deps.controlDatabase;
+  if (db === null || records.length === 0) return records;
+  const store = new D1AdminConsoleSessionStore(db);
+  const emails = await store.listTenantOwnerEmails(records.map((record) => String(record.id)));
+  if (emails.size === 0) return records;
+  return records.map((record) => {
+    const email = emails.get(String(record.id));
+    return email === undefined ? record : { ...record, email };
+  });
+}
+
 export const tenantHierarchyRoutes: GroupModule = crudGroup(
   "tenant_hierarchy",
   [
@@ -278,6 +313,9 @@ export const tenantHierarchyRoutes: GroupModule = crudGroup(
       object: "tenant_account",
       body: tenantAccountSchema,
       project: projectTenantAccount,
+      // Read-path only: project the owner's email onto every account so operators
+      // read a human, not an opaque `tenant-…` id. See the function's docblock.
+      enrichList: enrichTenantAccountOwnerEmail,
       // #820. A tenant's data plane is its own Durable Object, and the object is
       // created by being addressed — so onboarding is "record the tenant on the
       // roster and seed its model catalog", and nothing did either. Declared on
