@@ -1056,23 +1056,24 @@ const CONTROLS: readonly FleetControl[] = [
   },
   {
     /**
-     * Billing-group multipliers (#942/#945). The control plane authors the
+     * Billing-group multipliers (#942/#945/#961). The control plane authors the
      * `platform_billing_groups` rows (and stamps `platform_billing_group_revisions`
-     * so the data plane can invalidate its cache) through `PlatformBillingGroupStore`,
-     * and the gateway data plane reads the SAME two tables through
+     * so a reader can invalidate its cache) through `PlatformBillingGroupStore`,
+     * and the gateway data plane reads the SAME durable tables through
      * `controlDatabaseFrom` at settlement to scale the settled cost by a group's
      * multiplier. An operator who raises a group's multiplier on the control plane
      * must see the gateway bill at the new rate — the authoritative-when-present
      * rule, so both Workers resolve it from the same durable tables.
      *
-     * `shared_billing_groups` (#960, Phase C step 7b) is the SAME control read
-     * MIRROR-FIRST: the control plane pushes each group's `multiplier`/`enabled`
-     * into the tenant's own read-only `shared_billing_groups` mirror, and the
-     * gateway settlement path (`MirrorFirstBillingGroupSource`) prefers that
-     * mirror row, falling back to `platform_billing_groups` only when the tenant
-     * has not synced the group yet. A present mirror row is authoritative, so a
-     * change to it must bill on both Workers exactly as the control table does —
-     * it belongs to this control, not beside it.
+     * #961 put a KV-FIRST cache in front of that control read: the control plane
+     * republishes the account-global snapshot to the `PLATFORM_CONFIG` KV on every
+     * mutation and the gateway (`KvFirstBillingGroupSource`) prefers it, deferring
+     * to `platformBillingGroupSourceFromControlData` — the SAME three tables — only
+     * for a group created inside the reader's cache window. The KV object is a
+     * cache of the control tables, not a separate authority, so the durable
+     * authority both Workers must resolve is still exactly those three tables. The
+     * retired per-tenant `shared_billing_groups` mirror is no longer read by the
+     * data plane, so it is no longer one of this control's authorities.
      */
     id: "billing-group-multiplier",
     title: "the platform billing-group routing and cost multipliers",
@@ -1082,7 +1083,6 @@ const CONTROLS: readonly FleetControl[] = [
       "platform_billing_groups",
       "platform_billing_group_providers",
       "platform_billing_group_revisions",
-      "shared_billing_groups",
     ],
   },
   {

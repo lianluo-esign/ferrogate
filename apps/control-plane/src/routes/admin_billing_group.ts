@@ -37,9 +37,9 @@ import {
   type BillingGroupPatch,
   PlatformBillingGroupStore,
 } from "../store/platform-billing-group.js";
+import { publishPlatformBillingGroupsCache } from "../store/platform-billing-group-cache.js";
 import { isMissingPlatformCatalogError } from "../store/platform-model-catalog.js";
 import { matchesSearch } from "../store/query.js";
-import { propagateSharedConfigAfterMutation } from "../store/shared-config.js";
 import {
   TenantCatalogConflictError,
   TenantCatalogNotFoundError,
@@ -117,8 +117,29 @@ function platformScope(c: Parameters<Handler>[0]): CallerScope {
   return scope;
 }
 
+/**
+ * Republish the account-global billing-group snapshot to `PLATFORM_CONFIG` after
+ * a committed mutation (#961). This REPLACES the old per-tenant Durable Object
+ * fan-out — which serialized an RPC per tenant on the operator's request path and
+ * made creating a group slow — with one atomic KV overwrite the gateway money
+ * path reads KV-first. Mirrors `admin_model_catalog.ts`'s post-write publish: the
+ * D1 mutation is already authoritative, so a failed cache write is logged and
+ * left for the scheduled publisher to repair, never surfaced to the operator.
+ */
 async function propagateBillingGroups(c: Parameters<Handler>[0]): Promise<void> {
-  await propagateSharedConfigAfterMutation(depsOf(c), c.get("requestId") ?? "admin-billing-group");
+  const controlDatabase = depsOf(c).controlDatabase;
+  if (controlDatabase === null) return;
+  try {
+    await publishPlatformBillingGroupsCache({
+      db: controlDatabase,
+      kv: c.env.PLATFORM_CONFIG,
+    });
+  } catch (error) {
+    console.warn("control-plane: billing-group cache publish failed", {
+      request_id: c.get("requestId"),
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
 }
 
 /** Map the store's typed errors onto HTTP, exactly as the catalog handler does. */

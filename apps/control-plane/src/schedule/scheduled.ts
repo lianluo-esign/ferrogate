@@ -19,6 +19,10 @@ import { type SpendAnomalyReport, runSpendAnomalyPass } from "../finops/pass.js"
 import type { ControlPlaneBindings, ControlPlaneDeps } from "../ports.js";
 import { type SiemExportReport, runSiemExportPass } from "../siem/pump.js";
 import {
+  type PlatformBillingGroupCachePublishResult,
+  publishPlatformBillingGroupsCache,
+} from "../store/platform-billing-group-cache.js";
+import {
   type PlatformConfigCachePublishResult,
   publishPlatformCatalogCache,
 } from "../store/platform-config-cache.js";
@@ -78,6 +82,15 @@ export interface ScheduledTickReport extends ScheduleTickSummary {
   /** The global provider/model snapshot refreshed into shared KV on this tick. */
   readonly platformConfigCache: PlatformConfigCachePublishResult | { readonly status: "failed" };
   /**
+   * The account-global billing-group snapshot refreshed into shared KV on this
+   * tick (#961). Republished unconditionally, like {@link platformConfigCache},
+   * so a mutation whose inline KV write failed self-heals on the next tick while
+   * the D1 registry stays authoritative.
+   */
+  readonly platformBillingGroupCache:
+    | PlatformBillingGroupCachePublishResult
+    | { readonly status: "failed" };
+  /**
    * What the one-time tenant-account mirror backfill (#75) did: `skipped:
    * "complete"` on every tick once the fleet's pre-migration `tenants` rows have
    * had their `document_json` filled from each object — the steady-state answer,
@@ -131,6 +144,7 @@ export async function runScheduledTick(
     tenantCatalogAudit,
     sharedConfig: await sharedConfigPass(deps, now),
     platformConfigCache: await platformConfigCachePass(env, deps, now),
+    platformBillingGroupCache: await platformBillingGroupCachePass(env, deps, now),
     tenantAccountMirror: await tenantAccountMirrorPass(deps, now),
   };
 }
@@ -149,6 +163,32 @@ async function platformConfigCachePass(
     });
   } catch (error) {
     console.warn("control-plane: scheduled platform catalog cache publish failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return { status: "failed" };
+  }
+}
+
+/**
+ * Republish the billing-group snapshot every tick (#961), mirroring
+ * {@link platformConfigCachePass}: unconditional, cheap (one registry read),
+ * self-healing a mutation whose inline KV write lost or failed while the D1
+ * registry remains authoritative. Never throws into the platform retry path.
+ */
+async function platformBillingGroupCachePass(
+  env: ControlPlaneBindings,
+  deps: Pick<ControlPlaneDeps, "controlDatabase">,
+  now: number,
+): Promise<PlatformBillingGroupCachePublishResult | { readonly status: "failed" }> {
+  if (deps.controlDatabase === null) return { status: "unconfigured" };
+  try {
+    return await publishPlatformBillingGroupsCache({
+      db: deps.controlDatabase,
+      kv: env.PLATFORM_CONFIG,
+      nowUnix: now,
+    });
+  } catch (error) {
+    console.warn("control-plane: scheduled billing-group cache publish failed", {
       error: error instanceof Error ? error.message : String(error),
     });
     return { status: "failed" };

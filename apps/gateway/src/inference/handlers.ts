@@ -1741,9 +1741,11 @@ async function billingGroupMeterFields(
 ): Promise<{ billingGroupId?: string; billingMultiplier?: number }> {
   const groupId = caller.billingGroupId;
   if (groupId === undefined) return {};
-  // A tenant-scoped caller lets the mirror-first source read this tenant's own
-  // `shared_billing_groups` mirror; a platform-operator caller has no tenant
-  // mirror, so the source falls through to the control read (tenantId absent).
+  // Billing groups are account-global (#961): the KV-first source resolves the
+  // multiplier from the shared `PLATFORM_CONFIG` snapshot, and its control-DB
+  // fallback reads the account-global table too. `tenantId` no longer selects a
+  // per-tenant mirror; it is forwarded only as a diagnostic hint the source may
+  // log, so the value is passed for continuity and ignored by resolution.
   const tenantId = caller.scope.kind === "tenant" ? caller.scope.tenantId : undefined;
   const billingMultiplier = await deps.billingGroups.multiplierForGroup(
     env as InferenceBindings,

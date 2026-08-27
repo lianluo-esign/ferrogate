@@ -40,6 +40,7 @@ import {
   derivedControlProjectionMetadata,
   parseListQuery,
 } from "../responses.js";
+import { PlatformBillingGroupStore } from "../store/platform-billing-group.js";
 import { tenantDatabaseFor } from "../store/tenancy.js";
 import { provisionedTenantPage, tenantFanoutOffset } from "../store/tenant-fanout.js";
 import {
@@ -1176,80 +1177,42 @@ async function replayOutboxReportRow(
 }
 
 /**
- * A row of the tenant Durable Object `shared_billing_groups` mirror
- * (`sql/d1-ts/tenant/0027_shared_config_mirror.sql`). The mirror is projected
- * DOWN from the platform `platform_billing_groups` by the control-plane fan-out
- * (`store/shared-config.ts`); the gateway settles a request at the multiplier of
- * the group its API key is bound to, reading THIS table first. The tenant read
- * below exposes the SAME rows so a tenant console can offer the real,
- * multiplier-bearing group list when minting a key.
- */
-interface SharedBillingGroupRow {
-  id: string;
-  name: string;
-  provider_type_id: string | null;
-  multiplier: number;
-  description: string | null;
-  enabled: number;
-  provider_ids_json: string;
-}
-
-/** Parse the mirror's `provider_ids_json`, degrading a corrupted push to `[]`. */
-function parseProviderIds(raw: string | null): string[] {
-  if (raw === null) return [];
-  try {
-    const value = JSON.parse(raw);
-    return Array.isArray(value) ? value.filter((x): x is string => typeof x === "string") : [];
-  } catch {
-    return [];
-  }
-}
-
-function sharedBillingGroupDocument(row: SharedBillingGroupRow): StoreRecord {
-  return {
-    id: row.id,
-    name: row.name,
-    provider_type_id: row.provider_type_id,
-    multiplier: row.multiplier,
-    description: row.description,
-    enabled: row.enabled === 1,
-    provider_ids: parseProviderIds(row.provider_ids_json),
-  };
-}
-
-/**
- * `GET /admin/v1/shared-billing-groups` — the calling tenant's enabled billing
- * groups, read from its OWN Durable Object `shared_billing_groups` mirror.
+ * `GET /admin/v1/shared-billing-groups` — the account-global ENABLED billing
+ * groups, read from the authoritative control-DB `platform_billing_groups`
+ * (#961).
  *
- * This is a TENANT surface (uses {@link scopeOf}, not the platform 404-fence):
- * the mirror is the tenant's own projected copy, and the vega create-key dialog
- * uses it to show real group names + multipliers. Contrast the platform-operator
- * `GET /admin/v1/billing-groups` (`admin_billing_group.ts`), which reads the
- * authoritative control-DB `platform_billing_groups`.
+ * This is a TENANT surface (uses {@link scopeOf} for auth, not the platform
+ * 404-fence): the vega create-key dialog uses it to show real group names +
+ * multipliers when minting a key. Billing groups are ACCOUNT-GLOBAL config, not
+ * per-tenant data, so every caller sees the same enabled set — and always the
+ * latest, since there is no per-tenant mirror to lag. The response shape is
+ * byte-identical to the old DO-mirror read (`{id,name,provider_type_id,
+ * multiplier,description,enabled,provider_ids}`), so its vega consumers need no
+ * change. This replaces the read of the tenant DO `shared_billing_groups`
+ * mirror, retired with the per-tenant fan-out. Contrast the platform-operator
+ * `GET /admin/v1/billing-groups` (`admin_billing_group.ts`), which returns the
+ * FULL record set (disabled included) for CRUD.
  *
- * Edge cases: an un-fanned-out or native/unprovisioned tenant has no DO mirror →
- * empty list (never an error); a provisioned-but-unreachable DO surfaces the
- * router's `503 tenant_database_unavailable`. A platform-operator caller carries
- * no single tenant mirror, so it may narrow with `?tenant_id=` (else `[]`).
+ * A deployment with no control database (or with 0028 not yet applied — which
+ * `listGroups()` degrades to an empty list) answers `[]`, never an error: the
+ * same fail-soft the old empty-mirror read gave an un-fanned-out tenant.
  */
 async function listSharedBillingGroupsHandler(c: Context<ControlPlaneEnv>): Promise<Response> {
   const deps = c.get("deps");
-  const scope = scopeOf(c);
-  const tenantId =
-    scope.kind === "tenant"
-      ? scope.tenantId
-      : (new URL(c.req.url).searchParams.get("tenant_id")?.trim() ?? "");
-  const db = tenantId === "" ? null : await tenantBillingDatabaseFor(deps, tenantId);
-  if (db === null) return json(c, 200, adminList([]));
-  const result = await db
-    .prepare(
-      `SELECT id, name, provider_type_id, multiplier, description, enabled, provider_ids_json
-         FROM shared_billing_groups
-        WHERE enabled = 1
-        ORDER BY name`,
-    )
-    .all<SharedBillingGroupRow>();
-  return json(c, 200, adminList(result.results.map(sharedBillingGroupDocument)));
+  if (deps.controlDatabase === null) return json(c, 200, adminList([]));
+  const groups = await new PlatformBillingGroupStore({ db: deps.controlDatabase }).listGroups();
+  const documents: StoreRecord[] = groups
+    .filter((group) => group.enabled)
+    .map((group) => ({
+      id: group.id,
+      name: group.name,
+      provider_type_id: group.provider_type_id,
+      multiplier: group.multiplier,
+      description: group.description,
+      enabled: group.enabled,
+      provider_ids: group.provider_ids,
+    }));
+  return json(c, 200, adminList(documents));
 }
 
 /**

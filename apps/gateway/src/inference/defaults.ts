@@ -21,7 +21,7 @@ import type { ResponsesStreamProviderKind } from "../streaming/index.js";
 import { canonicalProviderKind, defaultAdapterRegistry } from "./adapters.js";
 import { defaultAnthropicTranslator } from "./anthropic.js";
 import { audioObjectsFromEnv } from "./audio-objects.js";
-import { platformBillingGroupSourceFromControlData } from "./billing-group-source.js";
+import { platformBillingGroupSourceFromSharedConfig } from "./billing-group-source.js";
 import { byokPortsFromEnv } from "./byok.js";
 import { orderCandidates } from "./candidates.js";
 import { DurableObjectProviderCircuit } from "./circuit-do.js";
@@ -222,11 +222,12 @@ export const isolateRoutingMetrics: RoutingMetrics = new ProviderRoutingMetrics(
 
 /**
  * #945 — the billing-group multiplier source, a module-scope singleton for the
- * same reason {@link isolateRoutingMetrics} is one: its revision-gated cache is
- * keyed by the Worker `env` and must survive every per-request `resolveDeps` so
- * the steady state is O(revisions), not a fresh control-object read per request.
+ * same reason {@link isolateRoutingMetrics} is one: its per-`env` KV snapshot
+ * cache is keyed by the Worker `env` and must survive every per-request
+ * `resolveDeps` so the steady state is O(cache-window), not a fresh KV read per
+ * request. KV-first (#961) over `PLATFORM_CONFIG`, control database as fallback.
  */
-export const isolateBillingGroupSource = platformBillingGroupSourceFromControlData();
+export const isolateBillingGroupSource = platformBillingGroupSourceFromSharedConfig();
 
 /** An empty registry — every model resolves to `model_not_found` (400). */
 export const emptyModelResolver: ModelResolver = new InMemoryModelResolver([]);

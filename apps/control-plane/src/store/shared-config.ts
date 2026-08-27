@@ -3,15 +3,22 @@
  *
  * ## What this is
  *
- * Platform config — billing groups (分组) today, plans (套餐) and announcements
- * (公告) next — is authored once, on the control database, by an operator. Every
- * tenant that needs it used to pay a synchronous cross-region read of the single
- * `ControlDataObject` to merge those shared rows in at read time. This store is
- * the other end of the fix: it renders that shared config into a batch of
- * parameterised statements and PUSHES it, one way, into each tenant Durable
- * Object's read-only mirror tables (`0027_shared_config_mirror.sql`) through the
- * privileged tenant-write RPC. After the push a tenant resolves shared config
- * from its own object with no control-plane hop.
+ * Platform config — announcements (公告) today — is authored once, on the control
+ * database, by an operator. Every tenant that needs it used to pay a synchronous
+ * cross-region read of the single `ControlDataObject` to merge those shared rows
+ * in at read time. This store is the other end of the fix: it renders that shared
+ * config into a batch of parameterised statements and PUSHES it, one way, into
+ * each tenant Durable Object's read-only mirror tables
+ * (`0027_shared_config_mirror.sql`) through the privileged tenant-write RPC.
+ * After the push a tenant resolves shared config from its own object with no
+ * control-plane hop.
+ *
+ * Billing groups (分组) NO LONGER travel this channel: they moved to the
+ * account-global `PLATFORM_CONFIG` KV snapshot (#961,
+ * `platform-billing-group-cache.ts`), which the control plane republishes on
+ * every mutation and the gateway reads KV-first — retiring the per-tenant
+ * fan-out that made creating a group slow. The `shared_billing_groups` mirror
+ * table remains as harmless dead schema.
  *
  * This module owns three things and deliberately nothing else:
  *   1. reading the current shared config + its monotone source revision;
@@ -36,10 +43,9 @@ import type { TenantDatabaseRouter, TenantObjectAddress } from "@ferrogate/stora
 import type { TenantDataStatement } from "@ferrogate/storage/durable-objects";
 import type { ControlPlaneDeps } from "../ports.js";
 import { PlatformAnnouncementStore } from "./platform-announcement.js";
-import { PlatformBillingGroupStore } from "./platform-billing-group.js";
 
 /** The shared-config domains this channel carries. One cursor row per value. */
-export const SHARED_CONFIG_DOMAINS = ["billing_groups", "announcements"] as const;
+export const SHARED_CONFIG_DOMAINS = ["announcements"] as const;
 export type SharedConfigDomain = (typeof SHARED_CONFIG_DOMAINS)[number];
 
 /** A domain's rendered push: the revision it reflects and the statements to apply. */
@@ -75,75 +81,14 @@ export class SharedConfigStore {
   // -- rendering -------------------------------------------------------------
 
   /**
-   * Render the billing-groups (分组) mirror push at the current source revision.
-   *
-   * The statement list, in order:
-   *   1. clear the mirror — but only when the tenant is behind this revision, so
-   *      an up-to-date tenant is untouched;
-   *   2. one guarded insert per group (same behind-revision predicate), so the
-   *      set the tenant ends with is exactly the source set, deletions included;
-   *   3. advance the tenant's `shared_config_cursor`, LAST and only when it moves
-   *      forward.
-   * Every guard reads the cursor as it stood at the START of the transaction
-   * (the cursor write is the final statement), so all three steps agree on
-   * whether this push applies.
-   */
-  async billingGroupsSnapshot(now?: number): Promise<SharedConfigSnapshot> {
-    const groups = new PlatformBillingGroupStore({ db: this.#db, requestId: this.#requestId });
-    const [records, revision] = await Promise.all([groups.listGroups(), groups.revision()]);
-    const at = nowUnix(now);
-    const domain: SharedConfigDomain = "billing_groups";
-
-    // COALESCE(...,0) < ? : the whole apply is conditioned on the tenant's cursor
-    // still being behind `revision`. A missing cursor row reads as 0 (never
-    // synced), which is what back-fills an existing tenant on its first push.
-    const behind =
-      "COALESCE((SELECT revision FROM shared_config_cursor WHERE domain = 'billing_groups'), 0) < ?";
-
-    const statements: TenantDataStatement[] = [
-      {
-        sql: `DELETE FROM shared_billing_groups WHERE ${behind}`,
-        params: [revision],
-      },
-    ];
-    for (const record of records) {
-      statements.push({
-        // INSERT ... SELECT ... WHERE <behind> so the row only lands while the
-        // cursor is still behind; booleans are normalised to 0/1 and the provider
-        // edges are flattened to a JSON array for the read-only mirror.
-        sql: `INSERT INTO shared_billing_groups (id, name, provider_type_id, multiplier, description, enabled, provider_ids_json, config_revision, synced_at_unix) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE ${behind}`,
-        params: [
-          record.id,
-          record.name,
-          record.provider_type_id,
-          record.multiplier,
-          record.description,
-          record.enabled ? 1 : 0,
-          JSON.stringify(record.provider_ids),
-          revision,
-          at,
-          revision,
-        ],
-      });
-    }
-    statements.push({
-      sql:
-        "INSERT INTO shared_config_cursor (domain, revision, applied_at_unix) VALUES (?, ?, ?) " +
-        "ON CONFLICT(domain) DO UPDATE SET revision = excluded.revision, " +
-        "applied_at_unix = excluded.applied_at_unix WHERE excluded.revision > shared_config_cursor.revision",
-      params: [domain, revision, at],
-    });
-
-    return { domain, revision, statements };
-  }
-
-  /**
    * Render the announcements (公告) mirror push at the current source revision.
    *
-   * Structurally identical to {@link billingGroupsSnapshot}: a behind-revision
-   * guard on every statement, a full DELETE-then-reinsert so deletions land, and
-   * the cursor advancing LAST. The only difference is the column set of the flat
-   * `shared_announcements` row.
+   * The statement list, in order: a behind-revision guard on every statement, a
+   * full DELETE-then-reinsert so deletions land, and the cursor advancing LAST.
+   * Every guard reads the cursor as it stood at the START of the transaction (the
+   * cursor write is the final statement), so all steps agree on whether this push
+   * applies. A missing cursor row reads as 0 (never synced), which back-fills an
+   * existing tenant on its first push.
    */
   async announcementsSnapshot(now?: number): Promise<SharedConfigSnapshot> {
     const announcements = new PlatformAnnouncementStore({
@@ -194,8 +139,6 @@ export class SharedConfigStore {
   /** Render one domain's snapshot by name — the dispatcher seed/fan-out drive. */
   async snapshotForDomain(domain: SharedConfigDomain, now?: number): Promise<SharedConfigSnapshot> {
     switch (domain) {
-      case "billing_groups":
-        return this.billingGroupsSnapshot(now);
       case "announcements":
         return this.announcementsSnapshot(now);
     }

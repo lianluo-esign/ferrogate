@@ -1,24 +1,33 @@
 /**
- * `ControlDataPlatformBillingGroupSource` (#945) — the data-plane read of the
- * billing-group multipliers #942 gave a home in the CONTROL database.
+ * The data-plane read of the billing-group multipliers #942 gave a home in the
+ * CONTROL database, in its two source shapes:
  *
- * Hermetic unit tests against a fake control database (no workerd): a
- * revision-gated, per-env cached read that FAILS OPEN to `1.0` on every axis a
- * money path must survive — no control database, a missing/rolled-back table, an
- * absent group, a DISABLED group, a garbage multiplier, and an outright read
- * error — while honouring a `0` multiplier only for an ENABLED comp group.
+ *  - `ControlDataPlatformBillingGroupSource` (#945) — the direct control read,
+ *    still the fallback; and
+ *  - `KvFirstBillingGroupSource` (#961) — the production source, which prefers
+ *    the account-global `PLATFORM_CONFIG` KV snapshot the control plane
+ *    republishes on every mutation, and defers to the control read only for a
+ *    group absent from the snapshot (freshly created inside the cache window).
  *
- * The file mutates `db.rows`/`db.revision`/`db.fail` on a shared state object
- * and re-reads: every assertion FAILS if the behavior is inverted (a cached
- * failure, a swallowed disabled flag, an ignored revision bump).
+ * Hermetic unit tests against a fake control database and a fake KV (no
+ * workerd): a read that FAILS OPEN to `1.0` on every axis a money path must
+ * survive — no backend, a missing/rolled-back table, an absent group, a DISABLED
+ * group, a garbage multiplier, and an outright read error — while honouring a `0`
+ * multiplier only for an ENABLED comp group.
+ *
+ * The file mutates state on shared objects and re-reads: every assertion FAILS
+ * if the behavior is inverted (a cached failure, a swallowed disabled flag, an
+ * ignored revision bump, a snapshot miss billed as 1.0 instead of falling back).
  */
 import { describe, expect, it } from "vitest";
 import {
   ControlDataPlatformBillingGroupSource,
-  MirrorFirstBillingGroupSource,
+  KvFirstBillingGroupSource,
+  PLATFORM_BILLING_GROUP_SNAPSHOT_KEY,
+  type PlatformBillingGroupSnapshot,
+  type PlatformBillingGroupSnapshotRow,
 } from "../../src/inference/billing-group-source.js";
 import type { InferenceBindings, PlatformBillingGroupSource } from "../../src/inference/ports.js";
-import type { TenantDatabaseResolver } from "../../src/tenancy/index.js";
 import { controlNamespaceOverD1 } from "../support/control-namespace.js";
 
 interface GroupRow {
@@ -229,59 +238,8 @@ describe("ControlDataPlatformBillingGroupSource", () => {
   });
 });
 
-/** One tenant's `shared_billing_groups` mirror, addressed by tenant id. */
-interface MirrorRow {
-  readonly multiplier: number | string | null;
-  readonly enabled: number | string | null;
-  readonly provider_ids_json?: string | null;
-}
-
-interface FakeMirror {
-  resolverFor: () => TenantDatabaseResolver;
-  reads: string[];
-  fail: boolean;
-  missing: boolean;
-}
-
-/**
- * A fake tenant resolver whose `forTenant` yields a handle whose `db` answers the
- * single-group mirror SELECT. `fail` makes `forTenant` reject (unreachable object);
- * `missing` makes the SELECT throw (mirror table not migrated). Both must defer to
- * the fallback, never bill.
- */
-function fakeMirror(rowsByTenant: Record<string, Record<string, MirrorRow>>): FakeMirror {
-  const state: FakeMirror = {
-    resolverFor: () => resolver,
-    reads: [],
-    fail: false,
-    missing: false,
-  };
-  const dbFor = (tenantId: string): D1Database => {
-    const chainFor = (groupId: string) => ({
-      async first<T>() {
-        state.reads.push(`${tenantId}:${groupId}`);
-        if (state.missing) throw new Error("D1_ERROR: no such table: main.shared_billing_groups");
-        const row = rowsByTenant[tenantId]?.[groupId];
-        return (row ?? null) as T;
-      },
-    });
-    return {
-      prepare: () => ({
-        bind: (groupId: string) => chainFor(groupId),
-      }),
-    } as unknown as D1Database;
-  };
-  const resolver = {
-    async forTenant(tenantId: string) {
-      if (state.fail) throw new Error("tenant object unreachable");
-      return { db: dbFor(tenantId) };
-    },
-  } as unknown as TenantDatabaseResolver;
-  return state;
-}
-
-/** A fallback that records every call and answers a sentinel, so the mirror-first
- *  decision (mirror hit vs fallback) is observable. */
+/** A fallback that records every call and answers a sentinel, so the KV-first
+ *  decision (snapshot hit vs control fallback) is observable. */
 function recordingFallback(answer: number): {
   source: PlatformBillingGroupSource;
   calls: Array<{ groupId: string | undefined; tenantId: string | undefined }>;
@@ -296,162 +254,189 @@ function recordingFallback(answer: number): {
   return { source, calls };
 }
 
-describe("MirrorFirstBillingGroupSource", () => {
-  const env = {} as InferenceBindings;
+interface FakeKv {
+  kv: KVNamespace;
+  reads: number;
+  value: string | null;
+  fail: boolean;
+}
 
-  it("serves the tenant mirror when the group row is present (authoritative)", async () => {
-    const mirror = fakeMirror({ "tnt-1": { premium: { multiplier: 1.5, enabled: 1 } } });
+/**
+ * A fake `PLATFORM_CONFIG` KV holding the single billing-group snapshot key.
+ * `value` is the raw stored string (or `null` for "never published"); `fail`
+ * makes `get` throw (a KV blip). `reads` counts `get`s so the per-env TTL cache
+ * is observable.
+ */
+function fakeKv(value: string | null): FakeKv {
+  const state: FakeKv = { kv: undefined as unknown as KVNamespace, reads: 0, value, fail: false };
+  state.kv = {
+    async get(key: string) {
+      state.reads += 1;
+      if (key !== PLATFORM_BILLING_GROUP_SNAPSHOT_KEY) return null;
+      if (state.fail) throw new Error("kv unavailable");
+      return state.value;
+    },
+  } as unknown as KVNamespace;
+  return state;
+}
+
+function snapshotJson(
+  groups: readonly PlatformBillingGroupSnapshotRow[],
+  revision = 1,
+): string {
+  const snapshot: PlatformBillingGroupSnapshot = {
+    schema_version: 1,
+    revision,
+    published_at_unix: 1700,
+    groups,
+  };
+  return JSON.stringify(snapshot);
+}
+
+function kvEnv(kv: FakeKv): InferenceBindings {
+  return { PLATFORM_CONFIG: kv.kv } as unknown as InferenceBindings;
+}
+
+describe("KvFirstBillingGroupSource", () => {
+  it("serves the snapshot multiplier when the group is present (authoritative)", async () => {
+    const kv = fakeKv(snapshotJson([{ id: "premium", multiplier: 1.5, enabled: true, provider_ids: [] }]));
     const fallback = recordingFallback(99);
-    const source = new MirrorFirstBillingGroupSource({
-      fallback: fallback.source,
-      resolverFor: mirror.resolverFor,
-    });
+    const source = new KvFirstBillingGroupSource({ fallback: fallback.source });
 
-    expect(await source.multiplierForGroup(env, "premium", "tnt-1")).toBe(1.5);
-    // A mirror hit never pays the cross-region control read.
+    expect(await source.multiplierForGroup(kvEnv(kv), "premium", "tnt-1")).toBe(1.5);
+    // A snapshot hit never pays the cross-region control read.
     expect(fallback.calls).toHaveLength(0);
-    expect(mirror.reads).toEqual(["tnt-1:premium"]);
   });
 
-  it("honours an ENABLED comp 0 from the mirror", async () => {
-    const mirror = fakeMirror({ "tnt-1": { comp: { multiplier: 0, enabled: 1 } } });
+  it("honours an ENABLED comp 0 from the snapshot", async () => {
+    const kv = fakeKv(snapshotJson([{ id: "comp", multiplier: 0, enabled: true, provider_ids: [] }]));
     const fallback = recordingFallback(99);
-    const source = new MirrorFirstBillingGroupSource({
-      fallback: fallback.source,
-      resolverFor: mirror.resolverFor,
-    });
+    const source = new KvFirstBillingGroupSource({ fallback: fallback.source });
 
-    expect(await source.multiplierForGroup(env, "comp", "tnt-1")).toBe(0);
+    expect(await source.multiplierForGroup(kvEnv(kv), "comp", "tnt-1")).toBe(0);
     expect(fallback.calls).toHaveLength(0);
   });
 
-  it("reads routing provider ids from the tenant mirror", async () => {
-    const mirror = fakeMirror({
-      "tnt-1": {
-        premium: {
-          multiplier: 1.5,
-          enabled: 1,
-          provider_ids_json: '["provider-a","provider-b"]',
-        },
-      },
-    });
+  it("reads routing provider ids from the snapshot", async () => {
+    const kv = fakeKv(
+      snapshotJson([
+        { id: "premium", multiplier: 1.5, enabled: true, provider_ids: ["provider-a", "provider-b"] },
+      ]),
+    );
     const fallback = recordingFallback(99);
-    const source = new MirrorFirstBillingGroupSource({
-      fallback: fallback.source,
-      resolverFor: mirror.resolverFor,
-    });
+    const source = new KvFirstBillingGroupSource({ fallback: fallback.source });
 
-    expect(await source.routingForGroup(env, "premium", "tnt-1")).toEqual({
+    expect(await source.routingForGroup(kvEnv(kv), "premium", "tnt-1")).toEqual({
       providerIds: ["provider-a", "provider-b"],
     });
     expect(fallback.calls).toHaveLength(0);
   });
 
-  it("fails closed when the mirrored provider id list is malformed", async () => {
-    const mirror = fakeMirror({
-      "tnt-1": {
-        premium: { multiplier: 1.5, enabled: 1, provider_ids_json: '["provider-a",3]' },
-      },
-    });
+  it("reads a DISABLED snapshot row as the official 1.0 (never the comp 0)", async () => {
+    const kv = fakeKv(snapshotJson([{ id: "off", multiplier: 0, enabled: false, provider_ids: [] }]));
     const fallback = recordingFallback(99);
-    const source = new MirrorFirstBillingGroupSource({
-      fallback: fallback.source,
-      resolverFor: mirror.resolverFor,
-    });
-
-    expect(await source.routingForGroup(env, "premium", "tnt-1")).toBeNull();
-    expect(fallback.calls).toHaveLength(0);
-  });
-
-  it("reads a DISABLED mirror row as the official 1.0 (never the comp 0)", async () => {
-    const mirror = fakeMirror({ "tnt-1": { off: { multiplier: 0, enabled: 0 } } });
-    const fallback = recordingFallback(99);
-    const source = new MirrorFirstBillingGroupSource({
-      fallback: fallback.source,
-      resolverFor: mirror.resolverFor,
-    });
+    const source = new KvFirstBillingGroupSource({ fallback: fallback.source });
 
     // A present-but-disabled row is authoritative → 1.0, WITHOUT a control read.
-    expect(await source.multiplierForGroup(env, "off", "tnt-1")).toBe(1);
+    expect(await source.multiplierForGroup(kvEnv(kv), "off", "tnt-1")).toBe(1);
+    expect(await source.routingForGroup(kvEnv(kv), "off", "tnt-1")).toBeNull();
     expect(fallback.calls).toHaveLength(0);
   });
 
-  it("reads a malformed mirror multiplier as the official 1.0", async () => {
-    const mirror = fakeMirror({ "tnt-1": { bad: { multiplier: "oops", enabled: 1 } } });
+  it("reads a malformed snapshot multiplier as the official 1.0", async () => {
+    // A non-numeric multiplier survived into the snapshot: present, enabled, but
+    // unparseable → the money path bills the official price, not a throw.
+    const kv = fakeKv(
+      snapshotJson([
+        { id: "bad", multiplier: "oops" as unknown as number, enabled: true, provider_ids: [] },
+      ]),
+    );
     const fallback = recordingFallback(99);
-    const source = new MirrorFirstBillingGroupSource({
-      fallback: fallback.source,
-      resolverFor: mirror.resolverFor,
-    });
+    const source = new KvFirstBillingGroupSource({ fallback: fallback.source });
 
-    expect(await source.multiplierForGroup(env, "bad", "tnt-1")).toBe(1);
+    expect(await source.multiplierForGroup(kvEnv(kv), "bad", "tnt-1")).toBe(1);
     expect(fallback.calls).toHaveLength(0);
   });
 
-  it("falls back to control when the group is ABSENT from the mirror (not synced yet)", async () => {
-    const mirror = fakeMirror({ "tnt-1": {} });
+  it("falls back to control when the group is ABSENT from the snapshot (freshly created)", async () => {
+    const kv = fakeKv(snapshotJson([{ id: "premium", multiplier: 1.5, enabled: true, provider_ids: [] }]));
     const fallback = recordingFallback(2.5);
-    const source = new MirrorFirstBillingGroupSource({
-      fallback: fallback.source,
-      resolverFor: mirror.resolverFor,
-    });
+    const source = new KvFirstBillingGroupSource({ fallback: fallback.source });
 
-    // The sync-window gap: an operator's brand-new group the tenant has not
-    // mirrored yet must be read from control, not mis-billed as 1.0.
-    expect(await source.multiplierForGroup(env, "fresh", "tnt-1")).toBe(2.5);
+    // The cache-window gap: an operator's brand-new group not yet in the read
+    // snapshot must be read from control, not mis-billed as 1.0.
+    expect(await source.multiplierForGroup(kvEnv(kv), "fresh", "tnt-1")).toBe(2.5);
     expect(fallback.calls).toEqual([{ groupId: "fresh", tenantId: "tnt-1" }]);
   });
 
-  it("falls back to control when the tenant object is unreachable", async () => {
-    const mirror = fakeMirror({ "tnt-1": { premium: { multiplier: 1.5, enabled: 1 } } });
-    mirror.fail = true;
+  it("falls back to control when no KV binding is configured", async () => {
     const fallback = recordingFallback(2.5);
-    const source = new MirrorFirstBillingGroupSource({
-      fallback: fallback.source,
-      resolverFor: mirror.resolverFor,
-    });
+    const source = new KvFirstBillingGroupSource({ fallback: fallback.source });
 
-    expect(await source.multiplierForGroup(env, "premium", "tnt-1")).toBe(2.5);
+    expect(await source.multiplierForGroup({} as InferenceBindings, "premium", "tnt-1")).toBe(2.5);
     expect(fallback.calls).toEqual([{ groupId: "premium", tenantId: "tnt-1" }]);
   });
 
-  it("falls back to control when the mirror table is not migrated", async () => {
-    const mirror = fakeMirror({ "tnt-1": { premium: { multiplier: 1.5, enabled: 1 } } });
-    mirror.missing = true;
+  it("falls back to control when the snapshot was never published (KV miss)", async () => {
+    const kv = fakeKv(null);
     const fallback = recordingFallback(2.5);
-    const source = new MirrorFirstBillingGroupSource({
-      fallback: fallback.source,
-      resolverFor: mirror.resolverFor,
-    });
+    const source = new KvFirstBillingGroupSource({ fallback: fallback.source });
 
-    expect(await source.multiplierForGroup(env, "premium", "tnt-1")).toBe(2.5);
+    expect(await source.multiplierForGroup(kvEnv(kv), "premium", "tnt-1")).toBe(2.5);
     expect(fallback.calls).toEqual([{ groupId: "premium", tenantId: "tnt-1" }]);
   });
 
-  it("falls back to control (never touches a mirror) when no tenant id is known", async () => {
-    const mirror = fakeMirror({ "tnt-1": { premium: { multiplier: 1.5, enabled: 1 } } });
+  it("falls back to control on a malformed snapshot value (no prior good snapshot)", async () => {
+    const kv = fakeKv("{not valid json");
     const fallback = recordingFallback(2.5);
-    const source = new MirrorFirstBillingGroupSource({
-      fallback: fallback.source,
-      resolverFor: mirror.resolverFor,
-    });
+    const source = new KvFirstBillingGroupSource({ fallback: fallback.source });
 
-    // A platform-operator caller has no tenant mirror.
-    expect(await source.multiplierForGroup(env, "premium", undefined)).toBe(2.5);
-    expect(mirror.reads).toHaveLength(0);
-    expect(fallback.calls).toEqual([{ groupId: "premium", tenantId: undefined }]);
+    expect(await source.multiplierForGroup(kvEnv(kv), "premium", "tnt-1")).toBe(2.5);
+    expect(fallback.calls).toEqual([{ groupId: "premium", tenantId: "tnt-1" }]);
   });
 
-  it("short-circuits to 1.0 for an unbound group, touching neither mirror nor control", async () => {
-    const mirror = fakeMirror({ "tnt-1": { premium: { multiplier: 1.5, enabled: 1 } } });
+  it("falls back to control on a KV read error (never billed from the blip)", async () => {
+    const kv = fakeKv(snapshotJson([{ id: "premium", multiplier: 1.5, enabled: true, provider_ids: [] }]));
+    kv.fail = true;
     const fallback = recordingFallback(2.5);
-    const source = new MirrorFirstBillingGroupSource({
-      fallback: fallback.source,
-      resolverFor: mirror.resolverFor,
-    });
+    const source = new KvFirstBillingGroupSource({ fallback: fallback.source });
 
-    expect(await source.multiplierForGroup(env, undefined, "tnt-1")).toBe(1);
-    expect(mirror.reads).toHaveLength(0);
+    expect(await source.multiplierForGroup(kvEnv(kv), "premium", "tnt-1")).toBe(2.5);
+    expect(fallback.calls).toEqual([{ groupId: "premium", tenantId: "tnt-1" }]);
+  });
+
+  it("short-circuits to 1.0 for an unbound group, touching neither KV nor control", async () => {
+    const kv = fakeKv(snapshotJson([{ id: "premium", multiplier: 1.5, enabled: true, provider_ids: [] }]));
+    const fallback = recordingFallback(2.5);
+    const source = new KvFirstBillingGroupSource({ fallback: fallback.source });
+
+    expect(await source.multiplierForGroup(kvEnv(kv), undefined, "tnt-1")).toBe(1);
+    expect(kv.reads).toBe(0);
     expect(fallback.calls).toHaveLength(0);
+  });
+
+  it("serves the cached snapshot within its TTL, re-reading KV only after expiry", async () => {
+    const kv = fakeKv(snapshotJson([{ id: "premium", multiplier: 1.5, enabled: true, provider_ids: [] }]));
+    let clock = 0;
+    const source = new KvFirstBillingGroupSource({
+      fallback: recordingFallback(99).source,
+      ttlMs: 30_000,
+      now: () => clock,
+    });
+    const env = kvEnv(kv);
+
+    expect(await source.multiplierForGroup(env, "premium")).toBe(1.5);
+    expect(kv.reads).toBe(1);
+
+    // A later value edit within the TTL is not observed: one KV read serves both.
+    kv.value = snapshotJson([{ id: "premium", multiplier: 3, enabled: true, provider_ids: [] }], 2);
+    clock = 29_999;
+    expect(await source.multiplierForGroup(env, "premium")).toBe(1.5);
+    expect(kv.reads).toBe(1);
+
+    // Past the TTL the snapshot is re-read and the new multiplier surfaces.
+    clock = 30_001;
+    expect(await source.multiplierForGroup(env, "premium")).toBe(3);
+    expect(kv.reads).toBe(2);
   });
 });

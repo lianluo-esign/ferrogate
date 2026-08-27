@@ -1467,13 +1467,14 @@ export interface ResolvedInferenceDeps {
 export interface PlatformBillingGroupSource {
   /**
    * The multiplier for `groupId`, or `1.0` when it is absent, disabled, or
-   * unresolvable. `env` carries the CONTROL_DATA binding the read needs.
+   * unresolvable. `env` carries the CONTROL_DATA and PLATFORM_CONFIG bindings the
+   * read needs.
    *
-   * `tenantId`, when known, lets a mirror-first source resolve the multiplier
-   * from THIS tenant's own read-only `shared_billing_groups` mirror (#960 /
-   * Phase C step 7b) instead of a cross-region control-plane read — falling back
-   * to the control database only for a group the mirror has not synced yet. A
-   * source that reads the control database directly ignores it.
+   * Billing groups are account-global (#961): the production KV-first source
+   * resolves the multiplier from the shared `PLATFORM_CONFIG` snapshot, falling
+   * back to the account-global control table only for a group created inside its
+   * cache window. `tenantId` no longer selects a per-tenant mirror; it is an
+   * optional diagnostic hint every current source ignores for resolution.
    */
   multiplierForGroup(
     env: InferenceBindings,

@@ -18,6 +18,7 @@
  */
 import { SELF, env } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { PLATFORM_BILLING_GROUP_SNAPSHOT_KEY } from "../../gateway/src/inference/billing-group-source.js";
 import { applySchema, db, resetD1 } from "./d1.js";
 import { BASE, arm, bearer, jsonRequest, operatorKey, tenantKey } from "./harness.js";
 import {
@@ -27,14 +28,10 @@ import {
   resetTenantD1,
   tenantDbA,
 } from "./tenant-db.js";
-import {
-  privilegedTenantBatch,
-  registerDurableObjectTenant,
-  tenantObjectDb,
-} from "./tenant-object.js";
 
 const OPERATOR = operatorKey.secret;
 const TENANT_SECRET = "billing-group-tenant";
+const platformConfig = (env as unknown as { PLATFORM_CONFIG: KVNamespace }).PLATFORM_CONFIG;
 
 /** The posture `wrangler.toml` pins for this app today; restored after every test. */
 const DEFAULT_CONTROL_STORAGE = "durable_object";
@@ -105,25 +102,29 @@ async function tenantKeyBillingGroup(id: string): Promise<string | null | undefi
   return row === null ? undefined : row.billing_group_id;
 }
 
-/** One shared group projected into the tenant DO immediately after an operator write. */
-async function tenantSharedBillingGroup(id: string): Promise<{
-  multiplier: number;
-  enabled: number;
-  provider_ids_json: string;
-} | null> {
-  return await tenantObjectDb(TENANT_A)
-    .prepare(
-      "SELECT multiplier, enabled, provider_ids_json FROM shared_billing_groups WHERE id = ?",
-    )
-    .bind(id)
-    .first<{
-      multiplier: number;
-      enabled: number;
-      provider_ids_json: string;
-    }>();
+interface SnapshotGroup {
+  readonly id: string;
+  readonly multiplier: number;
+  readonly enabled: boolean;
+  readonly provider_ids: readonly string[];
 }
 
-/** Remove billing-group state `resetD1` does not know about. */
+/** The account-global billing-group KV snapshot, as published after an operator write. */
+async function billingGroupSnapshot(): Promise<{
+  revision: number;
+  groups: readonly SnapshotGroup[];
+}> {
+  const raw = await platformConfig.get(PLATFORM_BILLING_GROUP_SNAPSHOT_KEY);
+  expect(raw).not.toBeNull();
+  return JSON.parse(raw ?? "{}") as { revision: number; groups: readonly SnapshotGroup[] };
+}
+
+/** One group projected into the shared KV snapshot immediately after an operator write. */
+async function snapshotGroup(id: string): Promise<SnapshotGroup | undefined> {
+  return (await billingGroupSnapshot()).groups.find((group) => group.id === id);
+}
+
+/** Remove billing-group state `resetD1` does not know about, KV snapshot included. */
 async function wipeBillingGroups(): Promise<void> {
   await db().batch([
     db().prepare("DELETE FROM platform_billing_group_providers"),
@@ -131,6 +132,7 @@ async function wipeBillingGroups(): Promise<void> {
     db().prepare("DELETE FROM platform_billing_group_revisions"),
     db().prepare("DELETE FROM shared_config_push_state"),
   ]);
+  await platformConfig.delete(PLATFORM_BILLING_GROUP_SNAPSHOT_KEY);
 }
 
 async function createPlatformProvider(id: string): Promise<TestResponse> {
@@ -298,14 +300,12 @@ describe("platform billing-group admin surface", () => {
     ).toBe(404);
   });
 
-  it("projects every successful group mutation into tenant Durable Objects immediately", async () => {
-    await registerDurableObjectTenant(TENANT_A);
-    await privilegedTenantBatch(TENANT_A, [
-      { sql: "DELETE FROM shared_billing_groups", params: [] },
-      { sql: "DELETE FROM shared_config_cursor", params: [] },
-    ]);
+  it("publishes every successful group mutation to one shared KV snapshot", async () => {
     expect((await createPlatformProvider("bg_live_channel")).status).toBe(201);
 
+    // create → the account-global snapshot carries the group at revision 1.
+    // Creating the provider above does NOT touch the billing-group revision, so
+    // the first billing-group mutation is revision 1, not 2.
     expect(
       (
         await request(OPERATOR, "POST", "/admin/v1/billing-groups", {
@@ -315,20 +315,25 @@ describe("platform billing-group admin surface", () => {
         })
       ).status,
     ).toBe(201);
-    expect(await tenantSharedBillingGroup("bg_live")).toEqual({
+    expect(await billingGroupSnapshot()).toMatchObject({ revision: 1 });
+    expect(await snapshotGroup("bg_live")).toEqual({
+      id: "bg_live",
       multiplier: 1.5,
-      enabled: 1,
-      provider_ids_json: "[]",
+      enabled: true,
+      provider_ids: [],
     });
 
+    // bind → the snapshot gains the edge and advances one revision.
     expect(
       (await request(OPERATOR, "PUT", "/admin/v1/billing-groups/bg_live/providers/bg_live_channel"))
         .status,
     ).toBe(200);
-    expect(
-      JSON.parse((await tenantSharedBillingGroup("bg_live"))?.provider_ids_json ?? "[]"),
-    ).toEqual(["bg_live_channel"]);
+    expect(await billingGroupSnapshot()).toMatchObject({ revision: 2 });
+    expect((await snapshotGroup("bg_live"))?.provider_ids).toEqual(["bg_live_channel"]);
 
+    // patch → a DISABLED group REMAINS in the KV snapshot with `enabled:false`,
+    // so the gateway money path can read its multiplier authoritatively rather
+    // than fall through to the control DB (fail-open is for absence, not disable).
     expect(
       (
         await request(OPERATOR, "PATCH", "/admin/v1/billing-groups/bg_live", {
@@ -337,14 +342,15 @@ describe("platform billing-group admin surface", () => {
         })
       ).status,
     ).toBe(200);
-    // Disabled rows remain in the mirror for exact snapshot parity; the tenant
-    // read endpoint excludes them from Vega's selectable list.
-    expect(await tenantSharedBillingGroup("bg_live")).toEqual({
+    expect(await billingGroupSnapshot()).toMatchObject({ revision: 3 });
+    expect(await snapshotGroup("bg_live")).toEqual({
+      id: "bg_live",
       multiplier: 2,
-      enabled: 0,
-      provider_ids_json: '["bg_live_channel"]',
+      enabled: false,
+      provider_ids: ["bg_live_channel"],
     });
 
+    // unbind → the edge drops and the revision advances.
     expect(
       (
         await request(
@@ -354,12 +360,17 @@ describe("platform billing-group admin surface", () => {
         )
       ).status,
     ).toBe(200);
-    expect((await tenantSharedBillingGroup("bg_live"))?.provider_ids_json).toBe("[]");
+    expect(await billingGroupSnapshot()).toMatchObject({ revision: 4 });
+    expect((await snapshotGroup("bg_live"))?.provider_ids).toEqual([]);
 
+    // delete → the group leaves the snapshot entirely at the final revision.
     expect((await request(OPERATOR, "DELETE", "/admin/v1/billing-groups/bg_live")).status).toBe(
       200,
     );
-    expect(await tenantSharedBillingGroup("bg_live")).toBeNull();
+    const final = await billingGroupSnapshot();
+    expect(final).toMatchObject({ revision: 5 });
+    expect(final.groups).toEqual([]);
+    expect(await snapshotGroup("bg_live")).toBeUndefined();
   });
 
   it("fences a tenant-scoped caller out of the billing-group surface", async () => {

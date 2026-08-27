@@ -1,9 +1,4 @@
 import { controlDatabaseFrom } from "../control-data.js";
-import {
-  type TenancyBindings,
-  type TenantDatabaseResolver,
-  resolverForEnv,
-} from "../tenancy/index.js";
 import type {
   BillingGroupRouting,
   InferenceBindings,
@@ -199,74 +194,126 @@ export class ControlDataPlatformBillingGroupSource implements PlatformBillingGro
 }
 
 /**
- * A single group's authoritative mirror row: `multiplier` and `enabled` exactly
- * as {@link ControlDataPlatformBillingGroupSource} reads them from the control
- * table, but from the tenant's own read-only `shared_billing_groups`.
+ * The public KV snapshot of billing groups (#961) — the account-global config
+ * that the control plane REPUBLISHES on every group mutation, replacing the old
+ * per-tenant Durable Object fan-out. One object, atomically overwritten, read by
+ * the money path in front of the control-database fallback.
+ *
+ * Only the money-path fields travel: `id`, `multiplier`, `enabled`, and the
+ * routable `provider_ids`. `schema_version` gates the reader, and `revision`
+ * lets a reader ignore a stale write that lost a KV race.
  */
-const MIRROR_GROUP_SQL =
-  "SELECT multiplier, enabled, provider_ids_json FROM shared_billing_groups WHERE id = ?";
+export const PLATFORM_BILLING_GROUP_SNAPSHOT_KEY = "platform-config:billing-groups:v1";
 
-interface MirrorGroupRow {
-  readonly multiplier: number | string | null;
-  readonly enabled: number | string | null;
-  readonly provider_ids_json: string | null;
+export interface PlatformBillingGroupSnapshotRow {
+  readonly id: string;
+  readonly multiplier: number;
+  readonly enabled: boolean;
+  readonly provider_ids: readonly string[];
 }
 
-function parseProviderIds(raw: string | null): readonly string[] | undefined {
-  if (raw === null) return undefined;
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    if (
-      !Array.isArray(parsed) ||
-      parsed.some((value) => typeof value !== "string" || value === "")
-    ) {
-      return undefined;
-    }
-    return [...new Set(parsed)];
-  } catch {
-    return undefined;
-  }
+export interface PlatformBillingGroupSnapshot {
+  readonly schema_version: 1;
+  readonly revision: number;
+  readonly published_at_unix: number;
+  readonly groups: readonly PlatformBillingGroupSnapshotRow[];
 }
-
-/** Resolve `env`'s tenant-database resolver; the seam a unit test overrides. */
-export type TenantResolverFor = (env: InferenceBindings) => TenantDatabaseResolver;
 
 /**
- * Mirror-FIRST billing-group multiplier source (#960, Phase C step 7b) — a MONEY
- * PATH read that prefers the tenant's OWN read-only `shared_billing_groups`
- * mirror over a cross-region read of the single-threaded control object.
+ * Parse and shape-check a raw KV value, returning `null` on any malformation so
+ * the reader falls back to the control database rather than trusting garbage.
+ * Individual `groups` rows are re-validated when the snapshot is indexed.
+ */
+export function parsePlatformBillingGroupSnapshot(
+  raw: string,
+): PlatformBillingGroupSnapshot | null {
+  let parsed: Partial<PlatformBillingGroupSnapshot>;
+  try {
+    parsed = JSON.parse(raw) as Partial<PlatformBillingGroupSnapshot>;
+  } catch {
+    return null;
+  }
+  if (
+    parsed.schema_version !== 1 ||
+    typeof parsed.revision !== "number" ||
+    !Number.isSafeInteger(parsed.revision) ||
+    parsed.revision < 0 ||
+    typeof parsed.published_at_unix !== "number" ||
+    !Number.isSafeInteger(parsed.published_at_unix) ||
+    parsed.published_at_unix < 0 ||
+    !Array.isArray(parsed.groups)
+  ) {
+    return null;
+  }
+  return parsed as PlatformBillingGroupSnapshot;
+}
+
+/** Index a snapshot's rows into the same in-memory shape the control source builds. */
+function snapshotFromKvRows(
+  rows: readonly PlatformBillingGroupSnapshotRow[],
+): BillingGroupSnapshot {
+  const snapshot = new Map<string, BillingGroupSnapshotEntry>();
+  for (const row of rows) {
+    if (typeof row?.id !== "string" || row.id === "") continue;
+    const providerIds = Array.isArray(row.provider_ids)
+      ? [...new Set(row.provider_ids.filter((v): v is string => typeof v === "string" && v !== ""))]
+      : [];
+    snapshot.set(row.id, {
+      enabled: row.enabled === true,
+      multiplier: parseMultiplier(typeof row.multiplier === "number" ? row.multiplier : null),
+      providerIds,
+    });
+  }
+  return snapshot;
+}
+
+interface KvCacheEntry {
+  readonly revision: number;
+  readonly snapshot: BillingGroupSnapshot;
+  readonly expiresAt: number;
+}
+
+/**
+ * KV-FIRST billing-group multiplier source (#961) — a MONEY PATH read that
+ * prefers the account-global `PLATFORM_CONFIG` snapshot the control plane
+ * republishes on every mutation, over a cross-region read of the single-threaded
+ * control object. This is the exact posture `platform-catalog.ts` uses for the
+ * model catalog, applied to billing groups.
  *
- * ## Mirror-first, control-fallback (the chosen posture)
+ * ## KV-first, control-fallback (the chosen posture)
  *
- * The shared-config channel (#948) DELETE-then-reinserts EVERY group — enabled
- * and disabled alike — into each tenant object, so once a tenant has synced, a
- * group id PRESENT in its mirror is authoritative: an enabled row answers its
- * multiplier (a `0×` comp included), a disabled or malformed row answers `1.0`
- * (the official price), byte-identical to the control source. A group id ABSENT
- * from the mirror means the tenant has not synced that group yet — a group an
- * operator created and bound within a single push cadence — so the read FALLS
- * BACK to the control database rather than mis-billing it as `1.0`. That
- * fallback is the ONLY residual control-plane coupling on this path, and it
- * fires only for the sync window of a brand-new group.
+ * The snapshot carries EVERY group — enabled and disabled alike — so a group id
+ * PRESENT in it is authoritative: an enabled row answers its multiplier (a `0×`
+ * comp included), a disabled or malformed row answers `1.0` (the official
+ * price), byte-identical to the control source. A group id ABSENT from the
+ * snapshot means it was created inside the reader's short cache window (the KV
+ * object has not yet been re-read), so the read FALLS BACK to the control
+ * database rather than mis-billing it as `1.0`. That fallback is the only
+ * residual control-plane coupling on this path, and it fires only for the ~30s
+ * cache window of a brand-new group.
  *
  * ## Fail OPEN on every axis (unchanged contract)
  *
- * No tenant id, no tenant router, the mirror table not migrated, the tenant
- * object unreachable, a read error — none of these bill anything but the
- * fallback's answer, which itself fails open to `1.0`. The tenant-mirror attempt
- * is best-effort in front of the control read, never a new way to fail a request.
+ * No KV binding, an unreadable key, a malformed snapshot — none of these bill
+ * anything but the fallback's answer, which itself fails open to `1.0`. A read
+ * error is never cached; the stale-but-good snapshot (if any) is left intact and
+ * the next request retries. The KV attempt is best-effort in front of the
+ * control read, never a new way to fail a request.
  */
-export class MirrorFirstBillingGroupSource implements PlatformBillingGroupSource {
+export class KvFirstBillingGroupSource implements PlatformBillingGroupSource {
   readonly #fallback: PlatformBillingGroupSource;
-  readonly #resolverFor: TenantResolverFor;
+  readonly #ttlMs: number;
+  readonly #now: () => number;
+  readonly #byEnv = new WeakMap<object, KvCacheEntry>();
 
   constructor(options: {
     fallback: PlatformBillingGroupSource;
-    resolverFor?: TenantResolverFor;
+    ttlMs?: number;
+    now?: () => number;
   }) {
     this.#fallback = options.fallback;
-    this.#resolverFor =
-      options.resolverFor ?? ((env) => resolverForEnv(env as unknown as TenancyBindings));
+    this.#ttlMs = options.ttlMs ?? DEFAULT_BILLING_GROUP_CACHE_TTL_MS;
+    this.#now = options.now ?? Date.now;
   }
 
   async multiplierForGroup(
@@ -276,14 +323,12 @@ export class MirrorFirstBillingGroupSource implements PlatformBillingGroupSource
   ): Promise<number> {
     if (groupId === undefined || groupId === "") return 1;
 
-    if (tenantId !== undefined && tenantId !== "") {
-      const mirrored = await this.#rowFromMirror(env, groupId, tenantId);
-      // `undefined` = the mirror could not answer authoritatively (not synced,
-      // unreachable, or unmigrated); only then do we pay the control fallback.
-      if (mirrored !== undefined) {
-        if (!rowIsEnabled(mirrored.enabled)) return 1;
-        return parseMultiplier(mirrored.multiplier) ?? 1;
-      }
+    const snapshot = await this.#snapshot(env);
+    if (snapshot !== undefined) {
+      const group = snapshot.get(groupId);
+      // A PRESENT id is authoritative; an ABSENT id may be freshly created, so
+      // only then do we pay the control fallback (which itself fails open to 1.0).
+      if (group !== undefined) return group.enabled ? (group.multiplier ?? 1) : 1;
     }
 
     return this.#fallback.multiplierForGroup(env, groupId, tenantId);
@@ -296,50 +341,71 @@ export class MirrorFirstBillingGroupSource implements PlatformBillingGroupSource
   ): Promise<BillingGroupRouting | null> {
     if (groupId === undefined || groupId === "") return null;
 
-    if (tenantId !== undefined && tenantId !== "") {
-      const mirrored = await this.#rowFromMirror(env, groupId, tenantId);
-      if (mirrored !== undefined) {
-        if (!rowIsEnabled(mirrored.enabled)) return null;
-        const providerIds = parseProviderIds(mirrored.provider_ids_json);
-        return providerIds === undefined ? null : { providerIds };
-      }
+    const snapshot = await this.#snapshot(env);
+    if (snapshot !== undefined) {
+      const group = snapshot.get(groupId);
+      if (group !== undefined) return group.enabled ? { providerIds: group.providerIds } : null;
     }
 
     return (await this.#fallback.routingForGroup?.(env, groupId, tenantId)) ?? null;
   }
 
   /**
-   * The multiplier the tenant's mirror asserts for `groupId`, or `undefined`
-   * when the mirror has no authoritative answer (row absent, or any read error).
-   * A PRESENT row is authoritative: enabled → its parsed multiplier, otherwise
-   * `1.0`.
+   * The cached KV snapshot for `env`, or `undefined` when KV is absent,
+   * unreadable, or has no published object yet — each of which routes the caller
+   * to the control fallback. A malformed value or a lost KV race serves the last
+   * good snapshot rather than a regression; a read error is never cached.
    */
-  async #rowFromMirror(
-    env: InferenceBindings,
-    groupId: string,
-    tenantId: string,
-  ): Promise<MirrorGroupRow | undefined> {
+  async #snapshot(env: InferenceBindings): Promise<BillingGroupSnapshot | undefined> {
+    const kv = env.PLATFORM_CONFIG as KVNamespace | undefined;
+    if (kv === undefined) return undefined;
+
+    const envKey = env as unknown as object;
+    const cached = this.#byEnv.get(envKey);
+    const now = this.#now();
+    if (cached !== undefined && cached.expiresAt > now) return cached.snapshot;
+
+    let raw: string | null;
     try {
-      const handle = await this.#resolverFor(env).forTenant(tenantId);
-      const row = await handle.db.prepare(MIRROR_GROUP_SQL).bind(groupId).first<MirrorGroupRow>();
-      if (row === null) return undefined; // not synced yet → let the fallback read it
-      return row;
+      raw = await kv.get(PLATFORM_BILLING_GROUP_SNAPSHOT_KEY, { cacheTtl: 30 });
     } catch {
-      // A missing mirror table or an unreachable tenant object is not a billing
-      // event: defer to the control fallback (which itself fails open to 1.0).
-      return undefined;
+      // A KV blip is not a billing event: serve the last good snapshot if any,
+      // otherwise defer to the control fallback. Never cache the failure.
+      return cached?.snapshot;
     }
+    if (raw === null) return undefined; // never published yet → control fallback
+
+    const parsed = parsePlatformBillingGroupSnapshot(raw);
+    if (parsed === null) return cached?.snapshot;
+    if (cached !== undefined && parsed.revision < cached.revision) return cached.snapshot;
+
+    const snapshot = snapshotFromKvRows(parsed.groups);
+    this.#byEnv.set(envKey, { revision: parsed.revision, snapshot, expiresAt: now + this.#ttlMs });
+    return snapshot;
   }
 }
 
 /**
- * Construct the production source; the returned object owns isolate-local cache
- * state. Mirror-FIRST (#960): a tenant reads its own `shared_billing_groups`
- * mirror and pays the control-plane read only for a group it has not synced yet.
+ * Construct the control-database-only source; the returned object owns
+ * isolate-local cache state. This is the KV-first source's fallback and the seam
+ * the fleet-control matrix asserts still reads the authoritative control table.
  */
 export function platformBillingGroupSourceFromControlData(
-  options: { ttlMs?: number; now?: () => number; resolverFor?: TenantResolverFor } = {},
+  options: { ttlMs?: number; now?: () => number } = {},
 ): PlatformBillingGroupSource {
-  const fallback = new ControlDataPlatformBillingGroupSource(options);
-  return new MirrorFirstBillingGroupSource({ fallback, resolverFor: options.resolverFor });
+  return new ControlDataPlatformBillingGroupSource(options);
+}
+
+/**
+ * Construct the production source: KV-FIRST (#961) over the account-global
+ * `PLATFORM_CONFIG` snapshot, with the control database as the fail-open
+ * fallback for a group created inside the reader's cache window.
+ */
+export function platformBillingGroupSourceFromSharedConfig(
+  options: { ttlMs?: number; now?: () => number } = {},
+): PlatformBillingGroupSource {
+  return new KvFirstBillingGroupSource({
+    fallback: new ControlDataPlatformBillingGroupSource(options),
+    ...options,
+  });
 }
