@@ -51,6 +51,7 @@ import {
 } from "./middleware/errors.js";
 import type { ControlPlaneEnv } from "./ports.js";
 import { GROUP_MODULES, type RegisteredRoute, registerRoutes } from "./routes/index.js";
+import { mountTenantConsumptionPurge } from "./routes/tenant-consumption-purge.js";
 import type { GroupModule } from "./routes/resource.js";
 import { type AdminConsoleSessionRoute, mountAdminConsoleSession } from "./session/index.js";
 
@@ -161,6 +162,19 @@ export const CONTROL_PLANE_ROUTE_MODULES: readonly GroupModule[] = GROUP_MODULES
  * shared document, and therefore stay exactly where they are.
  */
 app.get("/health", (c) => c.json({ ok: true }));
+
+/**
+ * `POST /admin/v1/tenant-consumption-purge` — platform-operator-only, heavily
+ * fenced erase of ONE tenant's 消费事件 + 模型请求 rows from that tenant's own
+ * TenantDataObject (the only place those tables are authoritative). It is NOT a
+ * contract operation, is described by no shared document, and so mounts OUT of
+ * `registerRoutes` exactly like `/health` and `/version`. `contractAuth` runs
+ * over it (it is an `app.use("*", …)`) and passes it through unauthenticated —
+ * the handler re-authenticates and requires a platform operator itself. See
+ * `./routes/tenant-consumption-purge.ts` for every fence.
+ */
+export const MOUNTED_PURGE_ROUTE: string = mountTenantConsumptionPurge(app);
+
 app.get("/version", (c) =>
   c.json({
     api: PUBLIC_API_MAJOR,
