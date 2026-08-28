@@ -435,6 +435,21 @@ describe("POST /v1/admin/register", () => {
     expect(String(document.key_hash).startsWith("sha256:")).toBe(true);
   });
 
+  it("stamps the console-session key with an expiry in LOCKSTEP with the browser cookie", async () => {
+    const session = await register("owner@acme.test");
+    const documents = await sessionKeyDocuments(session.tenant.id);
+    expect(documents).toHaveLength(1);
+    const document = documents[0] as Record<string, unknown>;
+    // `created_at` and `expires_at` are stamped from the SAME `now`, so their gap
+    // is EXACTLY the 400-day TTL the key shares with vega's SESSION_TTL_SEC. This
+    // is what ties the two lifetimes: an idle session's cookie and its gateway
+    // key lapse together, so a lifted cookie cannot outlive its session's key.
+    const createdAt = Number(document.created_at);
+    const expiresAt = Number(document.expires_at);
+    expect(Number.isFinite(createdAt)).toBe(true);
+    expect(expiresAt - createdAt).toBe(400 * 24 * 60 * 60);
+  });
+
   it("the minted key REALLY authenticates on this Worker's own native leg", async () => {
     const session = await register("owner@acme.test");
     await provisionTenantDatabase(session.tenant.id);
@@ -1204,6 +1219,36 @@ describe("POST /v1/admin/logout", () => {
     });
     expect(first.body).toEqual({ object: "logout", revoked: true });
     expect(second.body).toEqual({ object: "logout", revoked: true });
+  });
+
+  it("REVOKES the console-session gateway key too — it 401s on the native leg afterwards", async () => {
+    const registered = await register("owner@acme.test");
+    await provisionTenantDatabase(registered.tenant.id);
+    // Log in AFTER the tenant DB exists so the fresh key projects into it and is
+    // live (mirrors the login-revoke test); use THIS login's refresh token.
+    const { body } = await call("POST", "/v1/admin/login", {
+      body: { email: "owner@acme.test", password: "correct horse battery" },
+    });
+    const session = body as unknown as Session;
+    const key = session.gateway_api_key;
+
+    const before = await SELF.fetch(`${BASE}/admin/v1/status`, {
+      headers: { authorization: `Bearer ${key}` },
+    });
+    expect(before.status).toBe(200);
+
+    const logout = await call("POST", "/v1/admin/logout", {
+      body: { refresh_token: session.refresh_token },
+    });
+    expect(logout.status).toBe(200);
+    expect(logout.body).toEqual({ object: "logout", revoked: true });
+
+    // The `fg_…` credential the browser cookie carried is now dead — logout ties
+    // off the key so it cannot outlive the session it was minted for.
+    const after = await SELF.fetch(`${BASE}/admin/v1/status`, {
+      headers: { authorization: `Bearer ${key}` },
+    });
+    expect(after.status).toBe(401);
   });
 });
 

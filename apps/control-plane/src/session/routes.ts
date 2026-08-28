@@ -999,6 +999,17 @@ async function handleLogout(c: Ctx): Promise<Response> {
       revokedAtUnix: Math.floor(Date.now() / 1000),
     });
   }
+  // Logout also revokes this user's console-session gateway key(s) for the
+  // tenant, so the `fg_…` credential the browser cookie carried cannot outlive
+  // the session it was minted for. This closes the logout leg of the key⇄cookie
+  // lifetime binding: login re-mints (mintConsoleSessionResponse), cookie expiry
+  // is covered by the key's matching `expires_at` (provisionGatewayApiKey), and
+  // logout revokes here. A row predating tenant-scoped sessions (#232) carries
+  // tenantId === null and cannot be swept precisely — skip it; the next login's
+  // unattributed-legacy sweep covers it.
+  if (stored.tenantId !== null) {
+    await revokeAdminConsoleSessionKeys(console_.deps, stored.tenantId, stored.userId);
+  }
   // #912: logout revokes the superadmin's platform-operator credential too. The
   // call is unconditional and addressed by the user's deterministic id — a
   // non-superadmin never held one, so this is a harmless no-op for them, and a

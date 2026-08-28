@@ -66,6 +66,19 @@ export const ADMIN_CONSOLE_SESSION_KEY_NAME = "Admin console session";
 const SECRET_PREFIX = "fg_";
 
 /**
+ * The console session gateway key expires in lockstep with the browser session
+ * cookie (vega `SESSION_TTL_SEC`). Both are 400 days — the browser's Max-Age /
+ * Expires ceiling — so an idle session's cookie and its gateway key lapse at the
+ * same wall-clock time, while an active session re-mints BOTH on every login.
+ * This ties the two lifetimes together: once the cookie is gone the key is
+ * already dead, so a lifted cookie cannot outlive the session it was minted for.
+ * The projection carries this to every resolve surface (`api_keys.expires_at_unix`,
+ * `api_key_directory`, and the KV row) via `projectVirtualKey`; the gateway then
+ * fails an expired key closed with a 401 (`key_suspended`, reason `expired`).
+ */
+const CONSOLE_SESSION_KEY_TTL_SECS = 400 * 24 * 60 * 60;
+
+/**
  * The Recovery-seam probe the lifecycle gate is asked with.
  *
  * `TenancyLifecycleGatePort.admit` is operation-shaped because the 211
@@ -298,6 +311,10 @@ export async function provisionGatewayApiKey(
     allowed_models: [],
     allowed_providers: [],
     created_at: now,
+    // Expire in lockstep with the browser session cookie (see
+    // CONSOLE_SESSION_KEY_TTL_SECS). `projectVirtualKey` reads `expires_at` and
+    // stamps `expires_at_unix` onto every credential row the gateway resolves.
+    expires_at: now + CONSOLE_SESSION_KEY_TTL_SECS,
   };
 
   const stored = await deps.store.create(
