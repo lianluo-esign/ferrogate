@@ -1,7 +1,15 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "types": ["@cloudflare/workers-types", "@cloudflare/vitest-pool-workers/types"]
+    "types": ["@cloudflare/workers-types", "@cloudflare/vitest-pool-workers/types"],
+    // #976 Phase B — gpt-tokenizer@4's shipped .d.ts use string-literal import
+    // specifiers TS 5.5 cannot parse (and skipLibCheck does not suppress parse
+    // errors). Map the one encoding subpath this codebase imports to a local
+    // type shim so tsc never reads the package's declarations. Build/runtime
+    // resolvers ignore tsconfig paths and load the real JS. See the shim file.
+    "paths": {
+      "gpt-tokenizer/encoding/o200k_base": ["./src/types/gpt-tokenizer-o200k.d.ts"]
+    }
   },
   "include": ["src", "test", "vitest.config.ts"]
 }

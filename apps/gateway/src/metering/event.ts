@@ -199,6 +199,14 @@ function tenantFrom(usage: Usage): TenantContext {
  * that is exactly the `GatewayEstimate` case in Rust.
  */
 export function usageSourceFor(usage: Usage): BillingUsageSource {
+  // A caller that synthesized its own count (the #976 buffered fallback stamps
+  // `local_tokenizer`) already knows the source; honor it over inference. The
+  // inferred branch below cannot distinguish a locally-recovered count from a
+  // provider-reported one — both carry token fields — so the explicit tag is
+  // the only thing that keeps a recovered charge auditable.
+  if (usage.usageSource !== undefined) {
+    return usage.usageSource;
+  }
   return usage.promptTokens === undefined &&
     usage.completionTokens === undefined &&
     usage.totalTokens === undefined

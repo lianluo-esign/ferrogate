@@ -1,3 +1,4 @@
+import type { BillingUsageSource } from "@ferrogate/billing";
 import type { WorkflowProviderConstraint } from "@ferrogate/policy";
 /**
  * Hono handlers for the fourteen inference operations owned by `apps/gateway`.
@@ -201,6 +202,7 @@ import {
   applyCostQualityDial,
   renderCostQualityDecision,
 } from "./task-routing.js";
+import { localFallbackUsage } from "./fallback-usage.js";
 import {
   providerUsageDialect,
   sseUsageTap,
@@ -1828,6 +1830,7 @@ function recordUsage(
   >,
   providerKind: string,
   usage: ProviderUsage | undefined,
+  usageSource?: BillingUsageSource,
 ): void {
   // #669 — the TOKEN half of the observation, from the same provider usage
   // frame the charge is built from, so a span and its charge can never disagree
@@ -1860,6 +1863,10 @@ function recordUsage(
         ? { cacheWriteTokens: usage.cacheWriteTokens }
         : {}),
       ...(usage?.reasoningTokens !== undefined ? { reasoningTokens: usage.reasoningTokens } : {}),
+      // #976 Phase B — an explicit source label overrides the count-based
+      // inference in `usageSourceFor`, the only way a locally-recovered charge
+      // stays distinguishable from a provider-reported one on the ledger.
+      ...(usageSource !== undefined ? { usageSource } : {}),
     });
   } catch {
     // `InMemoryBillingEventSink` surfaced a poisoned-lock error to the LOG, not
@@ -1880,6 +1887,42 @@ function recordUsage(
   } catch {
     // Same contract: evidence is best-effort at the seam, never a 500.
   }
+}
+
+/**
+ * The usage to meter a BUFFERED success body with (#976 Phase B): the count the
+ * upstream reported when it reported one, else a count recovered locally from
+ * the response text so a provider that omits `usage` is billed on real tokens
+ * instead of the $0 it used to settle at.
+ *
+ * `dialect` is the dialect of the RESPONSE bytes — the upstream's native shape
+ * on the buffered path (`providerUsageDialect(providerKind)`), which is NOT
+ * always the ingress dialect (an OpenAI upstream serving `/v1/messages` returns
+ * OpenAI bytes). The extractor and the fallback read the SAME body under the
+ * SAME dialect, so they can never disagree about which envelope this is.
+ *
+ * CONTRACT: call this only past the caller's invalid-body 502 guard, on a
+ * response body already known to be a valid success payload. The prompt half of
+ * the fallback is counted from the REQUEST, so on a garbage response it would
+ * still produce a non-zero prompt count — gating on a validated body is what
+ * keeps a failed call from being dressed up as a measured one. `usageSource` is
+ * `"local_tokenizer"` exactly when the fallback produced the count, and
+ * `undefined` otherwise so the count-based inference in `usageSourceFor` stands.
+ */
+function bufferedUsageWithFallback(
+  dialect: UsageDialect,
+  responseBody: unknown,
+  requestBody: unknown,
+  model: string,
+): { usage: ProviderUsage | undefined; usageSource: BillingUsageSource | undefined } {
+  const reported = usageFromResponseBody(dialect, responseBody);
+  if (reported !== undefined) {
+    return { usage: reported, usageSource: undefined };
+  }
+  const recovered = localFallbackUsage(requestBody, responseBody, dialect, model);
+  return recovered === undefined
+    ? { usage: undefined, usageSource: undefined }
+    : { usage: recovered, usageSource: "local_tokenizer" };
 }
 
 /**
@@ -2669,9 +2712,16 @@ async function handleOpenAiInference(
   }
   // Buffered responses are still in the upstream provider's native dialect at
   // this point, so Anthropic and Gemini must use their own extractors just as
-  // the pre-normalization streaming tap does.
-  const usage = usageFromResponseBody(usageDialect, parsed);
-  recordUsage(c, deps, meterBase, servedRoute.providerKind, usage);
+  // the pre-normalization streaming tap does. When that extractor finds no
+  // usage on this ALREADY-VALIDATED success body, recover the count locally
+  // (#976 Phase B) rather than settle the call at $0.
+  const { usage, usageSource } = bufferedUsageWithFallback(
+    usageDialect,
+    parsed,
+    request,
+    logicalModel,
+  );
+  recordUsage(c, deps, meterBase, servedRoute.providerKind, usage, usageSource);
   await settleTokens(c, admission, usage?.totalTokens);
   settleWorkflowStep(c, deps, gate, true, usage?.totalTokens);
   // Dedicated provider families answer in their own dialect. Translate those
@@ -3303,8 +3353,23 @@ async function handleMessages(c: InferenceContext, deps: ResolvedInferenceDeps):
       requestId,
     );
   }
-  const usage = usageFromResponseBody(usageDialect, parsed);
-  recordUsage(c, deps, meterBase, servedRoute.providerKind, usage);
+  // The client is always served Anthropic frames, but the BUFFERED body is
+  // still the upstream's native shape — Anthropic for a native leg, OpenAI for
+  // one served over `/v1/messages` by a chat/responses upstream. Extract on the
+  // dialect the BYTES are in (`providerUsageDialect`), not the ingress dialect
+  // ("anthropic", used for the streaming tap above where the normalizer has
+  // already re-shaped the frames): reading a cross-protocol buffered body with
+  // the Anthropic extractor was silently metering those calls at $0. On a valid
+  // body that still reports no usage, recover the count locally (#976 Phase B)
+  // over the translated OpenAI request the estimate was taken on.
+  const bufferedDialect = providerUsageDialect(servedRoute.providerKind);
+  const { usage, usageSource } = bufferedUsageWithFallback(
+    bufferedDialect,
+    parsed,
+    translated.body,
+    logicalModel,
+  );
+  recordUsage(c, deps, meterBase, servedRoute.providerKind, usage, usageSource);
   await settleTokens(c, admission, usage?.totalTokens);
   settleWorkflowStep(c, deps, gate, true, usage?.totalTokens);
   if (nativeAnthropic) {
@@ -3491,9 +3556,18 @@ async function handleGeminiGenerateContent(
   }
 
   // Buffered native Gemini success: meter `usageMetadata` off the parsed body,
-  // then return the ORIGINAL upstream bytes unchanged.
-  const usage = usageFromResponseBody(usageDialect, safeJson(text));
-  recordUsage(c, deps, meterBase, servedRoute.providerKind, usage);
+  // then return the ORIGINAL upstream bytes unchanged. When a valid body reports
+  // no usage, recover the count locally (#976 Phase B) from the Gemini request
+  // + response text. Unlike the chat/messages paths this surface has no
+  // invalid-body 502 guard ahead of it, so gate the fallback on a structurally
+  // valid record ourselves: the fallback counts the prompt from the REQUEST and
+  // would otherwise manufacture a non-zero count on an unparseable response.
+  const parsed = safeJson(text);
+  const { usage, usageSource } =
+    record(parsed) === undefined
+      ? { usage: undefined, usageSource: undefined }
+      : bufferedUsageWithFallback(usageDialect, parsed, request, logicalModel);
+  recordUsage(c, deps, meterBase, servedRoute.providerKind, usage, usageSource);
   await settleTokens(c, admission, usage?.totalTokens);
   settleWorkflowStep(c, deps, gate, true, usage?.totalTokens);
   return rawUpstreamResponse(

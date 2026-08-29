@@ -44,6 +44,7 @@
 // Type-only, and therefore erased at build time: `reliability.ts` imports
 // `PhysicalRoute`/`UpstreamRequest` back out of this module, so a VALUE import
 // here would be a real cycle.
+import type { BillingUsageSource } from "@ferrogate/billing";
 import type { AsyncShadowBudgetLedger } from "@ferrogate/routing";
 import type { ExperimentObserver } from "../experiments/index.js";
 import type { ResidencyPolicy } from "../residency/policy.js";
@@ -923,6 +924,16 @@ export interface Usage {
    * it (a comp), never as a failure default.
    */
   readonly billingMultiplier?: number | undefined;
+  /**
+   * #976 Phase B — the billing-source label to persist for this row, when the
+   * caller already KNOWS it (e.g. the buffered fallback recovered the count with
+   * the local tokenizer and stamps `"local_tokenizer"`). ABSENT ⇒ the label is
+   * inferred by {@link metering/event.usageSourceFor} from whether any token
+   * count is present, which is correct for every path that does not synthesize
+   * its own count. This is NOT a caller tag — unlike {@link metadata} it feeds
+   * the settled billing event's `usage_source` directly.
+   */
+  readonly usageSource?: BillingUsageSource | undefined;
 }
 
 /**

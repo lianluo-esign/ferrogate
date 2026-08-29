@@ -405,15 +405,30 @@ export function estimateCost(
 // BillingUsageSource
 // ---------------------------------------------------------------------------
 
-/** `enum BillingUsageSource` — serde `rename_all = "snake_case"`. */
-export type BillingUsageSource = "provider_usage" | "gateway_estimate";
+/**
+ * `enum BillingUsageSource` — serde `rename_all = "snake_case"`.
+ *
+ * `local_tokenizer` (#976 Phase B) is the recovered-count case: an upstream
+ * returned a valid success body with NO usage object, and the gateway counted
+ * the tokens itself with a local BPE tokenizer rather than metering the call at
+ * $0. It prices IDENTICALLY to `provider_usage` — {@link estimateCost} / the
+ * ledger `charge()` read only the token counts and `usage_source` is a pure
+ * audit label — the separate variant exists so a report can tell a measured
+ * charge from a recovered one.
+ */
+export type BillingUsageSource = "provider_usage" | "gateway_estimate" | "local_tokenizer";
 
 export const BillingUsageSource = {
   ProviderUsage: "provider_usage",
   GatewayEstimate: "gateway_estimate",
+  LocalTokenizer: "local_tokenizer",
 } as const;
 
-export const billingUsageSourceSchema = z.enum(["provider_usage", "gateway_estimate"]);
+export const billingUsageSourceSchema = z.enum([
+  "provider_usage",
+  "gateway_estimate",
+  "local_tokenizer",
+]);
 
 /** Mirrors `BillingUsageSource::as_str` (identity — the wire tag is the string). */
 export function billingUsageSourceAsStr(source: BillingUsageSource): string {
