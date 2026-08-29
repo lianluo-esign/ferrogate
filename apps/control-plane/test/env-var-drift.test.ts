@@ -293,6 +293,13 @@ const SECRETS: readonly string[] = [
   // anyone who can read the repository can forge alerts with.
   "SPEND_ANOMALY_WEBHOOK_SIGNING_SECRET",
   "BILLING_ALERTS_WEBHOOK_SIGNING_SECRET",
+  // The shared secret the vega BFF signs a trusted "already-verified email"
+  // bridge-login with and `src/session/routes.ts` verifies before minting a
+  // session with no password. Never `[vars]`: a plaintext value in a tracked
+  // file is one any repository reader could forge a login with. vega-api and
+  // this Worker MUST hold the identical value; a mismatch fails the bridge
+  // login CLOSED. Absent ⇒ the bridge-login route is simply unavailable.
+  "OAUTH_BRIDGE_LOGIN_SECRET",
 ];
 
 /**

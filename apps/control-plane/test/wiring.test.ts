@@ -39,6 +39,7 @@ import {
   CONTROL_PLANE_ROUTE_MODULES,
   IDENTITY_APP,
   MOUNTED_OPERATION_IDS,
+  MOUNTED_PURGE_ROUTE,
   MOUNTED_ROUTES,
   MOUNTED_SESSION_ROUTES,
   MOUNTED_SSO_ROUTES,
@@ -99,7 +100,17 @@ const IDENTITY_MOUNTS: readonly string[] = [
   ...MOUNTED_SSO_ROUTES.map((route) => `${route.method} ${route.path}`),
 ];
 
-const NON_CONTRACT_ROUTES = [...PROBE_ROUTES, ...IDENTITY_MOUNTS] as const;
+/**
+ * The tenant-consumption-purge operator route: platform-operator-only,
+ * fail-closed, and mounted OUTSIDE `registerRoutes` (like `/health`), so it is
+ * deliberately not one of the contract's operations. Derived from the value the
+ * mount itself RETURNED — `MOUNTED_PURGE_ROUTE`, one entry per the single
+ * `app.post` it performed — so this list cannot drift from what `src/index.ts`
+ * actually mounted; the method is fixed because the mount is that one `post`.
+ */
+const OPERATOR_MOUNTS: readonly string[] = [`POST ${MOUNTED_PURGE_ROUTE}`];
+
+const NON_CONTRACT_ROUTES = [...PROBE_ROUTES, ...IDENTITY_MOUNTS, ...OPERATOR_MOUNTS] as const;
 
 function contractKey(operationId: string): string {
   const operation = operationById(operationId);

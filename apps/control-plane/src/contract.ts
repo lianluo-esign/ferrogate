@@ -136,8 +136,13 @@ export const SUPPORTED_CONTRACT_VERSION = 1;
  * tags without rotating the secret — the write behind the console's edit-group
  * action, which re-projects `api_keys.billing_group_id` so the gateway settles
  * at the new multiplier.
+ * 340 -> 341 with `POST /v1beta/models/{model_action}` (`geminiGenerateContent`,
+ * `gateway` data-plane group): the native Gemini generateContent ingress added
+ * in `080823c6` landed in `runtime-api-contract.json` but never in
+ * `admin-api.openapi.json` or this count, so `openapi-drift`/`contract` went red;
+ * describing it in the OpenAPI restores the documents to 1:1.
  */
-export const EXPECTED_TOTAL_OPERATION_COUNT = 340;
+export const EXPECTED_TOTAL_OPERATION_COUNT = 341;
 
 /**
  * Operations `ROUTE-MAP.md` assigns to `apps/control-plane`: `/admin/v1/**`

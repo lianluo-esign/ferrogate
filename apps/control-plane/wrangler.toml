@@ -470,6 +470,16 @@ bucket_name = "replace-at-deploy-ferrogate-assets"
 #       eviction. Provision with:
 #           wrangler secret put ADMIN_CONSOLE_JWT_SECRET --name ferrogate-control-plane
 #
+#   OAUTH_BRIDGE_LOGIN_SECRET  — the shared HMAC secret the vega BFF signs a
+#       trusted "already-verified email" bridge-login with, which
+#       `src/session/routes.ts` verifies before minting a session WITHOUT a
+#       password. A `wrangler secret put`, never a [vars] entry: a plaintext
+#       value in this tracked file is one any repository reader could forge a
+#       login with. This Worker and vega-api MUST hold the IDENTICAL value or
+#       every bridge login fails CLOSED; ABSENT ⇒ the bridge-login route is
+#       simply unavailable. Provision with:
+#           wrangler secret put OAUTH_BRIDGE_LOGIN_SECRET --name ferrogate-control-plane
+#
 #   <OIDC client secrets>      — NOT named here, by construction. A tenant's
 #       `sso_provider_configs.oidc_client_secret_ref` holds a REFERENCE
 #       (`env://NAME`), never the secret, so the control-plane row can never
