@@ -187,6 +187,43 @@ describe("bedrock chat completions", () => {
     }
   });
 
+  it("meters the call from the Converse usage envelope (camelCase)", async () => {
+    // The regression lock for the zero-billing bug: `usageProviderKindFor` had
+    // no `bedrock` arm, so Converse's camelCase `inputTokens`/`outputTokens`
+    // fell through to the OpenAI extractor (which reads snake_case), scraped
+    // nothing, and metered the call at $0. See `inference/usage.ts`.
+    const intercept = interceptProviderFetch(() =>
+      providerJson({
+        output: { message: { role: "assistant", content: [{ text: "hello" }] } },
+        stopReason: "end_turn",
+        usage: { inputTokens: 3, outputTokens: 2, totalTokens: 5 },
+      }),
+    );
+    try {
+      const h = harness({}, ROUTES);
+      await h.post("/v1/chat/completions", { model: "bedrock-chat", ...CHAT });
+      expect(h.usage.last?.promptTokens).toBe(3);
+      expect(h.usage.last?.completionTokens).toBe(2);
+      expect(h.usage.last?.totalTokens).toBe(5);
+    } finally {
+      intercept.restore();
+    }
+  });
+
+  it("meters embeddings from `inputTextTokenCount`", async () => {
+    const intercept = interceptProviderFetch(() =>
+      providerJson({ embedding: [0.5, 0.25], inputTextTokenCount: 4 }),
+    );
+    try {
+      const h = harness({}, ROUTES);
+      await h.post("/v1/embeddings", { model: "bedrock-embed", input: "hello" });
+      expect(h.usage.last?.promptTokens).toBe(4);
+      expect(h.usage.last?.totalTokens).toBe(4);
+    } finally {
+      intercept.restore();
+    }
+  });
+
   it("the `aws-bedrock` alias reaches the same adapter", async () => {
     const intercept = interceptProviderFetch(() =>
       providerJson({ output: { message: { role: "assistant", content: [{ text: "ok" }] } } }),
@@ -289,6 +326,26 @@ describe("vertex chat completions", () => {
       expect(sent.body).toEqual({
         contents: [{ role: "user", parts: [{ text: "hi" }] }],
       });
+    } finally {
+      intercept.restore();
+    }
+  });
+
+  it("meters the call from Vertex's `usageMetadata` (Gemini-shaped)", async () => {
+    // Vertex serves Gemini-shaped bodies, so it must reuse the Gemini extractor.
+    // With no `vertex` arm it fell through to OpenAI and metered $0.
+    const intercept = interceptProviderFetch(() =>
+      providerJson({
+        candidates: [{ content: { role: "model", parts: [{ text: "hello" }] } }],
+        usageMetadata: { promptTokenCount: 3, candidatesTokenCount: 2, totalTokenCount: 5 },
+      }),
+    );
+    try {
+      const h = harness({}, ROUTES);
+      await h.post("/v1/chat/completions", { model: "vertex-chat", ...CHAT });
+      expect(h.usage.last?.promptTokens).toBe(3);
+      expect(h.usage.last?.completionTokens).toBe(2);
+      expect(h.usage.last?.totalTokens).toBe(5);
     } finally {
       intercept.restore();
     }

@@ -201,7 +201,12 @@ import {
   applyCostQualityDial,
   renderCostQualityDecision,
 } from "./task-routing.js";
-import { sseUsageTap, usageFromResponseBody, usageProviderKindFor } from "./usage.js";
+import {
+  providerUsageDialect,
+  sseUsageTap,
+  usageFromResponseBody,
+  usageProviderKindFor,
+} from "./usage.js";
 import type { ProviderUsage, UsageDialect } from "./usage.js";
 import { enforceWorkflowGate, narrowByWorkflowProviders } from "./workflow.js";
 import type { WorkflowGateOutcome } from "./workflow.js";
@@ -3719,7 +3724,12 @@ async function handleEmbeddings(
   }
 
   const parsed = safeJson(text);
-  const usage = usageFromResponseBody("openai", parsed);
+  // The embeddings body is read in its NATIVE dialect here (before
+  // `translateEmbeddingsResponse` below), so the extractor must match the served
+  // provider family — Bedrock reports `inputTextTokenCount`, not OpenAI's
+  // `usage.prompt_tokens`. Hardcoding "openai" metered every Bedrock/Vertex
+  // embedding at $0.
+  const usage = usageFromResponseBody(providerUsageDialect(servedRoute.providerKind), parsed);
   recordUsage(c, deps, meterBase, servedRoute.providerKind, usage);
   await settleTokens(c, admission, usage?.totalTokens);
   settleWorkflowStep(c, deps, gate, true, usage?.totalTokens);

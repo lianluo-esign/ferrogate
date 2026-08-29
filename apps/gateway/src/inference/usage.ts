@@ -269,8 +269,47 @@ export function extractGeminiUsage(payload: unknown): ProviderUsage | undefined 
   );
 }
 
+/**
+ * `BedrockAdapter::extract_usage` — the Converse envelope reports
+ * `usage.{inputTokens,outputTokens,totalTokens}` in camelCase, and the
+ * InvokeModel embeddings path reports a bare top-level `inputTextTokenCount`.
+ * This mirrors `@ferrogate/providers`' shipped `bedrock.ts` extractor
+ * (`packages/providers/src/bedrock.ts:152-181`) field-for-field.
+ *
+ * Reading the OpenAI extractor's snake_case `prompt_tokens` against these
+ * camelCase fields is exactly the cross-dialect scrape-nothing bug this file's
+ * header names: it found no counts and metered the call at the fallback
+ * estimate. Converse also carries `cacheReadInputTokens` /
+ * `cacheWriteInputTokens` under prompt caching, but the shipped adapter does not
+ * read them and their subset/superset relationship to `inputTokens` is not yet
+ * pinned, so — per the "止损不是精确账单" rule — they are left for a follow-up
+ * rather than folded in on the money path with a guessed sign.
+ */
+export function extractBedrockUsage(payload: unknown): ProviderUsage | undefined {
+  const usage = member(payload, "usage");
+  if (usage === undefined) {
+    // InvokeModel embeddings: a bare top-level `inputTextTokenCount`.
+    const embeddingTokens = asUint(member(payload, "inputTextTokenCount"));
+    if (embeddingTokens === undefined) {
+      return undefined;
+    }
+    return { promptTokens: embeddingTokens, totalTokens: embeddingTokens };
+  }
+  const promptTokens = asUint(member(usage, "inputTokens"));
+  const completionTokens = asUint(member(usage, "outputTokens"));
+  return nonEmpty({
+    promptTokens,
+    completionTokens,
+    totalTokens:
+      asUint(member(usage, "totalTokens")) ??
+      (promptTokens !== undefined && completionTokens !== undefined
+        ? promptTokens + completionTokens
+        : undefined),
+  });
+}
+
 /** Extractor selection by the dialect the payload is written in. */
-export type UsageDialect = "openai" | "anthropic" | "gemini";
+export type UsageDialect = "openai" | "anthropic" | "gemini" | "bedrock";
 
 /** `state.extract_provider_usage(kind, payload)`. */
 export function extractUsage(dialect: UsageDialect, payload: unknown): ProviderUsage | undefined {
@@ -279,6 +318,8 @@ export function extractUsage(dialect: UsageDialect, payload: unknown): ProviderU
       return extractAnthropicUsage(payload);
     case "gemini":
       return extractGeminiUsage(payload);
+    case "bedrock":
+      return extractBedrockUsage(payload);
     case "openai":
       return extractOpenAiUsage(payload);
   }
@@ -303,14 +344,36 @@ export function usageProviderKindFor(
   }
   // Rust reads `provider.kind` and dispatches to THAT adapter's `extract_usage`
   // (`chat.rs:1026` → `AppState::extract_provider_usage`), so every family with
-  // its own usage envelope needs its own arm here. A family that fell through to
-  // the OpenAI extractor would scrape nothing and meter the call at the fallback
+  // its own usage envelope needs its own arm. A family that fell through to the
+  // OpenAI extractor would scrape nothing and meter the call at the fallback
   // estimate — the token-budget/TPM/wallet bypass this function's doc names.
+  return providerUsageDialect(providerKind);
+}
+
+/**
+ * The dialect a provider family writes its OWN buffered bodies in — the family
+ * switch shared by the chat/responses tap ({@link usageProviderKindFor}) and the
+ * buffered handlers that read a native (un-normalized) body directly, such as
+ * `/v1/embeddings`. It is deliberately NOT keyed by ingress operation: it
+ * answers only "what shape did THIS upstream emit", which is exactly what a
+ * buffered read of the native body needs.
+ *
+ * Vertex serves Gemini-shaped bodies (`usageMetadata`), so it reuses the Gemini
+ * extractor — `packages/providers/src/vertex.ts` delegates to Gemini for the
+ * same reason. Bedrock's Converse/InvokeModel envelope is camelCase and has its
+ * own arm. Before these two arms existed both fell through to `openai` and
+ * metered $0.
+ */
+export function providerUsageDialect(providerKind: string): UsageDialect {
   switch (canonicalProviderKind(providerKind)) {
     case "anthropic":
       return "anthropic";
     case "gemini":
       return "gemini";
+    case "vertex":
+      return "gemini";
+    case "bedrock":
+      return "bedrock";
     default:
       return "openai";
   }
