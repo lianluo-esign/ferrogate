@@ -838,6 +838,13 @@ export class D1AssetAuditSink implements AssetAuditSink {
     private readonly db: AssetDatabase,
     private readonly fallback: AssetAuditSink | undefined = undefined,
     tenantAuditFor?: ((tenantId: string) => TenantDataStub | undefined) | undefined,
+    // When false, `flush` still appends each event to the authoritative tenant
+    // object chain (the record `screeningEvidence` reads) but does NOT mirror it
+    // into control D1. The env-wired production sink passes false so no audit
+    // rows sync to the shared `audit_events` mirror — see `assetAuditSinkFromEnv`
+    // and the disabled cron sweep in `src/index.ts::gatewayScheduled`. Defaults
+    // true so direct construction (and every existing unit test) keeps mirroring.
+    private readonly projectToControl: boolean = true,
   ) {
     this.tenantAuditFor = tenantAuditFor;
   }
@@ -910,24 +917,30 @@ export class D1AssetAuditSink implements AssetAuditSink {
         }
       }
 
-      const statement = this.db.prepare(AUDIT_EVENT_PROJECTION_UPSERT_SQL);
-      await this.db.batch(
-        projections.map((row) =>
-          statement.bind(
-            evidenceProjectionKey(row.tenant, row.id),
-            row.id,
-            row.requestId,
-            row.agentRunId,
-            row.tenant,
-            row.occurredAtUnix,
-            row.auditJson,
-            row.chainKey,
-            row.seq,
-            row.prevHash,
-            row.rowHash,
+      // Authority is now written (the object chain above). The control-D1
+      // mirror is optional and disabled in production to stop the audit sync —
+      // the chain in the tenant object is the record of truth and the only
+      // gateway reader (`screeningEvidence`) reads it, not this projection.
+      if (this.projectToControl) {
+        const statement = this.db.prepare(AUDIT_EVENT_PROJECTION_UPSERT_SQL);
+        await this.db.batch(
+          projections.map((row) =>
+            statement.bind(
+              evidenceProjectionKey(row.tenant, row.id),
+              row.id,
+              row.requestId,
+              row.agentRunId,
+              row.tenant,
+              row.occurredAtUnix,
+              row.auditJson,
+              row.chainKey,
+              row.seq,
+              row.prevHash,
+              row.rowHash,
+            ),
           ),
-        ),
-      );
+        );
+      }
     } catch (error) {
       // Keep the same ids on a projection failure. The object append is
       // idempotent by id, so the next flush can repair control D1 without
@@ -1096,7 +1109,12 @@ export function assetAuditSinkFromEnv(env: Record<string, unknown>): AssetAuditS
             tenantId,
             tenantObjectAddressForEnv(env, tenantId),
           ) as unknown as TenantDataStub;
-  return new D1AssetAuditSink(db, undefined, tenantAuditFor);
+  // `projectToControl: false` — the production sink records each event to the
+  // authoritative tenant object chain but does NOT mirror it into control D1.
+  // The `audit_events` mirror had no gateway reader and its per-minute rebuild
+  // (now removed from `gatewayScheduled`) was the D1 billing spike. Flip back to
+  // the default (drop this argument) and restore the sweep to re-enable syncing.
+  return new D1AssetAuditSink(db, undefined, tenantAuditFor, false);
 }
 
 function auditJsonFor(event: AssetAuditEvent): string {

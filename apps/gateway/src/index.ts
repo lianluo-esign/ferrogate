@@ -19,7 +19,6 @@
 import {
   assetDepsFromEnv,
   assetRouteModule,
-  sweepAssetAuditProjections,
   sweepAssetRetentionForTenants,
 } from "./assets/index.js";
 import { attributionTags } from "./attribution/index.js";
@@ -552,7 +551,20 @@ export async function gatewayScheduled(
     await usage.sweepUsageProjections({ env, ctx }, tenantIds);
     await sweepExperimentProjections(env, tenantIds);
     await sweepManagedIsolationEvidence(env, tenantRouter, tenantIds);
-    await sweepAssetAuditProjections(env, tenantRouter, tenantIds);
+    // The asset-audit → control-D1 projection sweep is intentionally NOT run.
+    //
+    // It re-UPSERTed EVERY tenant's entire `audit_events` set into control D1 on
+    // every one-minute tick with no persisted watermark, which — against a fleet
+    // with essentially no traffic — was pure write churn: it metered ~120M
+    // `rows_written` in a week (5 indexes × the whole table, every minute) and
+    // was the sole cause of the D1 billing spike. Nothing on the gateway reads
+    // that mirror: the authority is each tenant's own hash-chained
+    // `audit_events` in its Durable Object (`appendAudit`), and the only
+    // gateway-side reader — `D1AssetAuditSink.screeningEvidence`, the #379
+    // withheld-asset listing — reads the DO, not this projection. Fleet-wide
+    // operator audit reads, if ever needed, fan out to the tenant objects (the
+    // Polaris monitoring pattern). Re-enable = restore this call plus the
+    // env-wired projection in `assetAuditSinkFromEnv` (`assets/d1.ts`).
   } catch (error) {
     // Keep compatibility deployments recoverable when the tenant registry is
     // unavailable; tenant-aware deployments enter the branch above and sweep

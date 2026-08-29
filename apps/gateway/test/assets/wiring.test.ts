@@ -347,17 +347,22 @@ describe("the deployed Worker persists asset metadata to D1", () => {
   });
 });
 
-describe("the deployed Worker persists the asset audit trail to D1", () => {
+describe("the deployed Worker persists the asset audit trail to the tenant object", () => {
+  // The control-D1 `audit_events` mirror is intentionally OFF: the env-wired
+  // sink runs with `projectToControl: false` and the per-minute projection
+  // sweep is removed from `gatewayScheduled`. Authority is the tenant object's
+  // own hash-chained trail; nothing syncs to the shared control mirror. See
+  // `assets/d1.ts::assetAuditSinkFromEnv` and `src/index.ts`.
   beforeEach(async () => {
     await applyControlMigrations();
     await provision();
   });
 
-  test("a push over SELF commits an `audit_events` row on CONTROL_DB", async () => {
+  test("a push over SELF commits an `audit_events` row on the TENANT OBJECT, not the mirror", async () => {
     expect((await push("cli", "5.0.0", "payload")).status).toBe(200);
 
-    const { control } = bindings();
-    const rows = await control
+    // Authority: the row lands in the tenant object's own trail.
+    const rows = await tenantObjectDb(TENANT)
       .prepare("SELECT request_id, tenant, audit_json FROM audit_events WHERE tenant = ?1")
       .bind(TENANT)
       .all<Record<string, unknown>>();
@@ -369,16 +374,23 @@ describe("the deployed Worker persists the asset audit trail to D1", () => {
       target: `${TENANT}:binaries:cli:5.0.0`,
       outcome: "committed",
     });
+
+    // Mirror OFF: nothing syncs to the shared control-D1 `audit_events`.
+    const { control } = bindings();
+    const mirror = await control
+      .prepare("SELECT id FROM audit_events WHERE tenant = ?1")
+      .bind(TENANT)
+      .all<Record<string, unknown>>();
+    expect(mirror.results ?? []).toHaveLength(0);
   });
 
-  test("a REFUSED request is audited too — the row an operator most wants", async () => {
+  test("a REFUSED request is audited too — on the tenant object", async () => {
     // The flush is in a `finally`, because every refusal leaves the handler by
     // `throw` or by an early `fail(...)`.
     await push("cli", "6.0.0", "first");
     expect((await push("cli", "6.0.0", "second")).status).toBe(409);
 
-    const { control } = bindings();
-    const rows = await control
+    const rows = await tenantObjectDb(TENANT)
       .prepare("SELECT audit_json FROM audit_events WHERE tenant = ?1")
       .bind(TENANT)
       .all<Record<string, unknown>>();
@@ -386,20 +398,34 @@ describe("the deployed Worker persists the asset audit trail to D1", () => {
     // The committed push, plus the yank/delete-free republish attempt's trail.
     expect(actions).toContain("asset.push");
     expect(rows.results?.length).toBeGreaterThanOrEqual(1);
+
+    // Still nothing on the control mirror.
+    const { control } = bindings();
+    const mirror = await control
+      .prepare("SELECT id FROM audit_events WHERE tenant = ?1")
+      .bind(TENANT)
+      .all<Record<string, unknown>>();
+    expect(mirror.results ?? []).toHaveLength(0);
   });
 
-  test("screening evidence written over SELF is readable by a FRESH sink (#379)", async () => {
+  test("screening evidence written over SELF is readable from the tenant object (#379)", async () => {
     // The cross-isolate property. The withheld listing is served by an isolate
     // that did not screen the push, so an in-isolate ring answers `undefined`
-    // for essentially every real request.
+    // for essentially every real request — the durable record now lives in the
+    // tenant object, which the env-wired sink reads.
     const eicar = "X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*";
     // 202: the bytes are STORED but withheld — "unproven" is indistinguishable
     // from "absent" on every read surface (#366).
     expect((await push("cli", "7.0.0", eicar)).status).toBe(202);
 
-    const { control } = bindings();
-    const evidence = await new D1AssetAuditSink(control as never).screeningEvidence(TENANT);
+    const audit = assetDepsFromEnv(env as unknown as Record<string, unknown>).audit;
+    if (audit?.screeningEvidence === undefined) throw new Error("expected the env-wired audit sink");
+    const evidence = await audit.screeningEvidence(TENANT);
     expect(evidence.get(`${TENANT}:binaries:cli:7.0.0`)).toContain("scan=");
+
+    // The control mirror is disabled, so a control-only sink sees nothing.
+    const { control } = bindings();
+    expect((await new D1AssetAuditSink(control as never).screeningEvidence(TENANT)).size).toBe(0);
 
     // And the row itself is withheld, so the evidence is explaining something
     // the read surfaces really refuse to serve.
