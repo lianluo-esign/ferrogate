@@ -474,8 +474,19 @@ describe("FC-2 one suspension reaches every Worker that spends on the credential
     // for the PLAN lookup in their quota chain, so the probe is the status
     // COLUMN read specifically — joining a table is not consulting a control,
     // and a matrix built on tables alone is how FC-2 survived one audit.
+    //
+    // `control-plane` is in the matched set too, but NOT as a spend gate: its
+    // operator teardown and consumption-purge routes FENCE on `tenants.status`
+    // (a teardown is refused unless the tenant is already `deleted`; the purge
+    // reads it the same way). That is the authority's OWNER guarding a
+    // destructive admin action, not a credential admitting spend — the
+    // spend-worker guarantee is the EMPTY-exploit-set assertion below, which
+    // filters `SPEND_WORKERS` and is unaffected by this legitimate reader. The
+    // list is updated (not the probe tightened) because that is this file's
+    // ratchet: a fleet that legitimately gained a reader must be re-pinned here.
     expect(appsMatching(PROBE.readsLifecycleAuthority)).toEqual([
       "gateway",
+      "control-plane",
       "mcp",
       "agent-runtime",
     ]);
