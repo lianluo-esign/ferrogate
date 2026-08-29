@@ -218,6 +218,17 @@ export const GATEWAY_ROUTE_MODULES: readonly RouteModule[] = [
     platformCatalog: platformModelCatalogFromSharedConfig(),
     dispatcher: dispatcherFromEnv,
     usage,
+    // Raise the inference body cap from the 1 MiB Rust-parity default
+    // (`DEFAULT_INFERENCE_LIMITS`) to 64 MiB so large multimodal / long-context
+    // requests (base64 images, big documents in `/v1/responses` etc.) are not
+    // rejected with `413 payload_too_large` at 1 MiB. This is a PERMITTED
+    // ceiling, not a guaranteed-safe one: `readInferenceBody` fully buffers the
+    // body via `arrayBuffer()` and then decodes + `JSON.parse`s it, so peak
+    // memory is ~3-4x the body size against a 128 MB Workers isolate. Bodies
+    // that actually approach this cap can OOM the isolate rather than answer a
+    // clean 413; typical requests sit far below it. Override lives here (not in
+    // the shared default) so the Rust-parity constant and its tests stay intact.
+    limits: { inferenceBodyMaxBytes: 64 * 1024 * 1024 },
   }),
   assetRouteModule({ depsFromEnv: assetDepsFromEnv }),
   batchRouteModule(),
