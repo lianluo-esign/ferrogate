@@ -40,6 +40,7 @@ import {
   IDENTITY_APP,
   MOUNTED_OPERATION_IDS,
   MOUNTED_PURGE_ROUTE,
+  MOUNTED_TEARDOWN_ROUTE,
   MOUNTED_ROUTES,
   MOUNTED_SESSION_ROUTES,
   MOUNTED_SSO_ROUTES,
@@ -108,7 +109,10 @@ const IDENTITY_MOUNTS: readonly string[] = [
  * `app.post` it performed — so this list cannot drift from what `src/index.ts`
  * actually mounted; the method is fixed because the mount is that one `post`.
  */
-const OPERATOR_MOUNTS: readonly string[] = [`POST ${MOUNTED_PURGE_ROUTE}`];
+const OPERATOR_MOUNTS: readonly string[] = [
+  `POST ${MOUNTED_PURGE_ROUTE}`,
+  `POST ${MOUNTED_TEARDOWN_ROUTE}`,
+];
 
 const NON_CONTRACT_ROUTES = [...PROBE_ROUTES, ...IDENTITY_MOUNTS, ...OPERATOR_MOUNTS] as const;
 

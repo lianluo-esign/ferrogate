@@ -52,6 +52,7 @@ import {
 import type { ControlPlaneEnv } from "./ports.js";
 import { GROUP_MODULES, type RegisteredRoute, registerRoutes } from "./routes/index.js";
 import { mountTenantConsumptionPurge } from "./routes/tenant-consumption-purge.js";
+import { mountTenantTeardown } from "./routes/tenant-teardown.js";
 import type { GroupModule } from "./routes/resource.js";
 import { type AdminConsoleSessionRoute, mountAdminConsoleSession } from "./session/index.js";
 
@@ -174,6 +175,17 @@ app.get("/health", (c) => c.json({ ok: true }));
  * `./routes/tenant-consumption-purge.ts` for every fence.
  */
 export const MOUNTED_PURGE_ROUTE: string = mountTenantConsumptionPurge(app);
+
+/**
+ * `POST /admin/v1/tenant-teardown` — platform-operator-only, heavily fenced,
+ * IRREVERSIBLE cascade destroying ONE tenant across the DO, the control
+ * database's tenant-scoped rows + evidence projections, the KV key/identity
+ * directories, and the routing roster. The teardown superset of the purge route
+ * above; like it, mounts OUT of `registerRoutes` (out-of-contract) and
+ * re-authenticates as a platform operator itself. See
+ * `./routes/tenant-teardown.ts` for the load-bearing order and every fence.
+ */
+export const MOUNTED_TEARDOWN_ROUTE: string = mountTenantTeardown(app);
 
 app.get("/version", (c) =>
   c.json({
