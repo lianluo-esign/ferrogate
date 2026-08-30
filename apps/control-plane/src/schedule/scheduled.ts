@@ -299,9 +299,11 @@ async function catalogAuditPass(
  * It runs on every tick rather than on a slower cadence of its own because the
  * anchor cadence IS the detection window: a row appended and deleted between
  * two anchors was never pinned and cannot be missed by comparison. A tick that
- * finds no new chain head writes nothing (the job skips an already-anchored
- * head), so the cost of the fast cadence is one grouped query and one R2 `head`
- * per chain.
+ * finds no new chain head writes nothing — and reads almost nothing: a
+ * change-detection probe (one indexed row plus one R2 `head`) short-circuits
+ * the full-table scan when the newest head is already anchored, so a settled
+ * deployment pays the fast cadence in a single row read, not a whole-table
+ * `GROUP BY` (see `anchorAuditChains`).
  *
  * Failures are caught and reported, never thrown: a `scheduled` handler that
  * throws is retried by the platform, and retrying an evidence write must not

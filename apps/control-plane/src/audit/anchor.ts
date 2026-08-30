@@ -106,6 +106,47 @@ export async function anchorAuditChains(
     return { chains: 0, written: 0, skipped: 0, unconfigured: true };
   }
 
+  // CHANGE-DETECTION GATE — skip the full-table scan below when nothing new can
+  // be anchored.
+  //
+  // The scan is a `GROUP BY chain_key` over the WHOLE table, run every minute.
+  // Since the gateway stopped mirroring asset audits, `audit_events` grows only
+  // on the operator's own (rare) mutations, so on almost every tick the heads
+  // are unchanged and the scan reads thousands of rows to write zero anchors.
+  //
+  // A head moves ONLY when a row is appended, and the newest-inserted anchorable
+  // row IS its chain's head (seq increases with insertion order within a chain).
+  // So: is that one head already anchored? If yes, every head is — a scan runs
+  // on every append, so all heads stay anchored — and this tick can produce
+  // nothing new. The probe is one indexed row (`rowid` DESC) plus one R2 `head`,
+  // versus the whole table.
+  //
+  // This does NOT weaken tamper-evidence. Anchors are append-only and never
+  // deleted here, so a truncated or re-forged tail is still caught at
+  // VERIFICATION against the anchor that was published when that head appeared;
+  // skipping a redundant scan removes no evidence. The detection window is
+  // unchanged: the probe runs every tick, and the FIRST tick after any append
+  // sees an unanchored head and falls through to the scan.
+  const newestHead = await db
+    .prepare(
+      `SELECT chain_key, seq
+         FROM ${AUDIT_TABLE}
+        WHERE chain_key IS NOT NULL AND seq IS NOT NULL AND row_hash IS NOT NULL
+        ORDER BY rowid DESC
+        LIMIT 1`,
+    )
+    .first<{ chain_key: string; seq: number }>();
+  // An empty table still owes the platform "no rows at time T" anchor (the
+  // load-bearing empty anchor below); probe for it so a settled empty
+  // deployment also skips the scan once that anchor exists.
+  const probeKey =
+    newestHead === null
+      ? auditAnchorKey("", 0)
+      : auditAnchorKey(newestHead.chain_key, newestHead.seq);
+  if ((await bucket.head(probeKey)) !== null) {
+    return { chains: 0, written: 0, skipped: 0, unconfigured: false };
+  }
+
   // ONE statement, so `first_seq` / `head_seq` / `row_count` / `head_hash`
   // cannot disagree with each other: computed separately, a concurrent append
   // between two queries would produce an anchor whose count belongs to one

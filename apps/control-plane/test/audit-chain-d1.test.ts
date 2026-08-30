@@ -122,6 +122,29 @@ async function readAnchors(): Promise<AuditChainAnchor[]> {
   return anchors;
 }
 
+/**
+ * A `db()` that counts the WHOLE-TABLE aggregate scan. The anchor's change-
+ * detection gate exists to keep that `GROUP BY` off the critical read path on a
+ * settled deployment; the only statement it prepares containing `GROUP BY` IS
+ * that scan, so counting those prepares proves whether the gate short-circuited.
+ */
+function scanCountingDb(real: D1Database): { readonly db: D1Database; scans: () => number } {
+  let scans = 0;
+  const db = new Proxy(real, {
+    get(target, prop, receiver) {
+      if (prop === "prepare") {
+        return (sql: string) => {
+          if (/GROUP BY/i.test(sql)) scans += 1;
+          return target.prepare(sql);
+        };
+      }
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  }) as D1Database;
+  return { db, scans: () => scans };
+}
+
 /** The id of the audit row recording a given mutation, straight from the table. */
 async function auditRowId(offset: number): Promise<string> {
   const row = await db()
@@ -255,6 +278,51 @@ describe("the periodic anchor", () => {
     // The seq-1 anchor is untouched: its timestamp is still the first tick's.
     expect(both.find((anchor) => anchor.head_seq === 1)?.anchored_at_unix).toBe(TICK_AT);
     expect(both.find((anchor) => anchor.head_seq === 2)?.anchored_at_unix).toBe(TICK_AT + 120);
+  });
+
+  /**
+   * THE READ-REDUCTION GATE. The scan is a whole-table `GROUP BY` run every
+   * minute, but a head only moves on an append. The gate probes the newest
+   * head (one indexed row + one R2 `head`) and skips the scan when it is
+   * already anchored — so a settled deployment stops paying thousands of
+   * `rows_read` per tick to write nothing. This pins that the scan runs when
+   * (and only when) a head has moved, without weakening any anchor above.
+   */
+  it("skips the whole-table scan when no head has moved", async () => {
+    expect((await createPolicy(operatorKey.secret, "pol_a")).status).toBe(201);
+    const counting = scanCountingDb(db());
+
+    // First tick: the head is unanchored, so the scan runs and publishes it.
+    await anchorAuditChains(counting.db, bucket(), TICK_AT);
+    expect(counting.scans()).toBe(1);
+    const first = await readAnchors();
+
+    // Second tick, nothing appended: the probe finds the head already anchored
+    // and short-circuits — no scan, no new anchor.
+    await anchorAuditChains(counting.db, bucket(), TICK_AT + 60);
+    expect(counting.scans()).toBe(1);
+    expect(await readAnchors()).toEqual(first);
+
+    // A new row moves the head: the probe misses and the scan runs again.
+    expect((await createPolicy(operatorKey.secret, "pol_b")).status).toBe(201);
+    await anchorAuditChains(counting.db, bucket(), TICK_AT + 120);
+    expect(counting.scans()).toBe(2);
+    expect(await readAnchors()).toHaveLength(2);
+  });
+
+  /**
+   * The empty deployment settles too: the first tick writes the load-bearing
+   * "no rows at time T" platform anchor, and every later idle tick then finds
+   * it and skips the scan — an idle control plane reads almost nothing.
+   */
+  it("skips the scan on a settled empty deployment once the platform anchor exists", async () => {
+    const counting = scanCountingDb(db());
+    await anchorAuditChains(counting.db, bucket(), TICK_AT);
+    expect(counting.scans()).toBe(1);
+    expect(await readAnchors()).toHaveLength(1);
+
+    await anchorAuditChains(counting.db, bucket(), TICK_AT + 60);
+    expect(counting.scans()).toBe(1);
   });
 
   it("records an empty chain as an anchor with head_seq 0", async () => {
