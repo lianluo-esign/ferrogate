@@ -195,6 +195,10 @@ export function gatewayTenantDataAuxWorker(gatewayAppRoot: URL) {
         // #879 (Zero-D1 S3): the control-plane binds CONTROL_DATA cross-script to
         // this same gateway-hosted class, so publish it here too.
         'export { ControlDataObject } from "@ferrogate/storage/durable-objects";',
+        // Zero-D1 Plan B: the control-plane binds PLATFORM_DATA cross-script to
+        // the gateway's singleton PlatformDataObject (home for platform/
+        // unattributed guardrail evidence), so publish that class here too.
+        'export { PlatformDataObject } from "@ferrogate/storage/durable-objects";',
         "export default {",
         "  fetch() {",
         '    return new Response("ferrogate-gateway test aux worker: RPC only", { status: 404 });',
@@ -223,6 +227,9 @@ export function gatewayTenantDataAuxWorker(gatewayAppRoot: URL) {
   if (!script.includes("ControlDataObject")) {
     throw new Error("tenant-data aux worker: bundle does not contain ControlDataObject");
   }
+  if (!script.includes("PlatformDataObject")) {
+    throw new Error("tenant-data aux worker: bundle does not contain PlatformDataObject");
+  }
 
   return {
     name,
@@ -233,6 +240,9 @@ export function gatewayTenantDataAuxWorker(gatewayAppRoot: URL) {
       TENANT_DATA: { className: "TenantDataObject", useSQLite: true },
       // #879: the singleton CONTROL object, bound cross-script by the control-plane.
       CONTROL_DATA: { className: "ControlDataObject", useSQLite: true },
+      // Zero-D1 Plan B: the singleton PLATFORM object, bound cross-script by the
+      // control-plane's operator guardrail read (platform/unattributed leg).
+      PLATFORM_DATA: { className: "PlatformDataObject", useSQLite: true },
     },
   };
 }

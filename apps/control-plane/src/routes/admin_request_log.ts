@@ -39,7 +39,9 @@ import {
   REQUEST_LOG_TABLE,
 } from "../store/d1.js";
 import { ensureTenantGuardrailEvidenceBackfill } from "../store/guardrail_evidence_backfill.js";
+import { ensurePlatformGuardrailEvidenceBackfill } from "../store/platform_guardrail_evidence_backfill.js";
 import { tenantEvidenceDatabaseFor } from "../store/tenancy.js";
+import { provisionedTenantPage, tenantFanoutOffset } from "../store/tenant-fanout.js";
 import {
   type GroupModule,
   type Handler,
@@ -634,29 +636,6 @@ function exportRequestLogsHandler(): Handler {
 // (#665)
 // ---------------------------------------------------------------------------
 
-/**
- * The tenant fence for `guardrail_evaluations`.
- *
- * Third statement of the same predicate, and stated separately for the reason
- * {@link requestLogTenantFence} gives: the three tables' `tenant` columns are
- * independent facts, and folding them into one helper would make a later
- * divergence in any of them look like a typo rather than a decision.
- *
- * STRICT equality, so a `NULL` tenant matches nobody. An evaluation with no
- * tenant screened a platform-operator (or anonymous) call; handing those to a
- * tenant would tell it which models the operator calls and what its own
- * detectors flag. `test/guardrail-evidence-read.test.ts` proves this from BOTH
- * tenants' sides and from the investigation view, whose leak would be worse
- * still: the investigation joins identity, route and cost.
- */
-function guardrailTenantFence(
-  scope: CallerScope,
-  alias = GUARDRAIL_EVALUATION_TABLE,
-): { sql: string; params: string[] } {
-  if (scope.kind === "platform_operator") return { sql: "", params: [] };
-  return { sql: `${alias}.tenant = ?`, params: [scope.tenantId] };
-}
-
 const GUARDRAIL_EVALUATION_COLUMNS =
   "id, request_id, trace_id, agent_run_id, subject_id, tenant, scope_type, scope_id, " +
   "target, protocol, stage, mode, policy_id, policy_revision, verdict, action, " +
@@ -810,7 +789,7 @@ function placeholders(count: number): string {
 async function guardrailChecksFor(
   db: D1Database,
   evaluations: readonly GuardrailEvaluationRow[],
-  source: "control" | "tenant",
+  source: "control" | "tenant" | "platform",
   tenantId?: string,
 ): Promise<Map<string, StoreRecord[]>> {
   const byEvaluation = new Map<string, StoreRecord[]>();
@@ -823,6 +802,12 @@ async function guardrailChecksFor(
       "guardrail projection key is missing",
     );
   }
+  // The `platform` source reads the platform object, whose whole table is the
+  // un-attributed domain — so it is id-keyed like `tenant` but carries NO tenant
+  // fence, the same "the object IS the fence" reasoning the evaluation read uses.
+  const idKeyedSelect = `SELECT id, evaluation_id, tenant, check_id, detector_id, detector_version,
+                config_digest, verdict, action, enforcement_status, error_kind, check_json
+           FROM ${GUARDRAIL_CHECK_TABLE}`;
   const query =
     source === "control"
       ? `SELECT projection_key, id, evaluation_projection_key, evaluation_id, tenant,
@@ -831,12 +816,14 @@ async function guardrailChecksFor(
            FROM ${GUARDRAIL_CHECK_TABLE}
           WHERE evaluation_projection_key IN (${placeholders(lookupKeys.length)})
           ORDER BY evaluation_projection_key ASC, check_id ASC`
-      : `SELECT id, evaluation_id, tenant, check_id, detector_id, detector_version,
-                config_digest, verdict, action, enforcement_status, error_kind, check_json
-           FROM ${GUARDRAIL_CHECK_TABLE}
+      : source === "tenant"
+        ? `${idKeyedSelect}
           WHERE tenant = ? AND evaluation_id IN (${placeholders(lookupKeys.length)})
+          ORDER BY evaluation_id ASC, check_id ASC`
+        : `${idKeyedSelect}
+          WHERE evaluation_id IN (${placeholders(lookupKeys.length)})
           ORDER BY evaluation_id ASC, check_id ASC`;
-  const params = source === "control" ? lookupKeys : [tenantId, ...lookupKeys];
+  const params = source === "tenant" ? [tenantId, ...lookupKeys] : lookupKeys;
   const rows = await db
     .prepare(query)
     .bind(...params)
@@ -857,31 +844,154 @@ async function guardrailChecksFor(
   return byEvaluation;
 }
 
-/** One fenced, ordered page of `guardrail_evaluations`, checks attached. */
-async function guardrailEvaluationPage(
+/**
+ * One evaluation carried alongside the sort keys the fleet merge needs.
+ *
+ * The keys are first-class numbers/strings rather than read back off the
+ * projected {@link StoreRecord}, so the merge-sort commits to the same
+ * `occurred_at_unix DESC, id ASC` the single-source readers use without trusting
+ * a document field a detector could have shaped.
+ */
+interface MergedGuardrailRow {
+  readonly occurredAtUnix: number;
+  readonly id: string;
+  readonly record: StoreRecord;
+}
+
+/**
+ * One tenant object's evaluations (up to `limit`, newest first), checks
+ * attached, as {@link MergedGuardrailRow}s. Reads from 0 — the fleet merge
+ * re-slices, so a per-object offset would drop rows the merged window still
+ * needs. `count(*) OVER()` reports how many the object holds so a clipped very
+ * active tenant does not silently shrink the fleet total.
+ */
+async function tenantGuardrailMergedRows(
   db: D1Database,
-  scope: CallerScope,
+  tenantId: string,
   limit: number,
-  offset: number,
-): Promise<{ records: StoreRecord[]; total: number }> {
-  const fence = guardrailTenantFence(scope);
+): Promise<{ rows: MergedGuardrailRow[]; total: number }> {
   const rows = await db
     .prepare(
-      `SELECT ${GUARDRAIL_PROJECTION_EVALUATION_COLUMNS}, count(*) OVER() AS total
-         FROM ${GUARDRAIL_EVALUATION_TABLE}${fence.sql === "" ? "" : ` WHERE ${fence.sql}`}
+      `SELECT ${GUARDRAIL_EVALUATION_COLUMNS}, count(*) OVER() AS total
+         FROM ${GUARDRAIL_EVALUATION_TABLE}
+        WHERE tenant = ?
         ${GUARDRAIL_EVALUATION_ORDER}
-        LIMIT ? OFFSET ?`,
+        LIMIT ?`,
     )
-    .bind(...fence.params, limit, offset)
+    .bind(tenantId, limit)
     .all<GuardrailEvaluationRow>();
-  const checks = await guardrailChecksFor(db, rows.results, "control");
+  const checks = await guardrailChecksFor(db, rows.results, "tenant", tenantId);
   return {
-    records: rows.results.map((row) =>
-      guardrailEvaluationDocument(row, checks.get(row.projection_key ?? "") ?? []),
-    ),
-    // `count(*) OVER()` is on every row and absent when there are none — the
-    // same reading the two sibling readers take.
+    rows: rows.results.map((row) => ({
+      occurredAtUnix: row.occurred_at_unix,
+      id: row.id,
+      record: guardrailEvaluationDocument(row, checks.get(row.id) ?? []),
+    })),
     total: rows.results[0]?.total ?? 0,
+  };
+}
+
+/**
+ * The platform object's evaluations (up to `limit`, newest first), checks
+ * attached. NO tenant fence: the whole object is the un-attributed domain — the
+ * "the object IS the fence" reasoning {@link tenantGuardrailMergedRows} inverts
+ * with `WHERE tenant = ?`.
+ */
+async function platformGuardrailMergedRows(
+  db: D1Database,
+  limit: number,
+): Promise<{ rows: MergedGuardrailRow[]; total: number }> {
+  const rows = await db
+    .prepare(
+      `SELECT ${GUARDRAIL_EVALUATION_COLUMNS}, count(*) OVER() AS total
+         FROM ${GUARDRAIL_EVALUATION_TABLE}
+        ${GUARDRAIL_EVALUATION_ORDER}
+        LIMIT ?`,
+    )
+    .bind(limit)
+    .all<GuardrailEvaluationRow>();
+  const checks = await guardrailChecksFor(db, rows.results, "platform");
+  return {
+    rows: rows.results.map((row) => ({
+      occurredAtUnix: row.occurred_at_unix,
+      id: row.id,
+      record: guardrailEvaluationDocument(row, checks.get(row.id) ?? []),
+    })),
+    total: rows.results[0]?.total ?? 0,
+  };
+}
+
+/**
+ * The fleet (platform-operator) guardrail page: a bounded live fan-out over each
+ * provisioned tenant object UNION the platform object, NEVER the shared control
+ * projection, which under the object cutover (#859/#881, Zero-D1 Plan B) holds
+ * nothing a tenant owns.
+ *
+ * Mirrors `admin_spend_anomaly.ts::fleetEpisodePage` exactly — at most
+ * `FLEET_FANOUT_MAX_TENANTS` objects per request, `?tenant_offset=` pages the
+ * roster, `tenant_page` reports whether more remain — with ONE extra leg: the
+ * platform object, home of the un-attributed evaluations no roster tenant owns
+ * and no fan-out can enumerate. The sources are disjoint on `id` (a tenant's
+ * evaluation id and an un-attributed one name different decisions), so the rows
+ * are appended and re-sorted rather than folded through a Map.
+ *
+ * The platform leg is skipped when `platformDb` is null (a unit env, or a Worker
+ * the cross-script `PLATFORM_DATA` stanza has not reached) and isolated in its
+ * own try/catch when it is unreachable — exactly as an unreachable tenant object
+ * contributes nothing rather than failing the whole fleet read. During the
+ * G1→CP1 rollout the control projection still carries these rows, so a skipped
+ * leg narrows the page, never loses evidence.
+ */
+async function fleetGuardrailEvaluationPage(
+  router: TenantDatabaseRouter,
+  platformDb: D1Database | null,
+  query: { readonly offset: number; readonly limit: number },
+  tenantOffset: number,
+): Promise<{
+  records: StoreRecord[];
+  total: number;
+  tenantPage: Awaited<ReturnType<typeof provisionedTenantPage>>;
+}> {
+  // Each object is paged from 0 to `offset+limit`: the merge re-slices, so a
+  // per-object offset would drop rows the merged window still needs.
+  const fetchLimit = Math.max(1, query.offset + query.limit);
+  const tenantPage = await provisionedTenantPage(router, tenantOffset);
+
+  const merged: MergedGuardrailRow[] = [];
+  let sourceTotal = 0;
+  for (const tenantId of tenantPage.tenantIds) {
+    let db: D1Database;
+    try {
+      db = await tenantEvidenceDatabaseFor(router, tenantId);
+    } catch {
+      // A tenant with no reachable object contributes nothing rather than
+      // failing the whole fleet read: it simply screened nothing here.
+      continue;
+    }
+    const page = await tenantGuardrailMergedRows(db, tenantId, fetchLimit);
+    merged.push(...page.rows);
+    sourceTotal += page.total;
+  }
+
+  if (platformDb !== null) {
+    try {
+      const page = await platformGuardrailMergedRows(platformDb, fetchLimit);
+      merged.push(...page.rows);
+      sourceTotal += page.total;
+    } catch {
+      // An unreachable platform object is isolated exactly as an unreachable
+      // tenant object is: the un-attributed leg is simply absent from the page.
+    }
+  }
+
+  merged.sort((a, b) => b.occurredAtUnix - a.occurredAtUnix || a.id.localeCompare(b.id));
+  return {
+    records: merged.slice(query.offset, query.offset + query.limit).map((row) => row.record),
+    // The sources are disjoint so `merged.length` and `sourceTotal` agree, but
+    // `max` keeps the count honest if a per-object `fetchLimit` clipped a very
+    // active source's page.
+    total: Math.max(merged.length, sourceTotal),
+    tenantPage,
   };
 }
 
@@ -929,7 +1039,8 @@ function listGuardrailEvaluationsHandler(): Handler {
   return async (c) => {
     const deps = depsOf(c);
     const scope = scopeOf(c);
-    const query = parseListQuery(new URL(c.req.url), deps.listDefaultLimit, deps.listMaxLimit);
+    const url = new URL(c.req.url);
+    const query = parseListQuery(url, deps.listDefaultLimit, deps.listMaxLimit);
     const db = deps.controlDatabase;
     const tenantRouter = deps.tenantStorage ?? deps.tenantDatabases;
 
@@ -953,18 +1064,27 @@ function listGuardrailEvaluationsHandler(): Handler {
       return json(c, 200, adminListPaginated(page.items, page.total, query.offset, query.limit));
     }
 
-    const page = await guardrailEvaluationPage(db, scope, query.limit, query.offset);
-    return json(
-      c,
-      200,
-      adminListPaginatedWithMetadata(
-        page.records,
-        page.total,
-        query.offset,
-        query.limit,
-        derivedControlProjectionMetadata(),
-      ),
+    // Platform operator: a bounded live fan-out over the tenant objects UNION the
+    // platform object — never the control projection. A one-time copy of the
+    // pre-cutover un-attributed control rows into the platform object runs first,
+    // idempotent and marked, exactly as the tenant read backfills its own object.
+    const platformDb = deps.platformData ?? null;
+    await ensurePlatformGuardrailEvidenceBackfill(db, platformDb);
+    const fleet = await fleetGuardrailEvaluationPage(
+      tenantRouter,
+      platformDb,
+      query,
+      tenantFanoutOffset(url),
     );
+    return json(c, 200, {
+      ...adminListPaginated(fleet.records, fleet.total, query.offset, query.limit),
+      tenant_page: {
+        offset: fleet.tenantPage.offset,
+        limit: fleet.tenantPage.limit,
+        total: fleet.tenantPage.total,
+        has_more: fleet.tenantPage.hasMore,
+      },
+    });
   };
 }
 

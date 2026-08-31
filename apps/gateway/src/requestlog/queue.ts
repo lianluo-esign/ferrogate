@@ -35,9 +35,12 @@
  * already landed are simply re-applied.
  */
 import {
+  type GuardrailEvidenceDatabase,
   guardrailEvidenceStatements,
+  platformGuardrailEvidenceStatements,
   tenantGuardrailEvidenceStatements,
 } from "../guardrails/evidence-d1.js";
+import { guardrailEvidencePlatformDatabaseFrom } from "../guardrails/evidence-sink.js";
 import {
   GUARDRAIL_EVALUATION_OBJECT,
   type GuardrailEvidenceEnvelope,
@@ -95,6 +98,12 @@ export async function consumeRequestLogBatch(
     env: unknown,
     tenantId: string,
   ) => RequestLogDatabase | undefined = requestLogTenantDatabaseFromEnv,
+  // Zero-D1 Plan B: resolver for the PLATFORM_DATA singleton. Default reads
+  // `env.PLATFORM_DATA`; a unit env or a not-yet-migrated Worker returns
+  // undefined and the platform dual-write leg is skipped.
+  platformDatabaseOf: (
+    env: unknown,
+  ) => GuardrailEvidenceDatabase | undefined = guardrailEvidencePlatformDatabaseFrom,
 ): Promise<RequestLogConsumeResult> {
   const records = [];
   const evidence: GuardrailEvidenceEnvelope[] = [];
@@ -146,9 +155,15 @@ export async function consumeRequestLogBatch(
       group.records.push(record);
       byTenant.set(record.tenantId, group);
     }
+    // Unscoped/platform evidence (empty tenant) has no tenant object; it goes to
+    // the control projection below and — Zero-D1 Plan B — also to PLATFORM_DATA.
+    const unscoped: GuardrailEvidenceEnvelope[] = [];
     for (const envelope of evidence) {
       const tenantId = envelope.evaluation.tenant.organizationId;
-      if (typeof tenantId !== "string" || tenantId.trim() === "") continue;
+      if (typeof tenantId !== "string" || tenantId.trim() === "") {
+        unscoped.push(envelope);
+        continue;
+      }
       const group = byTenant.get(tenantId) ?? { records: [], evidence: [] };
       group.evidence.push(envelope);
       byTenant.set(tenantId, group);
@@ -181,6 +196,31 @@ export async function consumeRequestLogBatch(
       ...guardrailEvidenceStatements(projection, evidence),
     ];
     await projection.batch(statements);
+
+    // Zero-D1 Plan B (G1 dual-write): unscoped/platform evidence ALSO lands in
+    // the PLATFORM_DATA singleton — the authoritative home it will be READ from
+    // once the control projection is retired. Deliberately OUTSIDE the retry
+    // contract, in its own try/catch: the tenant, request-log and control
+    // projection writes above have already committed, so a platform-object blip
+    // must NOT arm `retryAll()` and re-drive (or dead-letter) that committed
+    // evidence. The one-time CP1 backfill plus this ongoing dual-write reconcile
+    // any gap, so a swallowed failure here is at most a briefly-stale platform
+    // read, never lost evidence.
+    if (unscoped.length > 0) {
+      try {
+        const platformDb = platformDatabaseOf(env);
+        if (platformDb !== undefined) {
+          await platformDb.batch(platformGuardrailEvidenceStatements(platformDb, unscoped));
+        }
+      } catch (error) {
+        console.warn(
+          `[ferrogate] platform guardrail evidence dual-write failed for ${unscoped.length} row(s); control projection is unaffected: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    }
+
     return { written: records.length + evidence.length, malformed, retried: false };
   } catch (error) {
     // Log BEFORE the retry. A bare `catch {}` here left a failing consumer with

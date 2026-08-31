@@ -161,10 +161,12 @@ describe("the runtime contract at the top of the file", () => {
 describe("every Durable Object binding is deployable", () => {
   const bindings = stanzas("durable_objects.bindings");
 
-  it("declares at least the four classes this Worker exports", () => {
+  it("declares at least the classes this Worker exports", () => {
     // A guard on the gate itself: if the parser ever stopped matching, every
-    // assertion below would pass vacuously over an empty list.
-    expect(bindings.length).toBeGreaterThanOrEqual(5);
+    // assertion below would pass vacuously over an empty list. Six classes are
+    // bound today: RATE_LIMIT, PROVIDER_CIRCUIT, SHADOW_BUDGET, TENANT_DATA,
+    // CONTROL_DATA and PLATFORM_DATA.
+    expect(bindings.length).toBeGreaterThanOrEqual(6);
   });
 
   it("declares each bound class as an SQLite Durable Object export", () => {
@@ -183,7 +185,7 @@ describe("every Durable Object binding is deployable", () => {
       );
       expect(definition?.get("storage"), `${className} is not SQLite-backed`).toBe("sqlite");
     }
-    expect(exports.size, "the exports map must not be empty or parser-vacuous").toBe(5);
+    expect(exports.size, "the exports map must not be empty or parser-vacuous").toBe(6);
   });
 
   it("binds each namespace under the NAME src/ reads it by", () => {
@@ -216,6 +218,11 @@ describe("every Durable Object binding is deployable", () => {
       "SHADOW_BUDGET",
       "TENANT_DATA",
       "CONTROL_DATA",
+      // Zero-D1 Plan B: read by the guardrail evidence sink as
+      // `env.PLATFORM_DATA` for the platform/unattributed evidence leg. Its
+      // absence degrades the same way CONTROL_DATA's would — the platform rows
+      // have no per-isolate approximation — so the deployed config must name it.
+      "PLATFORM_DATA",
     ]) {
       expect(names, `no [[durable_objects.bindings]] is named ${required}`).toContain(required);
     }

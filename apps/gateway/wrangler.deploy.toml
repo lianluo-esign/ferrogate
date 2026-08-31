@@ -1487,9 +1487,31 @@ class_name = "TenantDataObject"
 name = "CONTROL_DATA"
 class_name = "ControlDataObject"
 
+# ---------------------------------------------------------------------------
+# PLATFORM_DATA — the singleton PlatformDataObject (Zero-D1 Plan B)
+#
+# The authoritative home for PLATFORM-SCOPED / unattributed guardrail evidence
+# (`scope_type = 'platform'`, `tenant IS NULL`) — the screening of platform
+# operator / anonymous calls that has no owning tenant, so it cannot live in a
+# per-tenant TenantDataObject and a pure DO fan-out over the tenant roster
+# structurally cannot reach it. Removing the whole control D1 therefore requires
+# this object: it is the one place those rows live once the projection is gone.
+#
+# A SINGLETON, exactly like CONTROL_DATA: everything addresses
+# `idFromName("platform")` and the object refuses any other address. This
+# gateway is the DEFINING script (the `src/worker.ts` re-export + the
+# `[exports.PlatformDataObject]` lifecycle declaration below), so the class is
+# BORN with `storage = "sqlite"` (immutable once a namespace exists). The
+# control-plane binds it cross-script (`script_name = "ferrogate-gateway"`), so
+# this gateway MUST deploy before the control-plane.
+# ---------------------------------------------------------------------------
+[[durable_objects.bindings]]
+name = "PLATFORM_DATA"
+class_name = "PlatformDataObject"
+
 
 # `exports` is mutually exclusive with the legacy `migrations` array. Keep all
-# five classes defined by this Worker in one declarative lifecycle map so a
+# six classes defined by this Worker in one declarative lifecycle map so a
 # deploy cannot accidentally leave one class on the old path.
 [exports.RateLimiterDurableObject]
 type = "durable-object"
@@ -1508,6 +1530,10 @@ type = "durable-object"
 storage = "sqlite"
 
 [exports.ControlDataObject]
+type = "durable-object"
+storage = "sqlite"
+
+[exports.PlatformDataObject]
 type = "durable-object"
 storage = "sqlite"
 

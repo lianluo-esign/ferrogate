@@ -22,7 +22,7 @@
  * brand-new tenant, a persisting episode — and the two tests that assert an
  * alert are outnumbered on purpose.
  *
- * ## Cross-Worker seam
+ * ## Cross-Worker seam, and WHERE the spend history lives
  *
  * `request_logs` and `billing_events` are written by `apps/gateway`, a
  * different Worker with a different `wrangler.toml`, so the spend history here
@@ -31,15 +31,28 @@
  * fixtures hold is that the DETECTOR reads what the tables hold. That the
  * gateway writes those tables in that shape is held by
  * `apps/gateway/test/requestlog/write.test.ts` and `test/metering/*`.
+ *
+ * Under per-tenant Durable Objects the detector reads the join from each
+ * tenant's OWN object, not the singleton `CONTROL_DATA` facade: a tenant's
+ * `billing_events` are written nowhere else, so the facade's copy has no join
+ * partner and reads as zero spend (see `finops/source.ts`). So `seedHour` seeds
+ * the spend into `tenantObjectDb(tenant)`, and `beforeEach` registers every
+ * fixture tenant in the `tenant_databases` roster the fleet fan-out enumerates.
+ * The EPISODES are authoritative in each tenant object too (no control mirror —
+ * the `episodes()` helper below reads them by fanning out, like the operator
+ * view does). The tuning knobs (`quota_policies`) and the `spend_throttles`
+ * projection still live on the control facade, which is where the pass reads and
+ * writes them.
  */
 import { SELF, env } from "cloudflare:test";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { SPEND_ANOMALY_CLAIM_LEASE_SECS, monthBoundsUnix } from "../src/finops/pass.js";
 import type { ControlPlaneBindings } from "../src/ports.js";
 import { runScheduledTick } from "../src/schedule/scheduled.js";
+import { FLEET_FANOUT_MAX_TENANTS } from "../src/store/tenant-fanout.js";
 import { applySchema, db, resetD1, seedBillingEvents, seedRequestLogs } from "./d1.js";
 import { BASE, arm, bearer, operatorKey, tenantKey } from "./harness.js";
-import { tenantObjectDb } from "./tenant-object.js";
+import { registerObjectTenants, tenantObjectDb } from "./tenant-object.js";
 
 /** One hour, the default detection window. */
 const HOUR = 3_600;
@@ -152,8 +165,14 @@ async function seedHour(
       event: { cost_usd: costUsd / requests, usage: { total_tokens: 100 } },
     });
   }
-  await seedRequestLogs(logs);
-  await seedBillingEvents(events);
+  // The detector reads the join from the tenant's OWN object (its
+  // `billing_events` live nowhere else), so the spend is seeded THERE — the
+  // control facade's copy would have no join partner and read as zero. The
+  // three-arg `seedBillingEvents` writes the tenant-object shape (NOT NULL
+  // `tenant_id`); registration into the fan-out roster happens in `beforeEach`.
+  const tenantDb = tenantObjectDb(tenant);
+  await seedRequestLogs(logs, tenantDb);
+  await seedBillingEvents(events, tenantDb, tenant);
 }
 
 /** A flat baseline of `usd` per hour for `windows` hours before the window. */
@@ -163,11 +182,18 @@ async function seedFlatBaseline(tenant: string, usd: number, windows = 24): Prom
   }
 }
 
-/** Set a tenant-scope quota policy row (the tuning surface). */
+/**
+ * Set a tenant-scope quota policy row (the tuning surface).
+ *
+ * The detector now reads its tuning from each tenant's OWN object (the
+ * `quota_policies` enforcement row moved there; `finops/pass.ts` fans out over
+ * the objects), so the row is seeded THERE — the control facade's copy is the
+ * mirror the cutover retires and would no longer be read.
+ */
 async function setPolicy(tenant: string, columns: Record<string, number | null>): Promise<void> {
   const names = Object.keys(columns);
   const assignments = names.map((name) => `${name} = excluded.${name}`).join(", ");
-  await db()
+  await tenantObjectDb(tenant)
     .prepare(
       `INSERT INTO quota_policies (id, scope_type, scope_id${names.map((n) => `, ${n}`).join("")})
        VALUES (?, 'tenant', ?${names.map(() => ", ?").join("")})
@@ -198,10 +224,24 @@ interface EpisodeRow {
 }
 
 async function episodes(): Promise<EpisodeRow[]> {
-  const rows = await db()
-    .prepare("SELECT * FROM spend_anomaly_episodes ORDER BY signal, scope_id")
-    .all<EpisodeRow>();
-  return [...rows.results];
+  // Episodes are authoritative in — and read only from — each tenant's OWN
+  // object now; the control-facade mirror was removed (see `finops/pass.ts`),
+  // and the operator fleet view reads them by fanning out to the objects. So the
+  // fleet assertion here assembles the same way: read each registered tenant's
+  // object and concatenate. Episode ids embed the scope, so the sets are
+  // disjoint across tenants and no dedup is needed; the (signal, scope_id) sort
+  // reproduces the old `ORDER BY signal, scope_id`.
+  const perTenant = await Promise.all(
+    ANOMALY_TENANTS.map(async (tenantId) => {
+      const rows = await tenantObjectDb(tenantId)
+        .prepare("SELECT * FROM spend_anomaly_episodes")
+        .all<EpisodeRow>();
+      return rows.results;
+    }),
+  );
+  return perTenant
+    .flat()
+    .sort((a, b) => a.signal.localeCompare(b.signal) || a.scope_id.localeCompare(b.scope_id));
 }
 
 interface ThrottleRow {
@@ -218,17 +258,53 @@ async function throttles(): Promise<ThrottleRow[]> {
   return [...rows.results];
 }
 
+/**
+ * The throttle rows the auto-throttle SHADOW-wrote into each tenant's own
+ * object, read straight off the objects (not the control facade). Proves the
+ * DO-side `spend_throttles` table is populated ahead of the admission cutover.
+ */
+async function tenantThrottles(): Promise<ThrottleRow[]> {
+  const perTenant = await Promise.all(
+    ANOMALY_TENANTS.map(async (tenantId) => {
+      const rows = await tenantObjectDb(tenantId)
+        .prepare("SELECT * FROM spend_throttles ORDER BY scope_id")
+        .all<ThrottleRow>();
+      return [...rows.results];
+    }),
+  );
+  return perTenant.flat().sort((a, b) => a.scope_id.localeCompare(b.scope_id));
+}
+
 beforeAll(async () => {
   await applySchema();
 });
 
 beforeEach(async () => {
   await resetD1();
+  // The tenant objects are addressed by `idFromName` and survive `resetD1`
+  // (which only wipes the control facade), so the per-object spend history and
+  // the authoritative episodes are cleared explicitly between tests.
   await Promise.all(
-    ANOMALY_TENANTS.map((tenantId) =>
-      tenantObjectDb(tenantId).prepare("DELETE FROM spend_anomaly_episodes").run(),
-    ),
+    ANOMALY_TENANTS.map(async (tenantId) => {
+      const tenant = tenantObjectDb(tenantId);
+      await tenant.batch([
+        tenant.prepare("DELETE FROM spend_anomaly_episodes"),
+        tenant.prepare("DELETE FROM request_logs"),
+        tenant.prepare("DELETE FROM billing_events"),
+        // The tuning surface now lives in the object too (`setPolicy` seeds it
+        // here); a leftover row would re-tune the next test's detector.
+        tenant.prepare("DELETE FROM quota_policies"),
+        // The auto-throttle now shadow-writes here too; a leftover brake would
+        // bleed into the next test's throttle assertions.
+        tenant.prepare("DELETE FROM spend_throttles"),
+      ]);
+    }),
   );
+  // The fleet fan-out reads the `tenant_databases` roster to know who exists;
+  // `resetD1` wiped it, so the fixture tenants are re-registered as
+  // durable-object tenants here (the production onboarding path writes this row
+  // the moment a tenant is created).
+  await registerObjectTenants(ANOMALY_TENANTS);
   installReceiver();
 });
 
@@ -284,9 +360,15 @@ describe("burn-rate anomaly detection", () => {
     expect(authoritative.results).toHaveLength(1);
     expect(authoritative.results[0]?.id).toBe(spike?.id);
     expect(authoritative.results[0]?.notified_count).toBe(1);
-    expect((open[0] as EpisodeRow & { projection_key?: string }).projection_key).toContain(
-      ":acme:",
-    );
+
+    // THE RED LINE: the shared control facade holds NO copy of the episode. It
+    // is authoritative in acme's own object and read back from there; the pass
+    // no longer mirrors it to the fleet store (see `finops/pass.ts`), and the
+    // operator view fans out to the objects instead.
+    const facadeCopy = await db()
+      .prepare("SELECT count(*) AS n FROM spend_anomaly_episodes")
+      .first<{ n: number }>();
+    expect(facadeCopy?.n).toBe(0);
 
     // The webhook is the operator-visible half; an episode row nobody is told
     // about is the defect one layer in.
@@ -632,6 +714,15 @@ describe("auto-throttle", () => {
     // invisible from the request path.
     expect(rows[0]?.expires_at_unix).toBe(NOW + 3_600);
     expect(delivered[0]?.body.auto_throttled_rpm).toBe(5);
+
+    // The SAME row is shadow-written into the owning tenant's object, so the
+    // DO-side `spend_throttles` table is already populated when the admission
+    // readers are later cut over to it (the deploy-ordering invariant).
+    const shadow = await tenantThrottles();
+    expect(shadow).toHaveLength(1);
+    expect(shadow[0]?.scope_id).toBe("brake");
+    expect(shadow[0]?.rpm_limit).toBe(5);
+    expect(shadow[0]?.expires_at_unix).toBe(NOW + 3_600);
   });
 
   it("does not throttle on a warning", async () => {
@@ -895,6 +986,31 @@ describe("GET /admin/v1/spend-anomalies", () => {
     expect((await read(operatorKey.secret, "?status=resolved")).total).toBe(0);
     expect((await read(operatorKey.secret, "?signal=forecast_overrun")).total).toBe(0);
     expect((await read(operatorKey.secret, "?severity=critical")).total).toBe(2);
+  });
+
+  it("bounds a fleet read to a roster page and reports whether more remain", async () => {
+    // A fleet read is a live fan-out over the tenant OBJECTS — there is no
+    // shared table to scan — so the response carries the roster page an operator
+    // walks with `?tenant_offset=`. Every registered tenant fits under one page
+    // here, so the whole roster is covered in one request and nothing remains.
+    const response = await SELF.fetch(`${BASE}/admin/v1/spend-anomalies`, {
+      headers: bearer(operatorKey.secret),
+    });
+    expect(response.status, await response.clone().text()).toBe(200);
+    const body = (await response.json()) as ListBody & {
+      readonly tenant_page: {
+        readonly offset: number;
+        readonly limit: number;
+        readonly total: number;
+        readonly has_more: boolean;
+      };
+    };
+    expect(body.tenant_page.offset).toBe(0);
+    expect(body.tenant_page.limit).toBe(FLEET_FANOUT_MAX_TENANTS);
+    expect(body.tenant_page.total).toBe(ANOMALY_TENANTS.length);
+    expect(body.tenant_page.has_more).toBe(false);
+    // The two anomalous tenants are found by reading their objects, not a mirror.
+    expect(body.total).toBe(2);
   });
 });
 

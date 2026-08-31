@@ -310,16 +310,37 @@ describe("tenant-authoritative request evidence reads", () => {
     ]);
   });
 
-  it("labels platform projection-backed agent responses with source and as-of time", async () => {
+  it("serves the operator agent-run LIST from the tenant objects, not the forged control mirror", async () => {
     await seedAuthoritativeEvidence();
 
     const list = await SELF.fetch(`${BASE}/admin/v1/agent-runs`, {
       headers: bearer(operatorKey.secret),
     });
-    const listBody = (await list.json()) as Record<string, unknown>;
-    expect(listBody.source).toBe("derived_control_projection");
-    expect(listBody.as_of_unix).toEqual(expect.any(Number));
+    expect(list.status, await list.clone().text()).toBe(200);
+    const listBody = (await list.json()) as {
+      data: Record<string, unknown>[];
+      source?: unknown;
+      as_of_unix?: unknown;
+      tenant_page?: { offset: number; limit: number; total: number; has_more: boolean };
+    };
+    // The operator list is now a bounded live fan-out over the tenant objects:
+    // the run is served from its OWNER's object (`tenant-object`), never the
+    // forged control mirror (`forged-control`), and the envelope carries a
+    // `tenant_page` roster cursor instead of the retired
+    // `derived_control_projection` freshness label.
+    expect(listBody.data).toEqual([
+      expect.objectContaining({ id: RUN_ID, source: "tenant-object" }),
+    ]);
+    expect(JSON.stringify(listBody)).not.toContain("forged-control");
+    expect(listBody.source).toBeUndefined();
+    expect(listBody.as_of_unix).toBeUndefined();
+    expect(listBody.tenant_page).toMatchObject({ has_more: false });
+    expect(listBody.tenant_page?.total).toEqual(expect.any(Number));
 
+    // The {run_id} TIMELINE is a SEPARATE handler still backed by the control
+    // projection for a platform operator naming no tenant — its cross-object
+    // collision contract (409 ambiguous_agent_run_id) needs a fan-out design of
+    // its own and is a deliberate follow-up — so it keeps the projection labels.
     const timeline = await SELF.fetch(`${BASE}/admin/v1/agent-runs/${RUN_ID}`, {
       headers: bearer(operatorKey.secret),
     });

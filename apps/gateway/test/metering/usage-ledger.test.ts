@@ -40,9 +40,8 @@ import { createGatewayApp } from "../../src/routes/index.js";
 import { tenantDatabase } from "../../src/tenancy/index.js";
 import { OPENAI_ROUTE } from "../inference/fixtures.js";
 import { interceptProviderFetch, providerJson } from "../inference/provider-mock.js";
-import { controlNamespaceOverD1 } from "../support/control-namespace.js";
 import { resetTenantBillingState, tenantObjectDb } from "../tenant-object.js";
-import { RecordingDatabase, RecordingQueue, resetMeteringTables } from "./d1-harness.js";
+import { RecordingQueue, resetMeteringTables } from "./d1-harness.js";
 import { FIXTURE_COST_USD, chargeFixture, pricedBook, usageFixture } from "./fixtures.js";
 
 const db = (env as unknown as { DB: D1Database }).DB;
@@ -213,7 +212,7 @@ describe("the loop: the metering drain accumulates into the tenant database", ()
     return { ...(env as unknown as Record<string, unknown>), BILLING: queue };
   }
 
-  test("a settled charge lands in usage_aggregate_rollups under the api key", async () => {
+  test("a settled charge lands in the tenant object and is never mirrored to control D1", async () => {
     const queue = new RecordingQueue();
     const sink = sinkFor(queue);
 
@@ -222,49 +221,47 @@ describe("the loop: the metering drain accumulates into the tenant database", ()
 
     expect(sink.stats.recorded).toBe(1);
     expect(sink.stats.aggregated).toBe(1);
+    // Authoritative side: the tenant object holds the aggregate and the monthly
+    // spend the admission gates read. (The tenant table has no `tenant` column —
+    // that dimension only ever existed on the retired control projection.)
     expect(await aggregateRows()).toEqual([{ total_tokens: 15, api_key_id: "key_metered" }]);
     expect(
-      await controlDb
-        .prepare(
-          "SELECT tenant, period_month, scope_type, scope_id, total_tokens, cost_usd " +
-            "FROM usage_monthly_rollups",
-        )
-        .all(),
-    ).toMatchObject({
-      results: [
-        {
-          tenant: "tenant_a",
-          scope_type: "tenant",
-          scope_id: "tenant_a",
-          total_tokens: 15,
-          cost_usd: FIXTURE_COST_USD,
-        },
-      ],
-    });
-    expect(
-      await controlDb
-        .prepare(
-          "SELECT tenant, logical_model, provider, api_key_id, total_tokens " +
-            "FROM usage_aggregate_rollups",
-        )
-        .all(),
-    ).toMatchObject({
-      results: [
-        {
-          tenant: "tenant_a",
-          logical_model: "gpt-4o-mini",
-          provider: "openai-main",
-          api_key_id: "key_metered",
-          total_tokens: 15,
-        },
-      ],
-    });
-    const presenceProjection = await controlDb
-      .prepare("SELECT tenant_id, api_key_id, request_count FROM observed_agent_presence")
-      .all();
-    expect(presenceProjection.results).toEqual([
-      { tenant_id: "tenant_a", api_key_id: "key_metered", request_count: 1 },
+      (
+        await tenantObjectDb("tenant_a")
+          .prepare(
+            "SELECT scope_type, scope_id, total_tokens, cost_usd " +
+              "FROM usage_monthly_rollups WHERE scope_type = 'tenant'",
+          )
+          .all()
+      ).results,
+    ).toMatchObject([
+      {
+        scope_type: "tenant",
+        scope_id: "tenant_a",
+        total_tokens: 15,
+        cost_usd: FIXTURE_COST_USD,
+      },
     ]);
+
+    // The no-tenant-data mirror red line: the retired control-D1 projection is
+    // never written — not for usage, not for presence — and no durable repair
+    // intent is stamped onto the tenant object either.
+    expect(
+      (await controlDb.prepare("SELECT tenant FROM usage_monthly_rollups").all()).results,
+    ).toEqual([]);
+    expect(
+      (await controlDb.prepare("SELECT tenant FROM usage_aggregate_rollups").all()).results,
+    ).toEqual([]);
+    expect(
+      (await controlDb.prepare("SELECT tenant_id FROM observed_agent_presence").all()).results,
+    ).toEqual([]);
+    expect(
+      (
+        await tenantObjectDb("tenant_a")
+          .prepare("SELECT source_id FROM usage_projection_retries")
+          .all()
+      ).results,
+    ).toEqual([]);
   });
 
   test("and in usage_monthly_rollups for every scope in the chain", async () => {
@@ -329,52 +326,6 @@ describe("the loop: the metering drain accumulates into the tenant database", ()
       accumulated_usd: 4.05e-6,
     });
     expect(burn?.period).toBe(periodMonthFromUnix(presence?.last_seen_at_unix ?? 0));
-  });
-
-  test("a control projection outage leaves a durable intent and repairs without re-accumulating", async () => {
-    const queue = new RecordingQueue();
-    const failingControl = new RecordingDatabase(controlDb);
-    failingControl.failure = new Error("control projection unavailable");
-    const sink = sinkFor(queue);
-    const failedEnv = {
-      ...bindings(queue),
-      CONTROL_DATA: controlNamespaceOverD1(failingControl),
-    };
-
-    sink.record(usageFixture({ requestId: ATTRIBUTION.requestId }));
-    await sink.flush({
-      env: failedEnv,
-      attribution: ATTRIBUTION,
-      usageDatabase: tenantObjectDb("tenant_a"),
-    });
-
-    const tenantDb = tenantObjectDb("tenant_a");
-    const pending = await tenantDb.prepare("SELECT source_id FROM usage_projection_retries").all();
-    expect(pending.results).toMatchObject([{ source_id: expect.any(String) }]);
-    const tenantAggregate = await tenantDb
-      .prepare(
-        "SELECT r.total_tokens AS total_tokens, c.api_key_id AS api_key_id " +
-          "FROM usage_aggregate_rollups r JOIN tenant_contexts c ON c.id = r.tenant_context_id",
-      )
-      .all<RollupRow>();
-    expect(tenantAggregate.results).toEqual([{ total_tokens: 15, api_key_id: "key_metered" }]);
-
-    failingControl.failure = undefined;
-    await sink.sweepUsageProjections({ env: bindings(queue) }, ["tenant_a"], 2_000_000_000);
-
-    const repaired = await tenantDb.prepare("SELECT source_id FROM usage_projection_retries").all();
-    expect(repaired.results).toEqual([]);
-    const repairedAggregate = await tenantDb
-      .prepare(
-        "SELECT r.total_tokens AS total_tokens, c.api_key_id AS api_key_id " +
-          "FROM usage_aggregate_rollups r JOIN tenant_contexts c ON c.id = r.tenant_context_id",
-      )
-      .all<RollupRow>();
-    expect(repairedAggregate.results).toEqual([{ total_tokens: 15, api_key_id: "key_metered" }]);
-    const projected = await controlDb
-      .prepare("SELECT tenant, total_tokens FROM usage_aggregate_rollups")
-      .all();
-    expect(projected.results).toMatchObject([{ tenant: "tenant_a", total_tokens: 15 }]);
   });
 
   test("a REPLAY repairs idempotently without re-adding usage", async () => {
@@ -483,73 +434,35 @@ describe("the loop: the metering drain accumulates into the tenant database", ()
     expect(await aggregateRows()).toEqual([]);
   });
 
-  test("usage projection repair drains every due page", async () => {
+  test("a control outage no longer stamps a durable usage-projection intent", async () => {
+    // The control-D1 usage/presence projection is retired: even when the control
+    // namespace is entirely absent from the drain env, the settlement succeeds on
+    // the tenant object and NO `usage_projection_retries` intent is written,
+    // because there is no projection left to repair.
     const queue = new RecordingQueue();
-    const failingControl = new RecordingDatabase(controlDb);
-    failingControl.failure = new Error("control projection unavailable");
     const sink = sinkFor(queue);
     const tenantDb = tenantObjectDb("tenant_a");
-    const failedEnv = { ...bindings(queue), CONTROL_DATA: controlNamespaceOverD1(failingControl) };
+    const { CONTROL_DATA: _noControlData, CONTROL_DB: _noControlDb, ...withoutControl } =
+      bindings(queue);
 
-    for (let index = 0; index < 3; index += 1) {
-      const requestId = `fg-projection-page-${index}`;
-      sink.record(usageFixture({ requestId }));
-      await sink.flush({
-        env: failedEnv,
-        attribution: { ...ATTRIBUTION, requestId },
-        usageDatabase: tenantDb,
-      });
-    }
-    expect(
-      (await tenantDb.prepare("SELECT source_id FROM usage_projection_retries").all()).results,
-    ).toHaveLength(3);
-
-    failingControl.failure = undefined;
-    await sink.sweepUsageProjections({ env: bindings(queue) }, ["tenant_a"], 2_000_000_000, 2);
-
-    expect(
-      (await tenantDb.prepare("SELECT source_id FROM usage_projection_retries").all()).results,
-    ).toEqual([]);
-    expect(
-      (await controlDb.prepare("SELECT tenant, total_tokens FROM usage_monthly_rollups").all())
-        .results,
-    ).toContainEqual({ tenant: "tenant_a", total_tokens: 45 });
-  });
-
-  test("usage projection repair rejects a row whose tenant disagrees with its payload", async () => {
-    const queue = new RecordingQueue();
-    const failingControl = new RecordingDatabase(controlDb);
-    failingControl.failure = new Error("control projection unavailable");
-    const sink = sinkFor(queue);
-    const tenantDb = tenantObjectDb("tenant_a");
-    const requestId = "fg-projection-tenant-mismatch";
-
-    sink.record(usageFixture({ requestId }));
+    sink.record(usageFixture({ requestId: ATTRIBUTION.requestId }));
     await sink.flush({
-      env: { ...bindings(queue), CONTROL_DATA: controlNamespaceOverD1(failingControl) },
-      attribution: { ...ATTRIBUTION, requestId },
+      env: withoutControl,
+      attribution: ATTRIBUTION,
       usageDatabase: tenantDb,
     });
-    const sourceId = (
-      await tenantDb
-        .prepare("SELECT source_id FROM usage_projection_retries")
-        .first<{ source_id: string }>()
-    )?.source_id;
-    if (sourceId === undefined) throw new Error("expected a durable usage projection retry");
-    await tenantDb
-      .prepare("UPDATE usage_projection_retries SET tenant_id = 'tenant_b' WHERE source_id = ?")
-      .bind(sourceId)
-      .run();
 
-    failingControl.failure = undefined;
-    await sink.sweepUsageProjections({ env: bindings(queue) }, ["tenant_a"], 2_000_000_000, 2);
-
+    expect(sink.stats.aggregated).toBe(1);
     expect(
       (await tenantDb.prepare("SELECT source_id FROM usage_projection_retries").all()).results,
-    ).toEqual([{ source_id: sourceId }]);
-    expect(
-      (await controlDb.prepare("SELECT tenant FROM usage_monthly_rollups").all()).results,
     ).toEqual([]);
+    const tenantAggregate = await tenantDb
+      .prepare(
+        "SELECT r.total_tokens AS total_tokens, c.api_key_id AS api_key_id " +
+          "FROM usage_aggregate_rollups r JOIN tenant_contexts c ON c.id = r.tenant_context_id",
+      )
+      .all<RollupRow>();
+    expect(tenantAggregate.results).toEqual([{ total_tokens: 15, api_key_id: "key_metered" }]);
   });
 });
 

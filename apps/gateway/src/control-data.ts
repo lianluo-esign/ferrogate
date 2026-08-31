@@ -11,10 +11,15 @@
  */
 import {
   type ControlDataNamespaceLike,
+  type PlatformDataNamespaceLike,
   controlD1ReplicaDatabase,
   controlDataObjectDatabase,
+  platformDataObjectDatabase,
 } from "@ferrogate/storage";
-import type { ControlDataNamespace } from "@ferrogate/storage/durable-objects";
+import type {
+  ControlDataNamespace,
+  PlatformDataNamespace,
+} from "@ferrogate/storage/durable-objects";
 import { HttpError } from "./middleware/errors.js";
 
 /**
@@ -43,6 +48,13 @@ export interface ControlDataBindings {
   readonly GATEWAY_CONTROL_STORAGE?: string;
   readonly CONTROL_DATA?: ControlDataNamespace;
   readonly CONTROL_D1?: D1Database;
+  /**
+   * The platform singleton (Zero-D1 Plan B). Home for platform/unattributed
+   * (`tenant IS NULL`) evidence. Unlike CONTROL there is no D1 posture and no
+   * fallback binding: the object is the only backend. Optional so a unit env
+   * or a not-yet-migrated Worker degrades to skipping the platform write leg.
+   */
+  readonly PLATFORM_DATA?: PlatformDataNamespace;
 }
 
 /** Parse `GATEWAY_CONTROL_STORAGE`; empty and absent select the DO posture. */
@@ -112,6 +124,31 @@ export function controlDatabaseFrom(env: unknown): D1Database | undefined {
 
   if (bindings.CONTROL_DATA !== undefined) {
     return controlDataObjectDatabase(bindings.CONTROL_DATA as unknown as ControlDataNamespaceLike);
+  }
+  return undefined;
+}
+
+/**
+ * Resolve the platform-evidence database from the PLATFORM_DATA facade
+ * (Zero-D1 Plan B).
+ *
+ * The platform sibling of {@link controlDatabaseFrom}, deliberately simpler:
+ * the platform object is a pure Durable Object with no D1 posture and no
+ * fallback binding, so there is no `GATEWAY_*_STORAGE` switch to parse. When
+ * PLATFORM_DATA is bound (the production shape) the caller gets the facade;
+ * when it is NOT bound — a unit env, or a Worker the stanza has not yet reached
+ * — the seam returns `undefined`, and the caller's platform write leg is
+ * skipped rather than 503-ing. The control projection write it runs alongside
+ * is unaffected, so evidence is never dropped during the rollout window.
+ */
+export function platformDatabaseFrom(env: unknown): D1Database | undefined {
+  if (!isObject(env)) return undefined;
+  // Read via `(env as T).X` so the env-var-drift scanner sees a genuine source
+  // read of PLATFORM_DATA (its `ENV_DOT` arm anchors on `env`, not a renamed
+  // `bindings` local), exactly as CONTROL_D1 is read in `controlDatabaseFrom`.
+  const platformData = (env as ControlDataBindings).PLATFORM_DATA;
+  if (platformData !== undefined) {
+    return platformDataObjectDatabase(platformData as unknown as PlatformDataNamespaceLike);
   }
   return undefined;
 }

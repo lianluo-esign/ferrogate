@@ -50,7 +50,6 @@ import {
   sweepResponseConversations,
   tenantModelCatalogFromD1,
 } from "./inference/index.js";
-import { sweepManagedIsolationEvidence } from "./managed-evidence-projection.js";
 import {
   createMeteringUsageSink,
   meteringBindingsFromEnv,
@@ -548,9 +547,18 @@ export async function gatewayScheduled(
     tenantRouter = resolverForEnv(env as TenancyBindings).router;
     tenantIds = await tenantRouter.provisionedTenants();
     await usage.sweep({ env, ctx }, undefined, tenantIds);
-    await usage.sweepUsageProjections({ env, ctx }, tenantIds);
+    // The usage/presence → control-D1 projection repair sweep is intentionally
+    // NOT run (removed with `MeteringUsageSink.sweepUsageProjections` and
+    // `src/metering/usage-projection.ts`): those rows are tenant-object
+    // authoritative and no longer mirrored to control D1 (no-tenant-data mirror
+    // red line). Admission reads the tenant object directly; nothing reads the
+    // control copy.
     await sweepExperimentProjections(env, tenantIds);
-    await sweepManagedIsolationEvidence(env, tenantRouter, tenantIds);
+    // The managed-isolation-evidence → control-D1 rebuild sweep is intentionally
+    // NOT run (removed with `src/managed-evidence-projection.ts`): that evidence
+    // is tenant-object authoritative and no longer mirrored to control D1
+    // (no-tenant-data mirror red line). Nothing reads the control copy.
+    //
     // The asset-audit → control-D1 projection sweep is intentionally NOT run.
     //
     // It re-UPSERTed EVERY tenant's entire `audit_events` set into control D1 on

@@ -127,29 +127,15 @@ import {
   eventWithTenantAttribution,
   usageWriteFor,
   withUsageDerivedRollups,
-  withUsageProjectionRetry,
 } from "./usage-ledger.js";
-import {
-  clearUsageProjectionRetry,
-  deferUsageProjectionRetry,
-  listUsageProjectionRetries,
-  projectUsageProjectionRetry,
-  projectUsageRollups,
-  usageProjectionRequestFor,
-} from "./usage-projection.js";
 
-async function projectWithRetry(work: () => Promise<void>): Promise<void> {
-  let lastError: unknown;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    try {
-      await work();
-      return;
-    } catch (error) {
-      lastError = error;
-    }
-  }
-  throw lastError instanceof Error ? lastError : new Error(String(lastError));
-}
+// The tenant-derived control-D1 usage/presence projection (`./usage-projection.ts`)
+// is RETIRED (no-tenant-data mirror red line): the tenant object is the sole
+// authority for `usage_*_rollups` and `observed_agent_presence`, admission reads
+// it directly, and operator fleet views fan out over tenant objects. Nothing
+// writes those rows to control D1 any more, so the producer, its durable
+// per-tenant repair intents (`usage_projection_retries`) and the retry helper
+// are gone.
 
 /** Resolve the billing authority from the charge, never from the draining request. */
 function tenantIdForCharge(
@@ -180,8 +166,6 @@ interface MeteringBackend {
    * when both are backed by the same tenant Durable Object.
    */
   readonly usageDatabase?: D1Database | undefined;
-  /** Control-D1 destination for replace-style tenant-derived usage views. */
-  readonly usageProjectionDatabase?: D1Database | undefined;
   /**
    * The proactive budget-threshold alerter (#170/#228), when this deployment
    * configures one — see `./budget-alerts.ts`.
@@ -529,7 +513,6 @@ export class MeteringUsageSink implements UsageSink {
     const database = this.#bindings.database(env, tenantId);
     const queue = this.#bindings.queue(env);
     const usageDatabase = this.#bindings.usageDatabase?.(env, tenantId);
-    const usageProjectionDatabase = this.#bindings.usageProjectionDatabase?.(env);
     const budgetAlerts = budgetAlertPortsFrom(env);
     const resolved: MeteringBackend = {
       ledger:
@@ -538,7 +521,6 @@ export class MeteringUsageSink implements UsageSink {
           : new D1LedgerStore(database, tenantId === undefined ? {} : { tenantId }),
       publisher: queue === undefined ? fallback.publisher : new QueueBillingReportPublisher(queue),
       ...(usageDatabase === undefined ? {} : { usageDatabase }),
-      ...(usageProjectionDatabase === undefined ? {} : { usageProjectionDatabase }),
       ...(budgetAlerts === undefined ? {} : { budgetAlerts }),
     };
     byTenant.set(key, resolved);
@@ -975,7 +957,6 @@ export class MeteringUsageSink implements UsageSink {
       throw new Error(`tenant usage database is unavailable for ${tenantId}`);
     }
     if (db === undefined) return;
-    const projectionDatabase = backend.usageProjectionDatabase;
     const baseWrite = usageWriteFor(charge, attribution);
     if (baseWrite === null) {
       // No scope at all: `persistUsageAggregate` would refuse this, and rightly
@@ -989,11 +970,7 @@ export class MeteringUsageSink implements UsageSink {
       );
       throw new Error(`usage charge ${charge.id} has no tenant/project scope`);
     }
-    const derivedWrite = withUsageDerivedRollups(baseWrite, charge, attribution);
-    const write =
-      projectionDatabase === undefined
-        ? derivedWrite
-        : withUsageProjectionRetry(derivedWrite, charge.id);
+    const write = withUsageDerivedRollups(baseWrite, charge, attribution);
     try {
       await d1UsageAggregateSink(db, tenantId).accumulate(write);
       if (countStats) this.#stats.aggregated += 1;
@@ -1003,74 +980,16 @@ export class MeteringUsageSink implements UsageSink {
       // tenant claim makes the next attempt safe even if the control claim won.
       throw error;
     }
-    if (projectionDatabase !== undefined) {
-      try {
-        await projectWithRetry(() =>
-          projectUsageRollups(db, projectionDatabase, usageProjectionRequestFor(write)),
-        );
-        await clearUsageProjectionRetry(db, write.projectionRetry?.sourceId ?? charge.id);
-      } catch (error) {
-        // Object state is authoritative. The durable intent remains for the
-        // scheduled repair and must not hold billing delivery hostage.
-        this.#report("usage_projection", error);
-      }
-    }
+    // No control-D1 projection follows: the tenant object is authoritative for
+    // `usage_*_rollups`/`observed_agent_presence` and admission reads it directly
+    // (no-tenant-data mirror red line).
     await this.#budgetAlerts(backend, charge, attribution);
   }
 
-  /** Repair tenant-local control projection intents without replaying usage. */
-  async sweepUsageProjections(
-    rc: MeteringDrainContext,
-    tenantIds: readonly string[],
-    nowUnixSeconds?: number,
-    batchSize = BILLING_OUTBOX_BATCH,
-  ): Promise<void> {
-    const backend = this.#backend(rc.env);
-    const projectionDatabase = backend.usageProjectionDatabase;
-    const bindings = this.#bindings;
-    const resolveTenantDatabase = bindings?.usageDatabase;
-    if (projectionDatabase === undefined || resolveTenantDatabase === undefined) return;
-    const now = nowUnixSeconds ?? this.#clock.nowUnixSeconds();
-    const pageSize = Math.max(1, Math.trunc(batchSize));
-    for (const tenantId of tenantIds) {
-      if (tenantId.trim() === "") continue;
-      const tenantDatabase = resolveTenantDatabase(rc.env, tenantId);
-      if (tenantDatabase === undefined) continue;
-      try {
-        for (;;) {
-          const rows = await listUsageProjectionRetries(tenantDatabase, now, pageSize);
-          if (rows.length === 0) break;
-          let stateWriteFailed = false;
-          for (const row of rows) {
-            try {
-              if (row.tenantId.trim() !== tenantId) {
-                throw new Error(
-                  `usage projection retry ${row.sourceId} belongs to ${row.tenantId}, not ${tenantId}`,
-                );
-              }
-              await projectWithRetry(() =>
-                projectUsageProjectionRetry(tenantDatabase, projectionDatabase, row),
-              );
-              await clearUsageProjectionRetry(tenantDatabase, row.sourceId);
-            } catch (error) {
-              try {
-                await deferUsageProjectionRetry(tenantDatabase, row, now);
-              } catch (deferError) {
-                stateWriteFailed = true;
-                this.#report("usage_projection_retry_defer", deferError);
-              }
-              this.#report("usage_projection_retry", error);
-            }
-          }
-          // A due row whose retry-state update also failed would be returned
-          // forever by the same page. Leave it for the next scheduled pass.
-          if (stateWriteFailed) break;
-        }
-      } catch (error) {
-        this.#report("usage_projection_list", error);
-      }
-    }
-  }
+  // `sweepUsageProjections` is REMOVED: it repaired the retired control-D1
+  // usage/presence projection from the tenant `usage_projection_retries` outbox.
+  // With the projection gone (no-tenant-data mirror red line) there is nothing to
+  // repair — the tenant object is authoritative and admission reads it directly.
 
   /**
    * A1 (#170/#228) — proactive budget-threshold alerting, fired from the same

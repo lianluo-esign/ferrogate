@@ -76,11 +76,34 @@ import {
   spendAlertDeliveryFrom,
 } from "./notify.js";
 import { SPEND_ANOMALY_POLICY_COLUMNS, budgetFromRow, tuningFromRow } from "./policy.js";
-import { readPeriodSpend, readSpendBuckets } from "./source.js";
+import {
+  readPeriodSpendFleet,
+  readSpendBucketsFleet,
+  readTenantPoliciesFleet,
+} from "./source.js";
 
 export const SPEND_ANOMALY_EPISODE_TABLE = "spend_anomaly_episodes";
 export const SPEND_ANOMALY_RUN_TABLE = "spend_anomaly_runs";
 export const SPEND_THROTTLE_TABLE = "spend_throttles";
+
+/**
+ * The auto-throttle upsert. Extracted so the authoritative control write and the
+ * best-effort tenant-object shadow (below) run the IDENTICAL statement — the two
+ * `spend_throttles` schemas are byte-identical by construction
+ * (`0032_spend_throttles.sql`), so the same bind list is total against both.
+ *
+ * `ON CONFLICT DO UPDATE` with a `MIN` on the RPM keeps the TIGHTER of two
+ * signals firing critical for the same scope; the expiry only moves forward, so
+ * a still-firing episode keeps the throttle alive without a second row.
+ */
+const SPEND_THROTTLE_UPSERT_SQL = `INSERT INTO ${SPEND_THROTTLE_TABLE}
+     (scope_type, scope_id, rpm_limit, reason, episode_id, created_at_unix, expires_at_unix)
+   VALUES ('tenant', ?, ?, ?, ?, ?, ?)
+   ON CONFLICT (scope_type, scope_id) DO UPDATE SET
+     rpm_limit = MIN(rpm_limit, excluded.rpm_limit),
+     reason = excluded.reason,
+     episode_id = excluded.episode_id,
+     expires_at_unix = MAX(expires_at_unix, excluded.expires_at_unix)`;
 /** A dead isolate must not suppress the same closed window forever. */
 export const SPEND_ANOMALY_CLAIM_LEASE_SECS = 15 * 60;
 
@@ -155,11 +178,6 @@ interface EpisodeProjectionRow extends EpisodeRow {
   readonly detail_json: string;
 }
 
-interface EpisodeStore {
-  readonly authoritative: D1Database;
-  readonly projection: D1Database;
-}
-
 const EPISODE_COLUMNS = [
   "id",
   "scope_type",
@@ -186,40 +204,6 @@ const EPISODE_COLUMNS = [
   "period_month",
   "detail_json",
 ] as const;
-
-const EPISODE_PROJECTION_UPSERT_SQL = `
-  INSERT INTO ${SPEND_ANOMALY_EPISODE_TABLE} (
-    projection_key, ${EPISODE_COLUMNS.join(", ")}
-  ) VALUES (?1, ${EPISODE_COLUMNS.map((_, index) => `?${index + 2}`).join(", ")})
-  ON CONFLICT (projection_key) DO UPDATE SET
-    id = excluded.id,
-    scope_type = excluded.scope_type,
-    scope_id = excluded.scope_id,
-    signal = excluded.signal,
-    severity = excluded.severity,
-    peak_severity = excluded.peak_severity,
-    window_start_unix = excluded.window_start_unix,
-    window_secs = excluded.window_secs,
-    opened_at_unix = excluded.opened_at_unix,
-    last_seen_unix = excluded.last_seen_unix,
-    resolved_at_unix = excluded.resolved_at_unix,
-    windows_seen = excluded.windows_seen,
-    notified_count = excluded.notified_count,
-    last_notified_unix = excluded.last_notified_unix,
-    observed_usd = excluded.observed_usd,
-    baseline_usd = excluded.baseline_usd,
-    threshold_usd = excluded.threshold_usd,
-    bound_by = excluded.bound_by,
-    baseline_windows = excluded.baseline_windows,
-    active_windows = excluded.active_windows,
-    projected_usd = excluded.projected_usd,
-    budget_usd = excluded.budget_usd,
-    period_month = excluded.period_month,
-    detail_json = excluded.detail_json`;
-
-function evidenceProjectionKey(tenantId: string, logicalId: string): string {
-  return `${Array.from(tenantId).length}:${tenantId}:${logicalId}`;
-}
 
 /** One scope's evaluation, before anything is written. */
 interface ScopeEvaluation {
@@ -304,20 +288,24 @@ async function evaluateWindow(
     const period = monthBoundsUnix(windowStartUnix);
     const periodMonth = periodMonthFromUnix(windowStartUnix);
     const windowEnd = windowStartUnix + windowSecs;
-    const episodeRouter = resolveTenantStorage(env);
-    const episodeStores = new Map<string, EpisodeStore>();
-    const episodeStoreFor = async (tenantId: string): Promise<EpisodeStore> => {
-      const existing = episodeStores.get(tenantId);
+    // ONE router for both legs the object cutover moved to per-tenant storage:
+    // the spend READ (`billing_events` lives only in each tenant's own object,
+    // so the fleet query below fans out) and the episode WRITE (authoritative in
+    // — and read back from — the object; the operator fleet view fans out to the
+    // objects too, so there is no control-facade mirror to keep in sync).
+    const tenantRouter = resolveTenantStorage(env);
+    const episodeObjects = new Map<string, D1Database>();
+    const episodeObjectFor = async (tenantId: string): Promise<D1Database> => {
+      const existing = episodeObjects.get(tenantId);
       if (existing !== undefined) return existing;
-      const handle = await episodeRouter.forTenant(tenantId);
+      const handle = await tenantRouter.forTenant(tenantId);
       if (handle.source !== "durable_object") {
         throw new Error(
           `spend anomaly episodes require TenantDataObject storage for tenant ${tenantId}; got ${handle.source}`,
         );
       }
-      const store: EpisodeStore = { authoritative: handle.db, projection: db };
-      episodeStores.set(tenantId, store);
-      return store;
+      episodeObjects.set(tenantId, handle.db);
+      return handle.db;
     };
 
     // The policies are read FIRST, and the bucket query is then widened to the
@@ -326,7 +314,12 @@ async function evaluateWindow(
     // inert: a scope that asked for 48 windows had only 24 fetched, so the knob
     // could not have worked however the slice was written. `tuningFromRow` bounds
     // the value, so this range is bounded too.
-    const policies = await readTenantPolicies(db);
+    // The tuning is read from each tenant's OWN object (the `quota_policies`
+    // enforcement row moved there with the rest of the tenant-private data), by
+    // the SAME fan-out and off the SAME roster as the spend read below — so the
+    // scopes align and no tenant's tuning is read from a shared control mirror.
+    const policyRows = await readTenantPoliciesFleet(tenantRouter, SPEND_ANOMALY_POLICY_COLUMNS);
+    const policies = new Map(policyRows.map((row) => [String(row.scope_id), row]));
     const tunings = new Map<string, SpendAnomalyTuning>();
     let widestBaseline = tuningFromRow(undefined).baselineWindows;
     for (const [scopeId, row] of policies) {
@@ -337,8 +330,8 @@ async function evaluateWindow(
     const baselineFrom = windowStartUnix - widestBaseline * windowSecs;
 
     const [buckets, periodSpend] = await Promise.all([
-      readSpendBuckets(db, baselineFrom, windowEnd, windowSecs),
-      readPeriodSpend(db, period.startUnix, windowEnd),
+      readSpendBucketsFleet(tenantRouter, baselineFrom, windowEnd, windowSecs),
+      readPeriodSpendFleet(tenantRouter, period.startUnix, windowEnd),
     ]);
 
     // Index the buckets by tenant. A tenant appears here iff it produced at least
@@ -427,22 +420,16 @@ async function evaluateWindow(
           // "consecutive windows this was true for" instead of "windows since it
           // was first true", which are different numbers during a flapping
           // incident and only the first is actionable.
-          const episodeStore = await episodeStoreFor(evaluation.scopeId);
-          const closed = await closeEpisode(
-            episodeStore.authoritative,
-            evaluation.scopeId,
-            signal,
-            now,
-          );
+          const episodeDb = await episodeObjectFor(evaluation.scopeId);
+          const closed = await closeEpisode(episodeDb, evaluation.scopeId, signal, now);
           if (closed !== null) {
-            await projectEpisode(episodeStore, closed.id);
             resolved += 1;
           }
           continue;
         }
 
-        const episodeStore = await episodeStoreFor(evaluation.scopeId);
-        const outcome = await upsertEpisode(episodeStore.authoritative, {
+        const episodeDb = await episodeObjectFor(evaluation.scopeId);
+        const outcome = await upsertEpisode(episodeDb, {
           scopeId: evaluation.scopeId,
           signal,
           windowStartUnix,
@@ -451,7 +438,6 @@ async function evaluateWindow(
           periodMonth,
           evaluation,
         });
-        await projectEpisode(episodeStore, outcome.episodeId);
         if (outcome.opened) opened += 1;
 
         // AUTO-THROTTLE, before the notification: an operator reading the alert
@@ -462,14 +448,21 @@ async function evaluateWindow(
         let throttledRpm: number | null = null;
         const rpm = evaluation.tuning.autoThrottleRpm;
         if (rpm !== undefined && outcome.severity === "critical" && outcome.shouldNotify) {
-          throttledRpm = await applyThrottle(db, {
-            scopeId: evaluation.scopeId,
-            rpm,
-            ttlSecs: evaluation.tuning.throttleTtlSecs,
-            episodeId: outcome.episodeId,
-            signal,
-            now,
-          });
+          // `episodeDb` is this tenant's own object (resolved just above for the
+          // episode write); mirror the throttle into its `spend_throttles` table
+          // so the row is present when the admission readers cut over to the DO.
+          throttledRpm = await applyThrottle(
+            db,
+            {
+              scopeId: evaluation.scopeId,
+              rpm,
+              ttlSecs: evaluation.tuning.throttleTtlSecs,
+              episodeId: outcome.episodeId,
+              signal,
+              now,
+            },
+            episodeDb,
+          );
           if (throttledRpm !== null) throttled += 1;
         }
 
@@ -496,7 +489,7 @@ async function evaluateWindow(
             payload,
             ...(fetchImpl === undefined ? {} : { fetchImpl }),
           });
-          await episodeStore.authoritative
+          await episodeDb
             .prepare(
               `UPDATE ${SPEND_ANOMALY_EPISODE_TABLE}
                 SET notified_count = notified_count + 1, last_notified_unix = ?
@@ -504,7 +497,6 @@ async function evaluateWindow(
             )
             .bind(now, outcome.episodeId)
             .run();
-          await projectEpisode(episodeStore, outcome.episodeId);
           notified += 1;
         } catch (error) {
           // NOT retried and the counter is NOT bumped: an episode whose
@@ -562,18 +554,6 @@ async function evaluateWindow(
   }
 }
 
-/** Every tenant-scope quota policy, indexed by scope id. */
-async function readTenantPolicies(db: D1Database): Promise<Map<string, Record<string, unknown>>> {
-  const rows = await db
-    .prepare(
-      `SELECT ${SPEND_ANOMALY_POLICY_COLUMNS.join(", ")}
-         FROM quota_policies
-        WHERE scope_type = 'tenant'`,
-    )
-    .all<Record<string, unknown>>();
-  return new Map(rows.results.map((row) => [String(row.scope_id), row]));
-}
-
 async function readEpisode(db: D1Database, id: string): Promise<EpisodeProjectionRow | null> {
   return await db
     .prepare(
@@ -584,37 +564,6 @@ async function readEpisode(db: D1Database, id: string): Promise<EpisodeProjectio
     )
     .bind(id)
     .first<EpisodeProjectionRow>();
-}
-
-/**
- * Copy one object-authoritative episode to the fleet projection.
- *
- * The object write is deliberately completed first. A bounded retry here makes
- * a transient control-D1 failure recoverable without ever treating a missing
- * projection as permission to write the episode to the wrong database.
- */
-async function projectEpisode(store: EpisodeStore, id: string): Promise<void> {
-  const row = await readEpisode(store.authoritative, id);
-  if (row === null) throw new Error(`spend anomaly episode ${id} disappeared before projection`);
-  if (row.scope_type !== "tenant" || row.scope_id.trim() === "") {
-    throw new Error(`spend anomaly episode ${id} has no tenant projection scope`);
-  }
-
-  const bindings = [
-    evidenceProjectionKey(row.scope_id, row.id),
-    ...EPISODE_COLUMNS.map((column) => row[column]),
-  ];
-  for (let attempt = 1; attempt <= 3; attempt += 1) {
-    try {
-      await store.projection
-        .prepare(EPISODE_PROJECTION_UPSERT_SQL)
-        .bind(...bindings)
-        .run();
-      return;
-    } catch (error) {
-      if (attempt === 3) throw error;
-    }
-  }
 }
 
 interface UpsertOutcome {
@@ -793,12 +742,17 @@ async function closeEpisode(
 /**
  * Write (or extend) the auto-throttle for a scope.
  *
- * `ON CONFLICT DO UPDATE` with a `MIN` on the RPM: two signals firing critical
- * for the same scope must leave the TIGHTER brake in place, never the later
- * one. The expiry always moves forward, so a still-firing episode keeps the
- * throttle alive without a second row.
+ * The authoritative write stays on the control database (the three admission
+ * readers still read it there); `shadow` — the owning tenant's own object — gets
+ * the SAME row on a best-effort basis, so the DO-side `spend_throttles` table is
+ * already populated when the admission readers are later pointed at it. A shadow
+ * outage or a not-yet-provisioned tenant must NEVER fail the control write the
+ * gateway enforces, so it is caught and logged, exactly like the quota-policy
+ * shadow in `routes/quota_policy.ts`. The scope is always a tenant here
+ * (`scope_id` IS the tenant id), so the shadow row belongs wholly to that tenant.
  *
- * Returns the applied RPM, or `null` when nothing was written.
+ * Returns the applied RPM (from the authoritative write), or `null` when nothing
+ * was written there.
  */
 async function applyThrottle(
   db: D1Database,
@@ -810,22 +764,29 @@ async function applyThrottle(
     signal: SpendAnomalySignal;
     now: number;
   },
+  shadow?: D1Database,
 ): Promise<number | null> {
   const expiresAt = input.now + input.ttlSecs;
   const reason = `spend anomaly ${input.signal} (episode ${input.episodeId})`;
+  const binds = [input.scopeId, input.rpm, reason, input.episodeId, input.now, expiresAt] as const;
   const result = await db
-    .prepare(
-      `INSERT INTO ${SPEND_THROTTLE_TABLE}
-         (scope_type, scope_id, rpm_limit, reason, episode_id, created_at_unix, expires_at_unix)
-       VALUES ('tenant', ?, ?, ?, ?, ?, ?)
-       ON CONFLICT (scope_type, scope_id) DO UPDATE SET
-         rpm_limit = MIN(rpm_limit, excluded.rpm_limit),
-         reason = excluded.reason,
-         episode_id = excluded.episode_id,
-         expires_at_unix = MAX(expires_at_unix, excluded.expires_at_unix)`,
-    )
-    .bind(input.scopeId, input.rpm, reason, input.episodeId, input.now, expiresAt)
+    .prepare(SPEND_THROTTLE_UPSERT_SQL)
+    .bind(...binds)
     .run();
+  if (shadow !== undefined) {
+    try {
+      await shadow
+        .prepare(SPEND_THROTTLE_UPSERT_SQL)
+        .bind(...binds)
+        .run();
+    } catch (error) {
+      console.warn("control-plane: spend throttle tenant-object shadow write failed", {
+        scopeId: input.scopeId,
+        signal: input.signal,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
   return (result.meta?.changes ?? 0) > 0 ? input.rpm : null;
 }
 

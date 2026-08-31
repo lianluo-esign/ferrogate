@@ -51,6 +51,7 @@ import {
 } from "./middleware/errors.js";
 import type { ControlPlaneEnv } from "./ports.js";
 import { GROUP_MODULES, type RegisteredRoute, registerRoutes } from "./routes/index.js";
+import { mountQuotaPolicyBackfill } from "./routes/quota-policy-backfill.js";
 import { mountTenantConsumptionPurge } from "./routes/tenant-consumption-purge.js";
 import { mountTenantTeardown } from "./routes/tenant-teardown.js";
 import type { GroupModule } from "./routes/resource.js";
@@ -186,6 +187,18 @@ export const MOUNTED_PURGE_ROUTE: string = mountTenantConsumptionPurge(app);
  * `./routes/tenant-teardown.ts` for the load-bearing order and every fence.
  */
 export const MOUNTED_TEARDOWN_ROUTE: string = mountTenantTeardown(app);
+
+/**
+ * `POST /admin/v1/quota-policy-backfill` — platform-operator-only, out-of-contract
+ * ONE-TIME sweep that copies every typed `quota_policies` enforcement row from
+ * the control database into the owning tenant object's `quota_policies` table.
+ * It is the deploy-ordering keystone of the quota-policy relocation: run once
+ * after the writer dual-write ships and before the admission/finops readers are
+ * pointed at the objects, so no reader ever meets an empty table. Idempotent and
+ * additive. See `./routes/quota-policy-backfill.ts` for the copy rationale and
+ * every fence.
+ */
+export const MOUNTED_QUOTA_BACKFILL_ROUTE: string = mountQuotaPolicyBackfill(app);
 
 app.get("/version", (c) =>
   c.json({

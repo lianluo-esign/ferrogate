@@ -198,6 +198,26 @@ export async function writeTenantGuardrailEvidence(
 }
 
 /**
+ * Persist a batch of platform/unattributed evidence in the platform object
+ * (Zero-D1 Plan B).
+ *
+ * These are the `unscoped` envelopes — the ones whose `tenant.organizationId`
+ * is empty, i.e. `scope_type = 'platform'` screening of platform-operator /
+ * anonymous calls. They have no owning tenant, so unlike
+ * {@link writeTenantGuardrailEvidence} there is no single-tenant assertion and
+ * the `tenant` column is written NULL. The platform table shares the tenant
+ * table's id-keyed shape (no `projection_key`), so the same `ON CONFLICT (id)`
+ * upsert applies verbatim.
+ */
+export async function writePlatformGuardrailEvidence(
+  db: GuardrailEvidenceDatabase,
+  envelopes: readonly GuardrailEvidenceEnvelope[],
+): Promise<void> {
+  if (envelopes.length === 0) return;
+  await db.batch(platformGuardrailEvidenceStatements(db, envelopes));
+}
+
+/**
  * The prepared statements for a batch, WITHOUT running them.
  *
  * Exported so the shared queue consumer can put request-log and guardrail
@@ -324,6 +344,89 @@ export function tenantGuardrailEvidenceStatements(
           check.id,
           evaluation.id,
           tenantId,
+          check.checkId,
+          check.detectorId,
+          check.detectorVersion,
+          check.configDigest,
+          check.verdict,
+          check.action,
+          check.enforcementStatus,
+          bindOptional(check.errorKind),
+          JSON.stringify(checkWires[index] ?? {}),
+        ),
+      );
+    });
+  }
+  return [...parents, ...children];
+}
+
+/**
+ * Prepared parent-before-child statements for one platform-object batch.
+ *
+ * The platform twin of {@link tenantGuardrailEvidenceStatements}, with two
+ * differences that follow from the platform object holding only unattributed
+ * rows:
+ *
+ *  * **`tenant` is written NULL**, not the envelope's org id. These envelopes
+ *    reached this function precisely because their `organizationId` was empty
+ *    (the `unscoped` split), and every row in the platform object is
+ *    unattributed by construction — the schema drops the tenant `NOT NULL` for
+ *    exactly this, and reads over the object need no tenant fence.
+ *  * **No single-tenant homogeneity assertion.** The tenant builder refuses a
+ *    batch that mixes tenants because each tenant object may hold only its own
+ *    rows; the one platform object holds them all, so there is nothing to fence.
+ *
+ * It reuses the `TENANT_*_UPSERT_SQL` statements verbatim: the platform table
+ * shares the tenant table's id-keyed shape (`ON CONFLICT (id)`, no
+ * `projection_key`), so the SQL is identical and only the bindings differ.
+ */
+export function platformGuardrailEvidenceStatements(
+  db: GuardrailEvidenceDatabase,
+  envelopes: readonly GuardrailEvidenceEnvelope[],
+): unknown[] {
+  const evaluationStatement = db.prepare(TENANT_GUARDRAIL_EVALUATION_UPSERT_SQL);
+  const checkStatement = db.prepare(TENANT_GUARDRAIL_CHECK_UPSERT_SQL);
+  const parents: unknown[] = [];
+  const children: unknown[] = [];
+
+  for (const envelope of envelopes) {
+    const wire = guardrailEvidenceToWire(envelope);
+    const evaluation = envelope.evaluation;
+    parents.push(
+      evaluationStatement.bind(
+        evaluation.id,
+        evaluation.requestId,
+        bindOptional(evaluation.traceId),
+        bindOptional(evaluation.agentRunId),
+        bindOptional(evaluation.subjectId),
+        // Unattributed by construction — the platform object's whole domain.
+        null,
+        evaluation.scopeType,
+        bindOptional(evaluation.scopeId),
+        evaluation.target,
+        evaluation.protocol,
+        evaluation.stage,
+        evaluation.mode,
+        evaluation.policyId,
+        evaluation.policyRevision,
+        evaluation.verdict,
+        evaluation.action,
+        evaluation.enforcementStatus,
+        evaluation.latencyMs,
+        evaluation.findingCount,
+        evaluation.inputFingerprint,
+        bindOptional(evaluation.actionFingerprint),
+        evaluation.occurredAtUnix,
+        JSON.stringify(wire),
+      ),
+    );
+    const checkWires = Array.isArray(wire.checks) ? (wire.checks as unknown[]) : [];
+    envelope.checks.forEach((check, index) => {
+      children.push(
+        checkStatement.bind(
+          check.id,
+          evaluation.id,
+          null,
           check.checkId,
           check.detectorId,
           check.detectorVersion,

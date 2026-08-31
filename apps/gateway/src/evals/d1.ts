@@ -253,24 +253,6 @@ RETURNING claim_key`;
 /** The same claim inside one tenant object. */
 export const TENANT_ONLINE_EVAL_REGRESSION_CLAIM_SQL = ONLINE_EVAL_REGRESSION_CLAIM_SQL;
 
-/** Control-D1 projection for a tenant-authoritative regression claim. */
-export const ONLINE_EVAL_REGRESSION_PROJECTION_SQL = `INSERT INTO ${ONLINE_EVAL_REGRESSION_TABLE} (
-  projection_key, claim_key, tenant, criterion_id, judge_model, logical_model,
-  baseline_mean, baseline_count, recent_mean, recent_count, drop_amount, detected_at_unix
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT (projection_key) DO UPDATE SET
-  claim_key = excluded.claim_key,
-  tenant = excluded.tenant,
-  criterion_id = excluded.criterion_id,
-  judge_model = excluded.judge_model,
-  logical_model = excluded.logical_model,
-  baseline_mean = excluded.baseline_mean,
-  baseline_count = excluded.baseline_count,
-  recent_mean = excluded.recent_mean,
-  recent_count = excluded.recent_count,
-  drop_amount = excluded.drop_amount,
-  detected_at_unix = excluded.detected_at_unix`;
-
 export function onlineEvalRegressionBindings(regression: {
   claimKey: string;
   tenantId: string;

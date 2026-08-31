@@ -158,33 +158,10 @@ export function d1UsageAggregateSink(db: D1Database, tenantId: string): UsageAgg
   };
 }
 
-/**
- * Add the durable identity needed to repair a control projection after an
- * isolate dies. The payload contains only projection lookup dimensions; the
- * projection reader reloads all counters from the tenant object, so retrying
- * never re-applies an additive delta.
- */
-export function withUsageProjectionRetry(
-  write: UsageAggregateWrite,
-  sourceId: string,
-): UsageAggregateWrite {
-  return {
-    ...write,
-    projectionRetry: {
-      sourceId,
-      payloadJson: JSON.stringify({
-        context: write.context,
-        logicalModel: write.logicalModel,
-        provider: write.provider,
-        occurredAtUnix: write.occurredAtUnix,
-        metadata: [...(write.metadata?.entries() ?? [])],
-        ...(write.presenceTouch === undefined
-          ? {}
-          : { presenceApiKeyId: write.presenceTouch.apiKeyId }),
-      }),
-    },
-  };
-}
+// `withUsageProjectionRetry` is REMOVED: it stamped a durable
+// `usage_projection_retries` intent onto a write so a failed control-D1 usage
+// projection could be repaired later. The projection is retired (no-tenant-data
+// mirror red line), so no intent is stamped and nothing repairs one.
 
 /** Apply request attribution to an event only when it belongs to this request. */
 export function eventWithTenantAttribution(

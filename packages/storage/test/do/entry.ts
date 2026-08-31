@@ -16,10 +16,17 @@
  */
 import { ControlDataObject } from "../../src/control-data-object.js";
 import { CONTROL_MIGRATIONS, type ControlMigration } from "../../src/control-schema-sql.js";
+import { PlatformDataObject } from "../../src/platform-data-object.js";
 import { TenantDataObject, sqlStatements } from "../../src/tenant-data-object.js";
 import { TENANT_MIGRATIONS, type TenantMigration } from "../../src/tenant-schema-sql.js";
 
-export { TenantDataObject, ControlDataObject };
+// `PlatformDataObject` (Zero-D1 Plan B, exactly one instance) has NO
+// fault-injection twin here: its applier is a byte-for-byte copy of
+// `ControlDataObject`'s, and `FaultyControlDataObject` already exercises the
+// mid-file-failure / no-reapply behaviour of that identical applier. A second
+// faulty twin would add a namespace and a `new_sqlite_classes` entry to prove
+// nothing new.
+export { TenantDataObject, ControlDataObject, PlatformDataObject };
 
 /**
  * A migration set whose SECOND file fails halfway through.

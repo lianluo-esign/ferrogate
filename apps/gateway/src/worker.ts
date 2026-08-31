@@ -154,3 +154,19 @@ export { TenantDataObject } from "@ferrogate/storage/durable-objects";
  * immutable, and getting it wrong is a total-data-loss tombstone.
  */
 export { ControlDataObject } from "@ferrogate/storage/durable-objects";
+
+/**
+ * The `PLATFORM_DATA` Durable Object class — the SQLite-backed SINGLETON that
+ * is the authoritative home for platform/unattributed guardrail evidence
+ * (`scope_type = 'platform'`, `tenant IS NULL` — Zero-D1 Plan B), addressed
+ * everywhere as `env.PLATFORM_DATA.idFromName("platform")`.
+ *
+ * Same startup rule as every class above: workerd resolves `class_name`
+ * against THIS module, so this re-export is what lets the gateway boot with the
+ * `[[durable_objects.bindings]] class_name = "PlatformDataObject"` stanza. This
+ * gateway is the DEFINING script; the control-plane binds it cross-script with
+ * `script_name = "ferrogate-gateway"` and adds no re-export of its own, which
+ * is why this gateway MUST deploy before the control-plane. The namespace ships
+ * `storage = "sqlite"` from its first deploy — the backend choice is immutable.
+ */
+export { PlatformDataObject } from "@ferrogate/storage/durable-objects";

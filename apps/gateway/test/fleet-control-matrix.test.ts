@@ -1499,12 +1499,12 @@ describe("§4 fleet-wide ratchets", () => {
       "managed_worker_lifecycle_events",
       "managed_worker_isolation_policies",
       "managed_worker_isolation_selections",
-      // The evidence leg of the same family, shared differently: the gateway's
-      // scheduled sweep (`src/managed-evidence-projection.ts`) rebuilds the
-      // control-D1 mirror from the tenant object after an isolate or control
-      // failure, so its sharers are (agent-runtime writer, gateway repairer).
-      // A derived projection of what a session DID — classified exactly like
-      // the guardrail evidence below.
+      // The evidence leg of the same family. Its control-D1 mirror and the
+      // gateway rebuild sweep were REMOVED (no-tenant-data mirror red line): the
+      // tenant object is now its only authority and the control table has no
+      // writer or reader, pending the physical drop of control D1. Kept in this
+      // list only because the control DDL still exists; it is no longer shared
+      // by two Workers, so 4.3 no longer evaluates it.
       "managed_worker_isolation_evidence",
       // #860 — guardrail screening evidence is tenant-object authoritative,
       // with a tenant-qualified CONTROL projection for the operator fleet

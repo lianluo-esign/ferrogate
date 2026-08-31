@@ -280,7 +280,11 @@ describe("GET /admin/v1/guardrail-evaluations returns the evidence the tables ho
     // Empty first, so the row below cannot be a leftover.
     expect((await readEvaluations(operatorKey.secret)).data).toHaveLength(0);
 
-    await seedGuardrailEvaluations([BLOCKED]);
+    // Under the Zero-D1 object cutover the operator read is a live fan-out over
+    // the tenant OBJECTS (union the platform object), never the control
+    // projection, so the authoritative fixture for an attributed row is its
+    // tenant's object — the same place the gateway writer lands it.
+    await seedExactTenantGuardrailEvaluations([BLOCKED]);
 
     const page = await readEvaluations(operatorKey.secret);
     expect(page.data).toHaveLength(1);
@@ -334,7 +338,9 @@ describe("GET /admin/v1/guardrail-evaluations returns the evidence the tables ho
    * unstable sort lets a page boundary re-serve one row and skip another.
    */
   it("orders newest first with id as the tiebreaker", async () => {
-    await seedGuardrailEvaluations([
+    // Object fan-out fixture (all three are tenant t-1's): the fleet merge
+    // re-sorts every source by `occurred_at_unix DESC, id ASC`.
+    await seedExactTenantGuardrailEvaluations([
       { ...BLOCKED, id: "ev-b", requestId: "r-b", occurredAtUnix: 200, checks: [] },
       { ...BLOCKED, id: "ev-a", requestId: "r-a", occurredAtUnix: 200, checks: [] },
       { ...BLOCKED, id: "ev-c", requestId: "r-c", occurredAtUnix: 300, checks: [] },
@@ -344,7 +350,10 @@ describe("GET /admin/v1/guardrail-evaluations returns the evidence the tables ho
   });
 
   it("reports the pre-window total alongside the page", async () => {
-    await seedGuardrailEvaluations(
+    // Five in tenant t-1's object. The fan-out pages each object to
+    // `offset+limit` but `count(*) OVER()` reports the object's full depth, so a
+    // clipped page still yields the pre-window total of 5.
+    await seedExactTenantGuardrailEvaluations(
       Array.from({ length: 5 }, (_unused, index) => ({
         ...BLOCKED,
         id: `ev-${index}`,

@@ -207,6 +207,15 @@ export * from "./key-directory-projection.js";
 export * from "./tenant-do.js";
 export * from "./control-do.js";
 /**
+ * The node-safe facade over the platform singleton object (`PlatformDataObject`,
+ * exactly one — Zero-D1 Plan B). Same shape as `control-do.js`: `import type`
+ * only against the workerd class, so this barrel stays node-importable. It is
+ * the handle a gateway evidence-sink / operator fleet reader holds for the
+ * platform/unattributed (`tenant IS NULL`) guardrail rows that no tenant
+ * fan-out can reach.
+ */
+export * from "./platform-do.js";
+/**
  * The router that picks between the two legs above PER TENANT, from
  * `tenant_databases.storage_backend`.
  *

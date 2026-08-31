@@ -39,10 +39,12 @@ import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { GuardrailEvidenceEnvelope } from "../../src/guardrails/evidence-wire.js";
 import {
   DurableGuardrailEvidenceSink,
+  guardrailEvidencePlatformDatabaseFrom,
   guardrailEvidenceTenantDatabaseFromEnv,
   guardrails,
   sweepGuardrailEvidence,
   writeGuardrailEvidence,
+  writePlatformGuardrailEvidence,
   writeTenantGuardrailEvidence,
 } from "../../src/guardrails/index.js";
 import { gatewayScheduled } from "../../src/index.js";
@@ -196,6 +198,59 @@ function manualEnvelope(tenantId: string): GuardrailEvidenceEnvelope {
   };
 }
 
+/**
+ * An UNSCOPED (`scope_type = 'platform'`) envelope: no `organizationId`, so the
+ * sink's `flush` routes it to the PLATFORM_DATA singleton — and, in G1, still
+ * dual-writes the control projection. Carries one check so the child-row leg is
+ * exercised too, and pins `occurredAtUnix` old enough for the retention test.
+ */
+function platformEnvelope(id: string): GuardrailEvidenceEnvelope {
+  return {
+    evaluation: {
+      id,
+      requestId: `request-${id}`,
+      // No organization — the whole point: this row has no owning tenant object.
+      tenant: {},
+      scopeType: "platform",
+      scopeId: "platform",
+      target: "gpt-4o-mini/openai",
+      protocol: "chat_completions",
+      stage: "request",
+      mode: "enforce",
+      policyId: "secret-scan",
+      policyRevision: 1,
+      verdict: "pass",
+      action: "allow",
+      enforcementStatus: "enforced",
+      latencyMs: 1,
+      findingCategoryCounts: {},
+      findingCount: 0,
+      transformed: false,
+      inputFingerprint: `hmac-sha256:${id}`,
+      occurredAtUnix: 1_700_000_200,
+    },
+    checks: [
+      {
+        id: `${id}/deterministic`,
+        evaluationId: id,
+        checkId: "deterministic",
+        detectorId: "deterministic",
+        detectorVersion: "det-1",
+        configDigest: "sha256:platform",
+        verdict: "pass",
+        action: "allow",
+        enforcementStatus: "enforced",
+        latencyMs: 1,
+        findingCategoryCounts: {},
+        findingCount: 0,
+        findings: [],
+        transformed: false,
+        usedFallback: false,
+      },
+    ],
+  };
+}
+
 async function tenantGuardrailRows(tenantId: string): Promise<{
   evaluations: Record<string, unknown>[];
   checks: Record<string, unknown>[];
@@ -223,6 +278,40 @@ async function resetTenantGuardrailEvidence(tenantId: string): Promise<void> {
   });
 }
 
+/**
+ * The platform object's rows, read through the SAME facade the production write
+ * and read paths use (`guardrailEvidencePlatformDatabaseFrom`). The whole table
+ * IS the platform domain, so there is no tenant fence — every row here is
+ * unattributed by construction.
+ */
+async function platformGuardrailRows(): Promise<{
+  evaluations: Record<string, unknown>[];
+  checks: Record<string, unknown>[];
+}> {
+  const db = guardrailEvidencePlatformDatabaseFrom(env);
+  if (db === undefined) throw new Error("PLATFORM_DATA binding is required");
+  const evaluations = (await db
+    .prepare("SELECT id, request_id, tenant FROM guardrail_evaluations ORDER BY id")
+    .bind()
+    .all()) as { results: Record<string, unknown>[] };
+  const checks = (await db
+    .prepare("SELECT id, evaluation_id, tenant FROM guardrail_check_evaluations ORDER BY id")
+    .bind()
+    .all()) as { results: Record<string, unknown>[] };
+  return { evaluations: evaluations.results, checks: checks.results };
+}
+
+async function resetPlatformGuardrailEvidence(): Promise<void> {
+  const db = guardrailEvidencePlatformDatabaseFrom(env);
+  if (db === undefined) return;
+  // Children first: the FK on `guardrail_check_evaluations.evaluation_id` rejects
+  // deleting parents ahead of their checks on a database with enforcement on.
+  await db.batch([
+    db.prepare("DELETE FROM guardrail_check_evaluations").bind(),
+    db.prepare("DELETE FROM guardrail_evaluations").bind(),
+  ]);
+}
+
 let provider: ProviderInterceptor | undefined;
 
 beforeAll(applyControlMigrations);
@@ -231,6 +320,7 @@ beforeEach(async () => {
   await resetGuardrailEvidence();
   await resetTenantGuardrailEvidence("tenant_a");
   await resetTenantGuardrailEvidence("tenant_b");
+  await resetPlatformGuardrailEvidence();
   provider?.restore();
   provider = undefined;
 });
@@ -569,6 +659,81 @@ describe("tenant-qualified evidence identity", () => {
 });
 
 // ---------------------------------------------------------------------------
+// The platform dual-write leg (Zero-D1 Plan B, G1)
+// ---------------------------------------------------------------------------
+
+describe("unscoped evidence dual-writes the platform object", () => {
+  it("lands in the PLATFORM_DATA object AND still writes the control projection", async () => {
+    // Empty first, so nothing below can be a leftover.
+    expect((await platformGuardrailRows()).evaluations).toHaveLength(0);
+    expect(await storedGuardrailEvaluations()).toHaveLength(0);
+
+    const sink = new DurableGuardrailEvidenceSink();
+    const envelope = platformEnvelope("platform-ev-1");
+    expect(sink.append(envelope.evaluation, envelope.checks)).toBe(true);
+    await sink.flush({
+      env: { ...(env as unknown as Record<string, unknown>), REQUEST_LOG: undefined },
+    });
+
+    // The platform object is the authoritative home these rows will be READ from
+    // once the projection is retired: parent AND child, both `tenant` NULL — the
+    // whole object is the platform domain, so nothing carries an org id.
+    const platform = await platformGuardrailRows();
+    expect(platform.evaluations).toEqual([
+      expect.objectContaining({
+        id: "platform-ev-1",
+        request_id: "request-platform-ev-1",
+        tenant: null,
+      }),
+    ]);
+    expect(platform.checks).toEqual([
+      expect.objectContaining({
+        id: "platform-ev-1/deterministic",
+        evaluation_id: "platform-ev-1",
+        tenant: null,
+      }),
+    ]);
+
+    // G1 is strictly ADDITIVE: the control projection write is UNCHANGED, so the
+    // same row is still there for every current operator reader.
+    expect(await storedGuardrailEvaluations()).toEqual([
+      expect.objectContaining({ id: "platform-ev-1", tenant: null, scope_type: "platform" }),
+    ]);
+    expect(await storedGuardrailChecks()).toHaveLength(1);
+  });
+
+  it("keeps the control projection when the platform leg fails (best-effort, never drops)", async () => {
+    // A platform object that refuses every batch. The additive leg must swallow
+    // this and the control write below must still land — the control projection
+    // is the COUNTED authority for these rows in G1, so a platform blip is a
+    // narrower future read, never lost evidence.
+    const sink = new DurableGuardrailEvidenceSink({
+      platformDatabase: () => ({
+        prepare: () => ({
+          bind: () => ({ run: async () => ({}), all: async () => ({ results: [] }) }),
+        }),
+        batch: async () => {
+          throw new Error("platform object unavailable");
+        },
+      }),
+    });
+    const envelope = platformEnvelope("platform-ev-2");
+    expect(sink.append(envelope.evaluation, envelope.checks)).toBe(true);
+    // NEVER rejects, even when the additive leg throws.
+    await sink.flush({
+      env: { ...(env as unknown as Record<string, unknown>), REQUEST_LOG: undefined },
+    });
+
+    // The REAL platform object got nothing (the failing double intercepted the
+    // write), but the control projection is intact.
+    expect((await platformGuardrailRows()).evaluations).toHaveLength(0);
+    expect(await storedGuardrailEvaluations()).toEqual([
+      expect.objectContaining({ id: "platform-ev-2", tenant: null }),
+    ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // An evidence failure is never a request failure
 // ---------------------------------------------------------------------------
 
@@ -874,5 +1039,27 @@ describe("guardrail evidence retention", () => {
     await waitOnExecutionContext(ctx);
 
     expect((await tenantGuardrailRows("tenant_a")).evaluations).toHaveLength(0);
+  });
+
+  it("sweeps the platform object under the fleet policy", async () => {
+    const envelope = platformEnvelope("platform-old-1");
+    const platformDb = guardrailEvidencePlatformDatabaseFrom(env);
+    if (platformDb === undefined) throw new Error("PLATFORM_DATA binding is required");
+    await writePlatformGuardrailEvidence(platformDb, [envelope]);
+    expect((await platformGuardrailRows()).evaluations).toHaveLength(1);
+
+    // The fleet default governs the WHOLE platform object — no tenant fence, and
+    // no second database to reconcile. `db` is left undefined so ONLY the
+    // platform leg runs here; the control unscoped sweep is covered above.
+    const result = await sweepGuardrailEvidence(
+      undefined,
+      { ...(env as unknown as Record<string, unknown>), REQUEST_LOG_RETENTION_DAYS: "30" },
+      NOW,
+    );
+
+    expect(result.pruned).toBeGreaterThanOrEqual(1);
+    // Parent gone, and its check followed through `ON DELETE CASCADE`.
+    expect((await platformGuardrailRows()).evaluations).toHaveLength(0);
+    expect((await platformGuardrailRows()).checks).toHaveLength(0);
   });
 });

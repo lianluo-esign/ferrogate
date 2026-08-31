@@ -176,7 +176,6 @@ export {
   executionContextOf,
   meteringBindingsFromEnv,
   meteringDatabaseFrom,
-  meteringProjectionDatabaseFrom,
   meteringQueueFrom,
 } from "./runtime.js";
 export type { MeteringBindingResolver, MeteringBindings } from "./runtime.js";

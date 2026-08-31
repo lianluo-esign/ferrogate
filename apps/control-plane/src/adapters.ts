@@ -39,7 +39,7 @@
  * `authenticate_with_admission`'s source ordering exactly.
  */
 
-import { controlDatabaseFrom } from "./control-data.js";
+import { controlDatabaseFrom, platformDatabaseFrom } from "./control-data.js";
 
 import {
   type ApiKeyDirectoryProjection,
@@ -1498,6 +1498,22 @@ export function resolveControlDatabase(env: ControlPlaneBindings): D1Database | 
 }
 
 /**
+ * The platform-evidence object facade (Zero-D1 Plan B), or `null` when unbound.
+ *
+ * Independent of `CONTROL_PLANE_STORE`, exactly like
+ * {@link resolveTenantObjectOperator}: an operator must be able to read platform
+ * evidence while the DOCUMENT store is in the memory posture, and the object is
+ * a distinct backend the document-store switch has no say over. There is no
+ * memory stand-in — the object's authoritative rows live in the gateway's DO, so
+ * an isolate-local map would make the operator list look empty of platform rows
+ * while the real object held them. `null` simply drops the platform leg from the
+ * operator union; the control projection still carries the rows during rollout.
+ */
+export function resolvePlatformData(env: ControlPlaneBindings): D1Database | null {
+  return platformDatabaseFrom(env) ?? null;
+}
+
+/**
  * The prompt-label KV namespace, or `null` when this deployment binds none.
  *
  * No fallback, and deliberately no in-memory stand-in: the pointer's ONLY
@@ -1707,6 +1723,9 @@ export function resolveDeps(
     tenantDatabases,
     tenantStorage: resolveTenantStorage(env, controlDatabase),
     tenantObjectOperator: resolveTenantObjectOperator(env, controlDatabase),
+    // Zero-D1 Plan B: the platform singleton, read by the operator guardrail
+    // list alongside the tenant fan-out. Independent of the control DB switch.
+    platformData: resolvePlatformData(env),
     // Operator-configured default placement for every new tenant (this fleet:
     // Tokyo). An unrecognised value coerces to `undefined`, which leaves the
     // built-in `apac-ne` fallback rather than addressing an object with a bad hint.

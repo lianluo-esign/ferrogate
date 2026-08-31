@@ -488,6 +488,10 @@ describe("the env-var drift gate itself", () => {
       "ASSETS",
       "TENANT_DATA",
       "CONTROL_DATA",
+      // Zero-D1 Plan B: the gateway's singleton `PlatformDataObject`, bound
+      // CROSS-SCRIPT (like TENANT_DATA/CONTROL_DATA) as the home for platform/
+      // unattributed guardrail evidence the operator read's platform leg reads.
+      "PLATFORM_DATA",
     ]);
     expect(READS.named.size).toBeGreaterThanOrEqual(13);
     // Two reads in two different shapes, so a regression in either arm of the

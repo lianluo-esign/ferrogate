@@ -189,18 +189,10 @@ describe("agent evidence source of truth", () => {
         tenant: TENANT_B,
       },
     ]);
-    expect(controlManagedEvidence.results).toEqual([
-      {
-        projection_key: projectionKey(TENANT_A, `managed:session-${RUN_ID}:${RUN_ID}`),
-        id: `managed:session-${RUN_ID}:${RUN_ID}`,
-        tenant: TENANT_A,
-      },
-      {
-        projection_key: projectionKey(TENANT_B, `managed:session-${RUN_ID}:${RUN_ID}`),
-        id: `managed:session-${RUN_ID}:${RUN_ID}`,
-        tenant: TENANT_B,
-      },
-    ]);
+    // Managed isolation evidence is no longer mirrored to control D1 (the
+    // no-tenant-data mirror red line): the tenant object is its only authority,
+    // asserted by `managedA` above. The control table stays empty.
+    expect(controlManagedEvidence.results).toEqual([]);
 
     await env.CONTROL_DB.prepare("UPDATE agent_runs SET run_json = ? WHERE projection_key = ?")
       .bind('{"tenant_id":"forged"}', projectionKey(TENANT_A, RUN_ID))

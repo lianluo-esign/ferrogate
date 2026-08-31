@@ -675,3 +675,25 @@ script_name = "ferrogate-gateway"
 name = "CONTROL_DATA"
 class_name = "ControlDataObject"
 script_name = "ferrogate-gateway"
+
+# ---------------------------------------------------------------------------
+# PLATFORM_DATA — the singleton PlatformDataObject, bound CROSS-SCRIPT.
+#
+# Zero-D1 Plan B: the authoritative home for platform/unattributed
+# (`scope_type = 'platform'`, `tenant IS NULL`) guardrail evidence that no
+# tenant fan-out can reach. This Worker's operator guardrail reader unions the
+# tenant DO fan-out with this object; a one-time backfill drains the control
+# projection's `WHERE tenant IS NULL` rows into it.
+#
+# Same three properties as the CONTROL_DATA stanza above:
+#   * `class_name = "PlatformDataObject"` is DEFINED by `ferrogate-gateway`, so
+#     the class ships its `[exports.PlatformDataObject]` sqlite lifecycle there.
+#   * NO `[exports]` here and NO `src/worker.ts` re-export: this Worker BINDS
+#     the class, it does not define it.
+#   * DEPLOY ORDER: `ferrogate-gateway` FIRST — a `script_name` binding to a
+#     not-yet-deployed script fails the deploy.
+# ---------------------------------------------------------------------------
+[[durable_objects.bindings]]
+name = "PLATFORM_DATA"
+class_name = "PlatformDataObject"
+script_name = "ferrogate-gateway"

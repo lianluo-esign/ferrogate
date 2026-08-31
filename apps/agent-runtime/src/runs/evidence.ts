@@ -3,10 +3,13 @@
  *
  * `AgentRunState` keeps live state and subscribers in its run-shaped object.
  * These helpers write durable evidence into the tenant's `TenantDataObject`
- * first, then update the control-D1 compatibility mirror for existing platform
- * pages. A mirror failure is observable but never changes object authority;
- * the gateway's scheduled managed-evidence sweep rebuilds the mirror from the
- * object after an isolate or control-D1 failure.
+ * first, then update the control-D1 `agent_runs` / `agent_run_events`
+ * compatibility mirror for existing platform pages. A mirror failure is
+ * observable but never changes object authority.
+ *
+ * Managed isolation evidence is NOT mirrored to control D1 (the no-tenant-data
+ * mirror red line): its only authoritative copy is the tenant object, and the
+ * gateway's scheduled managed-evidence rebuild sweep was removed with it.
  */
 import {
   ControlDatabaseTenantRegistry,
@@ -100,15 +103,6 @@ const TENANT_MANAGED_ISOLATION_EVIDENCE_UPSERT_SQL = `INSERT INTO managed_worker
   id, occurred_at_unix, evidence_json
 ) VALUES (?, ?, ?)
 ON CONFLICT (id) DO UPDATE SET
-  occurred_at_unix = excluded.occurred_at_unix,
-  evidence_json = excluded.evidence_json`;
-
-const CONTROL_MANAGED_ISOLATION_EVIDENCE_UPSERT_SQL = `INSERT INTO managed_worker_isolation_evidence (
-  projection_key, id, tenant, occurred_at_unix, evidence_json
-) VALUES (?, ?, ?, ?, ?)
-ON CONFLICT (projection_key) DO UPDATE SET
-  id = excluded.id,
-  tenant = excluded.tenant,
   occurred_at_unix = excluded.occurred_at_unix,
   evidence_json = excluded.evidence_json`;
 
@@ -285,15 +279,10 @@ export async function persistAgentRunEvidence(
     evidenceProjectionKey(run.tenant_id, run.run_id),
     ...params,
   ]);
-  if (managedEvidence !== undefined) {
-    await mirrorBestEffort(controlDatabase(env), CONTROL_MANAGED_ISOLATION_EVIDENCE_UPSERT_SQL, [
-      evidenceProjectionKey(managedEvidence.tenantId, managedEvidence.id),
-      managedEvidence.id,
-      managedEvidence.tenantId,
-      managedEvidence.occurredAtUnix,
-      managedEvidence.evidenceJson,
-    ]);
-  }
+  // Managed isolation evidence is tenant-object authoritative and is NOT
+  // mirrored to control D1 (no-tenant-data mirror red line). The `managedEvidence`
+  // object above still drives the authoritative `TENANT_MANAGED_ISOLATION_EVIDENCE`
+  // write in the tenant batch.
 }
 
 /** Write one append-only event to the tenant object, then to the mirror. */

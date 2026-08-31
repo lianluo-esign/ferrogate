@@ -8,8 +8,16 @@
  * that reads `env.CONTROL_DATA`. Since Zero-D1 S5 (#881) there is no `DB`
  * (`ferrogate-control`) fallback: the object is the only backend.
  */
-import { type ControlDataNamespaceLike, controlDataObjectDatabase } from "@ferrogate/storage";
-import type { ControlDataNamespace } from "@ferrogate/storage/durable-objects";
+import {
+  type ControlDataNamespaceLike,
+  type PlatformDataNamespaceLike,
+  controlDataObjectDatabase,
+  platformDataObjectDatabase,
+} from "@ferrogate/storage";
+import type {
+  ControlDataNamespace,
+  PlatformDataNamespace,
+} from "@ferrogate/storage/durable-objects";
 import { HttpError } from "./middleware/errors.js";
 
 /**
@@ -38,6 +46,14 @@ export interface ControlDataBindings {
   readonly CONTROL_PLANE_CONTROL_STORAGE?: string;
   readonly CONTROL_DATA?: ControlDataNamespace;
   readonly CONTROL_D1?: D1Database;
+  /**
+   * The gateway's `PlatformDataObject` singleton (Zero-D1 Plan B), bound
+   * CROSS-SCRIPT. Home for platform/unattributed (`tenant IS NULL`) guardrail
+   * evidence. Unlike CONTROL there is no D1 posture and no fallback binding: the
+   * object is the only backend. Optional so a unit env or a not-yet-migrated
+   * Worker degrades to skipping the platform leg rather than 503-ing.
+   */
+  readonly PLATFORM_DATA?: PlatformDataNamespace;
 }
 
 /** Parse `CONTROL_PLANE_CONTROL_STORAGE`; empty and absent select the DO posture. */
@@ -86,6 +102,32 @@ export function controlDatabaseFrom(env: unknown): D1Database | undefined {
   const controlData = (env as ControlDataBindings).CONTROL_DATA;
   if (controlData !== undefined) {
     return controlDataObjectDatabase(controlData as unknown as ControlDataNamespaceLike);
+  }
+  return undefined;
+}
+
+/**
+ * Resolve the platform-evidence database from the PLATFORM_DATA facade
+ * (Zero-D1 Plan B), the platform sibling of {@link controlDatabaseFrom}.
+ *
+ * Deliberately simpler: the platform object is a pure Durable Object with no D1
+ * posture and no fallback binding, so there is no `*_CONTROL_STORAGE` switch to
+ * parse and thus no hard configuration failure. When PLATFORM_DATA is bound (the
+ * production shape) the caller gets the facade; when it is NOT bound — a unit
+ * env, or a Worker the cross-script stanza has not yet reached — the seam
+ * returns `undefined`, and the operator's platform read leg is skipped rather
+ * than 503-ing. During the G1→CP1 rollout the control projection still carries
+ * these rows, so a skipped leg is a briefly-narrower operator page, never lost
+ * evidence.
+ */
+export function platformDatabaseFrom(env: unknown): D1Database | undefined {
+  if (!isObject(env)) return undefined;
+  // Read via `(env as T).X` so the env-var-drift scanner sees a genuine source
+  // read of PLATFORM_DATA (it does not follow a renamed `bindings` local),
+  // exactly as CONTROL_DATA is read in {@link controlDatabaseFrom} above.
+  const platformData = (env as ControlDataBindings).PLATFORM_DATA;
+  if (platformData !== undefined) {
+    return platformDataObjectDatabase(platformData as unknown as PlatformDataNamespaceLike);
   }
   return undefined;
 }

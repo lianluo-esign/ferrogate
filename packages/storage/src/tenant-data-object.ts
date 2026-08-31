@@ -951,7 +951,7 @@ function decodeTenantMigrationState(value: unknown): PersistedTenantMigrationSta
  * future trigger body:
  *
  *  * **Comment stripping must come first.** `0001_init_tenant.sql` has 18
- *    comment lines containing a `;` mid-prose, and the twenty-nine files have
+ *    comment lines containing a `;` mid-prose, and the thirty-three files have
  *    45 between them. The test below pins the per-file breakdown; 45 is the
  *    number that bounds this function's exposure. Splitting before stripping
  *    cuts statements in half at every one of them.
@@ -2085,15 +2085,15 @@ export class TenantDataObject extends DurableObject {
    * The version gate is the first thing that happens, because this runs on every
    * cold start of every tenant object: an already-current tenant pays one
    * `sqlite_master` probe and one `MAX(version)` read and returns, instead of
-   * re-running the 447 statements of the thirty files — 80 `CREATE TABLE IF
-   * NOT EXISTS`, 101 `CREATE INDEX`, 6 `CREATE UNIQUE INDEX`, 24 `ALTER TABLE … ADD
+   * re-running the 454 statements of the thirty-three files — 82 `CREATE TABLE IF
+   * NOT EXISTS`, 104 `CREATE INDEX`, 6 `CREATE UNIQUE INDEX`, 26 `ALTER TABLE … ADD
    * COLUMN`, 6 ledger `INSERT` statements, 229 `CREATE TRIGGER` and one
    * `DROP TABLE`. (Counted,
    * not estimated — and counted by a
    * TEST since #831's review: an earlier draft said "26 `CREATE INDEX`", and the
    * whole census then went stale again the moment `0013_guardrail_evaluations.sql`
    * landed. `test/do/tenant-data-object.test.ts` re-derives these numbers
-   * from `sql/d1-ts/tenant/` and asserts them. The twenty-four ALTERs are the half that
+   * from `sql/d1-ts/tenant/` and asserts them. The twenty-six ALTERs are the half that
    * matters — the CREATEs are idempotent by construction and the ALTERs are not,
    * so the gate is load-bearing rather than an optimisation.)
    */

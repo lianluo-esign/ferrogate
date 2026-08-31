@@ -24,7 +24,12 @@ import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { D1ControlPlaneStore } from "../src/store/d1.js";
 import { applySchema, auditRows, db, rawDocument, rawRevision, resetD1, seedD1 } from "./d1.js";
 import { BASE, arm, bearer, jsonRequest, operatorKey, tenantKey } from "./harness.js";
-import { rawTenantDocument, rawTenantRevision, registerObjectTenants } from "./tenant-object.js";
+import {
+  rawTenantDocument,
+  rawTenantRevision,
+  registerObjectTenants,
+  tenantObjectDb,
+} from "./tenant-object.js";
 
 const KEY = operatorKey.secret;
 const TENANT_A_KEY = "tenant-a-secret";
@@ -228,6 +233,66 @@ describe("quota_policy round-trips on D1", () => {
   // The operator fan-out over tenant-attributed rows reads the roster;
   // production writes these rows at onboarding.
   beforeEach(() => registerObjectTenants(["tenant_a", "tenant_b"]));
+
+  // The TYPED enforcement row (`quota_policies`), read straight out of a given
+  // database handle — control's facade or a tenant object's — so a dual-write
+  // assertion compares both sides of the boundary, not a value the handler
+  // echoed back. `rpm_limit` is the assertion target because it maps to a real
+  // typed column (unlike the `max_tokens_per_month` document-only field above).
+  async function typedQuotaRow(
+    handle: D1Database,
+    scopeType: string,
+    scopeId: string,
+  ): Promise<{ id: string; rpm_limit: number | null } | null> {
+    return handle
+      .prepare("SELECT id, rpm_limit FROM quota_policies WHERE scope_type = ? AND scope_id = ?")
+      .bind(scopeType, scopeId)
+      .first<{ id: string; rpm_limit: number | null }>();
+  }
+
+  it("shadow-writes the typed row into BOTH control and the owning tenant object", async () => {
+    // The document already lives in the tenant object (`quota-policies` is
+    // tenant_private). This asserts the OTHER half of the control-D1 removal:
+    // the typed enforcement projection the gateway's admission gate reads is
+    // dual-written — authoritative on control FOR NOW, and shadowed into the
+    // owning tenant's `quota_policies` (migration 0033) so it is current before
+    // the reader cutover flips admission onto the object.
+    const created = await SELF.fetch(
+      `${BASE}/admin/v1/quota-policies`,
+      jsonRequest(KEY, "POST", { scope_type: "tenant", scope_id: "tenant_a", rpm_limit: 60 }),
+    );
+    expect(created.status).toBe(201);
+    expect(await typedQuotaRow(db(), "tenant", "tenant_a")).toMatchObject({
+      id: "tenant:tenant_a",
+      rpm_limit: 60,
+    });
+    expect(await typedQuotaRow(tenantObjectDb("tenant_a"), "tenant", "tenant_a")).toMatchObject({
+      id: "tenant:tenant_a",
+      rpm_limit: 60,
+    });
+
+    const patched = await SELF.fetch(
+      `${BASE}/admin/v1/quota-policies/tenant/tenant_a`,
+      jsonRequest(KEY, "PATCH", { rpm_limit: 120 }),
+    );
+    expect(patched.status).toBe(200);
+    // The edit reaches the tenant object too, or the operator's change would be
+    // silently lost the moment admission starts reading the object.
+    expect(await typedQuotaRow(tenantObjectDb("tenant_a"), "tenant", "tenant_a")).toMatchObject({
+      rpm_limit: 120,
+    });
+
+    const deleted = await SELF.fetch(`${BASE}/admin/v1/quota-policies/tenant/tenant_a`, {
+      method: "DELETE",
+      headers: bearer(KEY),
+    });
+    expect(deleted.status).toBe(200);
+    // Delete-side dual-write: the typed row must not outlive the document in
+    // EITHER store, or a deleted limit would keep biting once admission reads
+    // the object.
+    expect(await typedQuotaRow(db(), "tenant", "tenant_a")).toBeNull();
+    expect(await typedQuotaRow(tenantObjectDb("tenant_a"), "tenant", "tenant_a")).toBeNull();
+  });
 
   it("round-trips the composite-keyed policy", async () => {
     const created = await SELF.fetch(

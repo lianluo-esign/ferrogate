@@ -62,10 +62,8 @@
  * two scheduled runs both alert.
  */
 
-import { evidenceProjectionKey } from "../requestlog/d1.js";
 import {
   ONLINE_EVAL_REGRESSION_CLAIM_SQL,
-  ONLINE_EVAL_REGRESSION_PROJECTION_SQL,
   ONLINE_EVAL_SCORE_TABLE,
   ONLINE_EVAL_WINDOW_AGGREGATE_SQL,
   type OnlineEvalScoreDatabase,
@@ -271,15 +269,10 @@ export async function sweepOnlineEvalRegressions(
       // group in this window. Not an error, and deliberately not re-emitted.
       if (row !== null && row !== undefined) claimed.push(regression);
 
-      if (authoritative !== undefined) {
-        // The object claim is the arbiter. Project even when the object claim
-        // already existed, so a retry after a projection-only failure repairs
-        // control D1 without emitting a second alert.
-        await db
-          .prepare(ONLINE_EVAL_REGRESSION_PROJECTION_SQL)
-          .bind(evidenceProjectionKey(regression.tenantId, claimKey), ...bindings)
-          .run();
-      }
+      // The regression claim is tenant-object authoritative and is NOT mirrored
+      // to control D1 (no-tenant-data mirror red line): nothing reads a control
+      // copy, and the alert an operator acts on is the Analytics Engine point
+      // emitted below, not a queryable control row.
     } catch {
       // A claim that could not be written is a claim not taken; the next tick
       // tries again. Never a throw — see the function docs.

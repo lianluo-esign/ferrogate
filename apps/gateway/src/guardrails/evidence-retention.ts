@@ -54,6 +54,7 @@ import {
   type GuardrailEvidenceDatabase,
   guardrailTenantDatabaseFromEnv,
 } from "./evidence-d1.js";
+import { guardrailEvidencePlatformDatabaseFrom } from "./evidence-sink.js";
 
 interface ProjectionCandidateRow {
   readonly projection_key: string;
@@ -376,6 +377,68 @@ async function sweepUnscopedProjection(
 }
 
 /**
+ * Sweep the platform object (Zero-D1 Plan B).
+ *
+ * The platform object holds ONLY platform/unattributed evidence, so the whole
+ * table IS the platform domain: no tenant fence, and — unlike the control
+ * projection above — no second database to reconcile. It is id-keyed like a
+ * tenant object (no `projection_key`), so deletes go by `id` and the child
+ * checks follow through `ON DELETE CASCADE`.
+ *
+ * Governed by the SAME fleet policy that governs the un-attributed rows in the
+ * control projection ({@link sweepUnscopedProjection}). During G1 both run
+ * against the same logical rows in their two homes; G2 removes the control leg
+ * once the object is the sole reader-facing source.
+ *
+ * Never throws: a retention failure is an unpruned table, which is safe.
+ */
+async function sweepPlatformGuardrailEvidenceRetention(
+  platformDb: GuardrailEvidenceDatabase,
+  policy: RetentionPolicy,
+  nowUnix: number,
+  maxRows: number,
+): Promise<RequestLogSweepResult> {
+  let rows: TenantCandidateRow[];
+  try {
+    const result = (await platformDb
+      .prepare(
+        `SELECT id, occurred_at_unix FROM ${GUARDRAIL_EVALUATION_TABLE}
+          ORDER BY occurred_at_unix ASC LIMIT ?`,
+      )
+      .bind(maxRows)
+      .all()) as { results?: TenantCandidateRow[] };
+    rows = result.results ?? [];
+  } catch {
+    return { scanned: 0, pruned: 0 };
+  }
+
+  const candidates: LogRetentionCandidate[] = rows.map((row) => ({
+    id: row.id,
+    createdAtUnix: row.occurred_at_unix,
+  }));
+  const doomed = planLogRetention(candidates, nowUnix, policy);
+  if (doomed.length === 0) return { scanned: rows.length, pruned: 0 };
+
+  try {
+    await platformDb.batch(tenantDeleteStatements(platformDb, doomed));
+  } catch {
+    return { scanned: rows.length, pruned: 0 };
+  }
+  return { scanned: rows.length, pruned: doomed.length };
+}
+
+/** Resolve the platform object without letting a Cron binding fault escape. */
+function platformDatabaseForSweep(env: unknown): GuardrailEvidenceDatabase | undefined {
+  try {
+    return guardrailEvidencePlatformDatabaseFrom(env);
+  } catch {
+    // A missing/unreachable object leaves its evidence in place. The next tick
+    // can retry after the binding or object becomes available.
+    return undefined;
+  }
+}
+
+/**
  * Every configured scope, swept once. The `scheduled` handler's entry point.
  *
  * With no vars configured this resolves to zero scopes and returns without
@@ -411,6 +474,27 @@ export async function sweepGuardrailEvidence(
   }
 
   const fleet = scopes.find((scope) => scope.tenantId === undefined);
+
+  // Zero-D1 Plan B: the platform object is the authoritative home for
+  // platform/unattributed evidence, swept wholesale by the fleet policy. This
+  // runs INDEPENDENTLY of the control leg below and does not need `db`: a
+  // Worker whose control projection has been retired (G2) still prunes the
+  // object. G1 runs both; the two homes hold the same logical rows until G2
+  // drops `sweepUnscopedProjection`.
+  if (fleet !== undefined) {
+    const platformDb = platformDatabaseForSweep(env);
+    if (platformDb !== undefined) {
+      const platform = await sweepPlatformGuardrailEvidenceRetention(
+        platformDb,
+        fleet.policy,
+        nowUnix,
+        REQUEST_LOG_SWEEP_MAX_ROWS,
+      );
+      scanned += platform.scanned;
+      pruned += platform.pruned;
+    }
+  }
+
   if (fleet !== undefined && db !== undefined) {
     const unscoped = await sweepUnscopedProjection(db, fleet.policy, nowUnix);
     scanned += unscoped.scanned;

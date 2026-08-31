@@ -40,7 +40,6 @@ const CONTROL_ONLY = [
   "tenants",
   "tenant_databases",
   "plans",
-  "quota_policies",
   "permissions",
   "roles",
   "admin_users",
@@ -78,6 +77,24 @@ const CONTROL_LEGACY = [
   "control_plane_replay_floors_legacy",
   "budget_alert_notifications_legacy",
 ] as const;
+
+/**
+ * Tenant-scoped config being RELOCATED off control into the tenant object
+ * (control-D1 removal). The tenant copy is provisioned SCHEMA-FIRST — ahead of
+ * the reader/writer switch — so during this window the table exists in BOTH
+ * roles: the control copy is still the live one the admission path and the
+ * finops writer use, while the tenant copy sits empty until the coordinated
+ * cutover points every reader and writer at it. AFTER the cutover these move to
+ * TENANT_ONLY and the control copy is dropped. Kept as its own list (neither
+ * CONTROL_ONLY nor TENANT_ONLY) so the contract states the in-flight truth
+ * rather than a topology that is momentarily false either way.
+ *
+ *  - `spend_throttles`  — 0010 (control) / 0032 (tenant); the finops auto-throttle.
+ *  - `quota_policies`   — 0001 (control) / 0033 (tenant); the effective-quota
+ *                         chain read by admission plus the gateway attribution /
+ *                         online-eval / residency sources and the finops pass.
+ */
+const RELOCATING_TO_TENANT = ["spend_throttles", "quota_policies"] as const;
 
 /** Evidence whose authority is tenant-local but whose compatibility projection remains in CONTROL. */
 const DERIVED_EVIDENCE = [
@@ -153,6 +170,15 @@ describe("control / tenant split", () => {
     for (const table of DERIVED_EVIDENCE) {
       expect(control, `${table} compatibility projection must exist in CONTROL`).toContain(table);
       expect(tenant, `${table} authority must exist in TENANT`).toContain(table);
+    }
+  });
+
+  test("config relocating off control exists in both roles during the cutover", async () => {
+    const control = await tableNames(env.CONTROL_DB);
+    const tenant = await tableNames(env.TENANT_DB_A);
+    for (const table of RELOCATING_TO_TENANT) {
+      expect(control, `${table} live copy must still exist in CONTROL pre-cutover`).toContain(table);
+      expect(tenant, `${table} relocation target must exist in TENANT`).toContain(table);
     }
   });
 

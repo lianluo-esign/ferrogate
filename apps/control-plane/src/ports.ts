@@ -499,6 +499,18 @@ export interface ControlPlaneDeps {
    */
   readonly controlDatabase: D1Database | null;
   /**
+   * The platform-evidence Durable Object facade (Zero-D1 Plan B), or `null` when
+   * this deployment binds no `PLATFORM_DATA` namespace (a unit env, or a Worker
+   * the cross-script stanza has not yet reached).
+   *
+   * The authoritative home for platform/unattributed (`tenant IS NULL`)
+   * guardrail evidence, which has no tenant object for a fan-out read to reach.
+   * The operator guardrail list unions the roster fan-out with this object;
+   * `null` narrows that list to the tenant legs rather than 503-ing, because the
+   * control projection still carries the same rows during the G1→CP1 rollout.
+   */
+  readonly platformData?: D1Database | null;
+  /**
    * The cross-tenant billing fleet view over Analytics Engine (#956 read side),
    * or `null` when the account query surface is unconfigured (no account id /
    * token). Null ⇒ the fleet endpoint answers 503, never a fabricated report.
@@ -741,6 +753,13 @@ export interface ControlPlaneBindings {
    */
   readonly CONTROL_DATA?: ControlDataNamespace;
   /**
+   * The gateway's singleton `PlatformDataObject` namespace, bound CROSS-SCRIPT
+   * (Zero-D1 Plan B). Home for platform/unattributed guardrail evidence. Like
+   * CONTROL_DATA the DEFINING script is `apps/gateway`; the control-plane only
+   * binds and reads it. See {@link ControlPlaneDeps.platformData}.
+   */
+  readonly PLATFORM_DATA?: PlatformDataNamespace;
+  /**
    * The Cloudflare D1 control database (Tokyo primary + global read replicas),
    * selected by `CONTROL_PLANE_CONTROL_STORAGE = "d1"`. The control-plane is the
    * SINGLE writer, so it holds the plain binding (primary reads/writes) and reads
@@ -891,4 +910,7 @@ export type ControlPlaneEnv = {
   Bindings: ControlPlaneBindings;
   Variables: ControlPlaneVariables;
 };
-import type { ControlDataNamespace } from "@ferrogate/storage/durable-objects";
+import type {
+  ControlDataNamespace,
+  PlatformDataNamespace,
+} from "@ferrogate/storage/durable-objects";

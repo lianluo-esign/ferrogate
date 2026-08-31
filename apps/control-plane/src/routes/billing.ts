@@ -33,13 +33,7 @@
 import type { Context } from "hono";
 import { HttpError } from "../middleware/errors.js";
 import type { CallerScope, ControlPlaneDeps, ControlPlaneEnv, StoreRecord } from "../ports.js";
-import {
-  adminList,
-  adminListPaginated,
-  adminListPaginatedWithMetadata,
-  derivedControlProjectionMetadata,
-  parseListQuery,
-} from "../responses.js";
+import { adminList, adminListPaginated, parseListQuery } from "../responses.js";
 import { PlatformBillingGroupStore } from "../store/platform-billing-group.js";
 import { tenantDatabaseFor } from "../store/tenancy.js";
 import { provisionedTenantPage, tenantFanoutOffset } from "../store/tenant-fanout.js";
@@ -221,10 +215,6 @@ interface UsageAggregateRow {
   readonly completion_tokens: number;
   readonly total_tokens: number;
 }
-
-const USAGE_AGGREGATE_COLUMNS =
-  "r.id, r.tenant, r.tenant_context_id, r.organization_id, r.project_id, r.api_key_id, " +
-  "r.logical_model, r.provider, r.prompt_tokens, r.completion_tokens, r.total_tokens";
 
 const TENANT_USAGE_AGGREGATE_COLUMNS =
   "r.id, r.tenant_context_id, c.organization_id, c.project_id, c.api_key_id, " +
@@ -642,21 +632,16 @@ async function tenantUsageAggregatePage(
 ): Promise<{ records: StoreRecord[]; total: number }> {
   const db = await tenantBillingDatabaseFor(deps, tenantId);
   if (db === null) {
-    if (deps.controlDatabase === null) {
-      const page = await deps.store.list(
-        "usage-aggregates",
-        { kind: "tenant", tenantId },
-        {
-          offset,
-          limit,
-          paginate: false,
-          search: null,
-          filters: {},
-        },
-      );
-      return { records: [...page.items], total: page.total };
-    }
-    return controlUsageAggregatePage(deps.controlDatabase, limit, offset, tenantId);
+    // No Durable Object for this (legacy/native) tenant: fall back to the
+    // document store, never the control-D1 `usage_aggregate_rollups` projection.
+    // The tenant object is the sole authority and the control mirror is being
+    // retired (no-tenant-data-in-control-D1 red line).
+    const page = await deps.store.list(
+      "usage-aggregates",
+      { kind: "tenant", tenantId },
+      { offset, limit, paginate: false, search: null, filters: {} },
+    );
+    return { records: [...page.items], total: page.total };
   }
   const result = await db
     .prepare(
@@ -675,27 +660,51 @@ async function tenantUsageAggregatePage(
   };
 }
 
-async function controlUsageAggregatePage(
-  db: D1Database,
-  limit: number,
-  offset: number,
-  tenantId?: string,
-): Promise<{ records: StoreRecord[]; total: number }> {
-  const where = tenantId === undefined ? "" : "WHERE r.tenant = ?";
-  const params = tenantId === undefined ? [limit, offset] : [tenantId, limit, offset];
-  const result = await db
-    .prepare(
-      `SELECT ${USAGE_AGGREGATE_COLUMNS}, count(*) OVER() AS total
-         FROM ${USAGE_AGGREGATE_TABLE} r
-        ${where}
-        ORDER BY updated_at_unix DESC, id ASC
-        LIMIT ? OFFSET ?`,
-    )
-    .bind(...params)
-    .all<UsageAggregateRow & { readonly total?: number }>();
+/**
+ * The fleet (platform-operator) usage-aggregate page, assembled by a bounded
+ * live fan-out over each provisioned tenant's Durable Object — NEVER the retired
+ * control-D1 `usage_aggregate_rollups` projection. Mirrors `listBillingAuthority`:
+ * fetch `offset+limit` rows from each of up to `FLEET_FANOUT_MAX_TENANTS`
+ * tenants (plus any legacy document-store rows, which are the KV compat surface,
+ * not the SQL projection), fold by aggregate id, sort, and slice the window.
+ * `tenant_offset` pages the tenant roster itself.
+ */
+async function fleetUsageAggregatePage(
+  deps: ControlPlaneDeps,
+  scope: CallerScope,
+  query: { readonly offset: number; readonly limit: number },
+  tenantOffset: number,
+): Promise<{
+  records: StoreRecord[];
+  total: number;
+  tenantPage: Awaited<ReturnType<typeof provisionedTenantPage>>;
+}> {
+  const fetchLimit = Math.max(1, Math.min(deps.listMaxLimit, query.offset + query.limit));
+  const tenantPage = await provisionedTenantPage(deps.tenantDatabases, tenantOffset);
+  const byId = new Map<string, StoreRecord>();
+  let sourceTotal = 0;
+
+  const legacy = await deps.store.list("usage-aggregates", scope, {
+    offset: 0,
+    limit: fetchLimit,
+    paginate: false,
+    search: null,
+    filters: {},
+  });
+  for (const record of legacy.items) byId.set(String(record.id), record);
+  sourceTotal += legacy.total;
+
+  for (const tenantId of tenantPage.tenantIds) {
+    const page = await tenantUsageAggregatePage(deps, tenantId, fetchLimit, 0);
+    for (const record of page.records) byId.set(String(record.id), record);
+    sourceTotal += page.total;
+  }
+
+  const items = [...byId.values()].sort((a, b) => String(a.id).localeCompare(String(b.id)));
   return {
-    records: result.results.map(usageAggregateDocument),
-    total: result.results[0]?.total ?? 0,
+    records: items.slice(query.offset, query.offset + query.limit),
+    total: Math.max(items.length, sourceTotal),
+    tenantPage,
   };
 }
 
@@ -703,30 +712,24 @@ function listAdminUsageAggregates(): (c: Context<ControlPlaneEnv>) => Promise<Re
   return async (c) => {
     const deps = c.get("deps");
     const scope = scopeOf(c);
-    const query = parseListQuery(new URL(c.req.url), deps.listDefaultLimit, deps.listMaxLimit);
+    const url = new URL(c.req.url);
+    const query = parseListQuery(url, deps.listDefaultLimit, deps.listMaxLimit);
 
     if (scope.kind === "tenant") {
       const page = await tenantUsageAggregatePage(deps, scope.tenantId, query.limit, query.offset);
       return json(c, 200, adminListPaginated(page.records, page.total, query.offset, query.limit));
     }
 
-    if (deps.controlDatabase === null) {
-      const page = await deps.store.list("usage-aggregates", scope, query);
-      return json(c, 200, adminListPaginated(page.items, page.total, query.offset, query.limit));
-    }
-
-    const page = await controlUsageAggregatePage(deps.controlDatabase, query.limit, query.offset);
-    return json(
-      c,
-      200,
-      adminListPaginatedWithMetadata(
-        page.records,
-        page.total,
-        query.offset,
-        query.limit,
-        derivedControlProjectionMetadata(),
-      ),
-    );
+    const fleet = await fleetUsageAggregatePage(deps, scope, query, tenantFanoutOffset(url));
+    return json(c, 200, {
+      ...adminListPaginated(fleet.records, fleet.total, query.offset, query.limit),
+      tenant_page: {
+        offset: fleet.tenantPage.offset,
+        limit: fleet.tenantPage.limit,
+        total: fleet.tenantPage.total,
+        has_more: fleet.tenantPage.hasMore,
+      },
+    });
   };
 }
 

@@ -14,7 +14,7 @@
  * does not do that for you.
  */
 import { applyD1Migrations, env } from "cloudflare:test";
-import { controlDataObjectDatabase } from "@ferrogate/storage";
+import { controlDataObjectDatabase, platformDataObjectDatabase } from "@ferrogate/storage";
 import { resolveTenantStorage } from "../src/adapters.js";
 import type { ControlPlaneBindings, StoreRecord } from "../src/ports.js";
 import { SIEM_CURSOR_TABLE } from "../src/siem/cursor.js";
@@ -71,6 +71,10 @@ interface D1TestBindings {
   readonly CONTROL_DATA: unknown;
 }
 
+interface PlatformTestBindings {
+  readonly PLATFORM_DATA: unknown;
+}
+
 // Zero-D1 S5 (#881): the control database is the singleton ControlDataObject.
 // The `[[d1_databases]] DB` (`ferrogate-control`) stanza is deleted and
 // `src/store/d1.ts` reads the CONTROL_DATA facade. This harness resolves a
@@ -104,11 +108,37 @@ export function db(): D1Database {
   return controlAlias;
 }
 
+// Zero-D1 Plan B: the singleton `PlatformDataObject`, the home for platform/
+// unattributed guardrail evidence once the control D1 is gone. The operator
+// guardrail read fans out across the tenant roster AND reads this object's whole
+// table (the platform leg); the control-plane binds it CROSS-SCRIPT to the
+// gateway-hosted class the aux worker publishes. Same fresh-per-operation Proxy
+// discipline as `controlAlias` so a request-bound DO stub is never reused across
+// operations. No `exec()` branch: the platform truncation below uses `batch()`.
+const platformAlias = new Proxy({} as D1Database, {
+  get(_target, prop) {
+    const handle = platformDataObjectDatabase(
+      (env as unknown as PlatformTestBindings).PLATFORM_DATA as never,
+    ) as unknown as Record<string | symbol, unknown>;
+    const value = handle[prop];
+    return typeof value === "function" ? value.bind(handle) : value;
+  },
+});
+
+/** The platform evidence object the operator guardrail read's platform leg reads. */
+export function platformDb(): D1Database {
+  return platformAlias;
+}
+
 /** Wake the control object so its schema is applied. Call once per file, in `beforeAll`. */
 export async function applySchema(): Promise<void> {
   // The ControlDataObject applies its inlined control schema on first wake; a
   // single query triggers it so `beforeAll` callers can assume the tables exist.
   await controlAlias.prepare("SELECT 1 AS one").all();
+  // Zero-D1 Plan B: wake the platform object too so its guardrail-evidence
+  // tables and the `platform_backfill_marks` ledger exist before `resetD1`
+  // truncates them (migration runs in the object's constructor).
+  await platformAlias.prepare("SELECT 1 AS one").all();
 }
 
 /**
@@ -225,6 +255,12 @@ export async function resetD1(): Promise<void> {
           handle.db.prepare("DELETE FROM wallets"),
           handle.db.prepare("DELETE FROM payment_methods"),
           handle.db.prepare("DELETE FROM semantic_cache_policies"),
+          // The typed quota-policy enforcement row the route now SHADOW-writes
+          // alongside the document (writer dual-write, ahead of the reader
+          // cutover). Left behind, a prior test's limit would satisfy a later
+          // "the shadow wrote it" assertion — the same "empty first" lie the
+          // control-side `quota_policies` truncate above guards against.
+          handle.db.prepare("DELETE FROM quota_policies"),
           handle.db
             .prepare("DELETE FROM tenant_provisioning_marks WHERE mark = ?")
             .bind("control_plane_resource_backfill_v1"),
@@ -234,6 +270,28 @@ export async function resetD1(): Promise<void> {
         ]);
       }),
     );
+  }
+
+  // Zero-D1 Plan B: the singleton platform object holds the platform/
+  // unattributed guardrail evidence the operator read fans into, plus the
+  // one-time control→platform backfill marker. Neither is reachable by the
+  // roster-driven `touchedObjectTenants` sweep above — the object has no roster
+  // tenant. The MARK is the dangerous leftover: a completed
+  // `platform_evidence_backfill_v1` makes the next test's operator read SKIP the
+  // copy, so a freshly seeded un-attributed control row would never reach the
+  // platform leg and a "shows the operator every row" assertion would silently
+  // drop it. Gated the same way as the tenant objects: in memory mode the
+  // operator read returns the store fallback before it ever touches the object.
+  if (
+    bindings.PLATFORM_DATA !== undefined &&
+    bindings.CONTROL_PLANE_STORE?.trim().toLowerCase() !== "memory"
+  ) {
+    await platformDb().batch([
+      // Children first: same FK ordering as the control tables above.
+      platformDb().prepare(`DELETE FROM ${GUARDRAIL_CHECK_TABLE}`),
+      platformDb().prepare(`DELETE FROM ${GUARDRAIL_EVALUATION_TABLE}`),
+      platformDb().prepare("DELETE FROM platform_backfill_marks"),
+    ]);
   }
 }
 
@@ -482,7 +540,14 @@ export async function seedRequestLogs(
           row.promptTokens ?? null,
           row.completionTokens ?? null,
           row.totalTokens ?? null,
-          row.guardrailVerdict ?? null,
+          // The tenant object's `request_logs.guardrail_verdict` is NOT NULL
+          // DEFAULT 'not_screened' (a screening decision is a required fact for
+          // the tenant-private evidence table); the control projection lets it
+          // be NULL. An explicit column bind bypasses the DEFAULT, so seed the
+          // canonical "no screening ran" value the gateway itself writes
+          // (`requestlog/record.ts` degrades an unknown verdict to it) — valid
+          // for both shapes, so one helper seeds either target.
+          row.guardrailVerdict ?? "not_screened",
           row.streamed === true ? 1 : 0,
           JSON.stringify(row.document ?? {}),
         ),

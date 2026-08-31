@@ -141,15 +141,6 @@ export interface MeteringBindingResolver {
    * satisfies the interface and simply accumulates nothing.
    */
   usageDatabase?(env: unknown, tenantId?: string): D1Database | undefined;
-  /** `env.CONTROL_DB`/`env.BILLING_DB`, where derived usage snapshots project. */
-  usageProjectionDatabase?(env: unknown): D1Database | undefined;
-}
-
-/** Resolve the control database used for tenant-derived fleet projections. */
-export function meteringProjectionDatabaseFrom(env: unknown): D1Database | undefined {
-  if (typeof env !== "object" || env === null) return undefined;
-  const candidate = controlDatabaseFrom(env);
-  return isMeteringDatabase(candidate) ? (candidate as unknown as D1Database) : undefined;
 }
 
 /**
@@ -166,7 +157,6 @@ export const meteringBindingsFromEnv: MeteringBindingResolver = {
   database: meteringDatabaseFrom,
   queue: meteringQueueFrom,
   usageDatabase: usageDatabaseFrom,
-  usageProjectionDatabase: meteringProjectionDatabaseFrom,
 };
 
 /**

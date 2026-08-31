@@ -31,16 +31,31 @@
  * observed window too low (making it quieter). Both are visible; neither
  * fabricates spend.
  *
- * ## Two queries for the whole fleet, not two per tenant
+ * ## Per-DB primitive, fleet fan-out — where the join's two sides actually live
  *
- * Both statements below are `GROUP BY tenant`, so a pass costs a fixed two
- * round trips no matter how many tenants exist. That is what makes it
- * affordable to watch every tenant by default rather than making the feature
- * opt-in — see the migration's note on `spend_anomaly_enabled`.
+ * The two statements below are `GROUP BY tenant` and take a `D1Database`: run
+ * against ONE database they cost two round trips and tag each group with the
+ * `request_logs.tenant` they grouped on. That shape was written when a shared
+ * control D1 held BOTH sides of the join for every tenant.
+ *
+ * Under per-tenant Durable Objects (#859/#881) it no longer does. A tenant's
+ * `billing_events` rows are written to its OWN object and nowhere else, so the
+ * singleton `CONTROL_DATA` facade has `request_logs` rows whose join partner is
+ * absent — the INNER JOIN drops them and the detector sees ZERO tenant spend.
+ * The only database that holds both sides for a tenant is that tenant's object.
+ * {@link readSpendBucketsFleet} / {@link readPeriodSpendFleet} therefore run
+ * the SAME per-DB statement against each provisioned tenant object and
+ * concatenate: `GROUP BY rl.tenant` over a single-tenant object is one
+ * correctly-tagged group, so the merged result is what the old fleet query
+ * would have produced IF the join had had both sides. The cost is a fan-out of
+ * two round trips per tenant instead of two for the fleet — the same trade
+ * `store/split.ts` accepts and documents, and the price of reading spend from
+ * the database that actually holds it.
  *
  * `idx_request_logs_tenant_started` (`0003_request_log_columns.sql`) is the
- * index both of them drive from.
+ * index both statements drive from, in every object.
  */
+import type { TenantDatabaseRouter } from "@ferrogate/storage";
 import { BILLING_EVENT_TABLE, REQUEST_LOG_TABLE } from "../store/d1.js";
 
 /**
@@ -155,4 +170,122 @@ export async function readPeriodSpend(
     .bind(periodStartUnix, toUnix)
     .all<PeriodSpendRow>();
   return [...rows.results];
+}
+
+/**
+ * Run `read` against every provisioned tenant object's authoritative database,
+ * concurrently and with per-tenant isolation.
+ *
+ * The reads are issued CONCURRENTLY — each tenant owns a SEPARATE object, so N
+ * round trips overlap and the wall-clock is the slowest single object, not the
+ * sum (the `store/split.ts` fan-out idiom). Each is also ISOLATED: a tenant
+ * whose object is unreachable or whose read throws yields `[]` and a warning,
+ * never a rejected pass. That is the header's rule — a single bad row must not
+ * stop the pass from watching everyone else — applied to whole objects.
+ *
+ * A non-`durable_object` handle (a native-binding or unroutable tenant)
+ * contributes nothing: these tables are authoritative only in the object, and a
+ * fleet fan-out is not the place to reach for the projection the object cutover
+ * exists to retire.
+ */
+async function fanOutTenantObjects<T>(
+  router: TenantDatabaseRouter,
+  read: (db: D1Database) => Promise<T[]>,
+): Promise<T[]> {
+  const tenantIds = await router.provisionedTenants();
+  const perTenant = await Promise.all(
+    tenantIds.map(async (tenantId) => {
+      try {
+        const handle = await router.forTenant(tenantId);
+        if (handle.source !== "durable_object") return [];
+        return await read(handle.db);
+      } catch (error) {
+        console.warn(
+          "control-plane: spend fan-out failed for tenant",
+          tenantId,
+          error instanceof Error ? error.name : "",
+        );
+        return [];
+      }
+    }),
+  );
+  return perTenant.flat();
+}
+
+/**
+ * Fan {@link readSpendBuckets} out across every provisioned tenant object.
+ *
+ * See the header for WHY this is a fan-out rather than the single fleet query it
+ * wraps: the join's `billing_events` side lives only inside each tenant's own
+ * object, so the singleton `CONTROL_DATA` facade would drop every tenant row.
+ */
+export async function readSpendBucketsFleet(
+  router: TenantDatabaseRouter,
+  fromUnix: number,
+  toUnix: number,
+  windowSecs: number,
+): Promise<SpendBucketRow[]> {
+  return await fanOutTenantObjects(router, (db) =>
+    readSpendBuckets(db, fromUnix, toUnix, windowSecs),
+  );
+}
+
+/**
+ * Fan {@link readPeriodSpend} out across every provisioned tenant object. See
+ * {@link readSpendBucketsFleet} for the fan-out rationale.
+ */
+export async function readPeriodSpendFleet(
+  router: TenantDatabaseRouter,
+  periodStartUnix: number,
+  toUnix: number,
+): Promise<PeriodSpendRow[]> {
+  return await fanOutTenantObjects(router, (db) => readPeriodSpend(db, periodStartUnix, toUnix));
+}
+
+/**
+ * The tenant-scope quota-policy TUNING rows from ONE tenant object.
+ *
+ * A tenant object holds AT MOST ONE `scope_type = 'tenant'` row — its own — so
+ * this returns zero or one row, already tagged with its `scope_id`. The typed
+ * `quota_policies` row moved to the object with the rest of the tenant-private
+ * data (#861 for the document, the writer dual-write for the enforcement row);
+ * reading the detector's tuning from the object rather than from a shared
+ * control mirror is the finops half of that cutover — the same reason the spend
+ * join above fans out.
+ */
+export async function readTenantPolicyRows(
+  db: D1Database,
+  columns: readonly string[],
+): Promise<Record<string, unknown>[]> {
+  const rows = await db
+    .prepare(`SELECT ${columns.join(", ")} FROM quota_policies WHERE scope_type = 'tenant'`)
+    .all<Record<string, unknown>>();
+  return [...rows.results];
+}
+
+/**
+ * Fan {@link readTenantPolicyRows} out across every provisioned tenant object.
+ *
+ * Fails safe per OBJECT exactly as the spend fan-out does: a tenant whose object
+ * is unreachable or throws contributes no tuning row rather than rejecting the
+ * pass, so the detector keeps watching everyone else.
+ *
+ * The MISSING-ROW case is NOT direction-neutral, and this is the load-bearing
+ * reason the one-time backfill MUST run before this reader is flipped in
+ * production (the deploy-ordering invariant). A tenant whose policy has not yet
+ * been dual-written into its object — an old row awaiting backfill, or one never
+ * re-saved since the writer cutover — reads here as "no tuning", so
+ * {@link tuningFromRow} substitutes the shipped defaults. Reverting to defaults
+ * is LOUDER, not quieter, whenever the operator had LOOSENED the tenant: a raised
+ * `spend_anomaly_ratio` (batch suppression) drops back to the tight default, and
+ * `spend_anomaly_enabled = 0` (a tenant an operator explicitly stopped watching)
+ * flips back to watched. The one leg that fails SAFE is the auto-throttle: a
+ * missing `spend_anomaly_auto_throttle_rpm` is `undefined`, so the only leg that
+ * touches live traffic simply does not fire. Alert NOISE, never a wrong brake.
+ */
+export async function readTenantPoliciesFleet(
+  router: TenantDatabaseRouter,
+  columns: readonly string[],
+): Promise<Record<string, unknown>[]> {
+  return await fanOutTenantObjects(router, (db) => readTenantPolicyRows(db, columns));
 }

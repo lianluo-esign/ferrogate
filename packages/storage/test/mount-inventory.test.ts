@@ -142,6 +142,16 @@ const MOUNTED: [symbol: string, app: string][] = [
   // instead. Reached from `apps/gateway/src/tenancy/tenant-data.ts` as well,
   // which is where `env.TENANT_DATA.idFromName(tenantId)` is issued.
   ["TenantDataObject", "gateway"],
+  // Zero-D1 Plan B — `PlatformDataObject`, the second class (after
+  // `TenantDataObject`) whose unmount is an UNBOOTABLE WORKER, not a dead
+  // export. workerd resolves the `[[durable_objects.bindings]] class_name =
+  // "PlatformDataObject"` stanza in `apps/gateway/wrangler.toml` against the
+  // ENTRY module's named exports, so deleting the re-export from
+  // `apps/gateway/src/worker.ts` stops the gateway starting — and the pool-workers
+  // suites stay green. This gate and `apps/gateway/test/wrangler-bindings.test.ts`
+  // are the two places that fail instead. The gateway is the DEFINING script;
+  // the control-plane binds the same class cross-script.
+  ["PlatformDataObject", "gateway"],
   // #859 — the D1-shaped facade is now used by the gateway request-log writer
   // and by AgentRunState's cross-script evidence writer. It remains a facade,
   // not a second storage authority: both call the same TenantDataObject RPC.

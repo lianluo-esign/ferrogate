@@ -36,7 +36,7 @@ import {
   providerJson,
 } from "../inference/provider-mock.js";
 import { tenantObjectDb } from "../tenant-object.js";
-import { controlDb, resetOnlineEvalTables, storedRegressions, storedScores } from "./harness.js";
+import { controlDb, resetOnlineEvalTables, storedScores } from "./harness.js";
 
 const CRITERIA = [{ id: "grounded", definition: "Is it supported by the context?" }];
 
@@ -234,8 +234,13 @@ describe("seam 3 — the cron tick sweeps regressions", () => {
 
     await gatewayScheduled({}, env(), { waitUntil: () => {} });
 
-    const rows = await storedRegressions();
-    expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ tenant: "tenant_a", criterion_id: "grounded" });
+    // The regression claim is tenant-object authoritative and is no longer
+    // mirrored to control D1 (no-tenant-data mirror red line): assert it on the
+    // tenant object, where the sweep now records it exclusively.
+    const rows = await tenantObjectDb("tenant_a")
+      .prepare("SELECT tenant, criterion_id FROM online_eval_regressions")
+      .all<{ tenant: string; criterion_id: string }>();
+    expect(rows.results).toHaveLength(1);
+    expect(rows.results[0]).toMatchObject({ tenant: "tenant_a", criterion_id: "grounded" });
   });
 });

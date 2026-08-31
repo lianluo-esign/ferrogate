@@ -123,6 +123,11 @@ const TENANT_TABLES = [
   "payment_methods",
   "projects",
   "provider_channels",
+  // `0033_quota_policies` — the effective-quota chain (tenant/project/workspace/
+  // key rows, all owned by this tenant) moved off the removed control database
+  // into the tenant object. Sorts after `provider_channels` and before
+  // `request_logs` (q > p, q < r).
+  "quota_policies",
   "request_logs",
   "responses_conversations",
   "retention_policies",
@@ -140,6 +145,10 @@ const TENANT_TABLES = [
   "shared_billing_groups",
   "shared_config_cursor",
   "spend_anomaly_episodes",
+  // `0032_spend_throttles` — the auto-throttle table, moved off the removed
+  // control database into the tenant object (the detector only ever writes
+  // `scope_type = 'tenant'` rows, so every throttle is about this tenant).
+  "spend_throttles",
   "sso_provider_configs",
   "storage_schema_migrations",
   "stored_assets",
@@ -361,10 +370,17 @@ describe("the statement splitter", () => {
       // support today and tenant/agent chat later. Finally,
       // `0031_public_model_pricing_binding` adds the supplier cost multiplier,
       // the configured route's public-price binding and its lookup index.
-      files: 31,
-      statements: 450,
-      createTable: 80,
-      createIndex: 102,
+      // `0032_spend_throttles` moves the auto-throttle table off the removed
+      // control database into the tenant object (+1 `CREATE TABLE`, +1 `CREATE
+      // INDEX`). Finally, `0033_quota_policies` moves the effective-quota chain
+      // off control too, reproducing the full 41-column squashed shape in one
+      // `CREATE TABLE` (+1 `CREATE TABLE`, +1 `CREATE INDEX`); the 25 columns
+      // that reached the control table by `ALTER` are inlined here, so this
+      // migration adds no `ALTER TABLE`.
+      files: 33,
+      statements: 454,
+      createTable: 82,
+      createIndex: 104,
       createUniqueIndex: 6,
       alterTable: 26,
       insert: 6,
@@ -423,7 +439,7 @@ describe("a fresh tenant object", () => {
     expect(status.latest).toBe(TENANT_SCHEMA_VERSION);
     // A guard on the fixture: if `TENANT_MIGRATIONS` were ever empty the
     // version assertions above would both read 0 and pass vacuously.
-    expect(TENANT_MIGRATIONS.length).toBe(31);
+    expect(TENANT_MIGRATIONS.length).toBe(33);
     expect(status.appliedThisWake).toEqual(TENANT_MIGRATIONS.map((m) => m.name));
 
     const tables = await object.query({
