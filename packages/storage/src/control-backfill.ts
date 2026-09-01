@@ -10,10 +10,14 @@
  *
  * Three properties the issue demands, held by construction:
  *
- *  - **Idempotent by primary key.** Every write is `INSERT OR IGNORE`, so a row
- *    whose key already exists at the destination is skipped. Re-running copies
- *    zero rows and the per-table row counts are unchanged — the property the
- *    companion test proves by running the copy twice.
+ *  - **Idempotent by primary key.** By default every write is `INSERT OR
+ *    IGNORE`, so a row whose key already exists at the destination is skipped.
+ *    Re-running copies zero rows and the per-table row counts are unchanged — the
+ *    property the companion test proves by running the copy twice. The optional
+ *    `overwrite` mode ({@link ControlBackfillOptions}) instead upserts, so a
+ *    destination row that has diverged from the source is reconciled rather than
+ *    left stale — the cut-over parity gate needs this because the destination
+ *    object self-seeds a few rows on first wake (see {@link copyStatementSql}).
  *  - **Re-runnable in either direction.** The copier is backend-agnostic: it
  *    takes two `D1Database` handles (a real D1 binding and the object facade
  *    from `controlDataObjectDatabase` are both `D1Database`-shaped), so
@@ -221,13 +225,31 @@ export type ControlTableReceiptComparison = TenantTableReceiptComparison;
 export interface ControlBackfillOptions {
   /** Rows read per page and statements per destination batch. */
   readonly pageSize?: number;
+  /**
+   * When true, a destination row that already exists with the same primary key
+   * is UPDATED to the source's values (a true `ON CONFLICT … DO UPDATE` upsert)
+   * rather than skipped. Default false = the historic additive `INSERT OR
+   * IGNORE`, which is safe only for an EMPTY destination.
+   *
+   * The cut-over needs the upsert because the destination `ControlDataObject` is
+   * never empty when it is backfilled: it applies the same control migrations on
+   * first wake, and a few of those SEED or bump rows (`plans` 'free' in 0001;
+   * the `platform_billing_group_revisions` counter in 0032/0033) with
+   * migration-time values the live D1 has since evolved. `INSERT OR IGNORE` can
+   * never heal a same-key/different-value row, so it pins the parity gate open on
+   * exactly those tables; the upsert reconciles them. See {@link copyStatementSql}.
+   */
+  readonly overwrite?: boolean;
 }
 
 export interface ControlBackfillTableResult {
   readonly table: string;
   /** Rows read from the source table. */
   readonly sourceRows: number;
-  /** Rows actually inserted at the destination (`0` on a re-run — idempotency). */
+  /**
+   * Rows written at the destination — inserts, plus in-place updates when
+   * `overwrite` is set. `0` on an idempotent `INSERT OR IGNORE` re-run.
+   */
   readonly copied: number;
 }
 
@@ -299,16 +321,54 @@ async function readPage(
   return results;
 }
 
-/** Copy one table's rows, idempotently, page by page. */
+/**
+ * The per-row write statement for one table.
+ *
+ * Default (`overwrite` false) is `INSERT OR IGNORE`: additive and idempotent by
+ * primary key — the historic behavior, safe for an EMPTY destination.
+ *
+ * `overwrite` true switches to a true upsert: `INSERT … ON CONFLICT (<pk>) DO
+ * UPDATE SET <non-key col> = excluded.<col>, …`. This is an in-place UPDATE that
+ * touches no child rows — deliberately NOT `INSERT OR REPLACE`, whose delete+insert
+ * would cascade through `ON DELETE` foreign keys. It is needed because the
+ * destination `ControlDataObject` self-seeds a handful of rows on first wake
+ * (`plans` 'free' in migration 0001; the `platform_billing_group_revisions`
+ * counter in 0032/0033) whose migration-time values the live D1 has since
+ * evolved — a same-key/different-value divergence `INSERT OR IGNORE` can never
+ * reconcile. A table whose every column is a key column has nothing to update, so
+ * it degrades to `ON CONFLICT DO NOTHING` — identical to the ignore path.
+ */
+function copyStatementSql(
+  spec: ControlBackfillTable,
+  columns: readonly string[],
+  overwrite: boolean,
+): string {
+  const placeholders = columns.map(() => "?").join(", ");
+  const columnsSql = columnList(columns);
+  const insertHead = `INSERT INTO ${spec.name} (${columnsSql}) VALUES (${placeholders})`;
+  if (!overwrite) {
+    return `INSERT OR IGNORE INTO ${spec.name} (${columnsSql}) VALUES (${placeholders})`;
+  }
+  const keyColumns = new Set(spec.keyColumns);
+  const setColumns = columns.filter((column) => !keyColumns.has(column));
+  const conflictTarget = orderByClause(spec.keyColumns);
+  if (setColumns.length === 0) {
+    return `${insertHead} ON CONFLICT (${conflictTarget}) DO NOTHING`;
+  }
+  const assignments = setColumns.map((column) => `"${column}" = excluded."${column}"`).join(", ");
+  return `${insertHead} ON CONFLICT (${conflictTarget}) DO UPDATE SET ${assignments}`;
+}
+
+/** Copy one table's rows page by page — additive by default, upsert when `overwrite`. */
 async function copyTable(
   source: D1Database,
   destination: D1Database,
   spec: ControlBackfillTable,
   pageSize: number,
+  overwrite: boolean,
 ): Promise<ControlBackfillTableResult> {
   const columns = await tableColumns(source, spec.name);
-  const placeholders = columns.map(() => "?").join(", ");
-  const insertSql = `INSERT OR IGNORE INTO ${spec.name} (${columnList(columns)}) VALUES (${placeholders})`;
+  const insertSql = copyStatementSql(spec, columns, overwrite);
   let sourceRows = 0;
   let copied = 0;
   for (let offset = 0; ; offset += pageSize) {
@@ -407,6 +467,7 @@ export async function backfillControlData(
   options: ControlBackfillOptions = {},
 ): Promise<ControlBackfillReport> {
   const pageSize = assertPositivePageSize(options.pageSize ?? DEFAULT_PAGE_SIZE);
+  const overwrite = options.overwrite ?? false;
   const tables: ControlBackfillTableResult[] = [];
   const skipped: string[] = [];
   const presentTables: ControlBackfillTable[] = [];
@@ -416,7 +477,7 @@ export async function backfillControlData(
       continue;
     }
     presentTables.push(spec);
-    tables.push(await copyTable(source, destination, spec, pageSize));
+    tables.push(await copyTable(source, destination, spec, pageSize, overwrite));
   }
   // Verify only the tables the source actually had. A manifest table the source
   // predates is excluded from BOTH receipts, so it cannot become a spurious

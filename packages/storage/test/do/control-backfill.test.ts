@@ -276,6 +276,55 @@ describe("copies the control database into the object", () => {
     );
   });
 
+  test("overwrite upserts a diverged destination row that INSERT OR IGNORE cannot heal", async () => {
+    await backfillControlData(env.CONTROL_DB, objectDb());
+
+    // Reproduce production: the destination holds a row with the SAME primary key
+    // but a STALE value (there, the object self-seeds `plans` 'free' and the
+    // billing-group revision counter on first wake; here we simulate it by
+    // mutating the object copy after the first backfill). The source is
+    // authoritative and still says "Backfill One".
+    await objectDb()
+      .prepare("UPDATE tenants SET name = ? WHERE id = ?")
+      .bind("Stale In Object", "bf-t1")
+      .run();
+
+    // The default INSERT OR IGNORE copy CANNOT heal it: bf-t1 already exists at
+    // the destination, so the row is skipped and the stale value survives.
+    const ignoreRun = await backfillControlData(env.CONTROL_DB, objectDb());
+    const ignoreTenants = ignoreRun.tables.find((t) => t.table === "tenants");
+    expect(ignoreTenants?.copied).toBe(0);
+    const afterIgnore = await objectDb()
+      .prepare("SELECT name FROM tenants WHERE id = ?")
+      .bind("bf-t1")
+      .first<{ name: string }>();
+    expect(afterIgnore?.name).toBe("Stale In Object");
+    const stillDiverged = compareTableReceipts(
+      await controlBackfillReceipts(env.CONTROL_DB, SUBSET),
+      await controlBackfillReceipts(objectDb(), SUBSET),
+    );
+    expect(stillDiverged.ok).toBe(false);
+    expect(stillDiverged.mismatches.some((m) => m.table === "tenants" && m.reason === "checksum")).toBe(
+      true,
+    );
+
+    // The upsert run reconciles the destination to the source in place.
+    const overwriteRun = await backfillControlData(env.CONTROL_DB, objectDb(), { overwrite: true });
+    const overwriteTenants = overwriteRun.tables.find((t) => t.table === "tenants");
+    // The updated row counts as written (an in-place UPDATE, not a skip).
+    expect(overwriteTenants?.copied).toBeGreaterThanOrEqual(1);
+    const afterOverwrite = await objectDb()
+      .prepare("SELECT name FROM tenants WHERE id = ?")
+      .bind("bf-t1")
+      .first<{ name: string }>();
+    expect(afterOverwrite?.name).toBe("Backfill One");
+    const healed = compareTableReceipts(
+      await controlBackfillReceipts(env.CONTROL_DB, SUBSET),
+      await controlBackfillReceipts(objectDb(), SUBSET),
+    );
+    expect(healed.ok).toBe(true);
+  }, 15_000);
+
   test("copies a foreign-keyed child after its parents (FK-dependency order)", async () => {
     // platform_catalog_offerings.model_id FK → platform_catalog_models and
     // .provider_id FK → platform_provider_channels (migration 0025). The object

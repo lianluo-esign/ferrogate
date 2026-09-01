@@ -134,6 +134,19 @@ export const controlBackfillRequestSchema = z
      * after a copy (or before a cut-over) WITHOUT moving a single row.
      */
     verify_only: z.boolean().optional(),
+    /**
+     * When true, the copy is an upsert (`ON CONFLICT … DO UPDATE`) rather than
+     * the default additive `INSERT OR IGNORE`: a destination row that already
+     * exists with the same primary key is UPDATED to the source's values instead
+     * of skipped. The cut-over needs this because the destination
+     * `ControlDataObject` self-seeds a few rows on first wake (the `plans`
+     * 'free' seed in migration 0001; the `platform_billing_group_revisions`
+     * counter in 0032/0033) with migration-time values the live D1 has since
+     * evolved — same-key/different-value divergences the ignore path can never
+     * reconcile, which otherwise pin the parity gate open on those tables.
+     * Ignored when `verify_only` is set (verify moves no rows).
+     */
+    overwrite: z.boolean().optional(),
   })
   .strict();
 
@@ -523,7 +536,10 @@ export const adminConfigOpsRoutes: GroupModule = crudGroup("admin_config_ops", [
    * the single boolean a cut-over gates on. `verify_only` re-runs just the
    * receipt comparison — the parity gate — without moving a row, scoped to the
    * tables the SOURCE actually has so a freshly-migrated destination's extra
-   * empty tables are not spuriously reported.
+   * empty tables are not spuriously reported. `overwrite` switches the copy from
+   * ignore to an in-place upsert so the destination object's self-seeded rows
+   * (`plans`, the billing-group revision counter) are reconciled to the live D1
+   * instead of pinning the parity gate open.
    *
    * The response reports rows READ and rows actually INSERTED per table (`0` on
    * a re-run), the tables skipped because the source predates them, and any
@@ -577,11 +593,10 @@ export const adminConfigOpsRoutes: GroupModule = crudGroup("admin_config_ops", [
       });
     }
 
-    const report = await backfillControlData(
-      source,
-      destination,
-      body.page_size !== undefined ? { pageSize: body.page_size } : {},
-    );
+    const report = await backfillControlData(source, destination, {
+      ...(body.page_size !== undefined ? { pageSize: body.page_size } : {}),
+      ...(body.overwrite !== undefined ? { overwrite: body.overwrite } : {}),
+    });
     return json(c, 200, {
       object: "control_backfill",
       direction,
