@@ -65,8 +65,23 @@ import {
   sqlStatements,
 } from "./tenant-data-object.js";
 
-/** The single well-known address of the control object. */
-export const CONTROL_DATA_ADDRESS = "control";
+/**
+ * The single well-known address of the control object.
+ *
+ * Re-homed from `"control"` to `"control-apac"` for the D1→DO cutover. Two
+ * reasons, both load-bearing:
+ *  1. Region. The original `"control"` object first materialized WITHOUT a
+ *     valid location hint and is pinned in US-East; a `locationHint` is honored
+ *     only on an address's FIRST `get()`, so an already-placed object cannot be
+ *     relocated. A fresh address gets a clean first `get()` (hinted `"apac"`,
+ *     in-region for this APAC fleet — see control-do.ts).
+ *  2. Backfill correctness. The D1→DO backfill copies with `INSERT OR IGNORE`,
+ *     so a NON-empty destination would keep its own rows and silently drop the
+ *     current D1 value on any shared primary key. Only a guaranteed-empty
+ *     (never-before-addressed) object copies every current D1 row faithfully.
+ * The old US-East `"control"` object is abandoned.
+ */
+export const CONTROL_DATA_ADDRESS = "control-apac";
 
 /** Prefix on every refusal this object raises, so a caller can recognise one. */
 const REFUSAL = "control_data_object";

@@ -82,6 +82,7 @@ import {
   charge as chargeEvent,
   ledgerEntryId,
 } from "@ferrogate/billing";
+import { platformDatabaseFrom } from "../control-data.js";
 import type { Usage, UsageSink } from "../inference/ports.js";
 import { chargeWithAgentRun } from "./agent-run.js";
 import { billingAnalyticsFromEnv, writeBillingAnalyticsForEvent } from "./billing-analytics.js";
@@ -92,8 +93,13 @@ import {
   dispatchBudgetThresholdAlerts,
 } from "./budget-alerts.js";
 import { usdToCredits } from "./credits.js";
-import { D1LedgerStore } from "./d1.js";
+import { BILLING_OUTBOX_DELETE_SQL, D1LedgerStore, platformBillingStatements } from "./d1.js";
 import { billingEventFromUsage } from "./event.js";
+import {
+  GATEWAY_PLATFORM_BILLING_DRAIN,
+  GATEWAY_PLATFORM_BILLING_OUTBOX,
+  platformBillingFlagEnabled,
+} from "./platform-billing-flags.js";
 import { InMemoryLedgerStore } from "./ledger.js";
 import {
   BILLING_OUTBOX_BATCH,
@@ -108,6 +114,7 @@ import {
   type MeteredCharge,
   type MeteringClock,
   type MeteringDiagnostics,
+  type MeteringDatabase,
   type MeteringOutbox,
   type MeteringScheduler,
   type MeteringStats,
@@ -279,6 +286,15 @@ export interface MeteringSinkOptions {
    * isolate-local outbox, drain scheduled from `record()`.
    */
   readonly bindings?: MeteringBindingResolver;
+  /**
+   * Zero-D1 Plan B (G1 dual-write): the PLATFORM_DATA singleton that shadows
+   * the UNATTRIBUTED (`tenant_id IS NULL`) billing rows a settlement writes to
+   * the control projection. Defaults to {@link platformDatabaseFrom}; a unit
+   * env or a Worker the PLATFORM_DATA stanza has not reached resolves to
+   * `undefined`, and the shadow leg self-skips without touching the control
+   * write. Tests inject an in-memory database here.
+   */
+  readonly platformDatabase?: (env: unknown) => MeteringDatabase | undefined;
   /** `ctx.waitUntil` in production; see {@link executionContextScheduler}. */
   readonly scheduler?: MeteringScheduler;
   readonly clock?: MeteringClock;
@@ -349,6 +365,7 @@ export class MeteringUsageSink implements UsageSink {
    */
   readonly #pendingUnpriced: UnpricedUsage[] = [];
   readonly #bindings: MeteringBindingResolver | undefined;
+  readonly #platformDatabaseOf: (env: unknown) => MeteringDatabase | undefined;
   /**
    * Durable backends, memoized ON THE ENV OBJECT.
    *
@@ -381,6 +398,7 @@ export class MeteringUsageSink implements UsageSink {
     this.#nodeId = options.nodeId;
     this.#settledCostUsd = options.settledCostUsd;
     this.#bindings = options.bindings;
+    this.#platformDatabaseOf = options.platformDatabase ?? platformDatabaseFrom;
   }
 
   // -------------------------------------------------------------------------
@@ -857,6 +875,49 @@ export class MeteringUsageSink implements UsageSink {
         const analytics = billingAnalyticsFromEnv(rc.env);
         if (analytics !== null) writeBillingAnalyticsForEvent(analytics, charge.event);
       }
+      // Zero-D1 Plan B (G1 dual-write): an UNATTRIBUTED settlement — one with no
+      // tenant object to own it, whose control write landed in the shared
+      // control projection — ALSO shadows its billing_events + billing_ledger
+      // rows into the PLATFORM_DATA singleton, the authoritative home those rows
+      // will be READ from once the control projection is retired. Gated on the
+      // SAME `tenantIdForCharge` the drain used to select the unattributed
+      // control store (`#drain`, ~L707), so an ATTRIBUTED charge — already
+      // written to its own tenant object — never reaches the platform object.
+      // Best-effort and OUTSIDE the retry contract, exactly like the request-log
+      // platform leg (`requestlog/queue.ts`): the control settlement above has
+      // already committed AND been delivered, so a platform-object blip must not
+      // re-drive a settled, delivered charge. The one-time backfill of
+      // pre-existing rows plus this ongoing dual-write reconcile any gap, so a
+      // swallowed failure here is at most a briefly-incomplete platform read.
+      if (rc?.env !== undefined && tenantIdForCharge(record.charge, attribution) === undefined) {
+        try {
+          const platformDb = this.#platformDatabaseOf(rc.env);
+          if (platformDb !== undefined) {
+            // Zero-D1 Plan B outbox co-migration: under either gate the shadow is
+            // upgraded from a 2-row (event+ledger) to a 3-row
+            // (event+ledger+outbox) commit issued as ONE `platformDb.batch()`,
+            // preserving #150 atomicity in the platform DO's single implicit
+            // transaction. The DRAIN gate also forces the write so its recovery
+            // sweep is never run against an unfed store. Both OFF ⇒ the original
+            // 2-row batch with no reap, i.e. byte-identical to production.
+            const writeOutbox =
+              platformBillingFlagEnabled(rc.env, GATEWAY_PLATFORM_BILLING_OUTBOX) ||
+              platformBillingFlagEnabled(rc.env, GATEWAY_PLATFORM_BILLING_DRAIN);
+            await platformDb.batch(
+              platformBillingStatements(platformDb, charge, { includeOutbox: writeOutbox }),
+            );
+            if (writeOutbox) {
+              // Reap the platform outbox row in the SAME best-effort pass — the
+              // report was already published from the in-isolate outbox above, so
+              // the platform outbox stays EMPTY at rest and a row a later
+              // `sweepPlatform` finds is unambiguously a crash remnant.
+              await platformDb.prepare(BILLING_OUTBOX_DELETE_SQL).bind(charge.id).run();
+            }
+          }
+        } catch (error) {
+          this.#report("platform-billing", error);
+        }
+      }
       this.#outbox.delete(id);
       await this.#reap(backend, id);
     } catch (error) {
@@ -1099,6 +1160,28 @@ export class MeteringUsageSink implements UsageSink {
     tenantId: string | undefined,
   ): Promise<void> {
     const backend = this.#backend(rc.env, tenantId);
+    await this.#sweepResolvedBackend(rc, now, backend, {
+      accumulate: this.#bindings !== undefined,
+    });
+  }
+
+  /**
+   * Recover stranded outbox rows from an ALREADY-RESOLVED backend.
+   *
+   * Split out of {@link #sweepBackend} so the same crash-recovery loop can drive
+   * either the tenant/control backend {@link #backend} memoizes on the env, or
+   * the fresh platform backend {@link sweepPlatform} builds by hand. `accumulate`
+   * is the one behavioural difference between the two: the tenant/control sweep
+   * re-runs the idempotent usage aggregate when a binding resolver is configured,
+   * while the platform sweep never accumulates (an unattributed charge has no
+   * tenant object to roll up into).
+   */
+  async #sweepResolvedBackend(
+    rc: MeteringDrainContext,
+    now: number,
+    backend: MeteringBackend,
+    options: { accumulate: boolean },
+  ): Promise<void> {
     const outbox = backend.ledger.outbox;
     if (outbox === undefined) {
       return;
@@ -1107,7 +1190,7 @@ export class MeteringUsageSink implements UsageSink {
       const due = await outbox.listDue(now - OUTBOX_SWEEP_GRACE_SECONDS, BILLING_OUTBOX_BATCH);
       for (const record of due) {
         try {
-          if (this.#bindings !== undefined) {
+          if (options.accumulate) {
             await this.#accumulate(backend, record.charge, undefined, rc);
           }
           await backend.publisher.deliver(record.charge);
@@ -1154,6 +1237,43 @@ export class MeteringUsageSink implements UsageSink {
     } catch (error) {
       this.#report("sweep", error);
     }
+  }
+
+  /**
+   * Zero-D1 Plan B — recover crash-stranded PLATFORM outbox rows.
+   *
+   * RECOVERY ONLY. The request path publishes each unattributed platform charge
+   * exactly once (from the in-isolate outbox) and reaps its platform outbox row
+   * in the same best-effort pass ({@link #deliverOnce}), so the platform outbox
+   * is empty at rest and control remains the authoritative request-path drain
+   * this slice (the authority flip to platform is the deferred G2 slice). A row
+   * this sweep finds is therefore an isolate-death remnant: the platform batch
+   * committed but the in-pass reap did not run. Re-delivering it is money-safe
+   * because downstream dedups on the ledger-entry-id (the Queue message id), so a
+   * consumer that already applied the charge drops the redelivery.
+   *
+   * The backend is built FRESH here rather than through {@link #backend}: that
+   * WeakMap keys `undefined -> "__control__" -> the control db`, so routing the
+   * platform sweep through it would silently sweep control and break the
+   * single-drain-source invariant. `D1LedgerStore(platformDb, {})` gives the
+   * control-variant `.outbox` (a `D1DurableOutbox` with no tenant fence), which
+   * is exactly the shape the platform outbox rows were written with.
+   *
+   * Inert when there is no platform object bound or no Queue producer, and never
+   * rejects (it inherits {@link #sweepResolvedBackend}'s `#report("sweep", …)`).
+   */
+  async sweepPlatform(rc: MeteringDrainContext, nowUnixSeconds?: number): Promise<void> {
+    const platformDb = this.#platformDatabaseOf(rc.env);
+    const queue = this.#bindings?.queue(rc.env);
+    if (platformDb === undefined || queue === undefined) {
+      return;
+    }
+    const now = nowUnixSeconds ?? this.#clock.nowUnixSeconds();
+    const backend: MeteringBackend = {
+      ledger: new D1LedgerStore(platformDb, {}),
+      publisher: new QueueBillingReportPublisher(queue),
+    };
+    await this.#sweepResolvedBackend(rc, now, backend, { accumulate: false });
   }
 
   /** Run an observability hook without letting it become a billing failure. */

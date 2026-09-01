@@ -13,6 +13,14 @@ import type {
   TenantModelCatalogLoadResult,
   TenantModelCatalogSource,
 } from "./ports.js";
+import {
+  PLATFORM_PROVIDER_COST_SQL,
+  PUBLIC_MODEL_PRICE_SQL,
+  type PlatformProviderCostRow,
+  type PublicModelPriceRow,
+  platformProviderCostMap,
+  readPublicPriceSnapshot,
+} from "./public-price-snapshot.js";
 
 /**
  * Tenant-owned model catalog loading for the inference data plane.
@@ -132,35 +140,6 @@ export interface CatalogJoinRow {
   readonly provider_enabled: number | null;
 }
 
-interface PublicModelPriceRow {
-  readonly id: string;
-  readonly model_key: string;
-  readonly aliases_json: string;
-  readonly enabled: number | string;
-  readonly input_price_per_1m: number | null;
-  readonly output_price_per_1m: number | null;
-  readonly cached_input_price_per_1m: number | null;
-  readonly cache_write_price_per_1m: number | null;
-  readonly reasoning_price_per_1m: number | null;
-  readonly audio_second_price_per_1m: number | null;
-  readonly audio_character_price_per_1m: number | null;
-}
-
-interface PlatformProviderCostRow {
-  readonly id: string;
-  readonly cost_multiplier: number | string | null;
-}
-
-const PUBLIC_MODEL_PRICE_SQL = `
-  SELECT id, model_key, aliases_json, enabled, input_price_per_1m, output_price_per_1m,
-         cached_input_price_per_1m, cache_write_price_per_1m,
-         reasoning_price_per_1m, audio_second_price_per_1m,
-         audio_character_price_per_1m
-    FROM platform_model_prices`;
-
-const PLATFORM_PROVIDER_COST_SQL = `
-  SELECT id, cost_multiplier FROM platform_provider_channels`;
-
 const PUBLIC_PRICE_FIELDS = [
   "input_price_per_1m",
   "output_price_per_1m",
@@ -241,6 +220,29 @@ async function resolvePublicModelPrices(
     (row) => row.pricing_model_id != null || row.offering_source === "platform_seed",
   );
   if (!needsPricing) return rows;
+
+  // KV fast path (#961 shape): the account-global snapshot the control plane
+  // republishes every tick over the SAME `PLATFORM_CONFIG` KV the catalog,
+  // billing-group and tenant-status projections ride. Present-and-well-formed →
+  // fold prices colo-locally, removing the two per-request control reads the
+  // singleton-DO cutover must shield. ANY miss (KV absent, never published,
+  // malformed, or a read that throws) falls THROUGH to the control read below,
+  // so this is a fast path and never a new authority. `withPublicModelPrices`
+  // and `platformProviderCostMap` are the SAME derivation on both paths, so KV
+  // and control produce byte-identical pricing.
+  const kv = env.PLATFORM_CONFIG as KVNamespace | undefined;
+  if (kv !== undefined) {
+    const snapshot = await readPublicPriceSnapshot(kv);
+    if (snapshot !== null) {
+      return withPublicModelPrices(
+        rows,
+        snapshot.prices,
+        platformProviderCostMap(snapshot.provider_costs),
+        tenantId,
+      );
+    }
+  }
+
   const control = controlDatabaseFrom(env);
   if (control === undefined) return rows;
   try {
@@ -248,15 +250,12 @@ async function resolvePublicModelPrices(
       control.prepare(PUBLIC_MODEL_PRICE_SQL).all<PublicModelPriceRow>(),
       control.prepare(PLATFORM_PROVIDER_COST_SQL).all<PlatformProviderCostRow>(),
     ]);
-    const platformCosts = new Map<string, number>();
-    for (const provider of providerResult.results) {
-      const value =
-        typeof provider.cost_multiplier === "number"
-          ? provider.cost_multiplier
-          : Number(provider.cost_multiplier);
-      if (Number.isFinite(value) && value >= 0) platformCosts.set(provider.id, value);
-    }
-    return withPublicModelPrices(rows, priceResult.results, platformCosts, tenantId);
+    return withPublicModelPrices(
+      rows,
+      priceResult.results,
+      platformProviderCostMap(providerResult.results),
+      tenantId,
+    );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (

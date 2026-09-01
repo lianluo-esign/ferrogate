@@ -659,6 +659,26 @@ GATEWAY_TENANT_DB_ROUTING = "durable_object"
 #
 GATEWAY_CONTROL_STORAGE = "durable_object"
 
+# Read by `tenantStatusKvReaderFrom` (src/adapters.ts). `"on"` — and nothing else
+# — arms the KV-first fast path for tenant lifecycle status: the control plane
+# publishes a `PLATFORM_CONFIG` snapshot every cron tick, and with the gate on the
+# gateway trusts an ACTIVE verdict from it (a non-active/absent/malformed read
+# still falls back to the control read, so suspend still propagates, within one
+# publish interval). Defaults OFF here so committing this template changes nothing;
+# the cut window flips it to "on" via wrangler.deploy.toml alongside the D1→DO
+# posture, and flipping it back is the kill switch. Part of the same cutover as
+# GATEWAY_CONTROL_STORAGE above — it shields the last per-request control read
+# before the singleton DO becomes authoritative.
+GATEWAY_TENANT_STATUS_KV = "off"
+
+# Read by `platformBillingBackfillEnabled` (src/metering/platform-billing-backfill.ts,
+# via the PLATFORM_BILLING_BACKFILL_FLAG constant). `"on"` — and nothing else —
+# lets the scheduled pass drain historical unattributed billing rows from control
+# D1 into the PlatformDataObject leg; defaults OFF so no backfill runs until an
+# operator opts in at deploy time. Never throws and is idempotent (resumable
+# cursor in `platform_backfill_marks`), so an accidental flip is self-limiting.
+GATEWAY_PLATFORM_BILLING_BACKFILL = "off"
+
 # Read by `readiness` (src/routes/readiness.ts). `"true"` — and nothing else —
 # makes `/readyz` answer 503 while `/healthz` stays 200, which is the
 # deploy-time approximation of the Rust drain flag: flip it, redeploy, let the

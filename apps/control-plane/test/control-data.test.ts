@@ -1,3 +1,4 @@
+import { CONTROL_DATA_ADDRESS } from "@ferrogate/storage";
 import { describe, expect, it } from "vitest";
 import { resolveStore } from "../src/adapters.js";
 import {
@@ -32,7 +33,7 @@ describe("control-plane CONTROL storage seam", () => {
     expect(facade).toBeDefined();
     // Accessing a method resolves (addresses) the singleton "control" object.
     void (facade as D1Database).prepare;
-    expect(addresses[0]?.[0]).toBe("control");
+    expect(addresses[0]?.[0]).toBe(CONTROL_DATA_ADDRESS);
 
     // No CONTROL_DATA bound ⇒ undefined, never a fall-through to a legacy binding.
     expect(controlDatabaseFrom({})).toBeUndefined();
@@ -76,7 +77,7 @@ describe("control-plane CONTROL storage seam", () => {
     // method on the SAME resolution the store is built over is what addresses
     // the singleton "control" object.
     void (controlDatabaseFrom({ CONTROL_DATA: namespace }) as D1Database).prepare;
-    expect(addresses.some(([name]) => name === "control")).toBe(true);
+    expect(addresses.some(([name]) => name === CONTROL_DATA_ADDRESS)).toBe(true);
     expect(addresses.some(([name]) => name === "get")).toBe(true);
   });
 });

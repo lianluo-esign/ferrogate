@@ -490,8 +490,26 @@ describe("FC-2 one suspension reaches every Worker that spends on the credential
       "mcp",
       "agent-runtime",
     ]);
+    // The gateway now matches the probe in TWO files, and the second is a
+    // PUBLISHER SQL const, not a second spend-path read (control-plane-d1
+    // §Phase3). `src/tenant-status-snapshot.ts` is a node-safe shared module —
+    // the twin of `public-price-snapshot.ts` — holding the WHOLE-MAP query
+    // `SELECT id, status FROM tenants` (no `WHERE id = ?1`) that the control
+    // plane runs to project `tenants.status` into a `PLATFORM_CONFIG` snapshot.
+    // It lives under `gateway/src` only so the gateway reader and the
+    // control-plane publisher import the same bytes; the query itself never runs
+    // in the gateway. The gateway's ADMISSION read is still the WHERE-scoped
+    // `LIFECYCLE_TENANT_SQL` in `adapters.ts`, and the snapshot is a fail-safe
+    // FAST PATH: `adapters.ts` trusts it only for an ACTIVE verdict and falls
+    // THROUGH to that durable read on any non-active/absent/malformed/miss (the
+    // module docblock proves the fall-through), so a suspension still reaches
+    // this Worker via the authority — the snapshot can only let an already-active
+    // tenant skip a read it would have passed. The list widens (the probe is not
+    // tightened) exactly as this file's ratchet prescribes for a legitimate new
+    // reader. The empty-exploit-set assertion below is what still guards spend.
     expect(filesMatching("gateway", PROBE.readsLifecycleAuthority)).toEqual([
       expect.stringContaining("adapters.ts"),
+      expect.stringContaining("tenant-status-snapshot.ts"),
     ]);
   });
 

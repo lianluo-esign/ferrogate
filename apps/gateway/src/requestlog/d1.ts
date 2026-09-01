@@ -234,3 +234,32 @@ export async function writeTenantRequestLogs(
   const statement = db.prepare(TENANT_REQUEST_LOG_UPSERT_SQL);
   await db.batch(records.map((record) => statement.bind(...tenantRequestLogBindings(record))));
 }
+
+/**
+ * Platform/unattributed request-log statements for the `PLATFORM_DATA` singleton
+ * (Zero-D1 Plan B).
+ *
+ * Reuses `TENANT_REQUEST_LOG_UPSERT_SQL` VERBATIM: the platform table
+ * (`sql/d1-ts/platform/0003_request_logs.sql`) shares the tenant table's
+ * `request_id`-keyed shape (`ON CONFLICT (request_id)`, no `projection_key`), so
+ * the SQL is identical and only the bindings differ — the same reuse the
+ * guardrail platform leg makes with its tenant statement.
+ *
+ * The `tenant` slot is forced NULL (`{ ...record, tenantId: undefined }` →
+ * `bindOptional(undefined)` → SQL NULL) rather than left to `bindOptional`,
+ * because an unscoped record's `tenantId` is `undefined` OR the empty string,
+ * and an empty string would bind as `""` — a phantom owner that the backfill's
+ * `tenant IS NULL OR tenant = ''` predicate would still match but that reads as
+ * an attributed row. Every platform row is unattributed by construction; NULL is
+ * the one honest value.
+ */
+export function platformRequestLogStatements(
+  db: RequestLogDatabase,
+  records: readonly RequestLogRecord[],
+): unknown[] {
+  if (records.length === 0) return [];
+  const statement = db.prepare(TENANT_REQUEST_LOG_UPSERT_SQL);
+  return records.map((record) =>
+    statement.bind(...tenantRequestLogBindings({ ...record, tenantId: undefined })),
+  );
+}

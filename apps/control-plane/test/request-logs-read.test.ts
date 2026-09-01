@@ -16,30 +16,33 @@
  * made. EU AI Act Art. 12/72 record-keeping for high-risk systems started
  * 2026-08-02 and is per DECISION, not per report.
  *
- * ## What this file proves and what it deliberately does not
+ * ## What this file proves after the Zero-D1 object cutover
  *
- * It proves the READER: that the admin surface returns what `request_logs`
- * holds, in the documented order, fenced to the caller's tenant, in both the
- * JSON list and the JSONL export.
+ * The operator list/export is no longer served from the shared control
+ * projection. Under Zero-D1 Plan B it is a live fan-out over each provisioned
+ * tenant's authoritative object UNION the single platform object — the home of
+ * the un-attributed (platform-operator) rows no roster tenant owns. So the
+ * authoritative fixture for an attributed row is its tenant's OBJECT (the same
+ * place the gateway writer lands it), and for an un-attributed row the PLATFORM
+ * object — either seeded directly or copied there from control by the one-time
+ * `ensurePlatformRequestLogBackfill` the operator read triggers. The three
+ * finops JOIN readers (cost-record/investigation/experiment) still read the
+ * control projection, which G1 keeps dual-written, and are proved elsewhere.
  *
- * It does NOT prove the WRITER, and it must not be read as if it did. The
- * writer is `apps/gateway/src/requestlog/` — a different Worker, a different
- * `wrangler.toml`, unreachable from this suite — and it is held end to end by
- * `apps/gateway/test/requestlog/write.test.ts`, which drives a real inference
- * request and asserts against these same columns. The two halves meet at
- * `sql/d1-ts/control/0003_request_log_columns.sql`, which both suites apply
- * from the deployed migration directory rather than from a fixture, so a column
- * rename breaks both.
- *
- * The seeded rows here are therefore honest fixtures for a cross-Worker seam,
- * not a substitute for the write path — see `test/d1.ts::seedRequestLogs`.
+ * It does NOT prove the WRITER. That is `apps/gateway/src/requestlog/` — a
+ * different Worker, a different `wrangler.toml`, unreachable from this suite —
+ * held end to end by `apps/gateway/test/requestlog/`. The two halves meet at the
+ * migration directories both suites apply from, so a column rename breaks both.
  */
 import { SELF, env } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { resolveTenantDatabases } from "../src/adapters.js";
 import type { ControlPlaneBindings } from "../src/ports.js";
-import { applySchema, db, resetD1, seedRequestLogs } from "./d1.js";
+import { applySchema, db, platformDb, resetD1, seedRequestLogs } from "./d1.js";
 import { BASE, arm, bearer, operatorKey, tenantKey } from "./harness.js";
+
+/** The object-local marker the operator read's one-time control→platform copy stamps. */
+const PLATFORM_REQUEST_LOG_BACKFILL_MARK = "platform_request_log_backfill_v1";
 
 interface ListBody {
   object: string;
@@ -48,7 +51,7 @@ interface ListBody {
   offset?: number;
   limit?: number;
   source?: string;
-  as_of_unix?: number;
+  tenant_page?: Record<string, unknown>;
 }
 
 async function readLogs(secret: string, query = ""): Promise<ListBody> {
@@ -62,12 +65,7 @@ async function readLogs(secret: string, query = ""): Promise<ListBody> {
 async function exportLogs(
   secret: string,
   query = "",
-): Promise<{
-  contentType: string;
-  source: string;
-  asOfUnix: number;
-  lines: Record<string, unknown>[];
-}> {
+): Promise<{ contentType: string; lines: Record<string, unknown>[] }> {
   const response = await SELF.fetch(`${BASE}/admin/v1/request-log-exports${query}`, {
     headers: bearer(secret),
   });
@@ -75,8 +73,6 @@ async function exportLogs(
   const text = await response.text();
   return {
     contentType: response.headers.get("content-type") ?? "",
-    source: response.headers.get("x-ferrogate-evidence-source") ?? "",
-    asOfUnix: Number(response.headers.get("x-ferrogate-evidence-as-of-unix") ?? "NaN"),
     lines: text
       .split("\n")
       .filter((line) => line.trim() !== "")
@@ -103,6 +99,24 @@ const FULL_ROW = {
   document: { object: "request_log", streamed: false, prompt_tokens: 11, completion_tokens: 4 },
 } as const;
 
+type RowSeed = {
+  readonly requestId: string;
+  readonly tenant?: string | null;
+  readonly project?: string | null;
+  readonly apiKeyId?: string | null;
+  readonly startedAtUnix: number;
+  readonly completedAtUnix?: number | null;
+  readonly route?: string | null;
+  readonly provider?: string | null;
+  readonly logicalModel?: string | null;
+  readonly providerModel?: string | null;
+  readonly statusCode?: number | null;
+  readonly latencyMs?: number | null;
+  readonly totalTokens?: number | null;
+  readonly guardrailVerdict?: string | null;
+  readonly document?: Record<string, unknown>;
+};
+
 async function exactTenantDatabase(tenantId: string): Promise<D1Database> {
   await db()
     .prepare(
@@ -126,20 +140,55 @@ async function clearExactTenantRequestLogs(): Promise<void> {
   }
 }
 
-async function seedExactTenantRequestLogs(
-  rows: readonly { requestId: string; tenant: string | null; startedAtUnix: number }[],
-): Promise<void> {
+/**
+ * Insert one full-shape row into an already-woken object handle, binding the
+ * caller's `tenant` value. The tenant and platform `request_logs` tables share
+ * the same column set (the platform one drops only `projection_key`), so the one
+ * statement serves both write legs — the tenant object with its own id, the
+ * platform object with `tenant` forced NULL.
+ */
+function insertFullRow(handle: D1Database, tenantValue: string | null, row: RowSeed) {
+  return handle
+    .prepare(
+      `INSERT INTO request_logs
+         (request_id, tenant, project, api_key_id, route, provider, logical_model,
+          provider_model, status_code, latency_ms, total_tokens, guardrail_verdict,
+          started_at_unix, completed_at_unix, request_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .bind(
+      row.requestId,
+      tenantValue,
+      row.project ?? null,
+      row.apiKeyId ?? null,
+      row.route ?? null,
+      row.provider ?? null,
+      row.logicalModel ?? null,
+      row.providerModel ?? null,
+      row.statusCode ?? null,
+      row.latencyMs ?? null,
+      row.totalTokens ?? null,
+      row.guardrailVerdict ?? "not_screened",
+      row.startedAtUnix,
+      row.completedAtUnix ?? null,
+      JSON.stringify(row.document ?? {}),
+    );
+}
+
+/** Seed attributed rows into their authoritative tenant objects (skips null). */
+async function seedTenantObjects(rows: readonly RowSeed[]): Promise<void> {
   for (const row of rows) {
-    if (row.tenant === null) continue;
-    const tenant = await exactTenantDatabase(row.tenant);
-    await tenant
-      .prepare(
-        `INSERT INTO request_logs
-           (request_id, tenant, guardrail_verdict, started_at_unix, request_json)
-         VALUES (?, ?, 'allowed', ?, '{}')`,
-      )
-      .bind(row.requestId, row.tenant, row.startedAtUnix)
-      .run();
+    const tenantValue = row.tenant ?? null;
+    if (tenantValue === null) continue;
+    const tenant = await exactTenantDatabase(tenantValue);
+    await insertFullRow(tenant, tenantValue, row).run();
+  }
+}
+
+/** Seed un-attributed rows into the platform object, `tenant` normalized to NULL. */
+async function seedPlatformObject(rows: readonly RowSeed[]): Promise<void> {
+  for (const row of rows) {
+    await insertFullRow(platformDb(), null, row).run();
   }
 }
 
@@ -156,12 +205,15 @@ beforeEach(async () => {
   await clearExactTenantRequestLogs();
 });
 
-describe("GET /admin/v1/request-logs returns the evidence the table holds", () => {
+describe("GET /admin/v1/request-logs returns the evidence the objects hold", () => {
   it("returns a seeded decision row with every fact the acceptance criteria names", async () => {
     // Empty first, so the row below cannot be a leftover.
     expect((await readLogs(operatorKey.secret)).data).toHaveLength(0);
 
-    await seedRequestLogs([FULL_ROW]);
+    // Under the object cutover the operator read fans out over the tenant OBJECTS
+    // (union the platform object), so the authoritative fixture for an attributed
+    // row is its tenant's object — the same place the gateway writer lands it.
+    await seedTenantObjects([FULL_ROW]);
 
     const page = await readLogs(operatorKey.secret);
     expect(page.data).toHaveLength(1);
@@ -182,18 +234,20 @@ describe("GET /admin/v1/request-logs returns the evidence the table holds", () =
       started_at_unix: FULL_ROW.startedAtUnix,
       completed_at_unix: FULL_ROW.completedAtUnix,
     });
-    expect(page.source).toBe("derived_control_projection");
-    expect(page.as_of_unix).toEqual(expect.any(Number));
+    // The read is authority now, not a derived projection: the projection source
+    // annotation the control read used to stamp is gone.
+    expect(page.source).toBeUndefined();
+    expect(page.tenant_page).toBeDefined();
   });
 
   /**
    * NEWEST FIRST. An evidence list is read to answer "what just happened", and
-   * the index this query rides (`idx_request_logs_tenant_started`, DESC) exists
-   * for exactly that read. `request_id` breaks the tie so a page boundary
-   * inside one second can neither re-serve nor skip a row.
+   * the fleet merge re-sorts every object's rows by `started_at_unix DESC,
+   * request_id ASC`. `request_id` breaks the tie so a page boundary inside one
+   * second can neither re-serve nor skip a row.
    */
   it("orders newest first with request_id as the tiebreaker", async () => {
-    await seedRequestLogs([
+    await seedTenantObjects([
       { ...FULL_ROW, requestId: "fg-b", startedAtUnix: 200 },
       { ...FULL_ROW, requestId: "fg-a", startedAtUnix: 200 },
       { ...FULL_ROW, requestId: "fg-c", startedAtUnix: 300 },
@@ -203,7 +257,10 @@ describe("GET /admin/v1/request-logs returns the evidence the table holds", () =
   });
 
   it("reports the pre-window total alongside the page", async () => {
-    await seedRequestLogs(
+    // Five in tenant t-1's object. The fan-out pages each object to `offset+limit`
+    // but `count(*) OVER()` reports the object's full depth, so a clipped page
+    // still yields the pre-window total of 5.
+    await seedTenantObjects(
       Array.from({ length: 5 }, (_unused, index) => ({
         ...FULL_ROW,
         requestId: `fg-${index}`,
@@ -216,6 +273,49 @@ describe("GET /admin/v1/request-logs returns the evidence the table holds", () =
     expect(page.offset).toBe(1);
     expect(page.limit).toBe(2);
   });
+
+  it("backfills pre-cutover un-attributed control rows into the platform object", async () => {
+    // Rows written to CONTROL before G1's dual-write existed: no tenant object
+    // owns them and no fan-out can reach them until the one-time copy runs.
+    await seedRequestLogs([
+      { ...FULL_ROW, requestId: "fg-none-1", tenant: null, startedAtUnix: 500 },
+      { ...FULL_ROW, requestId: "fg-none-2", tenant: null, startedAtUnix: 600 },
+    ]);
+    expect(
+      (await platformDb().prepare("SELECT request_id FROM request_logs").all()).results,
+    ).toEqual([]);
+
+    const page = await readLogs(operatorKey.secret);
+    expect(page.data.map((row) => row.request_id)).toEqual(["fg-none-2", "fg-none-1"]);
+
+    // The rows now live in the platform object, `tenant` normalized to NULL.
+    const copied = await platformDb()
+      .prepare("SELECT request_id, tenant FROM request_logs ORDER BY request_id ASC")
+      .all<{ request_id: string; tenant: string | null }>();
+    expect(copied.results).toEqual([
+      { request_id: "fg-none-1", tenant: null },
+      { request_id: "fg-none-2", tenant: null },
+    ]);
+    const mark = await platformDb()
+      .prepare("SELECT detail FROM platform_backfill_marks WHERE mark = ?")
+      .bind(PLATFORM_REQUEST_LOG_BACKFILL_MARK)
+      .first<{ detail: string }>();
+    expect(JSON.parse(mark?.detail ?? "{}")).toMatchObject({ state: "complete", rows: 2 });
+  });
+
+  it("does not pull a post-completion control row into the platform authority", async () => {
+    await seedRequestLogs([{ ...FULL_ROW, requestId: "fg-none-1", tenant: null, startedAtUnix: 500 }]);
+    await readLogs(operatorKey.secret); // completes the one-time copy
+
+    // A later control-only un-attributed row is projection lag, not migration
+    // input: the completed marker makes the copy a no-op, so the operator read
+    // sees only what the authoritative object holds.
+    await seedRequestLogs([
+      { ...FULL_ROW, requestId: "fg-none-late", tenant: null, startedAtUnix: 700 },
+    ]);
+    const page = await readLogs(operatorKey.secret);
+    expect(page.data.map((row) => row.request_id)).toEqual(["fg-none-1"]);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -224,17 +324,14 @@ describe("GET /admin/v1/request-logs returns the evidence the table holds", () =
 
 describe("the tenant fence on request logs", () => {
   beforeEach(async () => {
-    await seedRequestLogs([
+    await seedTenantObjects([
       { ...FULL_ROW, requestId: "fg-t1", tenant: "t-1" },
       { ...FULL_ROW, requestId: "fg-t2", tenant: "t-2" },
-      // An UNATTRIBUTED row: a request whose credential resolved no tenant, i.e.
-      // a platform-operator call. It is nobody's tenant data.
-      { ...FULL_ROW, requestId: "fg-none", tenant: null },
     ]);
-    await seedExactTenantRequestLogs([
-      { requestId: "fg-t1", tenant: "t-1", startedAtUnix: FULL_ROW.startedAtUnix },
-      { requestId: "fg-t2", tenant: "t-2", startedAtUnix: FULL_ROW.startedAtUnix },
-    ]);
+    // An UNATTRIBUTED row: a request whose credential resolved no tenant, i.e. a
+    // platform-operator call. It is nobody's tenant data, so it lives only in the
+    // platform object.
+    await seedPlatformObject([{ ...FULL_ROW, requestId: "fg-none", tenant: null }]);
   });
 
   it("shows a tenant only its own rows", async () => {
@@ -249,8 +346,9 @@ describe("the tenant fence on request logs", () => {
 
   /**
    * STRICT equality, so `NULL` matches nobody — the same narrowing
-   * `auditTenantFence` documents. A tenant that could read the un-attributed
-   * rows would be reading the platform operator's own traffic.
+   * `auditTenantFence` documents. A tenant read is `requestLogTenantPage` over
+   * its own object (`WHERE tenant = ?`), which never touches the platform object,
+   * so an un-attributed platform row is unreachable to any tenant by construction.
    */
   it("never shows a tenant the un-attributed platform rows", async () => {
     for (const secret of ["k-tenant", "k-other"]) {
@@ -287,14 +385,12 @@ describe("the tenant fence on request logs", () => {
 
 describe("GET /admin/v1/request-log-exports streams JSONL", () => {
   it("answers newline-delimited JSON, one decision per line", async () => {
-    await seedRequestLogs([
+    await seedTenantObjects([
       { ...FULL_ROW, requestId: "fg-1", startedAtUnix: 10 },
       { ...FULL_ROW, requestId: "fg-2", startedAtUnix: 20 },
     ]);
     const exported = await exportLogs(operatorKey.secret);
     expect(exported.contentType).toContain("application/x-ndjson");
-    expect(exported.source).toBe("derived_control_projection");
-    expect(exported.asOfUnix).toBeGreaterThan(1_700_000_000);
     expect(exported.lines.map((row) => row.request_id)).toEqual(["fg-2", "fg-1"]);
     expect(exported.lines[0]).toMatchObject({
       object: "request_log",

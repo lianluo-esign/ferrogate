@@ -26,7 +26,7 @@ import { DurableObjectD1Database } from "./tenant-do.js";
  * `control-data-object.ts`, because a VALUE import of that module would drag
  * `cloudflare:workers` into node-only consumers.
  */
-export const CONTROL_DATA_ADDRESS = "control";
+export const CONTROL_DATA_ADDRESS = "control-apac";
 
 /**
  * The data RPCs the facade calls on a `ControlDataObject` stub. Structural,
@@ -65,10 +65,14 @@ export function controlDataObjectDatabase(namespace: ControlDataNamespaceLike): 
   // this by resolving a new handle per request via `forTenant`; the singleton
   // control facade has no such per-request resolution, so it lazies here.
   const fresh = (): D1Database => {
-    // Hint is honored only on first creation. This fleet's control object is
-    // Tokyo-homed so login and quota reads are in-region for APAC clients.
+    // Hint is honored only on first creation, so it takes effect on the fresh
+    // `CONTROL_DATA_ADDRESS` (see its docblock in control-data-object.ts for why
+    // the address was re-homed). Valid CF hints are coarse regions — "apac"
+    // homes this fleet's control object in Asia-Pacific, in-region for APAC
+    // login/quota reads. The earlier "apac-ne" was not a valid hint token and
+    // was ignored, which is how the old "control" object was stranded in US-East.
     const stub = namespace.get(namespace.idFromName(CONTROL_DATA_ADDRESS), {
-      locationHint: "apac-ne",
+      locationHint: "apac",
     });
     return new DurableObjectD1Database(CONTROL_DATA_ADDRESS, stub).asD1Database();
   };

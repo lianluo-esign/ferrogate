@@ -61,6 +61,7 @@ import type {
 import { WILDCARD_SCOPE, callerScope } from "./ports.js";
 import type { TenancyBindings } from "./tenancy/ports.js";
 import { parseTenantDatabaseRoutingMode, resolverForEnv } from "./tenancy/resolver.js";
+import { type TenantStatusKvReader, readTenantStatusSnapshot } from "./tenant-status-snapshot.js";
 
 // ---------------------------------------------------------------------------
 // helpers
@@ -684,21 +685,59 @@ function asLifecycleRow(value: unknown): LifecycleRow | null {
 }
 
 /**
+ * Resolve one `tenants` lifecycle row, consulting the `tenants.status` KV
+ * snapshot as a FAST PATH before the control read.
+ *
+ * The snapshot is trusted ONLY when it names the tenant AND the stored status
+ * parses to `active` — the overwhelming hot case, and the one case where a stale
+ * answer can only ADMIT a tenant a fresh read would also have admitted (the
+ * bounded active→suspended propagation window). Every other outcome — a
+ * non-active status, an id the snapshot does not carry, a malformed or absent
+ * blob, or a KV read that throws (`readTenantStatusSnapshot` folds all of these
+ * to `null`) — falls THROUGH to the unchanged control read, which stays the deny
+ * authority and preserves today's semantics exactly (a read that throws
+ * propagates → 503; a NULL/blank status → `active`). When `tenantStatusKv` is
+ * `undefined` the snapshot is off and this is byte-for-byte the original read.
+ */
+async function resolveTenantLifecycleRow(
+  control: LifecycleDatabase | undefined,
+  tenantStatusKv: TenantStatusKvReader | undefined,
+  id: string,
+): Promise<LifecycleRow | null> {
+  if (tenantStatusKv !== undefined) {
+    const snapshot = await readTenantStatusSnapshot(tenantStatusKv);
+    if (snapshot !== null) {
+      const status = snapshot.statuses[id];
+      if (status !== undefined && parseLifecycleStatus(status) === "active") {
+        return asLifecycleRow({ id, status });
+      }
+    }
+  }
+  if (control === undefined) return null;
+  return asLifecycleRow(await control.prepare(LIFECYCLE_TENANT_SQL).bind(id).first());
+}
+
+/**
  * The two-database row source: `tenants` lives in CONTROL, `projects` and
  * `workspaces` are TENANT data (see the split rule in `sql/d1-ts/`).
  */
 export class D1LifecycleRowSource implements LifecycleRowSource {
   readonly #control: LifecycleDatabase | undefined;
   readonly #tenant: LifecycleDatabase | undefined;
+  readonly #tenantStatusKv: TenantStatusKvReader | undefined;
 
-  constructor(control: LifecycleDatabase | undefined, tenant: LifecycleDatabase | undefined) {
+  constructor(
+    control: LifecycleDatabase | undefined,
+    tenant: LifecycleDatabase | undefined,
+    tenantStatusKv?: TenantStatusKvReader | undefined,
+  ) {
     this.#control = control;
     this.#tenant = tenant;
+    this.#tenantStatusKv = tenantStatusKv;
   }
 
   async tenantRow(id: string): Promise<LifecycleRow | null> {
-    if (this.#control === undefined) return null;
-    return asLifecycleRow(await this.#control.prepare(LIFECYCLE_TENANT_SQL).bind(id).first());
+    return resolveTenantLifecycleRow(this.#control, this.#tenantStatusKv, id);
   }
 
   async projectRow(id: string): Promise<LifecycleRow | null> {
@@ -803,11 +842,32 @@ export class D1TenancyLifecycleGate implements TenancyLifecycleGatePort {
  * fallback an as-yet-unroutable tenant sees, where `tenants` (a CONTROL row) is
  * the only lifecycle authority that still applies.
  */
+/**
+ * The `tenants.status` KV fast-path reader, resolved from env — but ONLY when the
+ * `GATEWAY_TENANT_STATUS_KV = "on"` gate is set. The gate defaults OFF: deploying
+ * this code changes no request behaviour until the flag is flipped (itself a
+ * confirmed step), and flipping it back to anything but `"on"` is an instant
+ * kill-switch to the pure control read. `PLATFORM_CONFIG` is the SAME KV the
+ * model-catalog and billing-group snapshots already ride.
+ */
+function tenantStatusKvFromEnv(env: Record<string, unknown>): TenantStatusKvReader | undefined {
+  if (env.GATEWAY_TENANT_STATUS_KV !== "on") return undefined;
+  const kv = env.PLATFORM_CONFIG;
+  if (
+    typeof kv === "object" &&
+    kv !== null &&
+    typeof (kv as TenantStatusKvReader).get === "function"
+  ) {
+    return kv as TenantStatusKvReader;
+  }
+  return undefined;
+}
+
 export function lifecycleRowSourceFromEnv(env: Record<string, unknown>): LifecycleRowSource | null {
   const control = controlDatabaseFrom(env);
   const controlDb = isLifecycleDatabase(control) ? control : undefined;
   if (controlDb === undefined) return null;
-  return new D1LifecycleRowSource(controlDb, undefined);
+  return new D1LifecycleRowSource(controlDb, undefined, tenantStatusKvFromEnv(env));
 }
 
 /**
@@ -846,6 +906,7 @@ export function lifecycleRowSourceFactoryFromEnv(
 ): LifecycleRowSourceFactory | null {
   const control = controlDatabaseFrom(env);
   const controlDb = isLifecycleDatabase(control) ? control : undefined;
+  const tenantStatusKv = tenantStatusKvFromEnv(env);
   const legacy = lifecycleRowSourceFromEnv(env);
   const routingRaw = env.GATEWAY_TENANT_DB_ROUTING;
   const mode = parseTenantDatabaseRoutingMode(
@@ -859,7 +920,7 @@ export function lifecycleRowSourceFactoryFromEnv(
   if (legacy === null && !routed) return null;
   if (!routed) return () => legacy as LifecycleRowSource;
 
-  const sharedFallback = legacy ?? new D1LifecycleRowSource(controlDb, undefined);
+  const sharedFallback = legacy ?? new D1LifecycleRowSource(controlDb, undefined, tenantStatusKv);
   return (routingTenantId: string | null): LifecycleRowSource => {
     if (routingTenantId === null || routingTenantId === "") return sharedFallback;
     // Resolve the tenant's own object, or `null` when it is not routable yet
@@ -876,8 +937,7 @@ export function lifecycleRowSourceFactoryFromEnv(
     };
     return {
       async tenantRow(id: string): Promise<LifecycleRow | null> {
-        if (controlDb === undefined) return null;
-        return asLifecycleRow(await controlDb.prepare(LIFECYCLE_TENANT_SQL).bind(id).first());
+        return resolveTenantLifecycleRow(controlDb, tenantStatusKv, id);
       },
       async projectRow(id: string): Promise<LifecycleRow | null> {
         const db = await routedDb();

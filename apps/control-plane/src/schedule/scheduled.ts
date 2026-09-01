@@ -26,6 +26,10 @@ import {
   type PlatformConfigCachePublishResult,
   publishPlatformCatalogCache,
 } from "../store/platform-config-cache.js";
+import {
+  type PublicPriceCachePublishResult,
+  publishPublicPriceCache,
+} from "../store/public-price-cache.js";
 import { type SharedConfigPassReport, fanOutSharedConfig } from "../store/shared-config.js";
 import {
   type TenantAccountMirrorBackfillReport,
@@ -35,6 +39,10 @@ import {
   type TenantCatalogAuditSweepReport,
   reconcileProvisionedTenantCatalogAudits,
 } from "../store/tenant-model-catalog.js";
+import {
+  type TenantStatusCachePublishResult,
+  publishTenantStatusCache,
+} from "../store/tenant-status-cache.js";
 import type { ScheduleTickSummary } from "./engine.js";
 
 /** What `scheduled` reports back, so a tail log says something useful. */
@@ -91,6 +99,23 @@ export interface ScheduledTickReport extends ScheduleTickSummary {
     | PlatformBillingGroupCachePublishResult
     | { readonly status: "failed" };
   /**
+   * The `tenants(id → status)` snapshot refreshed into shared KV on this tick.
+   * Republished unconditionally, like {@link platformConfigCache}, so the
+   * gateway lifecycle gate can read tenant status colo-locally instead of on the
+   * control authority — the read the D1→DO cutover must remove from the hot
+   * path. `tenants` is authoritative; this is a self-healing projection.
+   */
+  readonly tenantStatusCache: TenantStatusCachePublishResult | { readonly status: "failed" };
+  /**
+   * The two platform-level pricing tables snapshotted into shared KV on this
+   * tick. Republished unconditionally, like {@link platformConfigCache}, so the
+   * gateway can attach public prices colo-locally instead of issuing the two
+   * per-request control reads the D1→DO cutover must remove from the inference
+   * build path. `platform_model_prices` / `platform_provider_channels` stay
+   * authoritative; this is a self-healing projection.
+   */
+  readonly publicPriceCache: PublicPriceCachePublishResult | { readonly status: "failed" };
+  /**
    * What the one-time tenant-account mirror backfill (#75) did: `skipped:
    * "complete"` on every tick once the fleet's pre-migration `tenants` rows have
    * had their `document_json` filled from each object — the steady-state answer,
@@ -145,6 +170,8 @@ export async function runScheduledTick(
     sharedConfig: await sharedConfigPass(deps, now),
     platformConfigCache: await platformConfigCachePass(env, deps, now),
     platformBillingGroupCache: await platformBillingGroupCachePass(env, deps, now),
+    tenantStatusCache: await tenantStatusCachePass(env, deps, now),
+    publicPriceCache: await publicPriceCachePass(env, deps, now),
     tenantAccountMirror: await tenantAccountMirrorPass(deps, now),
   };
 }
@@ -189,6 +216,59 @@ async function platformBillingGroupCachePass(
     });
   } catch (error) {
     console.warn("control-plane: scheduled billing-group cache publish failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return { status: "failed" };
+  }
+}
+
+/**
+ * Republish the `tenants.status` snapshot every tick, mirroring
+ * {@link platformConfigCachePass}: unconditional, cheap (one small-table read),
+ * self-healing any lost inline write while the `tenants` table stays
+ * authoritative. Never throws into the platform retry path.
+ */
+async function tenantStatusCachePass(
+  env: ControlPlaneBindings,
+  deps: Pick<ControlPlaneDeps, "controlDatabase">,
+  now: number,
+): Promise<TenantStatusCachePublishResult | { readonly status: "failed" }> {
+  if (deps.controlDatabase === null) return { status: "unconfigured" };
+  try {
+    return await publishTenantStatusCache({
+      db: deps.controlDatabase,
+      kv: env.PLATFORM_CONFIG,
+      nowUnix: now,
+    });
+  } catch (error) {
+    console.warn("control-plane: scheduled tenant-status cache publish failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return { status: "failed" };
+  }
+}
+
+/**
+ * Republish the public-model-price snapshot every tick, mirroring
+ * {@link platformConfigCachePass}: unconditional, cheap (one batched read of two
+ * small platform tables), self-healing any lost inline write while
+ * `platform_model_prices` / `platform_provider_channels` stay authoritative.
+ * Never throws into the platform retry path.
+ */
+async function publicPriceCachePass(
+  env: ControlPlaneBindings,
+  deps: Pick<ControlPlaneDeps, "controlDatabase">,
+  now: number,
+): Promise<PublicPriceCachePublishResult | { readonly status: "failed" }> {
+  if (deps.controlDatabase === null) return { status: "unconfigured" };
+  try {
+    return await publishPublicPriceCache({
+      db: deps.controlDatabase,
+      kv: env.PLATFORM_CONFIG,
+      nowUnix: now,
+    });
+  } catch (error) {
+    console.warn("control-plane: scheduled public-price cache publish failed", {
       error: error instanceof Error ? error.message : String(error),
     });
     return { status: "failed" };

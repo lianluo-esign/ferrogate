@@ -25,13 +25,7 @@
 import type { TenantDatabaseRouter } from "@ferrogate/storage";
 import { HttpError } from "../middleware/errors.js";
 import type { CallerScope, StoreRecord } from "../ports.js";
-import {
-  adminListPaginated,
-  adminListPaginatedWithMetadata,
-  derivedControlProjectionMetadata,
-  evidenceResponseHeaders,
-  parseListQuery,
-} from "../responses.js";
+import { adminListPaginated, parseListQuery } from "../responses.js";
 import {
   AUDIT_TABLE,
   GUARDRAIL_CHECK_TABLE,
@@ -40,6 +34,7 @@ import {
 } from "../store/d1.js";
 import { ensureTenantGuardrailEvidenceBackfill } from "../store/guardrail_evidence_backfill.js";
 import { ensurePlatformGuardrailEvidenceBackfill } from "../store/platform_guardrail_evidence_backfill.js";
+import { ensurePlatformRequestLogBackfill } from "../store/platform_request_log_backfill.js";
 import { tenantEvidenceDatabaseFor } from "../store/tenancy.js";
 import { provisionedTenantPage, tenantFanoutOffset } from "../store/tenant-fanout.js";
 import {
@@ -455,29 +450,6 @@ export function requestLogDocument(row: RequestLogRow): StoreRecord {
   };
 }
 
-/** One fenced, ordered page of `request_logs`, with the pre-window total. */
-async function requestLogPage(
-  db: D1Database,
-  scope: CallerScope,
-  limit: number,
-  offset: number,
-): Promise<{ rows: RequestLogRow[]; total: number }> {
-  const fence = requestLogTenantFence(scope);
-  const result = await db
-    .prepare(
-      `SELECT ${REQUEST_LOG_COLUMNS}, count(*) OVER() AS total
-         FROM ${REQUEST_LOG_TABLE}${fence.sql}
-        ${REQUEST_LOG_ORDER}
-        LIMIT ? OFFSET ?`,
-    )
-    .bind(...fence.params, limit, offset)
-    .all<RequestLogRow>();
-  // `count(*) OVER()` is on every row and absent when there are none, so an
-  // empty page past the end reports 0 — the same reading `listAuditEvents`
-  // takes, and the same one the windowed Rust query answers.
-  return { rows: result.results, total: result.results[0]?.total ?? 0 };
-}
-
 /** One tenant-scoped page from its authoritative TenantDataObject. */
 async function requestLogTenantPage(
   router: TenantDatabaseRouter,
@@ -497,6 +469,157 @@ async function requestLogTenantPage(
     .bind(tenantId, limit, offset)
     .all<RequestLogRow>();
   return { rows: result.results, total: result.results[0]?.total ?? 0 };
+}
+
+/**
+ * One request log carried alongside the sort keys the fleet merge needs.
+ *
+ * The keys are first-class number/string rather than read back off the projected
+ * {@link StoreRecord}, so the merge-sort commits to the same
+ * `started_at_unix DESC, request_id ASC` the single-source readers use without
+ * trusting a document field the writer could have shaped — the reasoning
+ * {@link MergedGuardrailRow} gives, with this reader's own order.
+ */
+interface MergedRequestLogRow {
+  readonly startedAtUnix: number;
+  readonly requestId: string;
+  readonly record: StoreRecord;
+}
+
+/**
+ * One tenant object's request logs (up to `limit`, newest first) as
+ * {@link MergedRequestLogRow}s. Reads from 0 — the fleet merge re-slices, so a
+ * per-object offset would drop rows the merged window still needs.
+ * `count(*) OVER()` reports how many the object holds so a clipped very active
+ * tenant does not silently shrink the fleet total.
+ */
+async function tenantRequestLogMergedRows(
+  db: D1Database,
+  tenantId: string,
+  limit: number,
+): Promise<{ rows: MergedRequestLogRow[]; total: number }> {
+  const result = await db
+    .prepare(
+      `SELECT ${REQUEST_LOG_COLUMNS}, count(*) OVER() AS total
+         FROM ${REQUEST_LOG_TABLE}
+        WHERE tenant = ?
+        ${REQUEST_LOG_ORDER}
+        LIMIT ?`,
+    )
+    .bind(tenantId, limit)
+    .all<RequestLogRow>();
+  return {
+    rows: result.results.map((row) => ({
+      startedAtUnix: row.started_at_unix,
+      requestId: row.request_id,
+      record: requestLogDocument(row),
+    })),
+    total: result.results[0]?.total ?? 0,
+  };
+}
+
+/**
+ * The platform object's request logs (up to `limit`, newest first). NO tenant
+ * fence: the whole object is the un-attributed domain — the "the object IS the
+ * fence" reasoning {@link tenantRequestLogMergedRows} inverts with
+ * `WHERE tenant = ?`.
+ */
+async function platformRequestLogMergedRows(
+  db: D1Database,
+  limit: number,
+): Promise<{ rows: MergedRequestLogRow[]; total: number }> {
+  const result = await db
+    .prepare(
+      `SELECT ${REQUEST_LOG_COLUMNS}, count(*) OVER() AS total
+         FROM ${REQUEST_LOG_TABLE}
+        ${REQUEST_LOG_ORDER}
+        LIMIT ?`,
+    )
+    .bind(limit)
+    .all<RequestLogRow>();
+  return {
+    rows: result.results.map((row) => ({
+      startedAtUnix: row.started_at_unix,
+      requestId: row.request_id,
+      record: requestLogDocument(row),
+    })),
+    total: result.results[0]?.total ?? 0,
+  };
+}
+
+/**
+ * The fleet (platform-operator) request-log page: a bounded live fan-out over
+ * each provisioned tenant object UNION the platform object, NEVER the shared
+ * control projection, which under the object cutover (Zero-D1 Plan B) holds
+ * nothing a tenant owns.
+ *
+ * The request-log twin of {@link fleetGuardrailEvaluationPage}, differing only in
+ * the sort key (`started_at_unix DESC, request_id ASC` — {@link REQUEST_LOG_ORDER}
+ * — not the guardrail `occurred_at_unix/id`). At most `FLEET_FANOUT_MAX_TENANTS`
+ * objects per request, `?tenant_offset=` pages the roster, `tenant_page` reports
+ * whether more remain, plus the platform object leg, home of the un-attributed
+ * rows no roster tenant owns and no fan-out can enumerate. The sources are
+ * disjoint on `request_id` (a tenant's request id and an un-attributed one name
+ * different requests), so the rows are appended and re-sorted rather than folded.
+ *
+ * The platform leg is skipped when `platformDb` is null (a unit env, or a Worker
+ * the cross-script `PLATFORM_DATA` stanza has not reached) and isolated in its
+ * own try/catch when it is unreachable — exactly as an unreachable tenant object
+ * contributes nothing rather than failing the whole fleet read. During the
+ * G1→CP1 rollout the control projection still carries these rows, so a skipped
+ * leg narrows the page, never loses evidence.
+ */
+async function fleetRequestLogPage(
+  router: TenantDatabaseRouter,
+  platformDb: D1Database | null,
+  query: { readonly offset: number; readonly limit: number },
+  tenantOffset: number,
+): Promise<{
+  records: StoreRecord[];
+  total: number;
+  tenantPage: Awaited<ReturnType<typeof provisionedTenantPage>>;
+}> {
+  // Each object is paged from 0 to `offset+limit`: the merge re-slices, so a
+  // per-object offset would drop rows the merged window still needs.
+  const fetchLimit = Math.max(1, query.offset + query.limit);
+  const tenantPage = await provisionedTenantPage(router, tenantOffset);
+
+  const merged: MergedRequestLogRow[] = [];
+  let sourceTotal = 0;
+  for (const tenantId of tenantPage.tenantIds) {
+    let db: D1Database;
+    try {
+      db = await tenantEvidenceDatabaseFor(router, tenantId);
+    } catch {
+      // A tenant with no reachable object contributes nothing rather than
+      // failing the whole fleet read: it simply logged nothing here.
+      continue;
+    }
+    const page = await tenantRequestLogMergedRows(db, tenantId, fetchLimit);
+    merged.push(...page.rows);
+    sourceTotal += page.total;
+  }
+
+  if (platformDb !== null) {
+    try {
+      const page = await platformRequestLogMergedRows(platformDb, fetchLimit);
+      merged.push(...page.rows);
+      sourceTotal += page.total;
+    } catch {
+      // An unreachable platform object is isolated exactly as an unreachable
+      // tenant object is: the un-attributed leg is simply absent from the page.
+    }
+  }
+
+  merged.sort((a, b) => b.startedAtUnix - a.startedAtUnix || a.requestId.localeCompare(b.requestId));
+  return {
+    records: merged.slice(query.offset, query.offset + query.limit).map((row) => row.record),
+    // The sources are disjoint so `merged.length` and `sourceTotal` agree, but
+    // `max` keeps the count honest if a per-object `fetchLimit` clipped a very
+    // active source's page.
+    total: Math.max(merged.length, sourceTotal),
+    tenantPage,
+  };
 }
 
 /**
@@ -528,38 +651,58 @@ function listRequestLogsHandler(): Handler {
   return async (c) => {
     const deps = depsOf(c);
     const scope = scopeOf(c);
-    const query = parseListQuery(new URL(c.req.url), deps.listDefaultLimit, deps.listMaxLimit);
+    const url = new URL(c.req.url);
+    const query = parseListQuery(url, deps.listDefaultLimit, deps.listMaxLimit);
     const db = deps.controlDatabase;
     const tenantRouter = deps.tenantStorage ?? deps.tenantDatabases;
 
-    if (db === null && scope.kind === "platform_operator") {
-      // No control database means no derived `request_logs` projection. The
-      // tenant-object path above remains independent; for an in-memory
-      // platform deployment the document collection is the only fleet surface.
+    if (scope.kind === "tenant") {
+      // Tenant scope is an authority read straight from the TenantDataObject;
+      // CONTROL is only a fleet projection, so its absence or staleness must not
+      // change the tenant answer. No control→object backfill runs here: the
+      // tenant request-log cutover (#664) writes the object on the hot path, so
+      // there is no pre-cutover tenant row to migrate (unlike guardrail).
+      const page = await requestLogTenantPage(
+        tenantRouter,
+        scope.tenantId,
+        query.limit,
+        query.offset,
+      );
+      return json(
+        c,
+        200,
+        adminListPaginated(page.rows.map(requestLogDocument), page.total, query.offset, query.limit),
+      );
+    }
+
+    if (db === null) {
+      // No control database means no derived `request_logs` projection. For an
+      // in-memory platform deployment the document collection is the only fleet
+      // surface.
       const page = await deps.store.list("request-logs", scope, query);
       return json(c, 200, adminListPaginated(page.items, page.total, query.offset, query.limit));
     }
 
-    const page =
-      scope.kind === "tenant"
-        ? await requestLogTenantPage(tenantRouter, scope.tenantId, query.limit, query.offset)
-        : await requestLogPage(db as D1Database, scope, query.limit, query.offset);
-    const body =
-      scope.kind === "platform_operator"
-        ? adminListPaginatedWithMetadata(
-            page.rows.map(requestLogDocument),
-            page.total,
-            query.offset,
-            query.limit,
-            derivedControlProjectionMetadata(),
-          )
-        : adminListPaginated(
-            page.rows.map(requestLogDocument),
-            page.total,
-            query.offset,
-            query.limit,
-          );
-    return json(c, 200, body);
+    // Platform operator: a bounded live fan-out over the tenant objects UNION the
+    // platform object — never the control projection. A one-time copy of the
+    // pre-cutover un-attributed control rows into the platform object runs first,
+    // idempotent and marked, exactly as the guardrail operator read backfills the
+    // same object. The three finops JOIN readers (cost-record/investigation/
+    // experiment) still read the control `request_logs` projection directly via
+    // their own billing JOINs, which G1 keeps dual-written, so this cutover of the
+    // list/export readers does not disturb them.
+    const platformDb = deps.platformData ?? null;
+    await ensurePlatformRequestLogBackfill(db, platformDb);
+    const fleet = await fleetRequestLogPage(tenantRouter, platformDb, query, tenantFanoutOffset(url));
+    return json(c, 200, {
+      ...adminListPaginated(fleet.records, fleet.total, query.offset, query.limit),
+      tenant_page: {
+        offset: fleet.tenantPage.offset,
+        limit: fleet.tenantPage.limit,
+        total: fleet.tenantPage.total,
+        has_more: fleet.tenantPage.hasMore,
+      },
+    });
   };
 }
 
@@ -586,7 +729,9 @@ const REQUEST_LOG_EXPORT_MAX_LIMIT = 10_000;
  * a consumer that `JSON.parse`s per line would fail on it.
  *
  * Same fence, same projection and same order as {@link listRequestLogsHandler},
- * by construction — {@link requestLogPage} is the only query. A SIEM export
+ * by construction — the operator branch calls the same {@link fleetRequestLogPage}
+ * fan-out and the tenant branch the same {@link requestLogTenantPage}, so this
+ * JSONL export and the console list cannot see different rows. A SIEM export
  * that could see a row the console cannot is a cross-tenant leak with a
  * different front door, so the two must not have two implementations.
  */
@@ -594,25 +739,35 @@ function exportRequestLogsHandler(): Handler {
   return async (c) => {
     const deps = depsOf(c);
     const scope = scopeOf(c);
+    const url = new URL(c.req.url);
     const query = parseListQuery(
-      new URL(c.req.url),
+      url,
       REQUEST_LOG_EXPORT_DEFAULT_LIMIT,
       REQUEST_LOG_EXPORT_MAX_LIMIT,
     );
     const db = deps.controlDatabase;
     const tenantRouter = deps.tenantStorage ?? deps.tenantDatabases;
 
-    const metadata =
-      db !== null && scope.kind === "platform_operator" ? derivedControlProjectionMetadata() : null;
-
-    const records =
-      db === null && scope.kind === "platform_operator"
-        ? (await deps.store.list("request-log-exports", scope, query)).items
-        : (
-            await (scope.kind === "tenant"
-              ? requestLogTenantPage(tenantRouter, scope.tenantId, query.limit, query.offset)
-              : requestLogPage(db as D1Database, scope, query.limit, query.offset))
-          ).rows.map(requestLogDocument);
+    let records: readonly StoreRecord[];
+    if (scope.kind === "tenant") {
+      records = (
+        await requestLogTenantPage(tenantRouter, scope.tenantId, query.limit, query.offset)
+      ).rows.map(requestLogDocument);
+    } else if (db === null) {
+      // In-memory platform deployment: the document collection is the only fleet
+      // surface such a deployment has.
+      records = (await deps.store.list("request-log-exports", scope, query)).items;
+    } else {
+      // Platform operator: the same fan-out ∪ platform authority the list read
+      // serves — never the control projection — so the console and this JSONL
+      // export cannot disagree about a row. The one-time platform backfill runs
+      // first, idempotent and marked, exactly as the list handler's does.
+      const platformDb = deps.platformData ?? null;
+      await ensurePlatformRequestLogBackfill(db, platformDb);
+      records = (
+        await fleetRequestLogPage(tenantRouter, platformDb, query, tenantFanoutOffset(url))
+      ).records;
+    }
 
     const body = records.map((record) => JSON.stringify(record)).join("\n");
     return raw(
@@ -626,7 +781,7 @@ function exportRequestLogsHandler(): Handler {
       // A trailing newline only when there IS a line: JSONL readers treat a
       // blank line as an error, and an empty export must be zero bytes.
       body === "" ? "" : `${body}\n`,
-      metadata === null ? {} : evidenceResponseHeaders(metadata),
+      {},
     );
   };
 }

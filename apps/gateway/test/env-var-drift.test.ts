@@ -497,7 +497,14 @@ describe("the env-var drift gate itself", () => {
     // #698 added `GATEWAY_BATCH_SWEEP_LIMIT` (the batch executor's per-tenant
     // cron sweep ceiling) ⇒ 67, re-counted off the merged file with the same
     // grep rather than incremented.
-    expect(DECLARED.vars.size).toBe(67);
+    // control-plane-d1 §Phase3 added TWO cutover gates, both committed OFF and
+    // both flipped to "on" only at the D1→DO cut via wrangler.deploy.toml:
+    // `GATEWAY_TENANT_STATUS_KV` (the tenant-lifecycle KV fast path) and
+    // `GATEWAY_PLATFORM_BILLING_BACKFILL` (the historical platform-billing
+    // drain). ⇒ 69, re-counted off the merged file with
+    // `grep -cE '^[A-Z][A-Z0-9_]*[[:space:]]*=' wrangler.toml` rather than
+    // incremented — same parallel-branch hazard as every line above.
+    expect(DECLARED.vars.size).toBe(69);
     expect(DECLARED.bindings.size).toBeGreaterThanOrEqual(9);
     expect(READS.named.size).toBeGreaterThanOrEqual(60);
 
@@ -792,7 +799,10 @@ describe("which committed [vars] values this runner can actually observe", () =>
     // re-counted off the merged file with the same grep ⇒ 65.
     // #878: + `GATEWAY_CONTROL_STORAGE` ⇒ 66.
     // #698: + `GATEWAY_BATCH_SWEEP_LIMIT` ⇒ 67, re-counted with the same grep.
-    expect(rows.length).toBe(67);
+    // control-plane-d1 §Phase3: + `GATEWAY_TENANT_STATUS_KV`,
+    // `GATEWAY_PLATFORM_BILLING_BACKFILL` (both committed OFF) ⇒ 69, re-counted
+    // off the merged file with the same grep.
+    expect(rows.length).toBe(69);
   });
 
   it("explains every overridden var with an explicit pin in vitest.config.ts", () => {
@@ -897,8 +907,15 @@ describe("which committed [vars] values this runner can actually observe", () =>
     // GATEWAY_CONTROL_STORAGE to `d1_compat` is gone (`durable_object` is the
     // only posture now), so the committed `durable_object` reaches the runner
     // unchanged and becomes observable rather than overridden.
+    //
+    // control-plane-d1 §Phase3: 62 -> 64, overridden stays 5. Both new cutover
+    // gates (`GATEWAY_TENANT_STATUS_KV`, `GATEWAY_PLATFORM_BILLING_BACKFILL`) are
+    // committed OFF ("off") and NOT pinned in vitest.config.ts, so the committed
+    // value reaches the runner unchanged and each is observable rather than
+    // overridden. Committed "off" is INERT: both readers arm only on exactly
+    // "on", so the suite behaves as if the gates were absent.
     const observable = rows.filter((r) => r.runtime === r.committed);
-    expect(observable.length).toBe(62);
+    expect(observable.length).toBe(64);
     expect(rows.length - observable.length).toBe(5);
   });
 });

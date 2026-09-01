@@ -216,6 +216,20 @@ export {
 } from "./sink.js";
 export type { MeteringSettlementMode, MeteringSinkOptions, UnpricedUsage } from "./sink.js";
 
+export {
+  PLATFORM_BILLING_BACKFILL_FLAG,
+  PLATFORM_BILLING_EVENTS_BACKFILL_MARK,
+  PLATFORM_BILLING_LEDGER_BACKFILL_MARK,
+  sweepPlatformBillingBackfill,
+} from "./platform-billing-backfill.js";
+export type { PlatformBillingBackfillSummary } from "./platform-billing-backfill.js";
+
+export {
+  GATEWAY_PLATFORM_BILLING_DRAIN,
+  GATEWAY_PLATFORM_BILLING_OUTBOX,
+  platformBillingFlagEnabled,
+} from "./platform-billing-flags.js";
+
 /**
  * The model-registry pricing leg of settlement (#663) — `src/index.ts` passes
  * it as `MeteringSinkOptions.settledCostUsd`.

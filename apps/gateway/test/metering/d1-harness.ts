@@ -20,6 +20,7 @@
  */
 import { env } from "cloudflare:test";
 import controlMigrationSql from "../../../../sql/d1-ts/control/0001_init_control.sql?raw";
+import { platformDatabaseFrom } from "../../src/control-data.js";
 import type {
   MeteringDatabase,
   MeteringQueryResult,
@@ -129,6 +130,98 @@ export async function overwriteLedgerDocument(
     .prepare("UPDATE billing_ledger SET entry_json = ? WHERE id = ?")
     .bind(JSON.stringify(document), id)
     .run();
+}
+
+/**
+ * The PLATFORM_DATA singleton's billing store (Zero-D1 Plan B), resolved through
+ * the SAME facade the production dual-write leg uses (`platformDatabaseFrom`). A
+ * genuinely different store from the control `BILLING_DB` binding above, so a row
+ * seen here proves the shadow leg reached the object and not the control table.
+ */
+export function platformBillingDb(): D1Database {
+  const db = platformDatabaseFrom(env);
+  if (db === undefined) {
+    // Loud, never a silent skip: PLATFORM_DATA is declared in `wrangler.toml`, so
+    // an absent one means the platform-object leg cannot be under test at all.
+    throw new Error(
+      "platform billing tests expect the `PLATFORM_DATA` binding (apps/gateway/wrangler.toml).",
+    );
+  }
+  return db;
+}
+
+/** One platform `billing_events` row, read straight out of the object. */
+export interface PlatformBillingEventRow {
+  readonly billing_event_id: string;
+  readonly tenant_id: string | null;
+  readonly request_id: string;
+  readonly provider_attempt_index: number;
+  readonly occurred_at_unix: number;
+  readonly event_json: string;
+}
+
+/** One platform `billing_ledger` row, read straight out of the object. */
+export interface PlatformBillingLedgerRow {
+  readonly id: string;
+  readonly tenant_id: string | null;
+  readonly organization_id: string | null;
+  readonly project_id: string | null;
+  readonly api_key_id: string | null;
+  readonly created_at_unix: number;
+  readonly entry_json: string;
+}
+
+/** Every platform `billing_events` row, oldest first. */
+export async function storedPlatformBillingEvents(): Promise<PlatformBillingEventRow[]> {
+  const result = await platformBillingDb()
+    .prepare(
+      "SELECT * FROM billing_events ORDER BY occurred_at_unix ASC, request_id ASC, provider_attempt_index ASC",
+    )
+    .bind()
+    .all<PlatformBillingEventRow>();
+  return result.results;
+}
+
+/** Every platform `billing_ledger` row, oldest first. */
+export async function storedPlatformBillingLedger(): Promise<PlatformBillingLedgerRow[]> {
+  const result = await platformBillingDb()
+    .prepare("SELECT * FROM billing_ledger ORDER BY created_at_unix ASC, id ASC")
+    .bind()
+    .all<PlatformBillingLedgerRow>();
+  return result.results;
+}
+
+/** One platform `billing_report_outbox` row, read straight out of the object. */
+export interface PlatformBillingOutboxRow {
+  readonly id: string;
+  readonly tenant_id: string | null;
+  readonly attempts: number;
+  readonly next_attempt_unix: number;
+  readonly dead_lettered_at_unix: number | null;
+  readonly created_at_unix: number;
+  readonly updated_at_unix: number;
+  readonly event_json: string;
+}
+
+/** Every platform `billing_report_outbox` row, most-due first. */
+export async function storedPlatformBillingOutbox(): Promise<PlatformBillingOutboxRow[]> {
+  const result = await platformBillingDb()
+    .prepare("SELECT * FROM billing_report_outbox ORDER BY next_attempt_unix ASC, id ASC")
+    .bind()
+    .all<PlatformBillingOutboxRow>();
+  return result.results;
+}
+
+/** Empty the platform object's billing tables, so each test starts from zero. */
+export async function resetPlatformBilling(): Promise<void> {
+  const db = platformDatabaseFrom(env);
+  if (db === undefined) return;
+  await db.batch([
+    db.prepare("DELETE FROM billing_events"),
+    db.prepare("DELETE FROM billing_ledger"),
+    db.prepare("DELETE FROM billing_report_outbox"),
+    db.prepare("DELETE FROM platform_backfill_marks"),
+  ]);
 }
 
 /** One executed statement, for asserting the SQL the store actually issues. */

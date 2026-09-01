@@ -290,6 +290,11 @@ export async function resetD1(): Promise<void> {
       // Children first: same FK ordering as the control tables above.
       platformDb().prepare(`DELETE FROM ${GUARDRAIL_CHECK_TABLE}`),
       platformDb().prepare(`DELETE FROM ${GUARDRAIL_EVALUATION_TABLE}`),
+      // The platform request-log leg (Zero-D1 Plan B): the un-attributed rows the
+      // operator list/export fans into, and their own `platform_request_log_backfill_v1`
+      // marker — the same "a completed mark makes the next test skip the copy"
+      // hazard the docblock above names, so it is wiped with the guardrail siblings.
+      platformDb().prepare(`DELETE FROM ${REQUEST_LOG_TABLE}`),
       platformDb().prepare("DELETE FROM platform_backfill_marks"),
     ]);
   }

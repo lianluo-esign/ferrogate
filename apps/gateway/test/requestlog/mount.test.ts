@@ -28,13 +28,15 @@
 import { SELF, env } from "cloudflare:test";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { GATEWAY_MIDDLEWARE } from "../../src/index.js";
-import { evidenceProjectionKey } from "../../src/requestlog/d1.js";
+import { evidenceProjectionKey, platformRequestLogStatements } from "../../src/requestlog/d1.js";
 import {
   REQUEST_LOG_RETENTION_DAYS_VAR,
   REQUEST_LOG_RETENTION_POLICIES_VAR,
   REQUEST_LOG_TABLE,
+  requestLogPlatformDatabaseFrom,
   requestLogRetentionFromEnv,
   requestLogTenantDatabaseFromEnv,
+  sweepPlatformRequestLogRetention,
   sweepRequestLogRetention,
   sweepRequestLogs,
   writeRequestLogs,
@@ -49,7 +51,9 @@ import {
 import {
   applyControlMigrations,
   controlDb,
+  resetPlatformRequestLogs,
   resetRequestLogs,
+  storedPlatformRequestLogs,
   storedRequestLogs,
 } from "./harness.js";
 
@@ -134,7 +138,10 @@ beforeAll(async () => {
   ]);
 });
 
-beforeEach(resetRequestLogs);
+beforeEach(async () => {
+  await resetRequestLogs();
+  await resetPlatformRequestLogs();
+});
 
 afterEach(() => {
   provider?.restore();
@@ -438,5 +445,51 @@ describe("policy-driven retention", () => {
 
   it("names the table the control plane reads", () => {
     expect(REQUEST_LOG_TABLE).toBe("request_logs");
+  });
+
+  // Zero-D1 Plan B (G1): the authoritative platform object is swept independently
+  // of the control projection's unscoped sweep, so it stays bounded and remains
+  // correct once G2 retires that projection.
+  it("sweeps the platform object under the fleet policy", async () => {
+    const platformDb = requestLogPlatformDatabaseFrom(env);
+    if (platformDb === undefined) throw new Error("PLATFORM_DATA binding is required");
+    // Seed one OLD unattributed row STRAIGHT into the platform object, through
+    // the same statement the gateway's dual-write leg uses.
+    await platformDb.batch(
+      platformRequestLogStatements(platformDb, [record("fg-platform-old-1", NOW - 40 * DAY)]),
+    );
+    expect(await storedPlatformRequestLogs()).toHaveLength(1);
+
+    // The fleet default governs the WHOLE platform object — no tenant fence and
+    // no second database to reconcile.
+    const result = await sweepPlatformRequestLogRetention(
+      platformDb,
+      { maxAgeSecs: 30 * DAY, minAgeSecs: 0 },
+      NOW,
+    );
+
+    expect(result.pruned).toBe(1);
+    expect(await storedPlatformRequestLogs()).toHaveLength(0);
+  });
+
+  it("prunes the platform object when the scheduled sweep runs the fleet policy", async () => {
+    const platformDb = requestLogPlatformDatabaseFrom(env);
+    if (platformDb === undefined) throw new Error("PLATFORM_DATA binding is required");
+    await platformDb.batch(
+      platformRequestLogStatements(platformDb, [record("fg-platform-fleet-old", NOW - 40 * DAY)]),
+    );
+    expect(await storedPlatformRequestLogs()).toHaveLength(1);
+    // Control carries no unscoped rows of its own here — the platform leg wired
+    // into `sweepRequestLogs` is the only thing that can prune this row.
+    expect(await storedRequestLogs()).toHaveLength(0);
+
+    const result = await sweepRequestLogs(
+      controlDb(),
+      { ...(env as unknown as Record<string, unknown>), [REQUEST_LOG_RETENTION_DAYS_VAR]: "30" },
+      NOW,
+    );
+
+    expect(result.pruned).toBeGreaterThanOrEqual(1);
+    expect(await storedPlatformRequestLogs()).toHaveLength(0);
   });
 });

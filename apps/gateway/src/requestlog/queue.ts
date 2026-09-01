@@ -50,6 +50,7 @@ import {
   REQUEST_LOG_UPSERT_SQL,
   type RequestLogDatabase,
   TENANT_REQUEST_LOG_UPSERT_SQL,
+  platformRequestLogStatements,
   requestLogBindings,
   tenantRequestLogBindings,
 } from "./d1.js";
@@ -149,8 +150,16 @@ export async function consumeRequestLogBatch(
       string,
       { records: typeof records; evidence: GuardrailEvidenceEnvelope[] }
     >();
+    // Unscoped/platform request logs (empty tenant) have no tenant object; they
+    // land in the control projection below and — Zero-D1 Plan B — also in
+    // PLATFORM_DATA, the authoritative home the operator list is READ from once
+    // the control projection is retired.
+    const unscopedRecords: typeof records = [];
     for (const record of records) {
-      if (record.tenantId === undefined || record.tenantId === "") continue;
+      if (record.tenantId === undefined || record.tenantId === "") {
+        unscopedRecords.push(record);
+        continue;
+      }
       const group = byTenant.get(record.tenantId) ?? { records: [], evidence: [] };
       group.records.push(record);
       byTenant.set(record.tenantId, group);
@@ -196,6 +205,29 @@ export async function consumeRequestLogBatch(
       ...guardrailEvidenceStatements(projection, evidence),
     ];
     await projection.batch(statements);
+
+    // Zero-D1 Plan B (G1 dual-write): unscoped/platform request logs ALSO land in
+    // the PLATFORM_DATA singleton — the authoritative home the operator list is
+    // READ from once the control projection is retired. Same contract as the
+    // guardrail platform leg below: OUTSIDE `retryAll()`, in its own try/catch,
+    // because the tenant, request-log and control writes above have already
+    // committed and a platform-object blip must not re-drive committed evidence.
+    // The one-time CP1 backfill plus this ongoing dual-write reconcile any gap,
+    // so a swallowed failure here is at most a briefly-stale platform read.
+    if (unscopedRecords.length > 0) {
+      try {
+        const platformDb = platformDatabaseOf(env);
+        if (platformDb !== undefined) {
+          await platformDb.batch(platformRequestLogStatements(platformDb, unscopedRecords));
+        }
+      } catch (error) {
+        console.warn(
+          `[ferrogate] platform request-log dual-write failed for ${unscopedRecords.length} row(s); control projection is unaffected: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    }
 
     // Zero-D1 Plan B (G1 dual-write): unscoped/platform evidence ALSO lands in
     // the PLATFORM_DATA singleton — the authoritative home it will be READ from

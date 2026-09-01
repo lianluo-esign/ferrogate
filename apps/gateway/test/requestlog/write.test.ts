@@ -53,7 +53,9 @@ import {
   RecordingQueue,
   applyControlMigrations,
   controlDb,
+  resetPlatformRequestLogs,
   resetRequestLogs,
+  storedPlatformRequestLogs,
   storedRequestLogs,
 } from "./harness.js";
 
@@ -170,6 +172,7 @@ beforeAll(applyControlMigrations);
 
 beforeEach(async () => {
   await resetRequestLogs();
+  await resetPlatformRequestLogs();
 });
 
 afterEach(() => {
@@ -564,6 +567,92 @@ describe("the data plane does not depend on the evidence path", () => {
     await waitOnExecutionContext(ctx);
     expect(errors).toEqual(["d1"]);
     expect(sink.stats.failed).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The platform dual-write leg (Zero-D1 Plan B, G1)
+// ---------------------------------------------------------------------------
+
+describe("unscoped request logs dual-write the platform object", () => {
+  it("lands in the PLATFORM_DATA object AND still writes the control projection", async () => {
+    // Empty first, so nothing below can be a leftover.
+    expect(await storedPlatformRequestLogs()).toHaveLength(0);
+    expect(await storedRequestLogs()).toHaveLength(0);
+
+    // An OPERATOR credential carries no tenant, so its row is UNATTRIBUTED — the
+    // one class of request with no TenantDataObject to be authoritative for it,
+    // which is the whole reason the platform object exists. `/v1/models` is a
+    // real 200 through the whole middleware chain, so this row is not a fixture.
+    const h = gateway();
+    const response = await h.call("/v1/models", { headers: OPERATOR });
+    expect(response.status, await response.clone().text()).toBe(200);
+    await h.settle();
+    const requestId = response.headers.get("x-request-id");
+    expect(requestId).not.toBeNull();
+
+    // The platform object is the authoritative home this row will be READ from
+    // once the projection is retired: `tenant` NULL, because the whole table IS
+    // the platform domain and nothing in it carries an owner.
+    const platform = await storedPlatformRequestLogs();
+    expect(platform).toHaveLength(1);
+    expect(platform[0]?.request_id).toBe(requestId);
+    expect(platform[0]?.tenant).toBeNull();
+
+    // G1 is strictly ADDITIVE: the control projection write is UNCHANGED, so the
+    // same row is still there for every current operator reader.
+    const control = await storedRequestLogs();
+    expect(control).toHaveLength(1);
+    expect(control[0]?.request_id).toBe(requestId);
+    expect(control[0]?.tenant).toBeNull();
+  });
+
+  it("keeps the control projection when the platform leg fails (best-effort, never drops)", async () => {
+    expect(await storedPlatformRequestLogs()).toHaveLength(0);
+
+    // Real control DB, no queue, but a platform object that refuses every batch.
+    // The additive leg must swallow this and the control write must still land —
+    // control is the COUNTED authority for these rows in G1, so a platform blip
+    // is a narrower future read, never lost evidence.
+    const errors: string[] = [];
+    const sink = createRequestLogSink({
+      ...requestLogBindingsFromEnv,
+      platformDatabase: () => ({
+        prepare: () => ({
+          bind: () => ({ run: async () => ({}), all: async () => ({ results: [] }) }),
+        }),
+        batch: async () => {
+          throw new Error("platform object unavailable");
+        },
+      }),
+      diagnostics: { onError: (stage) => errors.push(stage) },
+    });
+    const { app } = createGatewayApp({
+      modules: [inferenceRouteModule({ models: new InMemoryModelResolver([OPENAI_ROUTE]) })],
+      middleware: [requestLogging(sink)],
+    });
+    const ctx = createExecutionContext();
+    const response = await app.fetch(
+      new Request(`${BASE}/v1/models`, { headers: OPERATOR }),
+      {
+        ...(env as unknown as Record<string, unknown>),
+        GATEWAY_NATIVE_API_KEYS: LOG_TENANT_KEY,
+        REQUEST_LOG: undefined,
+      },
+      ctx,
+    );
+    expect(response.status).toBe(200);
+    await waitOnExecutionContext(ctx);
+
+    // The REAL platform object got nothing (the failing double intercepted the
+    // write), but the control projection is intact — and the platform blip is
+    // REPORTED through diagnostics, not counted as a sink failure or a drop.
+    expect(await storedPlatformRequestLogs()).toHaveLength(0);
+    const control = await storedRequestLogs();
+    expect(control).toHaveLength(1);
+    expect(control[0]?.tenant).toBeNull();
+    expect(errors).toEqual(["d1"]);
+    expect(sink.stats).toMatchObject({ written: 1, failed: 0, dropped: 0 });
   });
 });
 

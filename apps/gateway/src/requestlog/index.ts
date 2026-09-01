@@ -120,6 +120,7 @@ export {
   createRequestLogSink,
   requestLogBindingsFromEnv,
   requestLogDatabaseFrom,
+  requestLogPlatformDatabaseFrom,
   requestLogQueueFrom,
   requestLogTenantDatabaseFromEnv,
 } from "./sink.js";
@@ -142,6 +143,7 @@ export {
   REQUEST_LOG_RETENTION_POLICIES_VAR,
   REQUEST_LOG_SWEEP_MAX_ROWS,
   requestLogRetentionFromEnv,
+  sweepPlatformRequestLogRetention,
   sweepRequestLogRetention,
   sweepRequestLogs,
 } from "./retention.js";

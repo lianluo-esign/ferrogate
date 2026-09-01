@@ -39,9 +39,10 @@
  * turned a compliance feature into an outage.
  */
 
-import { controlDatabaseFrom } from "../control-data.js";
+import { controlDatabaseFrom, platformDatabaseFrom } from "../control-data.js";
 import {
   type RequestLogDatabase,
+  platformRequestLogStatements,
   requestLogTenantDatabaseFrom,
   writeRequestLogs,
   writeTenantRequestLogs,
@@ -133,6 +134,18 @@ export function requestLogTenantDatabaseFromEnv(
   return requestLogTenantDatabaseFrom(env, tenantId);
 }
 
+/**
+ * `env.PLATFORM_DATA`, when it really is the platform-singleton facade
+ * (Zero-D1 Plan B). The direct-D1 arm's home for unattributed rows, mirroring
+ * what the queue consumer writes; `undefined` on a unit env or a Worker the
+ * PLATFORM_DATA stanza has not yet reached, and the platform leg is then skipped
+ * without touching the control projection write.
+ */
+export function requestLogPlatformDatabaseFrom(env: unknown): RequestLogDatabase | undefined {
+  const candidate = platformDatabaseFrom(env);
+  return isDatabase(candidate) ? candidate : undefined;
+}
+
 /** Told about every failure, so a degraded evidence path is observable. */
 export interface RequestLogDiagnostics {
   onError?(stage: "queue" | "d1", error: unknown): void;
@@ -142,6 +155,8 @@ export interface RequestLogSinkOptions {
   readonly queue?: (env: unknown) => RequestLogQueue | undefined;
   readonly database?: (env: unknown) => RequestLogDatabase | undefined;
   readonly tenantDatabase?: (env: unknown, tenantId: string) => RequestLogDatabase | undefined;
+  /** Zero-D1 Plan B: the PLATFORM_DATA singleton for unattributed rows. */
+  readonly platformDatabase?: (env: unknown) => RequestLogDatabase | undefined;
   readonly diagnostics?: RequestLogDiagnostics | undefined;
 }
 
@@ -155,17 +170,19 @@ export interface RequestLogSinkOptions {
  * length, and the same conclusion.
  */
 export const requestLogBindingsFromEnv: Required<
-  Pick<RequestLogSinkOptions, "queue" | "database" | "tenantDatabase">
+  Pick<RequestLogSinkOptions, "queue" | "database" | "tenantDatabase" | "platformDatabase">
 > = {
   queue: requestLogQueueFrom,
   database: requestLogDatabaseFrom,
   tenantDatabase: requestLogTenantDatabaseFromEnv,
+  platformDatabase: requestLogPlatformDatabaseFrom,
 };
 
 export class RequestLogSink {
   readonly #queueOf: (env: unknown) => RequestLogQueue | undefined;
   readonly #databaseOf: (env: unknown) => RequestLogDatabase | undefined;
   readonly #tenantDatabaseOf: (env: unknown, tenantId: string) => RequestLogDatabase | undefined;
+  readonly #platformDatabaseOf: (env: unknown) => RequestLogDatabase | undefined;
   readonly #diagnostics: RequestLogDiagnostics | undefined;
   #queued = 0;
   #written = 0;
@@ -176,6 +193,7 @@ export class RequestLogSink {
     this.#queueOf = options.queue ?? requestLogQueueFrom;
     this.#databaseOf = options.database ?? requestLogDatabaseFrom;
     this.#tenantDatabaseOf = options.tenantDatabase ?? requestLogTenantDatabaseFromEnv;
+    this.#platformDatabaseOf = options.platformDatabase ?? requestLogPlatformDatabaseFrom;
     this.#diagnostics = options.diagnostics;
   }
 
@@ -233,6 +251,21 @@ export class RequestLogSink {
           return;
         }
         await writeRequestLogs(projection, [record]);
+
+        // Zero-D1 Plan B (G1 dual-write): mirror the row into the PLATFORM_DATA
+        // singleton so BOTH write paths — this direct arm and the queue consumer
+        // — keep the platform object's shadow complete for the CP1 read cutover.
+        // Best-effort in its own try/catch: the control projection write above
+        // has already landed, so a platform-object blip must neither fail the
+        // request nor undo that write; it is reported, not counted as a failure.
+        try {
+          const platformDb = this.#platformDatabaseOf(runtime.env);
+          if (platformDb !== undefined) {
+            await platformDb.batch(platformRequestLogStatements(platformDb, [record]));
+          }
+        } catch (error) {
+          this.#diagnostics?.onError?.("d1", error);
+        }
       }
       this.#written += 1;
     } catch (error) {

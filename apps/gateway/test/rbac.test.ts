@@ -28,6 +28,7 @@ import {
   type RbacDatabase,
   depsFromEnv,
 } from "../src/adapters.js";
+import { CONTROL_DATA_ADDRESS } from "@ferrogate/storage";
 import { CONTROL_STORAGE_MISCONFIGURED, controlDatabaseFrom } from "../src/control-data.js";
 import type { AuthContext, RbacDecision } from "../src/ports.js";
 import {
@@ -363,7 +364,7 @@ describe("CONTROL storage seam", () => {
     expect(facade).toBeDefined();
     // The facade addresses the singleton "control" object when first used.
     await (facade as D1Database).prepare("SELECT 1").all();
-    expect(addressedName).toBe("control");
+    expect(addressedName).toBe(CONTROL_DATA_ADDRESS);
 
     // No CONTROL_DATA bound ⇒ undefined (the optional reads' config path),
     // never a fall-through to a legacy binding.

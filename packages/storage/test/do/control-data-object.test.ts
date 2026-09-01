@@ -67,7 +67,7 @@ describe("addressing", () => {
   test("refuses any address that is not the constant", async () => {
     const stub = controlStub();
     expect(await refusal(stub.query({ tenantId: "tenant-1", sql: "SELECT 1 AS one" }))).toMatch(
-      /control_data_object: .*answers only address "control"/,
+      new RegExp(`control_data_object: .*answers only address "${CONTROL_DATA_ADDRESS}"`),
     );
     expect(await refusal(stub.query({ tenantId: "", sql: "SELECT 1 AS one" }))).toMatch(
       /control_data_object/,

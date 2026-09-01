@@ -338,6 +338,73 @@ export function ledgerDocument(charge: MeteredCharge): Record<string, unknown> {
 }
 
 /**
+ * The CONTROL-variant `billing_events` + `billing_ledger` INSERTs prepared
+ * against an arbitrary database — the platform shadow leg (Zero-D1 Plan B).
+ *
+ * The gateway dual-writes an UNATTRIBUTED settlement (`tenant_id IS NULL`) into
+ * the `PlatformDataObject` singleton alongside the control write, so removing
+ * the control D1 does not strand the platform billing rows that no tenant
+ * fan-out reader can reach. This reuses the exact control SQL and the exact
+ * binding derivation {@link D1LedgerStore.record} commits to control (same
+ * `eventJson`/`entryJson`, same columns), so the shadow copy can never drift
+ * from the authoritative row; the control statements' `ON CONFLICT DO NOTHING`
+ * makes a re-drain of the same charge idempotent here too.
+ *
+ * When `opts.includeOutbox` is true the same batch also carries the
+ * CONTROL-variant `billing_report_outbox` INSERT — the SAME 5-arg bind
+ * `record()` uses (`occurredAt` ×3, reusing the already-computed `eventJson`) —
+ * so the platform object commits event+ledger+outbox in ONE `batch()`,
+ * preserving the #150 atomicity in the platform DO's single implicit
+ * transaction exactly as control's `record()` does. `ON CONFLICT (id) DO
+ * NOTHING` keeps a re-drain of the same outbox row idempotent, and all three
+ * statements stay in the one batch the caller issues.
+ *
+ * With `includeOutbox` omitted / falsy the outbox is omitted (byte-identical to
+ * the original 2-statement shape, so a flags-off deploy is unchanged). The
+ * wallet-settlement legs are never emitted here (`record()` only emits those
+ * when `tenantId !== undefined`, which an unattributed charge never is).
+ */
+export function platformBillingStatements(
+  db: MeteringDatabase,
+  charge: MeteredCharge,
+  opts?: { includeOutbox?: boolean },
+): MeteringStatement[] {
+  const eventJson = JSON.stringify(billingEventToWire(charge.event));
+  const entryJson = JSON.stringify(ledgerDocument(charge));
+  const tenant = charge.entry.tenant;
+  const occurredAt = charge.occurredAtUnix;
+  const statements: MeteringStatement[] = [
+    db
+      .prepare(BILLING_EVENT_INSERT_SQL)
+      .bind(
+        charge.id,
+        charge.requestId,
+        charge.entry.provider_attempt.provider_attempt_index,
+        occurredAt,
+        eventJson,
+      ),
+    db
+      .prepare(BILLING_LEDGER_INSERT_SQL)
+      .bind(
+        charge.id,
+        tenant.organization_id ?? null,
+        tenant.project_id ?? null,
+        tenant.api_key_id ?? null,
+        occurredAt,
+        entryJson,
+      ),
+  ];
+  if (opts?.includeOutbox === true) {
+    statements.push(
+      db
+        .prepare(BILLING_OUTBOX_INSERT_SQL)
+        .bind(charge.id, occurredAt, occurredAt, occurredAt, eventJson),
+    );
+  }
+  return statements;
+}
+
+/**
  * Read the integer credits back out of a stored `entry_json` document.
  *
  * The fallback exists for a row this store did not write (the Rust producer, a

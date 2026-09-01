@@ -68,10 +68,13 @@ export function platformDataObjectDatabase(namespace: PlatformDataNamespaceLike)
   // cheap (a routing lookup, not a wake) and keeps every query in the context
   // of the request that issued it.
   const fresh = (): D1Database => {
-    // Hint is honored only on first creation. Homed with the rest of this
-    // fleet's singletons in Tokyo so operator reads stay in-region for APAC.
+    // Hint is honored only on first creation, and takes effect just once per
+    // address. "apac" is the valid CF region token for this APAC fleet; the
+    // earlier "apac-ne" was not a valid hint and was ignored. This is a token
+    // correctness fix — it re-homes only a future fresh platform object, not
+    // the one already materialized at PLATFORM_DATA_ADDRESS.
     const stub = namespace.get(namespace.idFromName(PLATFORM_DATA_ADDRESS), {
-      locationHint: "apac-ne",
+      locationHint: "apac",
     });
     return new DurableObjectD1Database(PLATFORM_DATA_ADDRESS, stub).asD1Database();
   };

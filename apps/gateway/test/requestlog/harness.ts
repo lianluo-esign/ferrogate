@@ -17,7 +17,7 @@
  */
 import { env } from "cloudflare:test";
 import { GUARDRAIL_CHECK_TABLE, GUARDRAIL_EVALUATION_TABLE } from "../../src/guardrails/index.js";
-import { REQUEST_LOG_TABLE } from "../../src/requestlog/index.js";
+import { REQUEST_LOG_TABLE, requestLogPlatformDatabaseFrom } from "../../src/requestlog/index.js";
 
 /** The live `env.CONTROL_DB` binding. */
 export function controlDb(): D1Database {
@@ -156,6 +156,36 @@ export async function storedRequestLogs(): Promise<StoredRequestLog[]> {
     .prepare(`SELECT * FROM ${REQUEST_LOG_TABLE} ORDER BY started_at_unix ASC, request_id ASC`)
     .all<StoredRequestLog>();
   return result.results;
+}
+
+/**
+ * The PLATFORM_DATA singleton's `request_logs` rows (Zero-D1 Plan B), read
+ * through the SAME facade the production write path uses
+ * (`requestLogPlatformDatabaseFrom`). The whole table IS the platform domain, so
+ * there is no tenant fence — every row here is unattributed by construction and
+ * its `tenant` column is NULL.
+ */
+export async function storedPlatformRequestLogs(): Promise<StoredRequestLog[]> {
+  const db = requestLogPlatformDatabaseFrom(env);
+  if (db === undefined) {
+    // Loud, never a silent skip: PLATFORM_DATA is declared in `wrangler.toml`, so
+    // an absent one means the platform-object leg cannot be under test at all.
+    throw new Error(
+      "request-log platform tests expect the `PLATFORM_DATA` binding (apps/gateway/wrangler.toml).",
+    );
+  }
+  const result = (await db
+    .prepare(`SELECT * FROM ${REQUEST_LOG_TABLE} ORDER BY started_at_unix ASC, request_id ASC`)
+    .bind()
+    .all()) as { results: StoredRequestLog[] };
+  return result.results;
+}
+
+/** Empty the platform object's `request_logs`, so each test starts from zero. */
+export async function resetPlatformRequestLogs(): Promise<void> {
+  const db = requestLogPlatformDatabaseFrom(env);
+  if (db === undefined) return;
+  await db.prepare(`DELETE FROM ${REQUEST_LOG_TABLE}`).bind().run();
 }
 
 /** A Queue producer double that records what was sent, and can be told to fail. */

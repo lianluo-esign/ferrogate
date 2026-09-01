@@ -22,6 +22,7 @@ import {
   sweepAssetRetentionForTenants,
 } from "./assets/index.js";
 import { attributionTags } from "./attribution/index.js";
+import { controlDatabaseFrom, platformDatabaseFrom } from "./control-data.js";
 import {
   batchJobFromWire,
   batchRouteModule,
@@ -38,7 +39,6 @@ import {
   sweepAllOnlineEvalRegressions,
 } from "./evals/index.js";
 import type { OnlineEvalMessageBatch } from "./evals/index.js";
-import { sweepExperimentProjections } from "./experiments/index.js";
 import { guardrailDepsFromEnv, guardrails, sweepGuardrailEvidence } from "./guardrails/index.js";
 import {
   defaultAnthropicTranslator,
@@ -51,10 +51,13 @@ import {
   tenantModelCatalogFromD1,
 } from "./inference/index.js";
 import {
+  GATEWAY_PLATFORM_BILLING_DRAIN,
   createMeteringUsageSink,
   meteringBindingsFromEnv,
   meteringDrain,
+  platformBillingFlagEnabled,
   routePriceSettledCostUsd,
+  sweepPlatformBillingBackfill,
 } from "./metering/index.js";
 import { rateLimit } from "./ratelimit/index.js";
 import {
@@ -553,7 +556,15 @@ export async function gatewayScheduled(
     // authoritative and no longer mirrored to control D1 (no-tenant-data mirror
     // red line). Admission reads the tenant object directly; nothing reads the
     // control copy.
-    await sweepExperimentProjections(env, tenantIds);
+    // The experiment-shadow-leg → control-D1 projection repair sweep is
+    // intentionally NOT run (Zero-D1 no-tenant-data-mirror red line). It re-paged
+    // EVERY tenant's entire `experiment_shadow_legs` table into the control
+    // projection on every one-minute tick — the cursor restarts from the head
+    // each invocation, so it is the same full-table reprojection churn that made
+    // the usage/presence and asset-audit sweeps a D1 billing hazard. The tenant
+    // object is authoritative; the inline dual-write in `experiments/sink.ts`
+    // keeps the control projection current for the operator reader until that
+    // reader moves to a tenant-object fan-out (sequenced with request_logs).
     // The managed-isolation-evidence → control-D1 rebuild sweep is intentionally
     // NOT run (removed with `src/managed-evidence-projection.ts`): that evidence
     // is tenant-object authoritative and no longer mirrored to control D1
@@ -588,6 +599,35 @@ export async function gatewayScheduled(
     await sweepAssetRetentionForTenants(env, tenantRouter, tenantIds);
   }
   await gatewayRequestLogRetention(env);
+  // Zero-D1 Plan B billing-outbox co-migration: recover crash-stranded PLATFORM
+  // outbox rows. RECOVERY ONLY — the request path publishes each unattributed
+  // platform charge once and reaps its platform outbox row in the same pass, so
+  // this sweep only re-delivers rows an isolate death stranded (money-safe:
+  // downstream dedups on the ledger-entry-id). Gated OFF by default
+  // (`GATEWAY_PLATFORM_BILLING_DRAIN`; that same gate forces the request-path
+  // shadow to WRITE the platform outbox, so the sweep is never fed an empty
+  // store). Placed OUTSIDE the try/catch above and grouped with the other
+  // Zero-D1 Plan B leg, AFTER money recovery (`usage.sweep`), so the degraded
+  // fallback branch still reaches this gate and `sweepPlatform` never throws.
+  if (platformBillingFlagEnabled(env, GATEWAY_PLATFORM_BILLING_DRAIN)) {
+    await usage.sweepPlatform({ env, ctx });
+  }
+  // Zero-D1 Plan B write-migration: back up the control projection's
+  // pre-dual-write UNATTRIBUTED billing rows into the authoritative
+  // PlatformDataObject, resumably. After G1's `#deliverOnce` dual-write there is
+  // still a historical tail in control that no tenant fan-out reader can reach;
+  // this is the one-time copy of it. Gated OFF by default
+  // (`GATEWAY_PLATFORM_BILLING_BACKFILL`), never throws, and once both table
+  // marks are complete it costs two small object reads per tick and zero control
+  // reads. Reader cutover stays deferred (owned by the polaris system later), so
+  // this is purely getting the data INTO the object. It runs AFTER money
+  // recovery (`usage.sweep`, above) so a bulk copy can never delay it.
+  await sweepPlatformBillingBackfill(
+    env,
+    controlDatabaseFrom(env),
+    platformDatabaseFrom(env),
+    Math.floor(Date.now() / 1000),
+  );
   // #689 — expired `/v1/responses` conversation state, on the SAME tick.
   //
   // It is a SEPARATE call rather than a line inside `gatewayRequestLogRetention`

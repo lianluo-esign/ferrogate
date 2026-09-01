@@ -1587,6 +1587,23 @@ describe("§4 fleet-wide ratchets", () => {
       // `asset-version-references`; this table follows it and cannot outlive
       // it, because both deletes are keyed on the same `asset_id`.
       "asset_bundle_files",
+      // One-time-migration bookkeeping for the platform-leg backfills (Zero-D1
+      // Plan B, `sql/d1-ts/platform/0002_backfill_marks.sql`). A resumable cursor
+      // keyed by `mark`, whose JSON `detail` records HOW FAR each platform-leg
+      // backfill has progressed and whether it is complete — it answers "how
+      // far", never "may you", and nothing consults it before admitting, pricing
+      // or routing anything. Both Workers touch it because the leg-owning code is
+      // split across the fleet: the control plane runs the guardrail-evidence and
+      // request-log legs (`apps/control-plane/src/store/platform_*_backfill.ts`)
+      // and the gateway runs the billing leg
+      // (`src/metering/platform-billing-backfill.ts`). A change to it DOES apply
+      // to both, and the schema enforces it rather than a registry entry: both
+      // use the identical `mark`/`detail`/`applied_at_unix` shape with the same
+      // idempotent `INSERT OR IGNORE` + "complete"-guarded update. The control on
+      // the copied bytes is the SOURCE row (registered above — the platform
+      // billing/guardrail/request-log authorities), not this cursor, which cannot
+      // outlive the backfill it tracks.
+      "platform_backfill_marks",
       // Schema introspection, not a row of state.
       "sqlite_master",
     ]);

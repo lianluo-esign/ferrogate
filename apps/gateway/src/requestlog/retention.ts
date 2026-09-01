@@ -68,7 +68,7 @@ import {
   planLogRetention,
 } from "@ferrogate/storage";
 import { REQUEST_LOG_TABLE, type RequestLogDatabase } from "./d1.js";
-import { requestLogTenantDatabaseFromEnv } from "./sink.js";
+import { requestLogPlatformDatabaseFrom, requestLogTenantDatabaseFromEnv } from "./sink.js";
 
 /** `[vars] REQUEST_LOG_RETENTION_DAYS` — the fleet-wide window. */
 export const REQUEST_LOG_RETENTION_DAYS_VAR = "REQUEST_LOG_RETENTION_DAYS";
@@ -303,6 +303,38 @@ async function sweepUnscopedProjection(
 }
 
 /**
+ * Sweep the PLATFORM_DATA singleton's request-log table (Zero-D1 Plan B).
+ *
+ * The whole table IS the platform domain — every row is unattributed by
+ * construction — so there is no tenant fence and the sweep considers the oldest
+ * rows across the object. This leg is INDEPENDENT of the control projection's
+ * `sweepUnscopedProjection` above: each keeps its own copy bounded, so the
+ * authoritative platform object stays correct once G2 retires the control
+ * projection and its unscoped sweep with it.
+ *
+ * Never throws — a retention failure is an unpruned table, which is safe.
+ */
+export async function sweepPlatformRequestLogRetention(
+  platformDb: RequestLogDatabase,
+  policy: RetentionPolicy,
+  nowUnix: number,
+  maxRows: number = REQUEST_LOG_SWEEP_MAX_ROWS,
+): Promise<RequestLogSweepResult> {
+  return sweepCandidates(platformDb, policy, nowUnix, maxRows, { sql: "", params: [] });
+}
+
+/** Resolve the platform singleton without letting a Cron binding fault escape. */
+function platformDatabaseForSweep(env: unknown): RequestLogDatabase | undefined {
+  try {
+    return requestLogPlatformDatabaseFrom(env);
+  } catch {
+    // A missing/unreachable platform object leaves its evidence in place; the
+    // next tick retries once the binding or object becomes available.
+    return undefined;
+  }
+}
+
+/**
  * Discover a bounded set of attributed tenants from the derived projection.
  *
  * This is the unavoidable fleet limitation until #825 defines the general
@@ -383,6 +415,17 @@ export async function sweepRequestLogs(
     const unscoped = await sweepUnscopedProjection(db, fleet.policy, nowUnix);
     scanned += unscoped.scanned;
     pruned += unscoped.pruned;
+
+    // Zero-D1 Plan B: the authoritative platform object gets its own sweep so it
+    // stays bounded independently of the control projection's unscoped sweep, and
+    // remains correct once G2 retires that projection. Skipped when PLATFORM_DATA
+    // is not yet bound — the control unscoped sweep above still bounds the mirror.
+    const platformDb = platformDatabaseForSweep(env);
+    if (platformDb !== undefined && platformDb !== db) {
+      const platform = await sweepPlatformRequestLogRetention(platformDb, fleet.policy, nowUnix);
+      scanned += platform.scanned;
+      pruned += platform.pruned;
+    }
 
     const tenantIds = await tenantIdsFromProjection(
       db,
