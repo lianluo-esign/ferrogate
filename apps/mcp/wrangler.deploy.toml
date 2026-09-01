@@ -26,19 +26,16 @@ compatibility_flags = ["nodejs_compat"]
 [vars]
 FG_DEV_IN_MEMORY_PORTS = "1"
 FG_DEV_MCP_GUARDRAILS = ""
-MCP_CONTROL_STORAGE = "d1"
+MCP_CONTROL_STORAGE = "durable_object"
 
 # --- KV: per-user MCP OAuth flow state (real live id) ------------------------
 [[kv_namespaces]]
 binding = "MCP_OAUTH_KV"
 id = "0c2bc7e26b6f4d55a4accc2f8d9b8acb"
 
-# --- CONTROL_D1: the shared global control database (deploy-time only) --------
-[[d1_databases]]
-binding = "CONTROL_D1"
-database_name = "ferrogate-control"
-database_id = "4a2f6a84-5fff-4759-af1b-49caa21f4be2"
-migrations_dir = "../../sql/d1-ts/control"
+# --- CONTROL_D1 binding REMOVED (2026-09-01) ---------------------------------
+# `ferrogate-control` D1 was physically DELETED after the ONE-SHOT cutover to the
+# CONTROL_DATA singleton DO. A stanza pointing at the deleted DB fails validation.
 
 # --- Durable Objects (self) --------------------------------------------------
 [[durable_objects.bindings]]

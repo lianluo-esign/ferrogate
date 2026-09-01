@@ -57,16 +57,13 @@ script_name = "ferrogate-gateway"
 tag = "v1"
 new_sqlite_classes = ["AgentRunState", "WorkerPlane"]
 
-# --- CONTROL_D1: the shared global control database (deploy-time only) --------
-[[d1_databases]]
-binding = "CONTROL_D1"
-database_name = "ferrogate-control"
-database_id = "4a2f6a84-5fff-4759-af1b-49caa21f4be2"
-migrations_dir = "../../sql/d1-ts/control"
+# --- CONTROL_D1 binding REMOVED (2026-09-01) ---------------------------------
+# `ferrogate-control` D1 was physically DELETED after the ONE-SHOT cutover to the
+# CONTROL_DATA singleton DO. A stanza pointing at the deleted DB fails validation.
 
 # --- vars: LIVE PROD values (harvested from GET /settings), posture flipped ---
 [vars]
-AGENT_RUNTIME_CONTROL_STORAGE = "d1"
+AGENT_RUNTIME_CONTROL_STORAGE = "durable_object"
 FG_DEV_IN_MEMORY_PORTS = "0"
 FG_REQUIRE_PRODUCTION_MTLS = "0"
 CONTAINER_GOVERNED_EGRESS_HOSTS = ""

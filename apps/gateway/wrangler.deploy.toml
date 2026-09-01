@@ -635,10 +635,11 @@ GATEWAY_CACHE_DISABLED_PROFILES = "[]"
 GATEWAY_TENANT_DB_ROUTING = "durable_object"
 # Control-plane read backend posture. "durable_object" reads the CONTROL_DATA
 # DO facade; "d1" opens a colo-local read-replica session on CONTROL_D1
-# (withSession "first-unconstrained", src/control-data.ts). Set to "d1" as part
-# of the control-plane DO->D1 migration: control-plane is the sole writer on the
-# `ferrogate-control` D1, and the gateway is a read-only replica consumer.
-GATEWAY_CONTROL_STORAGE = "d1"
+# (withSession "first-unconstrained", src/control-data.ts). The ONE-SHOT cutover
+# (2026-09-01) flipped all control readers/writers onto the CONTROL_DATA DO and
+# the `ferrogate-control` D1 has since been physically DELETED — this posture is
+# now permanently "durable_object"; the "d1" path is unreachable (no CONTROL_D1).
+GATEWAY_CONTROL_STORAGE = "durable_object"
 
 # Read by `readiness` (src/routes/readiness.ts). `"true"` — and nothing else —
 # makes `/readyz` answer 503 while `/healthz` stays 200, which is the
@@ -1160,19 +1161,11 @@ id = "PLATFORM_CONFIG_KV_ID_SET_BY_WORKFLOW"
 # stanzas; their readers resolve the singleton `CONTROL_DATA` Durable Object
 # facade.
 #
-# CONTROL-PLANE D1 (read-replica reader): the ONLY `[[d1_databases]]` stanza on
-# this Worker. It is the single global `ferrogate-control` D1 (Tokyo/APAC
-# primary) that `ferrogate-control-plane` writes. The gateway is a READ-ONLY
-# consumer: when `GATEWAY_CONTROL_STORAGE = "d1"`, `controlDataFrom` opens a
-# `withSession("first-unconstrained")` colo-local replica session (see
-# apps/gateway/src/control-data.ts). Dormant while posture stays
-# `durable_object`; present so the posture var can be flipped out-of-band
-# without a redeploy. NOT a tenant DB and NOT a routing table.
-[[d1_databases]]
-binding = "CONTROL_D1"
-database_name = "ferrogate-control"
-database_id = "4a2f6a84-5fff-4759-af1b-49caa21f4be2"
-migrations_dir = "../../sql/d1-ts/control"
+# CONTROL-PLANE D1 stanza REMOVED (2026-09-01): the `ferrogate-control` D1
+# (id 4a2f6a84-5fff-4759-af1b-49caa21f4be2) was physically DELETED after the
+# ONE-SHOT cutover to the CONTROL_DATA singleton DO. There is no `[[d1_databases]]`
+# binding on this Worker — a stanza pointing at a deleted DB fails deploy
+# validation. Recovery would require recreating the D1 from the cold backup.
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
