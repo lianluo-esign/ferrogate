@@ -794,39 +794,27 @@ describe("retiring a tenant", () => {
     );
   });
 
-  test("removes pushed aggregate rows while retaining tenant data", async () => {
-    await registerTenant(TENANT_A);
-    await env.CONTROL_DB.batch([
-      env.CONTROL_DB.prepare(
-        `INSERT INTO tenant_agent_cost_rollups
-             (tenant_id, agent_key, period, accumulated_usd, first_seen_unix, updated_at_unix, as_of_unix)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      ).bind(TENANT_A, "agent", "2026-08", 1, 1, 2, 3),
-      env.CONTROL_DB.prepare(
-        `INSERT INTO tenant_spend_rollups
-             (tenant_id, period, accumulated_usd, as_of_unix)
-           VALUES (?, ?, ?, ?)`,
-      ).bind(TENANT_A, "2026-08", 1, 3),
-      env.CONTROL_DB.prepare(
-        `INSERT INTO tenant_asset_rollups
-             (tenant_id, asset_count, asset_bytes, channel_count, as_of_unix)
-           VALUES (?, ?, ?, ?, ?)`,
-      ).bind(TENANT_A, 1, 10, 1, 3),
-    ]);
-
-    await retireTenantStorage(router, TENANT_A);
-
-    expect(
-      await env.CONTROL_DB.prepare(
-        `SELECT count(*) AS count FROM (
-             SELECT tenant_id FROM tenant_agent_cost_rollups WHERE tenant_id = ?
-             UNION ALL SELECT tenant_id FROM tenant_spend_rollups WHERE tenant_id = ?
-             UNION ALL SELECT tenant_id FROM tenant_asset_rollups WHERE tenant_id = ?
-           )`,
+  test("no longer sweeps pushed rollups — the mirror tables are gone (0040)", async () => {
+    // Track A: `tenant_agent_cost_rollups` / `tenant_spend_rollups` /
+    // `tenant_asset_rollups` were DROPPED by 0040. Retirement used to sweep them
+    // from the control mirror; the writer is stopped and the tables no longer
+    // exist, so there is nothing to sweep and retirement is a plain roster removal.
+    const control = env.CONTROL_DB;
+    const present = await control
+      .prepare(
+        `SELECT name FROM sqlite_master
+           WHERE type = 'table'
+             AND name IN ('tenant_agent_cost_rollups', 'tenant_spend_rollups', 'tenant_asset_rollups')`,
       )
-        .bind(TENANT_A, TENANT_A, TENANT_A)
-        .first<{ count: number }>(),
-    ).toEqual({ count: 0 });
+      .all<{ name: string }>();
+    expect(present.results).toHaveLength(0);
+
+    await registerTenant(TENANT_A);
+    await provisionTenantStorage(router, TENANT_A, { nowUnix: NOW });
+    const receipt = await retireTenantStorage(router, TENANT_A);
+    expect(receipt.rosterRowRemoved).toBe(true);
+    expect(receipt.tenantDataRetained).toBe(true);
+    expect(await router.provisionedTenants()).not.toContain(TENANT_A);
   });
 
   test("retiring a tenant that was never provisioned is not an error", async () => {

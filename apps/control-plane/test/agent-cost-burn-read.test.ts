@@ -42,16 +42,22 @@ import { SELF } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { applySchema, db, resetD1 } from "./d1.js";
 import { BASE, arm, bearer, operatorKey, tenantKey } from "./harness.js";
-import {
-  TENANT_A,
-  TENANT_B,
-  TENANT_UNROUTABLE,
-  applyTenantSchema,
-  registerTenantDatabases,
-  resetTenantD1,
-  tenantDbA,
-  tenantDbB,
-} from "./tenant-db.js";
+import { registerDurableObjectTenant, tenantObjectDb } from "./tenant-object.js";
+
+/**
+ * Zero-D1: production tenants are DURABLE OBJECTS, so the burn a tenant reads —
+ * and the fold an operator reads — comes from each tenant's OWN object, never a
+ * control-D1 projection. Two DISTINCT objects, so a cross-tenant assertion
+ * cannot be satisfied by a router that ignores its argument.
+ */
+const TENANT_A = "tenant_a";
+const TENANT_B = "tenant_b";
+/**
+ * Registered naming a binding this Worker does NOT have, so "provisioned but not
+ * yet redeployed" has something real to refuse on a tenant-scoped read and to
+ * SKIP (per-object isolation) in the platform fold.
+ */
+const TENANT_UNROUTABLE = "tenant_unrouted";
 
 const A_KEY = "key-tenant-a";
 const B_KEY = "key-tenant-b";
@@ -63,6 +69,8 @@ interface BurnListBody {
   total?: number;
   offset?: number;
   limit?: number;
+  source?: string;
+  as_of_unix?: number;
 }
 
 /** The billing period the surface defaults to, derived the way Rust derives it. */
@@ -71,7 +79,11 @@ function currentPeriod(): string {
   return `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
 }
 
-/** Insert one `agent_cost_burn` row with raw SQL, the way the accumulator does. */
+/**
+ * Insert one `agent_cost_burn` row with raw SQL into a tenant's OWN object, the
+ * way the accumulator does. There is no control-D1 twin any more: the burn is
+ * tenant-private authority, and the platform fold reads these object rows live.
+ */
 async function seedBurn(
   handle: D1Database,
   row: { tenantId: string; agentKey: string; period: string; usd: number; updatedAt?: number },
@@ -83,22 +95,6 @@ async function seedBurn(
        VALUES (?, ?, ?, ?, ?, ?)`,
     )
     .bind(row.tenantId, row.agentKey, row.period, row.usd, 1, row.updatedAt ?? 2)
-    .run();
-  await db()
-    .prepare(
-      `INSERT INTO tenant_agent_cost_rollups
-         (tenant_id, agent_key, period, accumulated_usd, first_seen_unix, updated_at_unix, as_of_unix)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    )
-    .bind(
-      row.tenantId,
-      row.agentKey,
-      row.period,
-      row.usd,
-      1,
-      row.updatedAt ?? 2,
-      Math.floor(Date.now() / 1000),
-    )
     .run();
 }
 
@@ -112,37 +108,37 @@ async function burnBody(secret: string, query = ""): Promise<BurnListBody> {
   return (await response.json()) as BurnListBody;
 }
 
-beforeAll(async () => {
-  await applySchema();
-  await applyTenantSchema();
-});
+beforeAll(applySchema);
 
 /**
- * `resetTenantD1()` clears the hierarchy and money tables; `agent_cost_burn` is
- * cleared here rather than added to that shared helper because three other
- * suites are being written against it concurrently, and a leftover row would be
- * a `UNIQUE constraint` on the next `seedBurn` rather than a silent pass.
+ * Register the deliberately-unroutable fixture: an env-binding roster row naming
+ * a binding this Worker does NOT have. Written with raw SQL rather than through
+ * `registerDurableObjectTenant` precisely because it must NOT resolve — it is
+ * how "provisioned but not yet redeployed" gets a real refusal.
  */
-async function clearBurn(): Promise<void> {
-  for (const handle of [tenantDbA(), tenantDbB()]) {
-    await handle.prepare("DELETE FROM agent_cost_burn").run();
-  }
-  await db().prepare("DELETE FROM tenant_agent_cost_rollups").run();
-}
-
-/** Drop the deliberately-unroutable fixture tenant from the registry. */
-async function deregisterUnroutable(): Promise<void> {
+async function registerUnroutable(): Promise<void> {
   await db()
-    .prepare("DELETE FROM tenant_databases WHERE tenant_id = ?")
+    .prepare(
+      `INSERT INTO tenant_databases
+         (tenant_id, binding_name, schema_version, migration_state, provisioned_at_unix, updated_at_unix)
+       VALUES (?, 'TENANT_DB_NOT_DEPLOYED', 1, 'done', 1, 1)`,
+    )
     .bind(TENANT_UNROUTABLE)
     .run();
 }
 
 beforeEach(async () => {
   await resetD1();
-  await resetTenantD1();
-  await clearBurn();
-  await registerTenantDatabases();
+  // Tenant object storage is not reset by `resetD1`; register each fixture
+  // tenant as a durable object and clear its burn table so the per-test seed is
+  // clean (a leftover row would be a `UNIQUE constraint`, not a silent pass).
+  for (const t of [TENANT_A, TENANT_B]) {
+    await registerDurableObjectTenant(t);
+    await tenantObjectDb(t).prepare("DELETE FROM agent_cost_burn").run();
+  }
+  // The legacy control rollup mirror (`tenant_agent_cost_rollups`) was DROPPED by
+  // 0040 — there is nothing left in control for the switched operator fold to read.
+  await registerUnroutable();
   arm({
     store: "d1",
     staticKeys: [operatorKey],
@@ -162,7 +158,7 @@ beforeEach(async () => {
 describe("the burn a tenant actually accumulated is what the admin surface reports", () => {
   it("reports the tenant's own rows from the tenant database", async () => {
     const period = currentPeriod();
-    await seedBurn(tenantDbA(), {
+    await seedBurn(tenantObjectDb(TENANT_A), {
       tenantId: TENANT_A,
       agentKey: "agent_alpha",
       period,
@@ -186,7 +182,7 @@ describe("the burn a tenant actually accumulated is what the admin surface repor
    * differently-shaped timestamp on a money report.
    */
   it("does not surface first_seen_unix", async () => {
-    await seedBurn(tenantDbA(), {
+    await seedBurn(tenantObjectDb(TENANT_A), {
       tenantId: TENANT_A,
       agentKey: "agent_alpha",
       period: currentPeriod(),
@@ -201,9 +197,9 @@ describe("the burn a tenant actually accumulated is what the admin surface repor
   /** Rust: "biggest accumulated total first". */
   it("orders by accumulated total, biggest first", async () => {
     const period = currentPeriod();
-    await seedBurn(tenantDbA(), { tenantId: TENANT_A, agentKey: "small", period, usd: 1 });
-    await seedBurn(tenantDbA(), { tenantId: TENANT_A, agentKey: "big", period, usd: 99 });
-    await seedBurn(tenantDbA(), { tenantId: TENANT_A, agentKey: "middle", period, usd: 50 });
+    await seedBurn(tenantObjectDb(TENANT_A), { tenantId: TENANT_A, agentKey: "small", period, usd: 1 });
+    await seedBurn(tenantObjectDb(TENANT_A), { tenantId: TENANT_A, agentKey: "big", period, usd: 99 });
+    await seedBurn(tenantObjectDb(TENANT_A), { tenantId: TENANT_A, agentKey: "middle", period, usd: 50 });
 
     expect((await burnBody(A_KEY)).data.map((row) => row.agent_key)).toEqual([
       "big",
@@ -220,8 +216,8 @@ describe("the burn a tenant actually accumulated is what the admin surface repor
 describe("burn is isolated per tenant", () => {
   it("never shows one tenant another tenant's burn", async () => {
     const period = currentPeriod();
-    await seedBurn(tenantDbA(), { tenantId: TENANT_A, agentKey: "a_agent", period, usd: 10 });
-    await seedBurn(tenantDbB(), { tenantId: TENANT_B, agentKey: "b_agent", period, usd: 20 });
+    await seedBurn(tenantObjectDb(TENANT_A), { tenantId: TENANT_A, agentKey: "a_agent", period, usd: 10 });
+    await seedBurn(tenantObjectDb(TENANT_B), { tenantId: TENANT_B, agentKey: "b_agent", period, usd: 20 });
 
     expect((await burnBody(A_KEY)).data.map((row) => row.agent_key)).toEqual(["a_agent"]);
     expect((await burnBody(B_KEY)).data.map((row) => row.agent_key)).toEqual(["b_agent"]);
@@ -234,11 +230,11 @@ describe("burn is isolated per tenant", () => {
    */
   it("isolates before it paginates, so the total is the tenant's own", async () => {
     const period = currentPeriod();
-    await seedBurn(tenantDbA(), { tenantId: TENANT_A, agentKey: "a1", period, usd: 3 });
-    await seedBurn(tenantDbA(), { tenantId: TENANT_A, agentKey: "a2", period, usd: 2 });
-    await seedBurn(tenantDbB(), { tenantId: TENANT_B, agentKey: "b1", period, usd: 100 });
-    await seedBurn(tenantDbB(), { tenantId: TENANT_B, agentKey: "b2", period, usd: 100 });
-    await seedBurn(tenantDbB(), { tenantId: TENANT_B, agentKey: "b3", period, usd: 100 });
+    await seedBurn(tenantObjectDb(TENANT_A), { tenantId: TENANT_A, agentKey: "a1", period, usd: 3 });
+    await seedBurn(tenantObjectDb(TENANT_A), { tenantId: TENANT_A, agentKey: "a2", period, usd: 2 });
+    await seedBurn(tenantObjectDb(TENANT_B), { tenantId: TENANT_B, agentKey: "b1", period, usd: 100 });
+    await seedBurn(tenantObjectDb(TENANT_B), { tenantId: TENANT_B, agentKey: "b2", period, usd: 100 });
+    await seedBurn(tenantObjectDb(TENANT_B), { tenantId: TENANT_B, agentKey: "b3", period, usd: 100 });
 
     const page = await burnBody(A_KEY, "?limit=1");
     expect(page.total).toBe(2);
@@ -246,47 +242,59 @@ describe("burn is isolated per tenant", () => {
   });
 
   /**
-   * The platform operator gets the cross-tenant view from the pushed control-D1
-   * projection. The unroutable fixture is deregistered here so this assertion
-   * isolates ordering and projection contents.
+   * The platform operator gets the cross-tenant view as the LIVE fold of every
+   * tenant object's own burn — no control-D1 projection. The unroutable fixture
+   * stays registered: per-object isolation makes it contribute nothing, so it
+   * cannot perturb the ordering this assertion isolates.
    */
-  it("gives the platform operator the cross-tenant view", async () => {
-    await deregisterUnroutable();
+  it("gives the platform operator the live cross-tenant fold", async () => {
     const period = currentPeriod();
-    await seedBurn(tenantDbA(), { tenantId: TENANT_A, agentKey: "a_agent", period, usd: 10 });
-    await seedBurn(tenantDbB(), { tenantId: TENANT_B, agentKey: "b_agent", period, usd: 20 });
+    await seedBurn(tenantObjectDb(TENANT_A), {
+      tenantId: TENANT_A,
+      agentKey: "a_agent",
+      period,
+      usd: 10,
+    });
+    await seedBurn(tenantObjectDb(TENANT_B), {
+      tenantId: TENANT_B,
+      agentKey: "b_agent",
+      period,
+      usd: 20,
+    });
 
     const body = await burnBody(operatorKey.secret);
-    // Sorted by accumulated total across BOTH databases, biggest first.
+    // Sorted by accumulated total across BOTH objects, biggest first.
     expect(body.data.map((row) => row.agent_key)).toEqual(["b_agent", "a_agent"]);
     expect(body.data.map((row) => row.tenant_id)).toEqual([TENANT_B, TENANT_A]);
     expect(body.total).toBe(2);
+    // The fold is live tenant authority, not a derived control projection.
+    expect(body.source).toBe("tenant_authority");
   });
 
-  it("reports the projection as-of timestamp for the platform view", async () => {
-    await deregisterUnroutable();
-    const period = currentPeriod();
-    await db()
+  /**
+   * The mirror is physically gone: 0040 DROPPED `tenant_agent_cost_rollups`, so
+   * the operator fold cannot fall back to a stale projection even in principle —
+   * the table no longer exists in control. (This replaces the earlier "ignores a
+   * stale control rollup row" decoy, which could no longer seed the dropped table.)
+   */
+  it("no longer has a control rollup mirror to read (0040 dropped it)", async () => {
+    const present = await db()
       .prepare(
-        `INSERT INTO tenant_agent_cost_rollups
-           (tenant_id, agent_key, period, accumulated_usd, first_seen_unix, updated_at_unix, as_of_unix)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        `SELECT name FROM sqlite_master
+           WHERE type = 'table' AND name = 'tenant_agent_cost_rollups'`,
       )
-      .bind(TENANT_A, "projected_agent", period, 17.25, 1, 2, 1234)
-      .run();
+      .first<{ name: string }>();
+    expect(present).toBeNull();
 
-    const body = await burnBody(operatorKey.secret);
-    expect(body).toMatchObject({
-      source: "derived_control_projection",
-      as_of_unix: 1234,
+    await seedBurn(tenantObjectDb(TENANT_A), {
+      tenantId: TENANT_A,
+      agentKey: "a_agent",
+      period: currentPeriod(),
+      usd: 5,
     });
-    expect(body.data).toEqual([
-      expect.objectContaining({
-        tenant_id: TENANT_A,
-        agent_key: "projected_agent",
-        accumulated_usd: 17.25,
-      }),
-    ]);
+    const body = await burnBody(operatorKey.secret);
+    expect(body.data.map((row) => row.agent_key)).toEqual(["a_agent"]);
+    expect(body.source).toBe("tenant_authority");
   });
 });
 
@@ -296,13 +304,13 @@ describe("burn is isolated per tenant", () => {
 
 describe("the ?period window", () => {
   it("defaults to the current billing month and excludes other months", async () => {
-    await seedBurn(tenantDbA(), {
+    await seedBurn(tenantObjectDb(TENANT_A), {
       tenantId: TENANT_A,
       agentKey: "this_month",
       period: currentPeriod(),
       usd: 5,
     });
-    await seedBurn(tenantDbA(), {
+    await seedBurn(tenantObjectDb(TENANT_A), {
       tenantId: TENANT_A,
       agentKey: "last_year",
       period: "2001-01",
@@ -313,7 +321,7 @@ describe("the ?period window", () => {
   });
 
   it("honours an explicit well-formed ?period", async () => {
-    await seedBurn(tenantDbA(), {
+    await seedBurn(tenantObjectDb(TENANT_A), {
       tenantId: TENANT_A,
       agentKey: "last_year",
       period: "2001-01",
@@ -331,7 +339,7 @@ describe("the ?period window", () => {
    * the surface stays usable without a param".
    */
   it("falls back to the current month for a malformed ?period, rather than erroring", async () => {
-    await seedBurn(tenantDbA(), {
+    await seedBurn(tenantObjectDb(TENANT_A), {
       tenantId: TENANT_A,
       agentKey: "this_month",
       period: currentPeriod(),
@@ -369,11 +377,15 @@ describe("an unreachable store is a refusal, not an empty list", () => {
   });
 
   /**
-   * The platform view is a pushed projection, so it does not address unrelated
-   * tenant objects during a read.
+   * The platform fold DOES address every provisioned tenant object, but an
+   * unreachable one degrades PER OBJECT — it contributes `[]` rather than
+   * failing the whole fleet read. `TENANT_UNROUTABLE` is registered in
+   * `beforeEach` naming a binding this Worker lacks; the reachable tenant's burn
+   * still comes back. (A tenant reading its OWN unreachable object still gets a
+   * 503 — that is the case above; the discipline differs by scope.)
    */
-  it("does not live-fan-out to an unreachable tenant", async () => {
-    await seedBurn(tenantDbA(), {
+  it("folds reachable tenants and skips an unreachable one, never 503-ing the fleet", async () => {
+    await seedBurn(tenantObjectDb(TENANT_A), {
       tenantId: TENANT_A,
       agentKey: "a_agent",
       period: currentPeriod(),
@@ -382,7 +394,7 @@ describe("an unreachable store is a refusal, not an empty list", () => {
 
     const body = await burnBody(operatorKey.secret);
     expect(body.data.map((row) => row.agent_key)).toEqual(["a_agent"]);
-    expect(body).toMatchObject({ source: "derived_control_projection" });
+    expect(body.source).toBe("tenant_authority");
   });
 
   /**

@@ -5,14 +5,12 @@
  * `admin.read`, tenant-scoped, read-only. Clean-room port of
  * `crates/ferrogate-gateway/src/server/agent_cost_burn.rs`.
  */
+import type { TenantDatabaseRouter } from "@ferrogate/storage";
 import { periodMonthFromUnix } from "@ferrogate/storage";
 import { HttpError } from "../middleware/errors.js";
 import type { CallerScope, ControlPlaneDeps, StoreRecord } from "../ports.js";
-import {
-  adminListPaginated,
-  derivedControlProjectionMetadata,
-  parseListQuery,
-} from "../responses.js";
+import { adminListPaginated, parseListQuery } from "../responses.js";
+import { fanOutProvisionedTenants } from "../store/tenant-fanout.js";
 import { tenantDatabaseFor } from "../store/tenancy.js";
 import {
   type GroupModule,
@@ -61,11 +59,6 @@ interface BurnRow {
   readonly updated_at_unix: number;
 }
 
-interface ProjectedBurnRow extends BurnRow {
-  readonly first_seen_unix: number;
-  readonly as_of_unix: number;
-}
-
 /**
  * Rust `AgentCostBurnRow::from_stored` — five fields.
  *
@@ -82,6 +75,32 @@ function burnDocument(row: BurnRow): StoreRecord {
     accumulated_usd: row.accumulated_usd,
     updated_at_unix: row.updated_at_unix,
   };
+}
+
+/**
+ * The raw per-agent SELECT out of one object's `agent_cost_burn` table.
+ *
+ * Shared by the tenant-fenced read (which wraps a failure as `503`) and the
+ * platform fan-out (whose per-object isolation turns a single failing object
+ * into `[]` rather than failing the whole fleet). `WHERE tenant_id = ?` is kept
+ * even though a tenant object holds only its own rows: it is the same predicate
+ * the accumulator writes under, and it makes a mis-routed read return nothing
+ * instead of another tenant's burn.
+ */
+async function selectBurnRows(
+  db: D1Database,
+  tenantId: string,
+  period: string,
+): Promise<BurnRow[]> {
+  const rows = await db
+    .prepare(
+      `SELECT tenant_id, agent_key, period, accumulated_usd, updated_at_unix
+         FROM agent_cost_burn
+        WHERE tenant_id = ? AND period = ?`,
+    )
+    .bind(tenantId, period)
+    .all<BurnRow>();
+  return [...rows.results];
 }
 
 /**
@@ -104,61 +123,12 @@ async function burnRowsFor(
   if (handle === null) return [];
 
   try {
-    const rows = await handle.db
-      .prepare(
-        `SELECT tenant_id, agent_key, period, accumulated_usd, updated_at_unix
-           FROM agent_cost_burn
-          WHERE tenant_id = ? AND period = ?`,
-      )
-      .bind(tenantId, period)
-      .all<BurnRow>();
-    return [...rows.results];
+    return await selectBurnRows(handle.db, tenantId, period);
   } catch (error) {
     throw new HttpError(
       503,
       "service_unavailable",
       `agent cost-burn surface unavailable: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
-    );
-  }
-}
-
-/** Read the pushed per-agent projection, preserving its oldest as-of time. */
-async function projectedBurnRows(
-  db: D1Database,
-  period: string,
-): Promise<{ rows: BurnRow[]; asOfUnix: number | null }> {
-  try {
-    const result = await db
-      .prepare(
-        `SELECT tenant_id, agent_key, period, accumulated_usd, first_seen_unix,
-                updated_at_unix, as_of_unix
-           FROM tenant_agent_cost_rollups
-          WHERE period = ?
-          ORDER BY accumulated_usd DESC, tenant_id ASC, agent_key ASC`,
-      )
-      .bind(period)
-      .all<ProjectedBurnRow>();
-    const asOfUnix = result.results.reduce<number | null>(
-      (oldest, row) => (oldest === null ? row.as_of_unix : Math.min(oldest, row.as_of_unix)),
-      null,
-    );
-    return {
-      rows: result.results.map((row) => ({
-        tenant_id: row.tenant_id,
-        agent_key: row.agent_key,
-        period: row.period,
-        accumulated_usd: row.accumulated_usd,
-        updated_at_unix: row.updated_at_unix,
-      })),
-      asOfUnix,
-    };
-  } catch (error) {
-    throw new HttpError(
-      503,
-      "service_unavailable",
-      `agent cost-burn projection unavailable: ${
         error instanceof Error ? error.message : String(error)
       }`,
     );
@@ -199,21 +169,26 @@ function listAgentCostBurnHandler(): Handler {
     let metadata: { readonly source: string; readonly as_of_unix: number } | undefined;
     if (scope.kind === "tenant") {
       rows.push(...(await burnRowsFor(deps, scope.tenantId, period)));
-      metadata = {
-        source: "tenant_authority",
-        as_of_unix: Math.floor(Date.now() / 1000),
-      };
     } else {
-      const control = deps.controlDatabase;
-      if (control === null) {
-        return json(c, 200, adminListPaginated([], 0, query.offset, query.limit));
-      }
-      const projected = await projectedBurnRows(control, period);
-      rows.push(...projected.rows);
-      metadata = derivedControlProjectionMetadata(
-        (projected.asOfUnix ?? Math.floor(Date.now() / 1000)) * 1000,
+      // The platform view is the LIVE fold of every tenant object's own
+      // `agent_cost_burn` — no longer a control-D1 projection. The burn is
+      // tenant-private authority; mirroring it into the shared control object
+      // was the red-line this slice removes. `fanOutProvisionedTenants` reads
+      // each provisioned object concurrently and, per-object isolation, an
+      // unreachable one contributes `[]` rather than failing the fleet read.
+      const router: TenantDatabaseRouter = deps.tenantStorage ?? deps.tenantDatabases;
+      rows.push(
+        ...(await fanOutProvisionedTenants(
+          router,
+          (db, tenantId) => selectBurnRows(db, tenantId, period),
+          "agent-cost-burn",
+        )),
       );
     }
+    metadata = {
+      source: "tenant_authority",
+      as_of_unix: Math.floor(Date.now() / 1000),
+    };
 
     // Rust's storage layer returns "biggest accumulated total first"; the
     // fan-out has to re-establish that across databases, and `agent_key` is the

@@ -377,6 +377,28 @@ const AGGREGATE_FLUSH_ALARM_KEY = "tenant_data:aggregate_flush_alarm";
  */
 export const TENANT_AGGREGATE_FLUSH_INTERVAL_SECONDS = 60;
 
+/**
+ * Track A writer-stop. The periodic flush is the ONLY writer of the three fleet
+ * rollups (`tenant_agent_cost_rollups`, `tenant_spend_rollups`,
+ * `tenant_asset_rollups`) mirrored into the shared CONTROL object — the last
+ * tenant-data mirror this object still pushed. Their sole reader,
+ * `admin_agent_cost_burn`'s operator fold, now reads each tenant object live, so
+ * the mirror is reader-free. With this off the flush arms nothing and writes
+ * nothing; an object provisioned before the flip drains its pending lease on the
+ * next wake without re-arming.
+ *
+ * The three control tables are now DROPPED by `0040_drop_tenant_rollups.sql`, so
+ * this MUST stay `false`: the gate short-circuits `#flushAggregates` before any
+ * statement runs, so the dormant machinery below never touches a table that no
+ * longer exists. "Rollback" is therefore no longer a flag flip — the mirror is
+ * derived, so restoring it would mean re-creating the tables and recomputing.
+ * The flush machinery is retained dormant (its native alarm multiplexes with the
+ * independent SCHEDULE leg; unpicking it is a separate hygiene slice with no
+ * red-line impact). Typed `boolean` (not the literal) so the guards below stay
+ * live code rather than statically-unreachable branches.
+ */
+const PROJECT_TENANT_AGGREGATES_TO_CONTROL: boolean = false;
+
 interface TenantScheduleAlarmQueue {
   send(body: unknown): Promise<unknown>;
 }
@@ -1507,6 +1529,9 @@ export class TenantDataObject extends DurableObject {
 
   /** Arm the periodic push once a tenant has made its first ordinary RPC. */
   async #ensureFlushAlarm(): Promise<void> {
+    // Track A writer-stop: the fleet rollups are reader-free, so stop arming the
+    // cadence. See PROJECT_TENANT_AGGREGATES_TO_CONTROL.
+    if (!PROJECT_TENANT_AGGREGATES_TO_CONTROL) return;
     if (this.#controlDatabase === null || this.#tenantId === null) return;
     await this.#state.blockConcurrencyWhile(async () => {
       const raw = await this.#state.storage.get<unknown>(AGGREGATE_FLUSH_ALARM_KEY);
@@ -1532,6 +1557,15 @@ export class TenantDataObject extends DurableObject {
 
   /** Push the current tenant-owned counters as replacements, never deltas. */
   async #flushAggregates(asOfUnix: number): Promise<void> {
+    // Track A writer-stop: the three fleet rollups this method mirrored into the
+    // shared CONTROL object are reader-free (see
+    // PROJECT_TENANT_AGGREGATES_TO_CONTROL). Drain any lease armed before the
+    // flip and write nothing; deleting the payload keeps alarm() from re-arming
+    // the 60s cadence, so a pre-flip object settles to quiescence on this wake.
+    if (!PROJECT_TENANT_AGGREGATES_TO_CONTROL) {
+      await this.#state.storage.delete(AGGREGATE_FLUSH_ALARM_KEY);
+      return;
+    }
     if (this.#controlDatabase === null) {
       throw new Error(`${REFUSAL}: CONTROL_DB is not bound; retaining aggregate flush alarm`);
     }

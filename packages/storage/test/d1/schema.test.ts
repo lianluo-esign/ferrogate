@@ -51,9 +51,10 @@ const CONTROL_ONLY = [
   "control_plane_resources",
   "api_key_directory",
   "static_api_keys",
-  "tenant_agent_cost_rollups",
-  "tenant_spend_rollups",
-  "tenant_asset_rollups",
+  // `tenant_agent_cost_rollups` / `tenant_spend_rollups` / `tenant_asset_rollups`
+  // were DROPPED by 0040 (Track A): derived push-rollup mirrors whose operator
+  // reader now folds each tenant object live. They are no longer in EITHER
+  // database, so they belong on neither this list nor the tenant one.
   // #889: the platform default catalog. These are the control-side twins of
   // the tenant `provider_channels`/`catalog_models`/`catalog_model_offerings`
   // graph, and this list is what proves a tenant database can never contain

@@ -182,12 +182,16 @@ export const CONTROL_BACKFILL_TABLES: readonly ControlBackfillTable[] = Object.f
   table("sso_pending_flows", ["state"]),
   table("sso_provider_configs_legacy", ["tenant_id"]),
   table("static_api_keys", ["key_hash"]),
-  table("tenant_agent_cost_rollups", ["tenant_id", "agent_key", "period"]),
-  table("tenant_asset_rollups", ["tenant_id"]),
+  // `tenant_agent_cost_rollups`, `tenant_asset_rollups` and `tenant_spend_rollups`
+  // were DROPPED from the control DO by `0040_drop_tenant_rollups.sql` — these
+  // push rollups were derived, tenant-attributed mirrors whose sole reader
+  // (`admin_agent_cost_burn`'s operator fold) now recomputes them live from each
+  // tenant object, so the control mirror has no writer or reader. A table the
+  // live schema no longer has must NOT appear in this manifest (the parity guard
+  // would flag it), same as `spend_anomaly_episodes` above (0038).
   table("tenant_databases", ["tenant_id"]),
   table("tenant_provider_credentials_legacy", ["tenant_id", "alias"]),
   table("tenant_role_bindings_legacy", ["id"]),
-  table("tenant_spend_rollups", ["tenant_id", "period"]),
   table("tenants", ["id"]),
 ]);
 

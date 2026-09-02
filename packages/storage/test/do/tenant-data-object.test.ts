@@ -58,12 +58,9 @@ beforeAll(async () => {
 beforeEach(async () => {
   // The control projection is shared by this workerd environment; keep rows
   // from a previous run from satisfying a freshness assertion.
-  await env.CONTROL_DB.batch([
-    env.CONTROL_DB.prepare("DELETE FROM tenant_databases"),
-    env.CONTROL_DB.prepare("DELETE FROM tenant_agent_cost_rollups"),
-    env.CONTROL_DB.prepare("DELETE FROM tenant_spend_rollups"),
-    env.CONTROL_DB.prepare("DELETE FROM tenant_asset_rollups"),
-  ]);
+  // The tenant push-rollup mirrors (`tenant_agent_cost_rollups` etc.) were
+  // DROPPED by 0040 and are no longer written; only the roster needs clearing.
+  await env.CONTROL_DB.batch([env.CONTROL_DB.prepare("DELETE FROM tenant_databases")]);
 });
 
 /**
@@ -1750,13 +1747,26 @@ describe("tenant schedule alarms", () => {
     ).toEqual({ scheduleRuns: 1, flushRuns: 1 });
   });
 
-  test("pushes tenant spend to control D1 and replaces it on the next flush", async () => {
+  /**
+   * Track A writer-stop (`PROJECT_TENANT_AGGREGATES_TO_CONTROL = false`): the
+   * three fleet rollups were the last tenant-data mirror this object pushed into
+   * the shared CONTROL object, and their sole reader — `admin_agent_cost_burn`'s
+   * operator fold — now reads each tenant object live. So a flush must mirror
+   * NOTHING even when the object holds burn/asset/channel rows, and it must
+   * drain a lease armed before the flip WITHOUT re-arming the 60s cadence. Now
+   * that 0040 has DROPPED the three control tables, the proof is the strongest
+   * form: the mirror TARGETS do not exist, and the gated flush still drains its
+   * lease cleanly without ever touching them (the guard short-circuits before any
+   * statement runs).
+   */
+  test("no longer mirrors tenant aggregates to control (writer-stop, tables dropped by 0040)", async () => {
     const tenantId = "tenant_aggregate_flush_projection";
     const object = aggregateAlarmObjectFor(tenantId);
     const period = "2026-08";
     await env.CONTROL_DB.prepare("INSERT INTO tenant_databases (tenant_id) VALUES (?)")
       .bind(tenantId)
       .run();
+    // Real tenant-authority rows: the object HAS burn/asset/channel data.
     await object.query({
       tenantId,
       sql:
@@ -1801,88 +1811,40 @@ describe("tenant schedule alarms", () => {
         },
       ],
     });
-    const before = Math.floor(Date.now() / 1000);
-    await object.setAggregateFlushAlarm({ tenantId, scheduledAtUnix: before + 10 });
+
+    // Arm a flush lease the way a pre-flip object would carry one, then fire it.
+    await object.setAggregateFlushAlarm({
+      tenantId,
+      scheduledAtUnix: Math.floor(Date.now() / 1000) + 10,
+    });
     await runDurableObjectAlarm(object);
 
-    const first = await env.CONTROL_DB.prepare(
-      `SELECT tenant_id, agent_key, period, accumulated_usd, as_of_unix
-           FROM tenant_agent_cost_rollups
-          WHERE tenant_id = ?`,
-    )
-      .bind(tenantId)
-      .first<{
-        tenant_id: string;
-        agent_key: string;
-        period: string;
-        accumulated_usd: number;
-        as_of_unix: number;
-      }>();
-    expect(first).toMatchObject({
-      tenant_id: tenantId,
-      agent_key: "agent",
-      period,
-      accumulated_usd: 4.5,
-    });
-    expect(first?.as_of_unix).toBeGreaterThanOrEqual(before);
+    // Nothing to mirror to: 0040 dropped all three control tables, and the gated
+    // flush drained without ever referencing them.
+    const mirrorTables = await env.CONTROL_DB.prepare(
+      `SELECT name FROM sqlite_master
+         WHERE type = 'table'
+           AND name IN ('tenant_agent_cost_rollups', 'tenant_spend_rollups', 'tenant_asset_rollups')`,
+    ).all<{ name: string }>();
+    expect(mirrorTables.results).toHaveLength(0);
+    // The lease drained without re-arming the cadence.
     expect(
-      await env.CONTROL_DB.prepare(
-        "SELECT tenant_id, period, accumulated_usd, as_of_unix FROM tenant_spend_rollups WHERE tenant_id = ?",
-      )
-        .bind(tenantId)
-        .first(),
-    ).toMatchObject({ tenant_id: tenantId, period, accumulated_usd: 4.5 });
-    expect(
-      await env.CONTROL_DB.prepare(
-        `SELECT asset_count, asset_bytes, channel_count
-             FROM tenant_asset_rollups
-            WHERE tenant_id = ?`,
-      )
-        .bind(tenantId)
-        .first<{ asset_count: number; asset_bytes: number; channel_count: number }>(),
-    ).toEqual({ asset_count: 1, asset_bytes: 12, channel_count: 1 });
+      await runInDurableObject(object, (_instance, state) => state.storage.getAlarm()),
+    ).toBeNull();
 
+    // A subsequent ordinary RPC does not re-arm the flush either.
     await object.query({
       tenantId,
       sql: "UPDATE agent_cost_burn SET accumulated_usd = ?, updated_at_unix = ? WHERE tenant_id = ?",
       params: [9.25, 30, tenantId],
     });
-    await object.setAggregateFlushAlarm({
-      tenantId,
-      scheduledAtUnix: Math.floor(Date.now() / 1000) + 10,
-    });
-    await runDurableObjectAlarm(object);
-    expect(
-      await env.CONTROL_DB.prepare(
-        "SELECT accumulated_usd FROM tenant_agent_cost_rollups WHERE tenant_id = ?",
-      )
-        .bind(tenantId)
-        .first<{ accumulated_usd: number }>(),
-    ).toEqual({ accumulated_usd: 9.25 });
-
-    await env.CONTROL_DB.batch([
-      env.CONTROL_DB.prepare("DELETE FROM tenant_databases WHERE tenant_id = ?").bind(tenantId),
-      env.CONTROL_DB.prepare("DELETE FROM tenant_agent_cost_rollups WHERE tenant_id = ?").bind(
-        tenantId,
-      ),
-      env.CONTROL_DB.prepare("DELETE FROM tenant_spend_rollups WHERE tenant_id = ?").bind(tenantId),
-      env.CONTROL_DB.prepare("DELETE FROM tenant_asset_rollups WHERE tenant_id = ?").bind(tenantId),
-    ]);
-    await object.setAggregateFlushAlarm({
-      tenantId,
-      scheduledAtUnix: Math.floor(Date.now() / 1000) + 10,
-    });
-    await runDurableObjectAlarm(object);
-    expect(
-      await env.CONTROL_DB.prepare(
-        "SELECT tenant_id FROM tenant_agent_cost_rollups WHERE tenant_id = ?",
-      )
-        .bind(tenantId)
-        .first(),
-    ).toBeNull();
     expect(
       await runInDurableObject(object, (_instance, state) => state.storage.getAlarm()),
     ).toBeNull();
+
+    await env.CONTROL_DB.prepare("DELETE FROM tenant_databases WHERE tenant_id = ?")
+      .bind(tenantId)
+      .run();
   });
 });
 

@@ -1,0 +1,47 @@
+-- ===========================================================================
+-- Drop the tenant push-rollup projections (Track A red-line)
+--
+-- `tenant_agent_cost_rollups`, `tenant_spend_rollups` and `tenant_asset_rollups`
+-- (#825, migration 0024) were DERIVED, tenant-attributed projection *mirrors* in
+-- the shared CONTROL object. Each was a fully RECOMPUTED snapshot — the owning
+-- TenantDataObject's `#flushAggregates` REPLACED a tenant's rows on every flush
+-- from that object's OWN authoritative tables (`agent_cost_burn`, `stored_assets`,
+-- `asset_channels`). Because nothing accumulated in the mirror, the family could
+-- be cut over to the object with no historical backfill: the switched reader
+-- recomputes the same totals live.
+--
+-- Both sides are now single-source on the tenant objects:
+--
+--   * READ  — `admin_agent_cost_burn.ts`'s platform-operator branch folds each
+--     provisioned tenant object's live `agent_cost_burn` via
+--     `fanOutProvisionedTenants` (metadata `source: "tenant_authority"`), the
+--     last reader of `tenant_agent_cost_rollups`. `tenant_spend_rollups` and
+--     `tenant_asset_rollups` had no reader at all.
+--   * WRITE — `TenantDataObject` no longer mirrors: the module gate
+--     `PROJECT_TENANT_AGGREGATES_TO_CONTROL = false` makes `#ensureFlushAlarm`
+--     arm nothing and `#flushAggregates` drain any pre-flip lease WITHOUT writing
+--     these tables (the SCHEDULE alarm leg is untouched). Roster retirement
+--     (`retireTenantStorage`) no longer sweeps them either — there is nothing to
+--     sweep.
+--
+-- The control copies therefore have no remaining writer or reader. Keeping the
+-- empty mirrors implies a second source of truth and lets a future writer bypass
+-- tenant isolation — the exact red line this program eliminates. `IF EXISTS`
+-- keeps this idempotent for fresh and already-migrated control databases
+-- (0013 / 0036 / 0037 / 0038 / 0039 precedent). None of the three is referenced
+-- by an inbound foreign key, so drop order is free; each table's index
+-- (`idx_tenant_agent_cost_rollups_period`, `idx_tenant_spend_rollups_period`)
+-- drops with its table.
+--
+-- Deploy order: the gateway bundle that defines the ControlDataObject carries
+-- BOTH the writer-stop gate AND this DROP, so they land in one deploy; the
+-- control-plane reader switch must be deployed FIRST (CP → gateway) so no live
+-- isolate still reads `tenant_agent_cost_rollups`. During the brief rollout skew
+-- an old operator read that still hits the mirror sees `no such table`, which the
+-- fold path never reaches once the switched reader is live. No historical
+-- backfill is required — the data is derived and recomputed on read.
+-- ===========================================================================
+
+DROP TABLE IF EXISTS tenant_agent_cost_rollups;
+DROP TABLE IF EXISTS tenant_spend_rollups;
+DROP TABLE IF EXISTS tenant_asset_rollups;
