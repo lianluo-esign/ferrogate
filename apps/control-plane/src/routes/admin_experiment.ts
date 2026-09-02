@@ -73,10 +73,13 @@ import {
  * is DISCOVERED from the observations, which means it lists exactly the splits
  * that really served traffic in the window.
  */
+import type { TenantDatabaseRouter } from "@ferrogate/storage";
 import { HttpError } from "../middleware/errors.js";
 import type { CallerScope, StoreRecord } from "../ports.js";
 import { adminListPaginated, parseListQuery } from "../responses.js";
 import { BILLING_EVENT_TABLE, REQUEST_LOG_TABLE } from "../store/d1.js";
+import { tenantEvidenceDatabaseFor } from "../store/tenancy.js";
+import { fanOutProvisionedTenants } from "../store/tenant-fanout.js";
 import {
   type GroupModule,
   type Handler,
@@ -123,16 +126,22 @@ const DEFAULT_MIN_SAMPLES = 30;
 const DEFAULT_ALPHA = 0.05;
 
 /**
- * The tenant fence.
+ * The tenant fence, per OBJECT.
+ *
+ * Every read below runs against ONE tenant's own object (or the platform
+ * object, `tenantId === null`), so the fence is defence in depth rather than
+ * the isolation mechanism: the object already holds only its owner's rows, and
+ * the predicate pins that a row stamped with another tenant — which the writer
+ * never produces — can still not leak into this tenant's report.
  *
  * Stated separately from `admin_cost_record.ts::costRecordTenantFence` for the
  * reason that file gives about ITS siblings: these predicates read independent
  * facts, and folding them into one helper would make a later divergence look
  * like a typo rather than a decision.
  */
-function tenantFence(scope: CallerScope, column: string): { sql: string; params: string[] } {
-  if (scope.kind === "platform_operator") return { sql: "", params: [] };
-  return { sql: `${column} = ?`, params: [scope.tenantId] };
+function tenantFence(tenantId: string | null, column: string): { sql: string; params: string[] } {
+  if (tenantId === null) return { sql: "", params: [] };
+  return { sql: `${column} = ?`, params: [tenantId] };
 }
 
 function whereFrom(clauses: readonly string[]): string {
@@ -243,12 +252,128 @@ interface QualityRow {
   readonly total_squares: number;
 }
 
-/** A D1 binding, narrowed to what this module issues. */
-interface Database {
-  prepare(query: string): {
-    bind(...values: unknown[]): { all<T>(): Promise<{ results: T[] }> };
-    all<T>(): Promise<{ results: T[] }>;
-  };
+/**
+ * Which evidence objects a caller's report is assembled from.
+ *
+ * The evidence — `request_logs` ⋈ `billing_events`, `experiment_shadow_legs`
+ * and `online_eval_scores` — lives in each tenant's OWN object (and, for
+ * unattributed traffic, in the platform object). The control-store copies were
+ * cross-tenant compatibility projections; mirroring tenant data into the shared
+ * control store is the red line #859/#881 closed, so nothing here reads them.
+ *
+ *  - a TENANT reads its exact object;
+ *  - a PLATFORM OPERATOR reads every provisioned tenant object plus the
+ *    platform object, and the per-object aggregates are FOLDED: each statement
+ *    below returns additive group totals (counts, sums, mins, maxes), so the
+ *    fleet answer is the same arithmetic over the union of objects that the
+ *    single control query used to perform over the union of rows.
+ *
+ * The operator read is a WHOLE-ROSTER fan-out, deliberately not a
+ * `tenant_offset` page: a report is a total, and a paged total would be a
+ * partial number that reads as a whole one. Each object costs one batched
+ * round trip. The platform object carries `request_logs` / `billing_events`
+ * only (no shadow legs, no scores), so it contributes to the served arms alone.
+ */
+interface EvidenceObject {
+  readonly db: D1Database;
+  /** `null` for the platform object, whose rows have no owner. */
+  readonly tenantId: string | null;
+  readonly leg: "tenant" | "platform";
+}
+
+async function evidenceObjects(
+  deps: ReturnType<typeof depsOf>,
+  scope: CallerScope,
+): Promise<EvidenceObject[]> {
+  // The same router the other evidence readers take, so a tenant's report and
+  // an operator's fleet report read the same objects.
+  const router: TenantDatabaseRouter = deps.tenantStorage ?? deps.tenantDatabases;
+  if (scope.kind === "tenant") {
+    const db = await tenantEvidenceDatabaseFor(router, scope.tenantId);
+    return [{ db, tenantId: scope.tenantId, leg: "tenant" }];
+  }
+  const objects = await fanOutProvisionedTenants<EvidenceObject>(
+    router,
+    async (db, tenantId) => [{ db, tenantId, leg: "tenant" }],
+    "experiment",
+  );
+  const platformDb = deps.platformData ?? null;
+  if (platformDb !== null) objects.push({ db: platformDb, tenantId: null, leg: "platform" });
+  return objects;
+}
+
+/**
+ * Run `read` against every evidence object and concatenate, isolating a bad
+ * object exactly as the fan-out that found it does: one unreachable tenant
+ * costs that tenant's rows, never the whole report.
+ */
+async function acrossObjects<T>(
+  objects: readonly EvidenceObject[],
+  read: (object: EvidenceObject) => Promise<T[]>,
+): Promise<T[]> {
+  const perObject = await Promise.all(
+    objects.map(async (object) => {
+      try {
+        return await read(object);
+      } catch (error) {
+        console.warn(
+          "control-plane: experiment report read failed for object",
+          object.tenantId ?? "platform",
+          error instanceof Error ? error.name : "",
+        );
+        return [];
+      }
+    }),
+  );
+  return perObject.flat();
+}
+
+/**
+ * Fold per-object aggregate rows that share a group key into one row. Every
+ * column is additive or an extremum, so the fold is exact — it is the same
+ * `GROUP BY` continued across objects.
+ */
+function foldArmRows(rows: readonly ArmRow[], keyOf: (row: ArmRow) => string): ArmRow[] {
+  const folded = new Map<string, ArmRow>();
+  for (const row of rows) {
+    const key = keyOf(row);
+    const existing = folded.get(key);
+    if (existing === undefined) {
+      folded.set(key, { ...row });
+      continue;
+    }
+    folded.set(key, {
+      ...existing,
+      logical_model: existing.logical_model ?? row.logical_model,
+      requests: existing.requests + row.requests,
+      failures: existing.failures + row.failures,
+      latency_total_ms: existing.latency_total_ms + row.latency_total_ms,
+      cost_usd_total: existing.cost_usd_total + row.cost_usd_total,
+      first_seen_unix: Math.min(existing.first_seen_unix, row.first_seen_unix),
+      last_seen_unix: Math.max(existing.last_seen_unix, row.last_seen_unix),
+    });
+  }
+  return [...folded.values()];
+}
+
+function foldQualityRows(rows: readonly QualityRow[]): QualityRow[] {
+  const folded = new Map<string, QualityRow>();
+  for (const row of rows) {
+    const key = `${row.arm}\u0000${row.judge_model}\u0000${row.criterion_id}`;
+    const existing = folded.get(key);
+    folded.set(
+      key,
+      existing === undefined
+        ? { ...row }
+        : {
+            ...existing,
+            n: existing.n + row.n,
+            total: existing.total + row.total,
+            total_squares: existing.total_squares + row.total_squares,
+          },
+    );
+  }
+  return [...folded.values()];
 }
 
 function isArm(value: unknown): value is ExperimentArm {
@@ -264,24 +389,51 @@ interface ExperimentObservations {
   readonly arms: Map<ExperimentArm, ArmOperationalAggregate>;
 }
 
+interface ObjectArmRows {
+  readonly served: readonly ArmRow[];
+  readonly shadow: readonly ArmRow[];
+}
+
+/** One object's served + shadow aggregates, in ONE round trip to that object. */
+async function objectArmRows(object: EvidenceObject, sinceUnix: number): Promise<ObjectArmRows> {
+  const servedFence = tenantFence(object.tenantId, "rl.tenant");
+  const served = object.db
+    .prepare(SERVED_ARM_AGGREGATE_SQL(servedFence.sql))
+    .bind(sinceUnix, ...servedFence.params);
+  if (object.leg === "platform") {
+    // The platform object has no shadow-leg table: unattributed traffic is
+    // never a shadow mirror's client.
+    return { served: (await served.all<ArmRow>()).results, shadow: [] };
+  }
+  const shadowFence = tenantFence(object.tenantId, "tenant");
+  const [servedResult, shadowResult] = await object.db.batch<ArmRow>([
+    served,
+    object.db
+      .prepare(SHADOW_ARM_AGGREGATE_SQL(shadowFence.sql))
+      .bind(sinceUnix, ...shadowFence.params),
+  ]);
+  return { served: servedResult?.results ?? [], shadow: shadowResult?.results ?? [] };
+}
+
 async function experimentObservations(
-  db: Database,
-  scope: CallerScope,
+  objects: readonly EvidenceObject[],
   sinceUnix: number,
 ): Promise<Map<string, ExperimentObservations>> {
-  const servedFence = tenantFence(scope, "rl.tenant");
-  const shadowFence = tenantFence(scope, "tenant");
-
-  const [served, shadow] = await Promise.all([
-    db
-      .prepare(SERVED_ARM_AGGREGATE_SQL(servedFence.sql))
-      .bind(sinceUnix, ...servedFence.params)
-      .all<ArmRow>(),
-    db
-      .prepare(SHADOW_ARM_AGGREGATE_SQL(shadowFence.sql))
-      .bind(sinceUnix, ...shadowFence.params)
-      .all<ArmRow>(),
+  const perObject = await acrossObjects(objects, async (object) => [
+    await objectArmRows(object, sinceUnix),
   ]);
+  const served = {
+    results: foldArmRows(
+      perObject.flatMap((rows) => rows.served),
+      (row) => `${row.experiment_id}\u0000${row.arm ?? ""}`,
+    ),
+  };
+  const shadow = {
+    results: foldArmRows(
+      perObject.flatMap((rows) => rows.shadow),
+      (row) => row.experiment_id,
+    ),
+  };
 
   const byExperiment = new Map<string, ExperimentObservations>();
   const absorb = (row: ArmRow, arm: ExperimentArm): void => {
@@ -379,30 +531,16 @@ function alphaFrom(url: URL): number {
   return parsed;
 }
 
-function noDatabase(): never {
-  // Not an empty list. A deployment with no control database has no evidence
-  // tables and no gateway writing them, so "no experiments" would be a claim
-  // this instance cannot support — and the operator would read it as "the
-  // canary produced no traffic".
-  throw new HttpError(
-    503,
-    "control_database_unavailable",
-    "experiment reporting requires the control database",
-  );
-}
-
 /** `GET /admin/v1/experiments` — the splits that really served traffic. */
 function listExperimentsHandler(): Handler {
   return async (c) => {
     const deps = depsOf(c);
-    const db = deps.controlDatabase as Database | null;
-    if (db === null) noDatabase();
-
     const url = new URL(c.req.url);
     const query = parseListQuery(url, deps.listDefaultLimit, deps.listMaxLimit);
     const sinceUnix = sinceFrom(url, Math.floor(Date.now() / 1000));
 
-    const observations = await experimentObservations(db, scopeOf(c), sinceUnix);
+    const objects = await evidenceObjects(deps, scopeOf(c));
+    const observations = await experimentObservations(objects, sinceUnix);
     // Newest activity first: the split an operator is about to make a decision
     // about is the one that served traffic most recently.
     const all = [...observations.values()].sort((a, b) => b.lastSeenUnix - a.lastSeenUnix);
@@ -425,9 +563,6 @@ function listExperimentsHandler(): Handler {
 function getExperimentHandler(): Handler {
   return async (c) => {
     const deps = depsOf(c);
-    const db = deps.controlDatabase as Database | null;
-    if (db === null) noDatabase();
-
     const experimentId = c.req.param("experiment_id") ?? "";
     const url = new URL(c.req.url);
     const sinceUnix = sinceFrom(url, Math.floor(Date.now() / 1000));
@@ -435,18 +570,30 @@ function getExperimentHandler(): Handler {
     const alpha = alphaFrom(url);
     const scope = scopeOf(c);
 
-    const observations = (await experimentObservations(db, scope, sinceUnix)).get(experimentId);
+    const objects = await evidenceObjects(deps, scope);
+    const observations = (await experimentObservations(objects, sinceUnix)).get(experimentId);
     if (observations === undefined) {
       throw new HttpError(404, "not_found", `unknown experiment ${experimentId}`);
     }
 
     const variant = variantArmFor(url, observations);
 
-    const scoreFence = tenantFence(scope, "tenant");
-    const scores = await db
-      .prepare(QUALITY_AGGREGATE_SQL(scoreFence.sql))
-      .bind(experimentId, sinceUnix, ...scoreFence.params)
-      .all<QualityRow>();
+    // Scores live in tenant objects only (the platform object carries none).
+    const scores = {
+      results: foldQualityRows(
+        await acrossObjects(
+          objects.filter((object) => object.leg === "tenant"),
+          async (object) => {
+            const scoreFence = tenantFence(object.tenantId, "tenant");
+            const result = await object.db
+              .prepare(QUALITY_AGGREGATE_SQL(scoreFence.sql))
+              .bind(experimentId, sinceUnix, ...scoreFence.params)
+              .all<QualityRow>();
+            return result.results;
+          },
+        ),
+      ),
+    };
 
     const aggregates: ArmScoreAggregate[] = [];
     for (const row of scores.results) {

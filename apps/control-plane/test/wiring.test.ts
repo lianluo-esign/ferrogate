@@ -42,10 +42,10 @@ import {
   MOUNTED_OPERATION_IDS,
   MOUNTED_PURGE_ROUTE,
   MOUNTED_QUOTA_BACKFILL_ROUTE,
-  MOUNTED_TEARDOWN_ROUTE,
   MOUNTED_ROUTES,
   MOUNTED_SESSION_ROUTES,
   MOUNTED_SSO_ROUTES,
+  MOUNTED_TEARDOWN_ROUTE,
   app,
 } from "../src/index.js";
 import { BASE, arm, bearer, operatorKey, tenantKey } from "./harness.js";
@@ -340,13 +340,12 @@ const GROUP_PROBES: readonly (readonly [string, string, HttpMethod, string, numb
   ["admin_billing_fleet", "queryBillingFleet", "GET", "/admin/v1/billing-fleet", 503],
   ["admin_config_ops", "validateAdminConfig", "POST", "/admin/v1/config/validate", 200],
   ["admin_cost_record", "listAdminCostRecords", "GET", "/admin/v1/cost-records", 200],
-  // 503, not 200, and that IS the mounted behaviour (issue #693). This probe
-  // runs against the MEMORY store, i.e. a deployment with no control database —
-  // and the experiment evidence tables live in the control database. "No
-  // experiments" would be a claim such a deployment cannot support, and an
-  // operator would read it as "the canary produced no traffic", so the surface
-  // refuses instead of answering an empty list.
-  ["admin_experiment", "listAdminExperiments", "GET", "/admin/v1/experiments", 503],
+  // The experiment report is assembled from the tenant OBJECTS (an operator's
+  // is a whole-roster fold), never a control projection. The memory-store world
+  // routes through the unprovisioned tenant router, whose roster is empty, so
+  // the honest fleet answer is an empty list — the same shape the agent-run and
+  // spend-anomaly fleet fan-outs give here.
+  ["admin_experiment", "listAdminExperiments", "GET", "/admin/v1/experiments", 200],
   ["admin_gateway_config", "listAdminGatewayConfigs", "GET", "/admin/v1/gateway-configs", 200],
   ["admin_managed_worker", "listAdminManagedWorkers", "GET", "/admin/v1/managed-workers", 200],
   ["admin_mcp_server", "listAdminMcpServers", "GET", "/admin/v1/mcp-servers", 200],

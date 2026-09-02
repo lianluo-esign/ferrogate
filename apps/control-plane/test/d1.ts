@@ -297,6 +297,9 @@ export async function resetD1(): Promise<void> {
       // marker — the same "a completed mark makes the next test skip the copy"
       // hazard the docblock above names, so it is wiped with the guardrail siblings.
       platformDb().prepare(`DELETE FROM ${REQUEST_LOG_TABLE}`),
+      // The un-attributed billing leg (platform 0004) the operator cost read
+      // joins against, wiped for the same reason as its request-log sibling.
+      platformDb().prepare(`DELETE FROM ${BILLING_EVENT_TABLE}`),
       platformDb().prepare("DELETE FROM platform_backfill_marks"),
     ]);
   }

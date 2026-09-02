@@ -35,9 +35,15 @@
 import { SELF } from "cloudflare:test";
 import { parquetReadObjects } from "hyparquet";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { applySchema, db, resetD1, seedBillingEvents, seedRequestLogs } from "./d1.js";
+import { applySchema, resetD1 } from "./d1.js";
 import { BASE, arm, bearer, operatorKey, tenantKey } from "./harness.js";
-import { registerDurableObjectTenant, tenantObjectDb } from "./tenant-object.js";
+import {
+  registerDurableObjectTenant,
+  resetRoutedCostOwners,
+  seedRoutedBillingEvents as seedBillingEvents,
+  seedRoutedRequestLogs as seedRequestLogs,
+  tenantObjectDb,
+} from "./tenant-object.js";
 
 interface ListBody {
   object: string;
@@ -177,6 +183,18 @@ beforeAll(applySchema);
 
 beforeEach(async () => {
   await resetD1();
+  resetRoutedCostOwners();
+  // Tenant object storage is not reset by `resetD1`; clear each fixture
+  // tenant's cost tables so the per-test seed is clean. (The platform object's
+  // un-attributed leg IS wiped by `resetD1`.)
+  for (const t of ["t-1", "t-2"]) {
+    await registerDurableObjectTenant(t);
+    const tdb = tenantObjectDb(t);
+    await tdb.batch([
+      tdb.prepare("DELETE FROM billing_events"),
+      tdb.prepare("DELETE FROM request_logs"),
+    ]);
+  }
   arm({
     store: "d1",
     staticKeys: [operatorKey],
@@ -387,13 +405,15 @@ describe("GET /admin/v1/cost-records answers cost per REQUEST, joined not duplic
    */
   it("survives a corrupt metering document, counting it as an unknown cost", async () => {
     await seedRequestLogs([REQUEST]);
-    await db()
+    // Raw, into the OWNER's object (the tenant table carries `tenant_id`): the
+    // shared seeder serialises its document, and this row must be malformed.
+    await tenantObjectDb(REQUEST.tenant)
       .prepare(
         `INSERT INTO billing_events
-           (billing_event_id, request_id, provider_attempt_index, occurred_at_unix, event_json)
-         VALUES (?, ?, ?, ?, ?)`,
+           (billing_event_id, tenant_id, request_id, provider_attempt_index, occurred_at_unix, event_json)
+         VALUES (?, ?, ?, ?, ?, ?)`,
       )
-      .bind("be-corrupt", REQUEST.requestId, 0, 1_700_000_101, "{not json")
+      .bind("be-corrupt", REQUEST.tenant, REQUEST.requestId, 0, 1_700_000_101, "{not json")
       .run();
 
     const record = (await readCosts(operatorKey.secret)).data[0];
@@ -537,18 +557,18 @@ describe("the tenant fence on cost records", () => {
         tdb.prepare("DELETE FROM request_logs"),
       ]);
     }
-    // Control holds ONLY the un-attributed (platform-operator) row. Tenant cost
-    // is tenant-private and lives in each tenant's own object (seeded below),
-    // NEVER in control — so a tenant read that wrongly went to control would
-    // find nothing, which is what makes the tenant-object routing testable.
+    // The PLATFORM object holds the un-attributed row. Tenant cost is
+    // tenant-private and lives in each tenant's own object (seeded below),
+    // NEVER in control — an operator's read is the fold of the objects, and a
+    // tenant read that wrongly went anywhere else would find nothing.
     await seedRequestLogs([{ ...REQUEST, requestId: "fg-none", tenant: null }]);
     await seedBillingEvents([
       { id: "b3", requestId: "fg-none", occurredAtUnix: 3, event: { ...EVENT, cost_usd: 4 } },
     ]);
     // #954: a tenant's cost is its OWN object's rows, not a control projection.
     // Seed each tenant's object so a tenant-fenced read resolves there; the
-    // control seed above stays for the platform-operator (unscoped) view (which
-    // includes the `fg-none` row that belongs to no tenant).
+    // platform-operator (unscoped) view is the fold of both objects plus the
+    // platform object's `fg-none` row that belongs to no tenant.
     await registerDurableObjectTenant("t-1");
     await registerDurableObjectTenant("t-2");
     await seedRequestLogs(
@@ -592,8 +612,23 @@ describe("the tenant fence on cost records", () => {
     }
   });
 
-  it("shows a platform operator only the un-attributed control rows (tenant cost lives in tenant objects)", async () => {
-    expect((await ids(operatorKey.secret)).sort()).toEqual(["fg-none"]);
+  it("shows a platform operator every object's rows with each tenant's OWN cost, never a control projection", async () => {
+    const page = await readCosts(operatorKey.secret);
+    expect(page.data.map((row) => row.request_id).sort()).toEqual(["fg-none", "fg-t1", "fg-t2"]);
+    // The cost is the one settled in each owner's object — the figure the
+    // control join could never show, because tenant billing never reached it.
+    const cost = new Map(page.data.map((row) => [row.request_id, row.cost_usd]));
+    expect(cost.get("fg-t1")).toBe(1);
+    expect(cost.get("fg-t2")).toBe(2);
+    expect(cost.get("fg-none")).toBe(4);
+    expect((page as unknown as Record<string, unknown>).tenant_page).toMatchObject({
+      has_more: false,
+    });
+  });
+
+  it("narrows an operator's `?tenant=` to that one object", async () => {
+    expect(await ids(operatorKey.secret, "?tenant=t-2")).toEqual(["fg-t2"]);
+    expect(await ids(operatorKey.secret, "?tenant=t-nobody")).toEqual([]);
   });
 
   /**

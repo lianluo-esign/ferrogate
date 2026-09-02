@@ -57,6 +57,7 @@
  */
 import type { TenantDatabaseRouter } from "@ferrogate/storage";
 import { BILLING_EVENT_TABLE, REQUEST_LOG_TABLE } from "../store/d1.js";
+import { fanOutProvisionedTenants } from "../store/tenant-fanout.js";
 
 /**
  * The priced cost of one request, guarded exactly as #677's aggregate is.
@@ -192,24 +193,9 @@ async function fanOutTenantObjects<T>(
   router: TenantDatabaseRouter,
   read: (db: D1Database) => Promise<T[]>,
 ): Promise<T[]> {
-  const tenantIds = await router.provisionedTenants();
-  const perTenant = await Promise.all(
-    tenantIds.map(async (tenantId) => {
-      try {
-        const handle = await router.forTenant(tenantId);
-        if (handle.source !== "durable_object") return [];
-        return await read(handle.db);
-      } catch (error) {
-        console.warn(
-          "control-plane: spend fan-out failed for tenant",
-          tenantId,
-          error instanceof Error ? error.name : "",
-        );
-        return [];
-      }
-    }),
-  );
-  return perTenant.flat();
+  // The shared whole-roster fan-out (`store/tenant-fanout.ts`): per-object
+  // isolation and the durable-object-only filter live there, once.
+  return fanOutProvisionedTenants(router, (db) => read(db), "spend");
 }
 
 /**

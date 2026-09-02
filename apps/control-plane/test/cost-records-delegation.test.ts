@@ -35,8 +35,15 @@
  */
 import { SELF } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { applySchema, resetD1, seedBillingEvents, seedRequestLogs } from "./d1.js";
+import { applySchema, resetD1 } from "./d1.js";
 import { BASE, arm, bearer, operatorKey, tenantKey } from "./harness.js";
+import {
+  registerDurableObjectTenant,
+  resetRoutedCostOwners,
+  seedRoutedBillingEvents as seedBillingEvents,
+  seedRoutedRequestLogs as seedRequestLogs,
+  tenantObjectDb,
+} from "./tenant-object.js";
 
 interface ListBody {
   data: Record<string, unknown>[];
@@ -107,6 +114,15 @@ beforeAll(applySchema);
 
 beforeEach(async () => {
   await resetD1();
+  resetRoutedCostOwners();
+  for (const t of ["t-1", "t-2"]) {
+    await registerDurableObjectTenant(t);
+    const tdb = tenantObjectDb(t);
+    await tdb.batch([
+      tdb.prepare("DELETE FROM billing_events"),
+      tdb.prepare("DELETE FROM request_logs"),
+    ]);
+  }
   arm({
     store: "d1",
     staticKeys: [operatorKey],

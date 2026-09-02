@@ -23,8 +23,10 @@
  * ## What is real, and what is a fixture
  *
  * Real: the exported control-plane Worker (`SELF`), the auth guard, the RBAC
- * chain, the contract router, the real `DB` binding with the DEPLOYED migration
- * set, and the pure comparator in `@ferrogate/routing`.
+ * chain, the contract router, the real TenantDataObject each tenant's evidence
+ * lives in (the control-store copies were retired: a report is assembled from
+ * the tenant objects, and an operator's fleet report folds them), and the pure
+ * comparator in `@ferrogate/routing`.
  *
  * Fixtures: the rows. The WRITER is `apps/gateway` — a different Worker with a
  * different `wrangler.toml`, unreachable from this suite — and it is held end
@@ -35,19 +37,43 @@
  * so a column rename breaks both. This is the same seam and the same argument
  * `test/request-logs-read.test.ts` states for #664.
  */
-import { SELF } from "cloudflare:test";
+import { SELF, env } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { resolveTenantDatabases } from "../src/adapters.js";
+import type { ControlPlaneBindings } from "../src/ports.js";
 import { applySchema, db, resetD1, seedBillingEvents, seedRequestLogs } from "./d1.js";
-import { BASE, arm as armWorld, bearer, tenantKey } from "./harness.js";
+import { BASE, arm as armWorld, bearer, operatorKey, tenantKey } from "./harness.js";
 
 const KEY = "cp_exp_reader";
 const TENANT = "tenant_a";
+const OTHER_TENANT = "tenant_b";
 const EXPERIMENT = "exp_00000000deadbeef";
 const OTHER_EXPERIMENT = "exp_00000000feedface";
 const NOW = 1_800_000_000;
 
-function projectionKey(tenant: string, logicalId: string): string {
-  return `${Array.from(tenant).length}:${tenant}:${logicalId}`;
+/** Register `tenantId` on the roster as a durable object and open its object. */
+async function routeTenant(tenantId: string): Promise<D1Database> {
+  await db()
+    .prepare(
+      `INSERT INTO tenant_databases
+         (tenant_id, binding_name, schema_version,
+          storage_backend, provisioning_status, migration_state, provisioned_at_unix, updated_at_unix)
+       VALUES (?, NULL, 18, 'durable_object', 'ready', 'done', 1, 1)
+       ON CONFLICT (tenant_id) DO UPDATE SET
+         storage_backend = 'durable_object', provisioning_status = 'ready', migration_state = 'done'`,
+    )
+    .bind(tenantId)
+    .run();
+  const handle = await resolveTenantDatabases(env as unknown as ControlPlaneBindings).forTenant(
+    tenantId,
+  );
+  expect(handle.source).toBe("durable_object");
+  return handle.db;
+}
+
+/** The tenant object the report reads — the ONLY place its evidence lives. */
+function tenantDb(tenantId = TENANT): Promise<D1Database> {
+  return routeTenant(tenantId);
 }
 
 interface ArmDocument {
@@ -92,8 +118,11 @@ async function seedServedArm(options: {
   latencyMs: number;
   costUsdEach: number;
   prefix: string;
+  tenant?: string;
 }): Promise<void> {
   const experimentId = options.experimentId ?? EXPERIMENT;
+  const tenant = options.tenant ?? TENANT;
+  const target = await tenantDb(tenant);
   const failures = options.failures ?? 0;
   const logs = [];
   const events = [];
@@ -102,7 +131,7 @@ async function seedServedArm(options: {
     const failed = index < failures;
     logs.push({
       requestId,
-      tenant: TENANT,
+      tenant,
       startedAtUnix: NOW - 60,
       statusCode: failed ? 502 : 200,
       latencyMs: options.latencyMs,
@@ -116,14 +145,14 @@ async function seedServedArm(options: {
       event: { cost_usd: options.costUsdEach },
     });
   }
-  await seedRequestLogs(logs);
-  await seedBillingEvents(events);
+  await seedRequestLogs(logs, target);
+  await seedBillingEvents(events, target, tenant);
   // The arm columns are not in `seedRequestLogs`' insert list (it predates
   // #693), so they are set here. Deliberately a separate UPDATE rather than a
   // widened shared helper: every other suite that uses that helper asserts on
   // rows with NO experiment, and quietly giving them one would change what
   // those tests mean.
-  await db()
+  await target
     .prepare(
       "UPDATE request_logs SET experiment_id = ?, experiment_arm = ? WHERE request_id LIKE ?",
     )
@@ -139,19 +168,19 @@ async function seedShadowLegs(options: {
   costUsdEach: number;
 }): Promise<void> {
   const failures = options.failures ?? 0;
+  const target = await tenantDb();
   const statements = [];
   for (let index = 0; index < options.count; index += 1) {
     const failed = index < failures;
     statements.push(
-      db()
+      target
         .prepare(
           `INSERT INTO experiment_shadow_legs
-             (projection_key, leg_id, client_request_id, experiment_id, tenant, logical_model, provider,
+             (leg_id, client_request_id, experiment_id, tenant, logical_model, provider,
               provider_model, status_code, error_code, latency_ms, cost_usd, observed_at_unix)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .bind(
-          projectionKey(TENANT, `shadow-${index}~shadow`),
           `shadow-${index}~shadow`,
           `shadow-${index}`,
           EXPERIMENT,
@@ -167,7 +196,7 @@ async function seedShadowLegs(options: {
         ),
     );
   }
-  if (statements.length > 0) await db().batch(statements);
+  if (statements.length > 0) await target.batch(statements);
 }
 
 /**
@@ -201,23 +230,19 @@ async function seedScores(options: {
 }): Promise<void> {
   const judgeModel = options.judgeModel ?? "judge-a";
   const criterionId = options.criterionId ?? "helpfulness";
+  const target = await tenantDb(options.tenant ?? TENANT);
   const statements = [];
   for (let index = 0; index < options.count; index += 1) {
     const score = options.mean + (index % 2 === 0 ? options.spread : -options.spread);
     statements.push(
-      db()
+      target
         .prepare(
           `INSERT INTO online_eval_scores
-             (projection_key, request_id, criterion_id, tenant, sampling_key, sampling_unit, sample_rate,
+             (request_id, criterion_id, tenant, sampling_key, sampling_unit, sample_rate,
               judge_model, score, scored_at_unix, experiment_id, experiment_arm)
-           VALUES (?, ?, ?, ?, ?, 'request', 1, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, 'request', 1, ?, ?, ?, ?, ?)`,
         )
         .bind(
-          projectionKey(
-            options.tenant ?? TENANT,
-            options.requestIdFor?.(index) ??
-              `score-${options.arm}-${judgeModel}-${criterionId}-${index}`,
-          ),
           options.requestIdFor?.(index) ??
             `score-${options.arm}-${judgeModel}-${criterionId}-${index}`,
           criterionId,
@@ -231,7 +256,7 @@ async function seedScores(options: {
         ),
     );
   }
-  if (statements.length > 0) await db().batch(statements);
+  if (statements.length > 0) await target.batch(statements);
 }
 
 async function report(query = ""): Promise<ReportBody> {
@@ -246,11 +271,22 @@ beforeAll(applySchema);
 
 beforeEach(async () => {
   await resetD1();
-  await db().batch([
-    db().prepare("DELETE FROM experiment_shadow_legs"),
-    db().prepare("DELETE FROM online_eval_scores"),
-  ]);
-  armWorld({ store: "d1", nativeKeys: [tenantKey(KEY, TENANT, ["admin.read"])] });
+  // `resetD1` clears the roster; re-route both tenant objects (they persist
+  // across tests by name) and empty the four evidence tables in each.
+  for (const tenantId of [TENANT, OTHER_TENANT]) {
+    const tenant = await routeTenant(tenantId);
+    await tenant.batch([
+      tenant.prepare("DELETE FROM experiment_shadow_legs"),
+      tenant.prepare("DELETE FROM online_eval_scores"),
+      tenant.prepare("DELETE FROM billing_events"),
+      tenant.prepare("DELETE FROM request_logs"),
+    ]);
+  }
+  armWorld({
+    store: "d1",
+    staticKeys: [operatorKey],
+    nativeKeys: [tenantKey(KEY, TENANT, ["admin.read"])],
+  });
 });
 
 describe("the operational half", () => {
@@ -294,14 +330,15 @@ describe("the operational half", () => {
   });
 
   it("fences to the caller's tenant", async () => {
+    // The split served traffic in ANOTHER tenant's object only.
     await seedServedArm({
       arm: "control",
       count: 5,
       latencyMs: 10,
       costUsdEach: 0,
       prefix: "ctl",
+      tenant: OTHER_TENANT,
     });
-    await db().prepare("UPDATE request_logs SET tenant = 'tenant_b'").run();
 
     const response = await SELF.fetch(`${BASE}/admin/v1/experiments?since=0`, {
       headers: bearer(KEY),
@@ -312,6 +349,65 @@ describe("the operational half", () => {
     // measured quality. Another tenant's split must not even be discoverable.
     expect(body.data).toHaveLength(0);
     expect(body.total).toBe(0);
+  });
+
+  it("folds a platform operator's fleet report across every tenant object", async () => {
+    // The SAME split served traffic in two tenants' objects. An operator's
+    // report is the fold of both — the arithmetic the single control query used
+    // to do over one table, continued across objects — and never a control
+    // projection (there is none to read).
+    await seedServedArm({
+      arm: "control",
+      count: 6,
+      failures: 3,
+      latencyMs: 100,
+      costUsdEach: 0.01,
+      prefix: "ctl-a",
+    });
+    await seedServedArm({
+      arm: "control",
+      count: 2,
+      latencyMs: 300,
+      costUsdEach: 0.05,
+      prefix: "ctl-b",
+      tenant: OTHER_TENANT,
+    });
+    await seedServedArm({
+      arm: "canary",
+      count: 4,
+      latencyMs: 50,
+      costUsdEach: 0.02,
+      prefix: "can-a",
+    });
+    await seedShadowLegs({ count: 4, latencyMs: 70, costUsdEach: 0.03 });
+
+    const list = await SELF.fetch(`${BASE}/admin/v1/experiments?since=0`, {
+      headers: bearer(operatorKey.secret),
+    });
+    expect(list.status, await list.clone().text()).toBe(200);
+    const listBody = (await list.json()) as {
+      data: { id: string; arms: ArmDocument[] }[];
+      total: number;
+    };
+    expect(listBody.total).toBe(1);
+    const byArm = new Map(listBody.data[0]?.arms.map((entry) => [entry.arm, entry]));
+    // 6 + 2 requests, 3 failures, (6×100 + 2×300) / 8 mean latency, 0.06 + 0.10 cost.
+    expect(byArm.get("control")?.requests).toBe(8);
+    expect(byArm.get("control")?.failures).toBe(3);
+    expect(byArm.get("control")?.mean_latency_ms).toBeCloseTo(150, 6);
+    expect(byArm.get("control")?.cost_usd).toBeCloseTo(0.16, 6);
+    expect(byArm.get("canary")?.requests).toBe(4);
+    expect(byArm.get("shadow")?.requests).toBe(4);
+
+    const detail = await SELF.fetch(
+      `${BASE}/admin/v1/experiments/${EXPERIMENT}?since=0&variant=canary`,
+      {
+        headers: bearer(operatorKey.secret),
+      },
+    );
+    expect(detail.status, await detail.clone().text()).toBe(200);
+    const detailBody = (await detail.json()) as ReportBody;
+    expect(new Map(detailBody.arms.map((a) => [a.arm, a])).get("control")?.requests).toBe(8);
   });
 });
 

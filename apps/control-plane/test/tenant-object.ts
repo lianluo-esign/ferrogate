@@ -1,7 +1,14 @@
 import { env } from "cloudflare:test";
 import { DurableObjectTenantDatabaseRouter } from "@ferrogate/storage";
 import type { TenantDataNamespace, TenantDataStatement } from "@ferrogate/storage/durable-objects";
-import { db } from "./d1.js";
+import {
+  type BillingEventSeed,
+  type RequestLogSeed,
+  db,
+  platformDb,
+  seedBillingEvents,
+  seedRequestLogs,
+} from "./d1.js";
 
 interface TenantObjectBindings {
   readonly TENANT_DATA: TenantDataNamespace;
@@ -69,6 +76,70 @@ export async function privilegedTenantBatch(
     throw new Error("control-plane tenant fixtures require the privileged tenant RPC");
   }
   await router.privilegedBatch(tenantId, statements);
+}
+
+/**
+ * Cost evidence seeded WHERE IT LIVES: a tenant-attributed request log goes into
+ * that tenant's object (registering it on the roster), an un-attributed one into
+ * the platform object — and a billing event follows the request it belongs to.
+ *
+ * The control `request_logs` / `billing_events` tables are no longer what an
+ * operator's cost read joins (that read fans out over the objects), so a
+ * fixture that seeded control would test nothing. The owner map is per test:
+ * call {@link resetRoutedCostOwners} from `beforeEach`.
+ */
+const ROUTED_COST_OWNERS = new Map<string, string | null>();
+
+export function resetRoutedCostOwners(): void {
+  ROUTED_COST_OWNERS.clear();
+}
+
+export async function seedRoutedRequestLogs(
+  rows: readonly RequestLogSeed[],
+  target?: D1Database,
+): Promise<void> {
+  for (const row of rows) ROUTED_COST_OWNERS.set(row.requestId, row.tenant ?? null);
+  if (target !== undefined) {
+    await seedRequestLogs(rows, target);
+    return;
+  }
+  const tenants = new Set(
+    rows.map((row) => row.tenant ?? null).filter((tenant): tenant is string => tenant !== null),
+  );
+  for (const tenantId of tenants) {
+    await registerDurableObjectTenant(tenantId);
+    await seedRequestLogs(
+      rows.filter((row) => (row.tenant ?? null) === tenantId),
+      tenantObjectDb(tenantId),
+    );
+  }
+  await seedRequestLogs(
+    rows.filter((row) => (row.tenant ?? null) === null),
+    platformDb(),
+  );
+}
+
+export async function seedRoutedBillingEvents(
+  rows: readonly BillingEventSeed[],
+  target?: D1Database,
+  tenantId?: string,
+): Promise<void> {
+  if (target !== undefined) {
+    await seedBillingEvents(rows, target, tenantId);
+    return;
+  }
+  const byOwner = new Map<string | null, BillingEventSeed[]>();
+  for (const row of rows) {
+    const owner = ROUTED_COST_OWNERS.get(row.requestId) ?? null;
+    byOwner.set(owner, [...(byOwner.get(owner) ?? []), row]);
+  }
+  for (const [owner, events] of byOwner) {
+    if (owner === null) await seedBillingEvents(events, platformDb());
+    else {
+      await registerDurableObjectTenant(owner);
+      await seedBillingEvents(events, tenantObjectDb(owner), owner);
+    }
+  }
 }
 
 export async function registerDurableObjectTenant(tenantId: string): Promise<void> {

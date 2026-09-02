@@ -62,12 +62,21 @@
  * is the one thing a chargeback file must never do.
  */
 
+import type { TenantDatabaseRouter } from "@ferrogate/storage";
 import { type CsvValue, encodeCsv } from "../export/csv.js";
 import { type ParquetColumn, type ParquetValue, encodeParquet } from "../export/parquet.js";
 import { HttpError } from "../middleware/errors.js";
 import type { CallerScope, StoreRecord } from "../ports.js";
 import { adminListPaginated, parseListQuery } from "../responses.js";
 import { BILLING_EVENT_TABLE, REQUEST_LOG_TABLE } from "../store/d1.js";
+import { ensurePlatformRequestLogBackfill } from "../store/platform_request_log_backfill.js";
+import { tenantEvidenceDatabaseFor } from "../store/tenancy.js";
+import {
+  FLEET_FANOUT_MAX_TENANTS,
+  type TenantFanoutPage,
+  provisionedTenantPage,
+  tenantFanoutOffset,
+} from "../store/tenant-fanout.js";
 import {
   type GroupModule,
   type Handler,
@@ -549,28 +558,124 @@ async function costRecordPage(
 }
 
 /**
- * The database a cost query reads (#954).
+ * The database a TENANT's cost query reads (#954).
  *
  * Tenant billing settles into the tenant's OWN Durable Object: `billing_events`
  * (whose `event_json` carries `cost_usd`) and the authoritative `request_logs`
  * are tenant-private and are NEVER projected to the control database. So a
  * tenant-fenced cost read routes to that tenant's object — the only place its
- * cost exists — while a `platform_operator` (unscoped) read stays on the control
- * database, where the un-attributed billing rows live.
- *
- * A tenant with no provisioned object records no cost; `null` yields the same
- * truthful empty page an unbound control database does.
+ * cost exists. A tenant with no provisioned object records no cost; `null`
+ * yields the truthful empty page.
  */
-async function costRecordDatabase(
-  deps: ReturnType<typeof depsOf>,
-  scope: CallerScope,
+async function tenantCostRecordDatabase(
+  router: TenantDatabaseRouter,
+  tenantId: string,
 ): Promise<D1Database | null> {
-  if (scope.kind === "platform_operator") return deps.controlDatabase;
   try {
-    return (await deps.tenantDatabases.forTenant(scope.tenantId)).db;
+    return await tenantEvidenceDatabaseFor(router, tenantId);
   } catch {
     return null;
   }
+}
+
+/**
+ * A platform operator's fleet page: a bounded live fan-out over the tenant
+ * objects that OWN the cost, UNION the platform object's un-attributed rows —
+ * never the control `request_logs` projection.
+ *
+ * ## Why not the control projection any more
+ *
+ * The control `request_logs` copy was a cross-tenant compatibility projection
+ * (retired under the no-tenant-data-mirror red line), and — decisively — the
+ * `billing_events` it was joined to were ONLY ever written to control for
+ * un-attributed charges: a tenant's charge settles into its own object. So the
+ * control join showed an operator every tenant request with an UNKNOWN cost,
+ * which a chargeback reader reads as "unpriced". The fan-out joins each
+ * object's own `request_logs` to its own `billing_events`, so the operator
+ * sees the cost the tenant itself sees.
+ *
+ * Bounded exactly as the request-log fleet read: at most
+ * `FLEET_FANOUT_MAX_TENANTS` objects per request, `?tenant_offset=` pages the
+ * roster and the returned `tenantPage` reports whether more remain. Each object
+ * is paged from 0 to `offset+limit` because the merge re-slices. A `?tenant=`
+ * filter collapses the roster to that one object — it is a NARROWING, and a
+ * fan-out that still visited every object to apply it would pay the whole
+ * fleet for a one-tenant answer. The platform leg is skipped under `?tenant=`
+ * (its rows belong to no tenant) and when no platform object is bound.
+ */
+async function fleetCostRecordPage(
+  deps: ReturnType<typeof depsOf>,
+  url: URL,
+  query: { readonly offset: number; readonly limit: number },
+  tenantOffset: number,
+): Promise<{ rows: CostRecordRow[]; total: number; tenantPage: TenantFanoutPage }> {
+  // The same router the tenant-scoped read takes, so an operator's fleet page
+  // and a tenant's own read hit the same objects.
+  const router: TenantDatabaseRouter = deps.tenantStorage ?? deps.tenantDatabases;
+  const fetchLimit = Math.max(1, query.offset + query.limit);
+  const narrowedTenant = param(url, "tenant");
+  const tenantPage: TenantFanoutPage =
+    narrowedTenant === undefined
+      ? await provisionedTenantPage(router, tenantOffset)
+      : {
+          tenantIds: [narrowedTenant],
+          offset: 0,
+          limit: FLEET_FANOUT_MAX_TENANTS,
+          total: 1,
+          hasMore: false,
+        };
+
+  const rows: CostRecordRow[] = [];
+  let sourceTotal = 0;
+  for (const tenantId of tenantPage.tenantIds) {
+    const db = await tenantCostRecordDatabase(router, tenantId);
+    // A tenant with no reachable object contributes nothing rather than
+    // failing the whole fleet read — it recorded no cost here.
+    if (db === null) continue;
+    const page = await costRecordPage(db, { kind: "tenant", tenantId }, url, fetchLimit, 0);
+    rows.push(...page.rows);
+    sourceTotal += page.total;
+  }
+
+  const platformDb = deps.platformData ?? null;
+  if (narrowedTenant === undefined && platformDb !== null) {
+    try {
+      // The one-time copy of pre-cutover un-attributed control rows into the
+      // platform object, idempotent and marked — the same gate the request-log
+      // operator read runs, so the two surfaces agree on what the platform leg holds.
+      await ensurePlatformRequestLogBackfill(deps.controlDatabase, platformDb);
+      const page = await costRecordPage(
+        platformDb,
+        { kind: "platform_operator" },
+        url,
+        fetchLimit,
+        0,
+      );
+      rows.push(...page.rows);
+      sourceTotal += page.total;
+    } catch (error) {
+      // An unreachable platform object (or a copy still in progress) is isolated
+      // exactly as an unreachable tenant object is: the un-attributed leg is
+      // simply absent from this page. A 503 from the copy is NOT swallowed
+      // silently for a client that needs to know — the request-log list
+      // surfaces it — but a cost page is a fold and answers what it can.
+      if (!(error instanceof HttpError)) throw error;
+    }
+  }
+
+  // Re-sort on the same key the per-object page uses (`COST_RECORD_ORDER`:
+  // newest first, request id as the tiebreaker) so the merged window is stable.
+  rows.sort(
+    (a, b) => b.started_at_unix - a.started_at_unix || a.request_id.localeCompare(b.request_id),
+  );
+  return {
+    rows: rows.slice(query.offset, query.offset + query.limit),
+    // The sources are disjoint so `rows.length` and `sourceTotal` agree, but
+    // `max` keeps the count honest if a per-object `fetchLimit` clipped a very
+    // active source's page.
+    total: Math.max(rows.length, sourceTotal),
+    tenantPage,
+  };
 }
 
 /**
@@ -587,14 +692,32 @@ function listCostRecordsHandler(): Handler {
     const scope = scopeOf(c);
     const url = new URL(c.req.url);
     const query = parseListQuery(url, deps.listDefaultLimit, deps.listMaxLimit);
-    const db = await costRecordDatabase(deps, scope);
 
+    if (scope.kind === "platform_operator") {
+      // Platform operator: a bounded live fan-out over the tenant objects UNION
+      // the platform object — never the control projection.
+      const fleet = await fleetCostRecordPage(deps, url, query, tenantFanoutOffset(url));
+      return json(c, 200, {
+        ...adminListPaginated(
+          fleet.rows.map(costRecordDocument),
+          fleet.total,
+          query.offset,
+          query.limit,
+        ),
+        tenant_page: {
+          offset: fleet.tenantPage.offset,
+          limit: fleet.tenantPage.limit,
+          total: fleet.tenantPage.total,
+          has_more: fleet.tenantPage.hasMore,
+        },
+      });
+    }
+
+    const router: TenantDatabaseRouter = deps.tenantStorage ?? deps.tenantDatabases;
+    const db = await tenantCostRecordDatabase(router, scope.tenantId);
     if (db === null) {
-      // No control database means neither table exists AND no gateway is
-      // writing them — `controlDatabase` is `null` exactly when
-      // `CONTROL_PLANE_STORE = "memory"` or no `DB` is bound. An empty page is
-      // the truthful answer for a deployment that records no cost, and it is
-      // the same answer the sibling evidence readers give.
+      // A tenant with no provisioned object has recorded no cost: an empty page
+      // is the truthful answer, and the same one the sibling evidence readers give.
       return json(c, 200, adminListPaginated([], 0, query.offset, query.limit));
     }
 
@@ -779,14 +902,24 @@ function exportCostRecordsHandler(): Handler {
     // full table scan followed by a 400.
     const format = resolveFormat(url);
     const query = parseListQuery(url, COST_EXPORT_DEFAULT_LIMIT, COST_EXPORT_MAX_LIMIT);
-    const db = await costRecordDatabase(deps, scope);
 
-    const records =
-      db === null
-        ? []
-        : (await costRecordPage(db, scope, url, query.limit, query.offset)).rows.map(
-            costRecordDocument,
-          );
+    let records: StoreRecord[];
+    if (scope.kind === "platform_operator") {
+      // The same fleet fold the list serves, so the export and the console
+      // cannot disagree about a tenant's cost. `?tenant_offset=` pages the
+      // roster for a fleet wider than one fan-out bound.
+      const fleet = await fleetCostRecordPage(deps, url, query, tenantFanoutOffset(url));
+      records = fleet.rows.map(costRecordDocument);
+    } else {
+      const router: TenantDatabaseRouter = deps.tenantStorage ?? deps.tenantDatabases;
+      const db = await tenantCostRecordDatabase(router, scope.tenantId);
+      records =
+        db === null
+          ? []
+          : (await costRecordPage(db, scope, url, query.limit, query.offset)).rows.map(
+              costRecordDocument,
+            );
+    }
 
     if (format === "jsonl") {
       const body = records.map((record) => JSON.stringify(record)).join("\n");
