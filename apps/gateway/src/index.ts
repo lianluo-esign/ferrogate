@@ -730,7 +730,11 @@ export async function gatewayQueue(batch: RequestLogMessageBatch, env: unknown):
     (message) => onlineEvalSampleFromWire(message.body) !== undefined,
   );
   if (evalMessages.length > 0) {
-    await consumeOnlineEvalBatch(view(evalMessages), env);
+    // A judge score is tenant data: it lands in the owning object and is NOT
+    // mirrored to the shared control store (#859/#881 red line). The historical
+    // control projection is read only by the one-shot control->object backfill
+    // until it is retired; nothing on the request path reads it.
+    await consumeOnlineEvalBatch(view(evalMessages), env, { projectToControl: false });
   }
   // #698 — the THIRD queue on this entry point. Same rule as the second: the
   // partition is on the body's `object` discriminator (`batch.job`), not on
@@ -748,7 +752,19 @@ export async function gatewayQueue(batch: RequestLogMessageBatch, env: unknown):
       batchJobFromWire(message.body) === undefined,
   );
   if (rest.length > 0) {
-    await consumeRequestLogBatch(view(rest) as RequestLogMessageBatch, env);
+    // Track A / G2: guardrail evidence is tenant data — it lands in the owning
+    // object (and PLATFORM_DATA for unscoped) and is NOT mirrored to the shared
+    // control store. The guardrail control projection now has zero readers, so
+    // the leg is dropped here. `request_logs` is UNAFFECTED (default deps): SIEM
+    // still exports it from control until #825.
+    await consumeRequestLogBatch(
+      view(rest) as RequestLogMessageBatch,
+      env,
+      undefined,
+      undefined,
+      undefined,
+      { projectGuardrailToControl: false },
+    );
   }
 }
 

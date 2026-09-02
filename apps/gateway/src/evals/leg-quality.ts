@@ -288,11 +288,19 @@ export async function refreshOnlineEvalLegQuality(
 
   const authoritative = tenantDatabase(env, tenantId);
   if (database === onlineEvalDatabaseFrom && authoritative === undefined) return 0;
-  const source = authoritative ?? projection;
+  // Single source of truth (Track A): `online_eval_leg_quality` is a
+  // fully-recomputed projection of `online_eval_scores`, which is authoritative
+  // in the tenant object. The projection is written to that SAME object and
+  // nowhere else — the shared-control mirror is retired, so there is no second
+  // copy to drift and no dual-write to reconcile. Under the DEFAULT resolvers
+  // `authoritative` IS the tenant object (the guard above already refused the
+  // absent-binding case); the `?? projection` fallback exists only for tests
+  // that inject a single db to drive the real recompute/upsert/prune SQL.
+  const target = authoritative ?? projection;
 
   try {
-    const aggregates = await onlineEvalLegAggregates(source, tenantId, nowUnix);
-    await writeOnlineEvalLegQuality(projection, tenantId, aggregates, nowUnix);
+    const aggregates = await onlineEvalLegAggregates(target, tenantId, nowUnix);
+    await writeOnlineEvalLegQuality(target, tenantId, aggregates, nowUnix);
     return aggregates.length;
   } catch {
     // A schema that predates this migration, or a D1 blip. The next queue batch

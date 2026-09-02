@@ -2,12 +2,13 @@
  * #894 — the per-PROVIDER-LEG quality aggregate, its RELATIVE comparator, and
  * the memo the router reads it through.
  *
- * The aggregate half runs against the REAL control D1 with the REAL migration
- * (`sql/d1-ts/control/0026_online_eval_leg_quality.sql`), so the finer `GROUP
- * BY`, the upsert's conflict target and the prune are exercised by SQLite rather
- * than asserted against a double. The router half runs in the gateway isolate
- * and asserts the thing the issue actually asks for: after a warm, the answer is
- * available SYNCHRONOUSLY.
+ * The aggregate half runs against the REAL TENANT object with the REAL
+ * migration (`sql/d1-ts/tenant/0034_online_eval_leg_quality.sql`) — the
+ * single-source home the projection now lives in, its shared-control mirror
+ * retired — so the finer `GROUP BY`, the upsert's conflict target and the prune
+ * are exercised by SQLite rather than asserted against a double. The router half
+ * runs in the gateway isolate and asserts the thing the issue actually asks for:
+ * after a warm, the answer is available SYNCHRONOUSLY.
  *
  * ## MUTATION LOG
  *
@@ -29,7 +30,7 @@ import {
   DEFAULT_REGRESSION_MIN_SAMPLES,
   LEG_QUALITY_WINDOW_SECONDS,
   ONLINE_EVAL_LEG_QUALITY_TABLE,
-  ONLINE_EVAL_SCORE_PROJECTION_UPSERT_SQL,
+  TENANT_ONLINE_EVAL_SCORE_UPSERT_SQL,
   type OnlineEvalLegAggregate,
   type OnlineEvalPolicySource,
   cachedOnlineEvalLegQualitySource,
@@ -37,7 +38,7 @@ import {
   legQualityKey,
   legQualityVerdicts,
   onlineEvalLegAggregates,
-  onlineEvalScoreProjectionBindings,
+  onlineEvalScoreBindings,
   readOnlineEvalLegQuality,
   refreshOnlineEvalLegQuality,
   routingQualityPortFor,
@@ -47,6 +48,7 @@ import {
 } from "../../src/evals/index.js";
 import type { PhysicalRoute } from "../../src/inference/ports.js";
 import { NO_ROUTING_QUALITY, orderCandidatesByStrategy } from "../../src/inference/strategy.js";
+import { tenantObjectDb } from "../tenant-object.js";
 import { controlDb, resetOnlineEvalTables } from "./harness.js";
 
 const TENANT = "tenant_a";
@@ -89,14 +91,14 @@ async function seedLeg(input: {
   /** `undefined` = the SERVED arm; `"coverage"` / `"shadow"` are the mirrors. */
   readonly arm?: string;
 }): Promise<void> {
-  const db = controlDb();
-  const statement = db.prepare(ONLINE_EVAL_SCORE_PROJECTION_UPSERT_SQL);
+  const db = tenantObjectDb(TENANT);
+  const statement = db.prepare(TENANT_ONLINE_EVAL_SCORE_UPSERT_SQL);
   const atUnix = input.atUnix ?? NOW_UNIX - 3600;
   const criterionId = input.criterionId ?? "grounded";
   await db.batch(
     Array.from({ length: input.count }, (_, index) =>
       statement.bind(
-        ...onlineEvalScoreProjectionBindings({
+        ...onlineEvalScoreBindings({
           requestId: `fg-${input.provider}-${criterionId}-${atUnix}-${index}`,
           tenantId: TENANT,
           criterionId,
@@ -127,8 +129,8 @@ function key(
   return legQualityKey(logicalModel, provider, providerModel);
 }
 
-async function storedLegQuality(): Promise<Record<string, unknown>[]> {
-  const result = await controlDb()
+async function storedLegQuality(tenantId: string = TENANT): Promise<Record<string, unknown>[]> {
+  const result = await tenantObjectDb(tenantId)
     .prepare(`SELECT * FROM ${ONLINE_EVAL_LEG_QUALITY_TABLE} ORDER BY provider, criterion_id`)
     .all();
   return result.results as Record<string, unknown>[];
@@ -136,7 +138,16 @@ async function storedLegQuality(): Promise<Record<string, unknown>[]> {
 
 beforeEach(async () => {
   await resetOnlineEvalTables();
-  await controlDb().prepare(`DELETE FROM ${ONLINE_EVAL_LEG_QUALITY_TABLE}`).run();
+  // Track A single-source: scores and the derived leg-quality projection are
+  // BOTH tenant-object owned now, so the reset clears each invented tenant's
+  // object rather than a shared control mirror.
+  for (const tenantId of [TENANT, "tenant_b"]) {
+    const tenant = tenantObjectDb(tenantId);
+    await tenant.batch([
+      tenant.prepare("DELETE FROM online_eval_scores"),
+      tenant.prepare(`DELETE FROM ${ONLINE_EVAL_LEG_QUALITY_TABLE}`),
+    ]);
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -151,7 +162,7 @@ describe("the per-leg aggregate, against the real schema", () => {
     await seedLeg({ provider: "openai-main", providerModel: "gpt-4o-mini", count: 20, score: 0.9 });
     await seedLeg({ provider: "azure-eu", providerModel: "gpt-4o-mini", count: 20, score: 0.5 });
 
-    const rows = await onlineEvalLegAggregates(controlDb(), TENANT, NOW_UNIX);
+    const rows = await onlineEvalLegAggregates(tenantObjectDb(TENANT), TENANT, NOW_UNIX);
     expect(rows).toHaveLength(2);
     const byProvider = new Map(rows.map((row) => [row.provider, row]));
     expect(byProvider.get("openai-main")?.scoreCount).toBe(20);
@@ -167,11 +178,11 @@ describe("the per-leg aggregate, against the real schema", () => {
     // as a phantom `NULL` leg would give the router a candidate that does not
     // exist.
     await seedLeg({ provider: "openai-main", providerModel: "gpt-4o-mini", count: 5, score: 0.9 });
-    const db = controlDb();
+    const db = tenantObjectDb(TENANT);
     await db
-      .prepare(ONLINE_EVAL_SCORE_PROJECTION_UPSERT_SQL)
+      .prepare(TENANT_ONLINE_EVAL_SCORE_UPSERT_SQL)
       .bind(
-        ...onlineEvalScoreProjectionBindings({
+        ...onlineEvalScoreBindings({
           requestId: "fg-unattributed",
           tenantId: TENANT,
           criterionId: "grounded",
@@ -187,7 +198,7 @@ describe("the per-leg aggregate, against the real schema", () => {
       )
       .run();
 
-    const rows = await onlineEvalLegAggregates(controlDb(), TENANT, NOW_UNIX);
+    const rows = await onlineEvalLegAggregates(tenantObjectDb(TENANT), TENANT, NOW_UNIX);
     expect(rows.map((row) => row.provider)).toEqual(["openai-main"]);
   });
 
@@ -199,7 +210,7 @@ describe("the per-leg aggregate, against the real schema", () => {
       score: 0.9,
       atUnix: NOW_UNIX - LEG_QUALITY_WINDOW_SECONDS - 1,
     });
-    expect(await onlineEvalLegAggregates(controlDb(), TENANT, NOW_UNIX)).toEqual([]);
+    expect(await onlineEvalLegAggregates(tenantObjectDb(TENANT), TENANT, NOW_UNIX)).toEqual([]);
   });
 
   it("replaces rather than accumulates when a batch is redelivered", async () => {
@@ -210,7 +221,7 @@ describe("the per-leg aggregate, against the real schema", () => {
         TENANT,
         NOW_UNIX,
         () => controlDb() as never,
-        () => undefined,
+        (_env: unknown, tenantId: string) => tenantObjectDb(tenantId) as never,
       );
 
     expect(await refresh()).toBe(1);
@@ -227,9 +238,9 @@ describe("the per-leg aggregate, against the real schema", () => {
   it("prunes a cell whose scores have all aged out, beside a live one", async () => {
     await seedLeg({ provider: "openai-main", providerModel: "gpt-4o-mini", count: 20, score: 0.9 });
     await writeOnlineEvalLegQuality(
-      controlDb(),
+      tenantObjectDb(TENANT),
       TENANT,
-      await onlineEvalLegAggregates(controlDb(), TENANT, NOW_UNIX),
+      await onlineEvalLegAggregates(tenantObjectDb(TENANT), TENANT, NOW_UNIX),
       NOW_UNIX,
     );
     expect(await storedLegQuality()).toHaveLength(1);
@@ -239,7 +250,7 @@ describe("the per-leg aggregate, against the real schema", () => {
     // the router for ever on a number nobody can reproduce.
     const later = NOW_UNIX + LEG_QUALITY_WINDOW_SECONDS + 10;
     await writeOnlineEvalLegQuality(
-      controlDb(),
+      tenantObjectDb(TENANT),
       TENANT,
       [aggregate({ provider: "azure-eu" })],
       later,
@@ -263,33 +274,39 @@ describe("the per-leg aggregate, against the real schema", () => {
         TENANT,
         atUnix,
         () => controlDb() as never,
-        () => undefined,
+        (_env: unknown, tenantId: string) => tenantObjectDb(tenantId) as never,
       );
     expect(await refresh(NOW_UNIX)).toBe(1);
     expect(await storedLegQuality()).toHaveLength(1);
 
     const later = NOW_UNIX + LEG_QUALITY_WINDOW_SECONDS + 10;
-    expect(await onlineEvalLegAggregates(controlDb(), TENANT, later)).toEqual([]);
+    expect(await onlineEvalLegAggregates(tenantObjectDb(TENANT), TENANT, later)).toEqual([]);
     expect(await refresh(later)).toBe(0);
     expect(await storedLegQuality()).toEqual([]);
   });
 
   it("prunes only the refreshing tenant's cells", async () => {
-    // ANTI-VACUITY for the unconditional prune: it is bound to the tenant being
-    // refreshed, so an empty recompute for one tenant may not wipe another's.
-    await writeOnlineEvalLegQuality(controlDb(), TENANT, [aggregate()], NOW_UNIX);
+    // Under Track A single-source each tenant's leg-quality lives in its OWN
+    // object, so the fence is PHYSICAL: an empty recompute for one tenant cannot
+    // reach another tenant's table at all. (The within-object bound prune is
+    // covered by "prunes a cell whose scores have all aged out, beside a live
+    // one".)
+    await writeOnlineEvalLegQuality(tenantObjectDb(TENANT), TENANT, [aggregate()], NOW_UNIX);
     await writeOnlineEvalLegQuality(
-      controlDb(),
+      tenantObjectDb("tenant_b"),
       "tenant_b",
       [aggregate({ tenantId: "tenant_b", provider: "azure-eu" })],
       NOW_UNIX,
     );
-    expect(await storedLegQuality()).toHaveLength(2);
+    expect(await storedLegQuality(TENANT)).toHaveLength(1);
+    expect(await storedLegQuality("tenant_b")).toHaveLength(1);
 
     const later = NOW_UNIX + LEG_QUALITY_WINDOW_SECONDS + 10;
-    await writeOnlineEvalLegQuality(controlDb(), TENANT, [], later);
-    expect(await readOnlineEvalLegQuality(controlDb(), TENANT)).toEqual([]);
-    expect(await readOnlineEvalLegQuality(controlDb(), "tenant_b")).toHaveLength(1);
+    await writeOnlineEvalLegQuality(tenantObjectDb(TENANT), TENANT, [], later);
+    expect(await readOnlineEvalLegQuality(tenantObjectDb(TENANT), TENANT)).toEqual([]);
+    expect(
+      await readOnlineEvalLegQuality(tenantObjectDb("tenant_b"), "tenant_b"),
+    ).toHaveLength(1);
   });
 
   it("keeps a COVERAGE score in the ladder aggregate and drops a SHADOW one", async () => {
@@ -315,7 +332,7 @@ describe("the per-leg aggregate, against the real schema", () => {
       arm: "shadow",
     });
 
-    const rows = await onlineEvalLegAggregates(controlDb(), TENANT, NOW_UNIX);
+    const rows = await onlineEvalLegAggregates(tenantObjectDb(TENANT), TENANT, NOW_UNIX);
     expect(rows.map((row) => row.provider).sort()).toEqual(["azure-eu", "openai-main"]);
 
     // The consequence the exclusion exists for. Best ROUTABLE leg is 0.90, so
@@ -357,20 +374,21 @@ describe("the per-leg aggregate, against the real schema", () => {
     await sweepAllOnlineEvalRegressions(
       { GATEWAY_ONLINE_EVAL_POLICIES: JSON.stringify([{ tenant_id: TENANT, ...OPT_IN_ROW }]) },
       NOW_UNIX,
-      () => controlDb() as never,
-      () => controlDb() as never,
+      () => tenantObjectDb(TENANT) as never,
+      (_env: unknown, tenantId: string) => tenantObjectDb(tenantId) as never,
     );
 
     const rows = await storedLegQuality();
     expect(rows.map((row) => row.provider)).toEqual(["azure-eu", "openai-main"]);
     // And it is the ROUTER-readable projection, under this tenant.
-    expect(await readOnlineEvalLegQuality(controlDb(), TENANT)).toHaveLength(2);
+    expect(await readOnlineEvalLegQuality(tenantObjectDb(TENANT), TENANT)).toHaveLength(2);
   });
 
-  it("refuses to aggregate the shared table when the tenant object is absent", async () => {
-    // The object-first rule `regression.ts` states: an absent `TENANT_DATA`
-    // binding is a storage misconfiguration, not permission to read the control
-    // projection as if it were authority.
+  it("refuses to refresh when the tenant object binding is absent", async () => {
+    // The object-first rule `regression.ts` states, now that the shared-control
+    // mirror is retired: an absent `TENANT_DATA` binding is a storage
+    // misconfiguration, and there is nowhere else to write — never a licence to
+    // fall back to a control table as if it were authority.
     await seedLeg({ provider: "openai-main", providerModel: "gpt-4o-mini", count: 20, score: 0.9 });
     expect(await refreshOnlineEvalLegQuality({ CONTROL_DB: controlDb() }, TENANT, NOW_UNIX)).toBe(
       0,
@@ -529,12 +547,12 @@ describe("the router-consumable read", () => {
       TENANT,
       NOW_UNIX,
       () => controlDb() as never,
-      () => undefined,
+      (_env: unknown, tenantId: string) => tenantObjectDb(tenantId) as never,
     );
 
     const source = cachedOnlineEvalLegQualitySource(
       d1OnlineEvalLegQualitySource(
-        controlDb() as never,
+        ((tenantId: string) => tenantObjectDb(tenantId)) as never,
         policySource(async () => ({ ok: true, policy: OPT_IN as never })),
       ),
     );
@@ -564,7 +582,7 @@ describe("the router-consumable read", () => {
     let attempts = 0;
     const source = cachedOnlineEvalLegQualitySource(
       d1OnlineEvalLegQualitySource(
-        controlDb() as never,
+        ((tenantId: string) => tenantObjectDb(tenantId)) as never,
         policySource(async () => {
           attempts += 1;
           return attempts === 1
@@ -590,12 +608,12 @@ describe("the router-consumable read", () => {
       TENANT,
       NOW_UNIX,
       () => controlDb() as never,
-      () => undefined,
+      (_env: unknown, tenantId: string) => tenantObjectDb(tenantId) as never,
     );
 
     const source = cachedOnlineEvalLegQualitySource(
       d1OnlineEvalLegQualitySource(
-        controlDb() as never,
+        ((tenantId: string) => tenantObjectDb(tenantId)) as never,
         policySource(async () => ({ ok: true, policy: OPT_IN as never })),
       ),
     );
@@ -606,7 +624,7 @@ describe("the router-consumable read", () => {
     expect(peeked.quality.verdictFor("split-model", "azure-eu", "gpt-4o-mini").kind).toBe(
       "no_signal",
     );
-    expect(await readOnlineEvalLegQuality(controlDb(), TENANT)).toHaveLength(2);
+    expect(await readOnlineEvalLegQuality(tenantObjectDb(TENANT), TENANT)).toHaveLength(2);
   });
 });
 

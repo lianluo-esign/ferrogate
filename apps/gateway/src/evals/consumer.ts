@@ -104,6 +104,15 @@ export interface OnlineEvalConsumerDeps {
   readonly tenantDatabase?: (env: unknown, tenantId: string) => OnlineEvalScoreDatabase | undefined;
   /** Control-D1 projection database. */
   readonly projectionDatabase?: (env: unknown) => OnlineEvalScoreDatabase | undefined;
+  /**
+   * Whether the object-authoritative batch is ALSO mirrored to the control
+   * projection. `false` in production — a score is tenant data and lives in the
+   * owning object, never mirrored into the shared control store (#859/#881 red
+   * line). The default stays `true` so the existing dual-write tests are
+   * unchanged; the production caller passes `false`, and re-enabling it is the
+   * whole rollback.
+   */
+  readonly projectToControl?: boolean;
   readonly now?: () => number;
   /** Judge call timeout. A wedged judge must not hold the consumer open. */
   readonly timeoutMs?: number;
@@ -172,6 +181,7 @@ export async function consumeOnlineEvalBatch(
   const databaseFor = deps.database ?? onlineEvalDatabaseFrom;
   const tenantDatabaseFor = deps.tenantDatabase ?? onlineEvalTenantDatabaseFrom;
   const projectionDatabaseFor = deps.projectionDatabase ?? onlineEvalDatabaseFrom;
+  const projectToControl = deps.projectToControl ?? true;
   const now = deps.now ?? (() => Date.now());
   const timeoutMs = deps.timeoutMs ?? DEFAULT_JUDGE_TIMEOUT_MS;
   const maxBytes = deps.maxResponseBytes ?? DEFAULT_JUDGE_MAX_BYTES;
@@ -282,12 +292,14 @@ export async function consumeOnlineEvalBatch(
       if (db === undefined) throw new Error("online evaluation database is unavailable");
       await writeOnlineEvalScores(db, records);
     } else {
-      const projection = projectionDatabaseFor(env);
-      if (projection === undefined) {
-        // The judge has already been paid for. A missing projection destination
-        // is a durable-write failure, not a permanently bad sample: throwing
-        // into the common handler arms retryAll without acknowledging a result
-        // that has not reached either durable store.
+      // Production runs with `projectToControl: false`: the tenant object is the
+      // only durable destination, so the projection is neither resolved nor
+      // required. While the mirror is still on, a missing projection remains a
+      // durable-write failure — the judge has already been paid for, and
+      // throwing into the common handler arms retryAll without acknowledging a
+      // result that has not reached the projection store.
+      const projection = projectToControl ? projectionDatabaseFor(env) : undefined;
+      if (projectToControl && projection === undefined) {
         throw new Error("online evaluation projection database is unavailable");
       }
 
@@ -306,7 +318,9 @@ export async function consumeOnlineEvalBatch(
           throw new Error(`tenant evaluation database is unavailable for ${tenantId}`);
         }
         await writeTenantOnlineEvalScores(tenantDatabase, group);
-        await writeOnlineEvalScoreProjections(projection, group);
+        if (projection !== undefined) {
+          await writeOnlineEvalScoreProjections(projection, group);
+        }
         refreshed.push(tenantId);
       }
     }

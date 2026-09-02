@@ -627,6 +627,48 @@ describe("the Queue producer/consumer pair carries guardrail evidence too", () =
     expect(await storedGuardrailEvaluations()).toHaveLength(1);
     expect(await storedGuardrailChecks()).toHaveLength(1);
   });
+
+  /**
+   * Track A / G2: with `projectGuardrailToControl` false the guardrail leg of
+   * the control batch is dropped — the tenant object is the sole home. The
+   * request_logs leg of the same batch is UNTOUCHED (SIEM still reads it from
+   * control until #825); that preservation is proven in
+   * `test/requestlog/write.test.ts`, where a real request_log message exists.
+   * This is the posture `src/index.ts` wires.
+   */
+  it("stops the guardrail control projection while keeping the tenant object", async () => {
+    const queue = new RecordingQueue();
+    const h = gateway({ requestId: "fg-g2-stop", queue });
+    await h.call("/v1/chat/completions", {
+      method: "POST",
+      headers: AUTHED,
+      body: chatBody(bodyWithProbeSecret()),
+    });
+    await h.settle();
+
+    expect(await storedGuardrailEvaluations()).toHaveLength(0);
+
+    const messages = queue.sent.map((body) => ({ body }));
+    const result = await consumeRequestLogBatch(
+      { messages },
+      env,
+      undefined,
+      undefined,
+      undefined,
+      { projectGuardrailToControl: false },
+    );
+    expect(result.malformed).toBe(0);
+    expect(result.retried).toBe(false);
+
+    // The guardrail control projection is READER-FREE and now WRITER-FREE too.
+    expect(await storedGuardrailEvaluations()).toHaveLength(0);
+    expect(await storedGuardrailChecks()).toHaveLength(0);
+
+    // The tenant object remains the authoritative home for the evidence.
+    expect((await tenantGuardrailRows("tenant_a")).evaluations).toEqual([
+      expect.objectContaining({ tenant: "tenant_a" }),
+    ]);
+  });
 });
 
 describe("tenant-qualified evidence identity", () => {

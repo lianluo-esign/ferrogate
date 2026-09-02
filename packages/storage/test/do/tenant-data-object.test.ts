@@ -118,6 +118,7 @@ const TENANT_TABLES = [
   "mcp_oauth_credentials",
   "mcp_servers",
   "observed_agent_presence",
+  "online_eval_leg_quality",
   "online_eval_regressions",
   "online_eval_scores",
   "payment_methods",
@@ -376,11 +377,14 @@ describe("the statement splitter", () => {
       // off control too, reproducing the full 41-column squashed shape in one
       // `CREATE TABLE` (+1 `CREATE TABLE`, +1 `CREATE INDEX`); the 25 columns
       // that reached the control table by `ALTER` are inlined here, so this
-      // migration adds no `ALTER TABLE`.
-      files: 33,
-      statements: 454,
-      createTable: 82,
-      createIndex: 104,
+      // migration adds no `ALTER TABLE`. Finally, `0034_online_eval_leg_quality`
+      // (#894, Track A single-source) gives the recomputed leg-quality
+      // projection its tenant-object home so its shared-control mirror can be
+      // dropped (+1 `CREATE TABLE`, +1 `CREATE INDEX`).
+      files: 34,
+      statements: 456,
+      createTable: 83,
+      createIndex: 105,
       createUniqueIndex: 6,
       alterTable: 26,
       insert: 6,
@@ -416,8 +420,9 @@ describe("the statement splitter", () => {
       "0026_api_key_billing_group": 1,
       "0027_shared_config_mirror": 4,
       "0029_shared_billing_group_type": 1,
+      "0034_online_eval_leg_quality": 2,
     });
-    expect(Object.values(commentSemicolons).reduce((total, n) => total + n, 0)).toBe(45);
+    expect(Object.values(commentSemicolons).reduce((total, n) => total + n, 0)).toBe(47);
 
     // Ordinary statements still have their terminator removed, while each
     // trigger stays whole because its body contains internal terminators.
@@ -439,7 +444,7 @@ describe("a fresh tenant object", () => {
     expect(status.latest).toBe(TENANT_SCHEMA_VERSION);
     // A guard on the fixture: if `TENANT_MIGRATIONS` were ever empty the
     // version assertions above would both read 0 and pass vacuously.
-    expect(TENANT_MIGRATIONS.length).toBe(33);
+    expect(TENANT_MIGRATIONS.length).toBe(34);
     expect(status.appliedThisWake).toEqual(TENANT_MIGRATIONS.map((m) => m.name));
 
     const tables = await object.query({

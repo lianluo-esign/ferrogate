@@ -79,6 +79,16 @@ export interface ExperimentSinkOptions {
   readonly tenantDatabase?: (env: unknown, tenantId: string) => ExperimentDatabase | undefined;
   readonly projectionDatabase?: (env: unknown) => ExperimentDatabase | undefined;
   readonly diagnostics?: { onError?(error: unknown): void } | undefined;
+  /**
+   * Whether the object-authoritative write is ALSO mirrored to the control
+   * projection. `false` in production — a shadow leg is tenant data and lives in
+   * the owning object, never mirrored into the shared control store (#859/#881
+   * red line, the same cut `assets/d1.ts`'s `projectToControl` made for audit
+   * rows). The default stays `true` so the compat/repair seam and its existing
+   * tests keep exercising the dual write; flipping the production flag back on is
+   * the whole rollback.
+   */
+  readonly projectToControl?: boolean;
 }
 
 /**
@@ -98,6 +108,7 @@ export class D1ExperimentObserver {
   readonly #tenantDatabaseFor: (env: unknown, tenantId: string) => ExperimentDatabase | undefined;
   readonly #projectionDatabaseFor: (env: unknown) => ExperimentDatabase | undefined;
   readonly #legacyDatabase: boolean;
+  readonly #projectToControl: boolean;
   readonly #diagnostics: { onError?(error: unknown): void } | undefined;
 
   constructor(options: ExperimentSinkOptions = {}) {
@@ -105,6 +116,7 @@ export class D1ExperimentObserver {
     this.#tenantDatabaseFor = options.tenantDatabase ?? experimentTenantDatabaseFrom;
     this.#projectionDatabaseFor = options.projectionDatabase ?? experimentDatabaseFrom;
     this.#legacyDatabase = options.database !== undefined;
+    this.#projectToControl = options.projectToControl ?? true;
     this.#diagnostics = options.diagnostics;
   }
 
@@ -127,13 +139,20 @@ export class D1ExperimentObserver {
         await writeShadowLegProjection(db, record);
       } else {
         const tenant = this.#tenantDatabaseFor(env, record.tenantId);
-        const projection = this.#projectionDatabaseFor(env);
-        if (tenant === undefined || projection === undefined) {
+        // The control projection is resolved BEFORE any write only while it is
+        // still a destination, so "nowhere to mirror" stays a `dropped` leg
+        // rather than a half-written one. Production runs with
+        // `projectToControl: false`: the object is the only destination, and an
+        // absent projection binding is no longer a reason to drop the leg.
+        const projection = this.#projectToControl ? this.#projectionDatabaseFor(env) : undefined;
+        if (tenant === undefined || (this.#projectToControl && projection === undefined)) {
           this.#dropped += 1;
           return;
         }
         await writeShadowLeg(tenant, record);
-        await writeShadowLegProjection(projection, record);
+        if (projection !== undefined) {
+          await writeShadowLegProjection(projection, record);
+        }
       }
       this.#written += 1;
     } catch (error) {
@@ -158,7 +177,7 @@ export function createExperimentObserver(
  * report zero forever — a counter with no reader, which is the defect shape
  * this repository keeps finding.
  */
-const ISOLATE_EXPERIMENT_OBSERVER = new D1ExperimentObserver();
+const ISOLATE_EXPERIMENT_OBSERVER = new D1ExperimentObserver({ projectToControl: false });
 
 /** Isolate-wide observer counters, for a diagnostics surface. */
 export function experimentObserverStats(): ExperimentSinkStats {

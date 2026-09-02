@@ -468,4 +468,60 @@ describe("a bad judge run costs a sample, never a retry storm", () => {
         .first<{ count: number }>(),
     ).toEqual({ count: 0 });
   });
+
+  it("writes the tenant object only and never the control projection when projectToControl is false", async () => {
+    // The production contract (#859/#881): a score is tenant data. The owning
+    // object is the sole durable destination; nothing is mirrored to control.
+    const judge = judgeAnswering(VERDICT);
+    const delivery = batchOf(sample());
+    const result = await consumeOnlineEvalBatch(
+      delivery.batch,
+      {},
+      {
+        routeFor: () => JUDGE_ROUTE,
+        dispatcher: () => judge.dispatcher,
+        tenantDatabase: (_env: unknown, tenantId: string) => tenantObjectDb(tenantId),
+        projectToControl: false,
+        now: () => 1_700_000_500_000,
+      },
+    );
+
+    expect(result).toMatchObject({ scored: 2, retried: false });
+    expect(delivery.retried).toBe(false);
+    expect(
+      await tenantObjectDb("tenant_a")
+        .prepare("SELECT COUNT(*) AS count FROM online_eval_scores")
+        .first<{ count: number }>(),
+    ).toEqual({ count: 2 });
+    // The control projection stays empty — the object is the only destination.
+    expect(await storedScores()).toHaveLength(0);
+  });
+
+  it("does not retry when the control projection is unavailable but projectToControl is false", async () => {
+    // A missing projection binding is no longer a durable-write failure once the
+    // mirror is off: the object write alone is the durable result.
+    const judge = judgeAnswering(VERDICT);
+    const delivery = batchOf(sample());
+    const result = await consumeOnlineEvalBatch(
+      delivery.batch,
+      {},
+      {
+        routeFor: () => JUDGE_ROUTE,
+        dispatcher: () => judge.dispatcher,
+        tenantDatabase: (_env: unknown, tenantId: string) => tenantObjectDb(tenantId),
+        projectionDatabase: () => undefined,
+        projectToControl: false,
+        now: () => 1_700_000_500_000,
+      },
+    );
+
+    expect(result).toMatchObject({ scored: 2, retried: false });
+    expect(delivery.retried).toBe(false);
+    expect(
+      await tenantObjectDb("tenant_a")
+        .prepare("SELECT COUNT(*) AS count FROM online_eval_scores")
+        .first<{ count: number }>(),
+    ).toEqual({ count: 2 });
+    expect(await storedScores()).toHaveLength(0);
+  });
 });

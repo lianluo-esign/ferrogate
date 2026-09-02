@@ -1,0 +1,44 @@
+-- ===========================================================================
+-- Drop the online-eval leg-quality compatibility projection (Track A red-line)
+--
+-- `online_eval_leg_quality` in the CONTROL store was a derived, tenant-attributed
+-- projection *mirror* (#894). It is a fully RECOMPUTED projection — one row per
+-- grouping tuple, REPLACED on every refresh from `online_eval_scores`, which is
+-- itself authoritative in each tenant's TenantDataObject. Because nothing
+-- accumulates, the projection could be cut over to the object atomically, with
+-- no historical backfill: the next queue batch or cron tick simply rederives the
+-- same cells in the tenant object.
+--
+-- Both sides are now single-source on the tenant object:
+--
+--   * WRITE — `evals/leg-quality.ts` `refreshOnlineEvalLegQuality` writes the
+--     projection to the tenant object ONLY (`writeOnlineEvalLegQuality(target,
+--     …)` where `target` is the tenant's own object), no control-facade mirror.
+--   * READ  — `evals/quality-source.ts` `d1OnlineEvalLegQualitySource` resolves
+--     each tenant's OWN object (`onlineEvalTenantDatabaseFrom(env, tenantId)`)
+--     inside `qualityFor`; the router's `routingQualityPortFor` reads that
+--     snapshot. The "no evaluation storage bound" empty-port identity stays
+--     keyed on the control facade, but the DATA is never read from control.
+--
+-- The control copy therefore has no remaining writer or reader. Keeping the
+-- empty mirror implies a second source of truth and lets a future writer bypass
+-- tenant isolation — the exact red line this program eliminates. `IF EXISTS`
+-- keeps this idempotent for fresh and already migrated control databases
+-- (0013 / 0036 / 0037 / 0038 precedent). The table is referenced by no inbound
+-- foreign key, so drop order is free; its index `idx_online_eval_leg_quality`
+-- drops with it.
+--
+-- NOT dropped here, on purpose:
+--   * online_eval_scores — still carries a control projection leg for other
+--     readers of that family; it is dropped by its own family's slice, not this
+--     one.
+--
+-- Deploy order: the gateway bundle that defines the ControlDataObject carries
+-- BOTH the writer/reader single-source switch AND this DROP, so they land in one
+-- deploy. During the brief rollout skew an old isolate that still reads control
+-- hits `no such table: online_eval_leg_quality`, which the reader already treats
+-- as a COMPLETE "nothing measured" answer (NO_LEG_QUALITY), never an error — the
+-- safe under-steer. No separate control-plane step is required.
+-- ===========================================================================
+
+DROP TABLE IF EXISTS online_eval_leg_quality;

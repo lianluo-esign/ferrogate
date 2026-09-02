@@ -44,9 +44,23 @@ export async function resetOnlineEvalTables(): Promise<void> {
   // was never mirrored): nothing to reset on the control side.
 }
 
-/** One stored score row, read straight out of the table. */
+/** One stored score row, read straight out of the CONTROL projection table. */
 export async function storedScores(): Promise<Record<string, unknown>[]> {
   const result = await controlDb()
+    .prepare(`SELECT * FROM ${ONLINE_EVAL_SCORE_TABLE} ORDER BY criterion_id`)
+    .all();
+  return result.results as Record<string, unknown>[];
+}
+
+/**
+ * Stored score rows read from the TENANT object that owns them — the
+ * authoritative destination the deployed consumer writes to now that the
+ * control projection is no longer mirrored (`projectToControl: false`).
+ */
+export async function storedTenantScores(
+  tenantId: string,
+): Promise<Record<string, unknown>[]> {
+  const result = await tenantObjectDb(tenantId)
     .prepare(`SELECT * FROM ${ONLINE_EVAL_SCORE_TABLE} ORDER BY criterion_id`)
     .all();
   return result.results as Record<string, unknown>[];

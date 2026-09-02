@@ -364,11 +364,15 @@ describe("burn-rate anomaly detection", () => {
     // THE RED LINE: the shared control facade holds NO copy of the episode. It
     // is authoritative in acme's own object and read back from there; the pass
     // no longer mirrors it to the fleet store (see `finops/pass.ts`), and the
-    // operator view fans out to the objects instead.
-    const facadeCopy = await db()
-      .prepare("SELECT count(*) AS n FROM spend_anomaly_episodes")
+    // operator view fans out to the objects instead. The control mirror table is
+    // now GONE entirely — `0038_drop_spend_anomaly_episodes.sql` dropped it, the
+    // strongest form of "no second source of truth" — so the red line is proven
+    // by the table's ABSENCE, not by a count of zero over a table that exists.
+    const facadeTable = await db()
+      .prepare("SELECT count(*) AS n FROM sqlite_master WHERE type='table' AND name=?")
+      .bind("spend_anomaly_episodes")
       .first<{ n: number }>();
-    expect(facadeCopy?.n).toBe(0);
+    expect(facadeTable?.n).toBe(0);
 
     // The webhook is the operator-visible half; an episode row nobody is told
     // about is the defect one layer in.

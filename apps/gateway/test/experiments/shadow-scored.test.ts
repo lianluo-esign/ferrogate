@@ -41,7 +41,7 @@ import { GATEWAY_MIDDLEWARE, gatewayQueue } from "../../src/index.js";
 import type { PhysicalRoute, RequestIdFactory } from "../../src/inference/index.js";
 import { InMemoryModelResolver, inferenceRouteModule } from "../../src/inference/index.js";
 import { createGatewayApp } from "../../src/routes/index.js";
-import { controlDb, resetOnlineEvalTables, storedScores } from "../evals/harness.js";
+import { controlDb, resetOnlineEvalTables, storedTenantScores } from "../evals/harness.js";
 import {
   type ProviderInterceptor,
   interceptProviderFetch,
@@ -349,7 +349,10 @@ describe("a control+shadow split scores BOTH arms under one instrument", () => {
       } as never,
     );
 
-    const rows = await storedScores();
+    // The deployed consumer writes the object-authoritative score; the control
+    // projection is no longer mirrored (`projectToControl: false`), so the two
+    // arms are read from the owning tenant object.
+    const rows = await storedTenantScores("tenant_optin");
     expect(rows).toHaveLength(2);
     const arms = rows.map((row) => row.experiment_arm).sort();
     // THE ASSERTION THIS FILE EXISTS FOR. Without a `shadow` row here the

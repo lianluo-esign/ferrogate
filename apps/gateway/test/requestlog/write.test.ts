@@ -392,6 +392,36 @@ describe("the Queue producer/consumer pair", () => {
     });
   });
 
+  /**
+   * Track A / G2: the guardrail leg of the control batch is gated off, but the
+   * request_logs leg is NOT — SIEM still exports request_logs from control until
+   * #825. This is the flag `src/index.ts` passes on the live path, so the writer
+   * must keep landing the compatibility projection under it.
+   */
+  it("still writes the request_logs control projection when guardrail projection is gated off", async () => {
+    provider = interceptProviderFetch(() => providerJson(BUFFERED_COMPLETION));
+    const queue = new RecordingQueue();
+    const h = gateway({ requestId: "fg-g2-reqlog", queue });
+    await h.call("/v1/chat/completions", { method: "POST", headers: AUTHED, body: chatBody() });
+    await h.settle();
+
+    expect(await storedRequestLogs()).toHaveLength(0);
+
+    const result = await consumeRequestLogBatch(
+      { messages: queue.sent.map((body) => ({ body })) },
+      env,
+      undefined,
+      undefined,
+      undefined,
+      { projectGuardrailToControl: false },
+    );
+    expect(result).toMatchObject({ written: 1, malformed: 0, retried: false });
+
+    const rows = await storedRequestLogs();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ request_id: "fg-g2-reqlog", status_code: 200 });
+  });
+
   /** At-least-once delivery: the second copy must not fail, and must not double. */
   it("is idempotent on redelivery", async () => {
     provider = interceptProviderFetch(() => providerJson(BUFFERED_COMPLETION));

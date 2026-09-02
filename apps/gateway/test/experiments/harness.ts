@@ -13,6 +13,7 @@
 import { EXPERIMENT_SHADOW_LEG_TABLE } from "../../src/experiments/index.js";
 import { REQUEST_LOG_TABLE } from "../../src/requestlog/index.js";
 import { applyControlMigrations, controlDb } from "../requestlog/harness.js";
+import { tenantObjectDb } from "../tenant-object.js";
 
 export { applyControlMigrations, controlDb };
 
@@ -49,10 +50,21 @@ export interface StoredShadowLeg {
   readonly observed_at_unix: number;
 }
 
+/**
+ * The tenant objects the experiment suites write shadow legs to now that the
+ * control projection is no longer mirrored (`projectToControl: false`). Cleared
+ * on reset so each test starts from zero rows in the AUTHORITATIVE store — the
+ * control mirror alone no longer bounds a suite's visible legs.
+ */
+const SHADOW_LEG_TEST_TENANTS = ["tenant_a", "tenant_optin"] as const;
+
 export async function resetExperimentTables(): Promise<void> {
   await applyControlMigrations();
   await controlDb().prepare(`DELETE FROM ${REQUEST_LOG_TABLE}`).run();
   await controlDb().prepare(`DELETE FROM ${EXPERIMENT_SHADOW_LEG_TABLE}`).run();
+  for (const tenantId of SHADOW_LEG_TEST_TENANTS) {
+    await tenantObjectDb(tenantId).prepare(`DELETE FROM ${EXPERIMENT_SHADOW_LEG_TABLE}`).run();
+  }
 }
 
 export async function storedRequestLogs(): Promise<StoredExperimentRequestLog[]> {
@@ -64,6 +76,20 @@ export async function storedRequestLogs(): Promise<StoredExperimentRequestLog[]>
 
 export async function storedShadowLegs(): Promise<StoredShadowLeg[]> {
   const result = await controlDb()
+    .prepare(
+      `SELECT * FROM ${EXPERIMENT_SHADOW_LEG_TABLE} ORDER BY observed_at_unix ASC, leg_id ASC`,
+    )
+    .all<StoredShadowLeg>();
+  return result.results;
+}
+
+/**
+ * Shadow legs read from the TENANT object that owns them — the authoritative
+ * destination the deployed producer writes to now that the control projection is
+ * no longer mirrored (`projectToControl: false`).
+ */
+export async function storedTenantShadowLegs(tenantId: string): Promise<StoredShadowLeg[]> {
+  const result = await tenantObjectDb(tenantId)
     .prepare(
       `SELECT * FROM ${EXPERIMENT_SHADOW_LEG_TABLE} ORDER BY observed_at_unix ASC, leg_id ASC`,
     )

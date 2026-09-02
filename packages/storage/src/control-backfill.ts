@@ -126,14 +126,9 @@ export const CONTROL_BACKFILL_TABLES: readonly ControlBackfillTable[] = Object.f
   table("managed_worker_lifecycle_events", ["id"]),
   table("managed_worker_sessions", ["id"]),
   table("managed_worker_templates", ["id"]),
-  table("online_eval_leg_quality", [
-    "tenant",
-    "criterion_id",
-    "judge_model",
-    "logical_model",
-    "provider",
-    "provider_model",
-  ]),
+  // `online_eval_leg_quality` was DROPPED from control by migration 0039: the
+  // recomputed leg-quality projection is single-source on each tenant object
+  // now (Track A), so there is no control table left to back-fill.
   table("online_eval_scores", ["projection_key"]),
   table("permissions", ["id"]),
   table("plans", ["id"]),
@@ -177,7 +172,11 @@ export const CONTROL_BACKFILL_TABLES: readonly ControlBackfillTable[] = Object.f
   table("siem_export_cursors", ["sink_id", "stream"]),
   table("site_domain_verifications", ["tenant_id", "hostname"]),
   table("site_domains", ["hostname"]),
-  table("spend_anomaly_episodes", ["projection_key"]),
+  // `spend_anomaly_episodes` was DROPPED from the control DO by
+  // `0038_drop_spend_anomaly_episodes.sql` — the episode ledger is authoritative
+  // in each tenant's own object (`finops/pass.ts`) and read by fleet fan-out, so
+  // the control mirror has no writer or reader. A table the live schema no longer
+  // has must NOT appear in this manifest (the parity guard would flag it).
   table("spend_anomaly_runs", ["window_start_unix"]),
   table("spend_throttles", ["scope_type", "scope_id"]),
   table("sso_pending_flows", ["state"]),

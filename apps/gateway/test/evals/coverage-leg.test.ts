@@ -60,7 +60,8 @@ import {
   providerJson,
 } from "../inference/provider-mock.js";
 import { controlNamespace } from "../support/control-namespace.js";
-import { controlDb, resetOnlineEvalTables, storedScores } from "./harness.js";
+import { tenantObjectDb } from "../tenant-object.js";
+import { controlDb, resetOnlineEvalTables, storedTenantScores } from "./harness.js";
 
 const BASE = "https://gw.test";
 const CRITERIA = [{ id: "grounded", definition: "Is it supported by the context?" }];
@@ -332,7 +333,7 @@ describe("candidate coverage buys a score for a leg that never served", () => {
       } as never,
     );
 
-    const rows = await storedScores();
+    const rows = await storedTenantScores("tenant_optin");
     expect(rows).toHaveLength(2);
     const providers = rows.map((row) => row.provider).sort();
     // THE ASSERTION THIS FILE EXISTS FOR: `azure-eu` has a score, and no client
@@ -342,8 +343,10 @@ describe("candidate coverage buys a score for a leg that never served", () => {
 
     // And the per-leg aggregate can now see BOTH legs of the one ladder — which
     // is the thing the router consumes.
+    // The recompute reads `online_eval_scores` from the store that now owns them
+    // — the tenant object (`projectToControl: false`), not the control mirror.
     const aggregates = await onlineEvalLegAggregates(
-      controlDb(),
+      tenantObjectDb("tenant_optin"),
       "tenant_optin",
       Math.floor(Date.now() / 1000),
     );
@@ -354,8 +357,10 @@ describe("candidate coverage buys a score for a leg that never served", () => {
     // the scores are durable, and this is the only place that call is driven
     // from the deployed entry point. Without it the table stays empty in every
     // deployment, every leg reads `no_signal`, and the whole slice is a no-op
-    // with a green suite — so this reads the PROJECTION, not the recompute.
-    const projected = await readOnlineEvalLegQuality(controlDb(), "tenant_optin");
+    // with a green suite — so this reads the PROJECTION, not the recompute. The
+    // projection is single-source now: written to the tenant object that owns
+    // the scores it derives from, never a control mirror.
+    const projected = await readOnlineEvalLegQuality(tenantObjectDb("tenant_optin"), "tenant_optin");
     expect(projected.map((row) => row.provider).sort()).toEqual(["azure-eu", "openai-main"]);
     expect(projected.every((row) => row.scoreCount > 0)).toBe(true);
   });

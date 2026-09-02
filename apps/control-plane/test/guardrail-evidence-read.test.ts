@@ -582,19 +582,10 @@ describe("the tenant fence on guardrail evidence", () => {
 
 describe("GET /admin/v1/investigations joins one request's evidence", () => {
   it("answers a timeline carrying the request, the guardrail decision and the audit trail", async () => {
-    await seedGuardrailEvaluations([BLOCKED]);
-    await seedRequestLogs([
-      {
-        requestId: "fg-block-1",
-        tenant: "t-1",
-        startedAtUnix: 1_700_000_100,
-        completedAtUnix: 1_700_000_100,
-        statusCode: 403,
-        logicalModel: "gpt-4o-mini",
-        provider: "openai",
-        guardrailVerdict: "blocked",
-      },
-    ]);
+    // Operator discovery is a live fan-out over the tenant OBJECTS, so an
+    // attributed evaluation's authoritative fixture is its tenant's object —
+    // the control projection this used to seed is no longer read.
+    await seedExactTenantGuardrailEvaluations([BLOCKED]);
     await seedExactTenantRequestLog("fg-block-1", "t-1", 1_700_000_100);
     await seedAuditEvents([
       {
@@ -657,7 +648,7 @@ describe("GET /admin/v1/investigations joins one request's evidence", () => {
   });
 
   it("finds the same request by trace_id", async () => {
-    await seedGuardrailEvaluations([BLOCKED]);
+    await seedExactTenantGuardrailEvaluations([BLOCKED]);
     const { status, body } = await investigate(operatorKey.secret, `?trace_id=${BLOCKED.traceId}`);
     expect(status).toBe(200);
     expect((body.guardrail_evaluations as unknown[]).length).toBe(1);

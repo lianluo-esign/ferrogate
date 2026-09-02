@@ -119,7 +119,10 @@ const CONTROL_TENANT_TABLES: readonly string[] = [
   "audit_events", // the control PROJECTION rows; the R2 anchor chain is kept
   "delegation_revocations",
   "experiment_shadow_legs",
-  "online_eval_leg_quality",
+  // `online_eval_leg_quality` DROPPED from control by migration 0039 (Track A
+  // single-source): no control mirror row remains to sweep here. Its
+  // authoritative copy lives in the tenant object and is removed with the object
+  // itself, the same lifecycle as the object's own `online_eval_scores` rows.
   "online_eval_scores",
   "siem_export_cursors",
   "guardrail_evaluations", // carries `tenant`; its child rows are swept just before it
@@ -136,7 +139,10 @@ const CONTROL_SCOPE_TABLES: readonly string[] = [
   "quota_policies",
   "budget_alert_notifications",
   "semantic_cache_policies",
-  "spend_anomaly_episodes",
+  // `spend_anomaly_episodes` is gone from the control DO (dropped by
+  // `0038_drop_spend_anomaly_episodes.sql`); the episode ledger lives in the
+  // tenant object and is wiped by the per-object consumption purge instead. A
+  // `WHERE scope_id IN (…)` against a table the schema no longer has would fail.
   "spend_throttles",
 ];
 

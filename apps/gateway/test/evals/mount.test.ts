@@ -36,7 +36,7 @@ import {
   providerJson,
 } from "../inference/provider-mock.js";
 import { tenantObjectDb } from "../tenant-object.js";
-import { controlDb, resetOnlineEvalTables, storedScores } from "./harness.js";
+import { controlDb, resetOnlineEvalTables, storedTenantScores } from "./harness.js";
 
 const CRITERIA = [{ id: "grounded", definition: "Is it supported by the context?" }];
 
@@ -135,7 +135,7 @@ describe("seam 2 — the queue entry point routes both queues", () => {
       env(),
     );
 
-    const rows = await storedScores();
+    const rows = await storedTenantScores("tenant_a");
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({
       request_id: "fg-mounted-1",
@@ -182,7 +182,7 @@ describe("seam 2 — the queue entry point routes both queues", () => {
       .all();
     expect(logs.results).toHaveLength(1);
     // …and nothing was mistaken for a sample.
-    expect(await storedScores()).toEqual([]);
+    expect(await storedTenantScores("tenant_a")).toEqual([]);
   });
 });
 

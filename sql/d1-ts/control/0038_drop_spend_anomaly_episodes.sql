@@ -1,0 +1,34 @@
+-- ===========================================================================
+-- Drop the spend-anomaly episode compatibility projection (Track A red-line)
+--
+-- `spend_anomaly_episodes` in the CONTROL store was a derived, tenant-attributed
+-- projection *mirror* (#697; #859/#881 keyed it by `projection_key`). Its
+-- authoritative home is each tenant's TenantDataObject: the finops pass is
+-- object-connected and opens/closes/upserts episodes ONLY on the owning object
+-- (`finops/pass.ts` `episodeObjectFor` / `upsertEpisode` / `closeEpisode`),
+-- explicitly keeping "no control-facade mirror to keep in sync". Every reader
+-- now targets that tenant object:
+--
+--   * control-plane `GET /admin/v1/spend-anomalies` — roster fan-out over the
+--     tenant objects (`admin_spend_anomaly.ts` `fleetEpisodePage`, disjoint
+--     per-object, `tenant_page`-paged); a tenant read routes to its own object.
+--
+-- The pass's control mirror write was removed in the same change, so the control
+-- copy has no remaining writer or reader. Keeping the empty mirror implies a
+-- second source of truth and lets a future writer bypass tenant isolation — the
+-- exact red line this program eliminates. `IF EXISTS` keeps this idempotent for
+-- fresh and already migrated control databases (0013 / 0036 / 0037 precedent).
+-- The table is referenced by no inbound foreign key, so drop order is free; its
+-- indexes drop with it.
+--
+-- NOT dropped here, on purpose:
+--   * spend_anomaly_runs   — a platform-owned single-flight fleet-coordination
+--                            claim, not a tenant mirror; it stays on control.
+--   * spend_throttles      — still authoritative on control (the gateway
+--                            admission readers have not been cut over yet).
+--
+-- Deploy order: the control-plane reader flip and the pass's writer stop are
+-- already live, so this migration only removes an empty table.
+-- ===========================================================================
+
+DROP TABLE IF EXISTS spend_anomaly_episodes;

@@ -60,6 +60,28 @@ describe("tenant-authoritative experiment legs", () => {
     expect(projection.projection_key).toContain("tenant_a");
   });
 
+  it("writes the object only and never the control projection when projectToControl is false", async () => {
+    // The production contract (#859/#881): a shadow leg is tenant data. The
+    // owning object is the sole destination; the control mirror is off, and an
+    // absent projection binding is not a reason to drop the leg.
+    const observer = new D1ExperimentObserver({
+      tenantDatabase: (_env, tenantId) => tenantObjectDb(tenantId),
+      projectionDatabase: () => undefined,
+      projectToControl: false,
+    });
+
+    await observer.observeShadowLeg(RECORD, {});
+    expect(observer.stats).toMatchObject({ written: 1, dropped: 0, failed: 0 });
+    const tenant = tenantObjectDb("tenant_a");
+    expect(
+      await tenant
+        .prepare("SELECT COUNT(*) AS count FROM experiment_shadow_legs")
+        .first<{ count: number }>(),
+    ).toEqual({ count: 1 });
+    // The control projection stays empty — nothing is mirrored to it.
+    expect(await storedShadowLegs()).toHaveLength(0);
+  });
+
   it("repairs a missing control projection from the object on a scheduled sweep", async () => {
     const observer = new D1ExperimentObserver({
       tenantDatabase: (_env, tenantId) => tenantObjectDb(tenantId),

@@ -186,8 +186,12 @@ export async function resetD1(): Promise<void> {
     // having run at all. The episode rows are the same trap one layer out: a
     // previous test's alert would satisfy a later test's assertion.
     db().prepare("DELETE FROM spend_anomaly_runs"),
-    db().prepare("DELETE FROM spend_anomaly_episodes"),
     db().prepare("DELETE FROM spend_throttles"),
+    // `spend_anomaly_episodes` was DROPPED from the control DO by
+    // `0038_drop_spend_anomaly_episodes.sql` — the episode ledger is
+    // authoritative in each tenant's own object and read by fleet fan-out, so
+    // there is no control copy left to truncate here; the per-object episodes
+    // are cleared in the tenant-object reset below.
     // `usage_aggregate_rollups`, `usage_monthly_rollups`, `usage_metadata_rollups`
     // and `observed_agent_presence` were DROPPED from the control DO by
     // `0036_drop_dead_tenant_projections.sql` (the metering sink stopped writing

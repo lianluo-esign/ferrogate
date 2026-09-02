@@ -40,7 +40,11 @@
 import type { PhysicalRoute } from "../inference/ports.js";
 import { NO_ROUTING_QUALITY } from "../inference/strategy.js";
 import type { RoutingQuality, RoutingQualityPort } from "../inference/strategy.js";
-import { type OnlineEvalScoreDatabase, onlineEvalDatabaseFrom } from "./d1.js";
+import {
+  type OnlineEvalScoreDatabase,
+  onlineEvalDatabaseFrom,
+  onlineEvalTenantDatabaseFrom,
+} from "./d1.js";
 import {
   type LegQualityVerdict,
   NO_LEG_QUALITY_SIGNAL,
@@ -126,7 +130,7 @@ export const NO_ONLINE_EVAL_LEG_QUALITY: OnlineEvalLegQualitySource = {
  * resolves to {@link NO_LEG_QUALITY} — an `ok: true` complete answer.
  */
 export function d1OnlineEvalLegQualitySource(
-  db: OnlineEvalScoreDatabase,
+  resolveDb: (tenantId: string) => OnlineEvalScoreDatabase | undefined,
   policies: OnlineEvalPolicySource,
 ): OnlineEvalLegQualitySource {
   return {
@@ -136,6 +140,13 @@ export function d1OnlineEvalLegQualitySource(
       if (!resolved.ok) return { ok: false, detail: resolved.detail };
       const policy = resolved.policy;
       if (policy === null) return { ok: true, quality: NO_LEG_QUALITY };
+
+      // Track A single-source: the projection lives in the TENANT object, so the
+      // read is resolved per tenant. An absent object binding (a tenant with no
+      // provisioned data store yet) is a COMPLETE answer — nothing measured —
+      // exactly like the pre-migration schema branch below, never a failure.
+      const db = resolveDb(tenantId);
+      if (db === undefined) return { ok: true, quality: NO_LEG_QUALITY };
 
       let aggregates: OnlineEvalLegAggregate[];
       try {
@@ -220,12 +231,22 @@ export function onlineEvalLegQualitySourceFromEnv(
   const key = env as unknown as object;
   const memoized = SOURCES.get(key);
   if (memoized !== undefined) return memoized;
-  const db = onlineEvalDatabaseFrom(env);
+  // "No evaluation storage bound at all" stays keyed on the control facade —
+  // the same signal `routingQualityPortFor` uses to hand the router the named
+  // empty port BY IDENTITY (a deployment with nothing durable bound). When
+  // storage IS bound, the projection is read from each tenant's OWN object
+  // (Track A single-source), resolved per tenantId inside `qualityFor` because
+  // the env-scoped memo cannot bind a per-tenant handle up front. An absent
+  // per-tenant object then degrades to `no_signal`, the safe under-steer, rather
+  // than reaching for a shared-control mirror that no longer exists.
   const source =
-    db === undefined
+    onlineEvalDatabaseFrom(env) === undefined
       ? NO_ONLINE_EVAL_LEG_QUALITY
       : cachedOnlineEvalLegQualitySource(
-          d1OnlineEvalLegQualitySource(db, onlineEvalPolicySourceFromEnv(env)),
+          d1OnlineEvalLegQualitySource(
+            (tenantId) => onlineEvalTenantDatabaseFrom(env, tenantId),
+            onlineEvalPolicySourceFromEnv(env),
+          ),
         );
   SOURCES.set(key, source);
   return source;

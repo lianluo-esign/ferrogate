@@ -36,7 +36,11 @@ import { ensureTenantGuardrailEvidenceBackfill } from "../store/guardrail_eviden
 import { ensurePlatformGuardrailEvidenceBackfill } from "../store/platform_guardrail_evidence_backfill.js";
 import { ensurePlatformRequestLogBackfill } from "../store/platform_request_log_backfill.js";
 import { tenantEvidenceDatabaseFor } from "../store/tenancy.js";
-import { provisionedTenantPage, tenantFanoutOffset } from "../store/tenant-fanout.js";
+import {
+  fanOutProvisionedTenants,
+  provisionedTenantPage,
+  tenantFanoutOffset,
+} from "../store/tenant-fanout.js";
 import {
   type GroupModule,
   type Handler,
@@ -1326,110 +1330,95 @@ function getGuardrailInvestigationHandler(): Handler {
 
     const db = deps.controlDatabase;
     const tenantRouter = deps.tenantStorage ?? deps.tenantDatabases;
+    const platformDb = deps.platformData ?? null;
     const authoritativeTenantDb =
       scope.kind === "tenant"
         ? await tenantEvidenceDatabaseFor(tenantRouter, scope.tenantId)
         : null;
+
+    // ---- 1. Resolve the selector to AUTHORITATIVE evidence -----------------
+    // A tenant caller reads its own object. A platform operator fans the bare
+    // selector out over EVERY provisioned tenant object UNION the platform
+    // object — never the shared control projection (#859/#881, Zero-D1 Plan B),
+    // which mirrors nothing a tenant owns. Discovery is therefore the read
+    // itself: the rows it returns are already the owning objects', so step 2
+    // needs no re-read to make them authoritative (the projection-discovery
+    // indirection is gone with the projection). A memory-store deployment has
+    // no provisioned objects, so the fan-out is empty and the join 404s below
+    // exactly as the old `db === null` guard did.
+    let evaluationRows: GuardrailEvaluationRow[];
+    let requestRows: RequestLogRow[];
     if (scope.kind === "tenant") {
+      const tenantDb = authoritativeTenantDb as D1Database;
       await ensureTenantGuardrailEvidenceBackfill(db, tenantRouter, scope.tenantId);
+      evaluationRows = (
+        await tenantDb
+          .prepare(
+            `SELECT ${GUARDRAIL_EVALUATION_COLUMNS}
+               FROM ${GUARDRAIL_EVALUATION_TABLE}
+              WHERE ${column} = ? AND tenant = ?
+              ${GUARDRAIL_EVALUATION_ORDER}
+              LIMIT ?`,
+          )
+          .bind(value, scope.tenantId, INVESTIGATION_MAX_REQUESTS)
+          .all<GuardrailEvaluationRow>()
+      ).results;
+      requestRows = (
+        await tenantDb
+          .prepare(
+            `SELECT ${REQUEST_LOG_COLUMNS}
+               FROM ${REQUEST_LOG_TABLE}
+              WHERE ${column} = ? AND tenant = ?
+              ${REQUEST_LOG_ORDER}
+              LIMIT ?`,
+          )
+          .bind(value, scope.tenantId, INVESTIGATION_MAX_REQUESTS)
+          .all<RequestLogRow>()
+      ).results;
+    } else {
+      // Platform operator: fold any pre-cutover un-attributed control rows into
+      // the platform object first (idempotent, marked), exactly as the
+      // list/export readers do, then discover over the objects.
+      if (db !== null) {
+        await ensurePlatformGuardrailEvidenceBackfill(db, platformDb);
+        await ensurePlatformRequestLogBackfill(db, platformDb);
+      }
+      evaluationRows = await fleetInvestigationEvaluations(tenantRouter, platformDb, column, value);
+      requestRows = await fleetInvestigationRequestLogs(tenantRouter, platformDb, column, value);
     }
-    if (scope.kind === "platform_operator" && db === null) {
-      // Nothing writes the control projection in a memory-store deployment, so
-      // there is nothing for a fleet operator to investigate.
-      throw new HttpError(404, "guardrail_investigation_not_found", `no evidence for ${selector}`);
-    }
-    const tenantDb = authoritativeTenantDb as D1Database;
 
-    // ---- 1. Exact tenant objects or the operator projection resolve the selector ----
-    const evaluationRows =
-      scope.kind === "tenant"
-        ? await tenantDb
-            .prepare(
-              `SELECT ${GUARDRAIL_EVALUATION_COLUMNS}
-                 FROM ${GUARDRAIL_EVALUATION_TABLE}
-                WHERE ${column} = ? AND tenant = ?
-                ${GUARDRAIL_EVALUATION_ORDER}
-                LIMIT ?`,
-            )
-            .bind(value, scope.tenantId, INVESTIGATION_MAX_REQUESTS)
-            .all<GuardrailEvaluationRow>()
-        : await (db as D1Database)
-            .prepare(
-              `SELECT ${GUARDRAIL_PROJECTION_EVALUATION_COLUMNS}
-                 FROM ${GUARDRAIL_EVALUATION_TABLE}
-                WHERE ${column} = ?
-                ${GUARDRAIL_EVALUATION_ORDER}
-                LIMIT ?`,
-            )
-            .bind(value, INVESTIGATION_MAX_REQUESTS)
-            .all<GuardrailEvaluationRow>();
-
-    const requestRows =
-      scope.kind === "tenant"
-        ? await tenantDb
-            .prepare(
-              `SELECT ${REQUEST_LOG_COLUMNS}
-                 FROM ${REQUEST_LOG_TABLE}
-                WHERE ${column} = ? AND tenant = ?
-                ${REQUEST_LOG_ORDER}
-                LIMIT ?`,
-            )
-            .bind(value, scope.tenantId, INVESTIGATION_MAX_REQUESTS)
-            .all<RequestLogRow>()
-        : await (db as D1Database)
-            .prepare(
-              `SELECT ${REQUEST_LOG_COLUMNS}
-                 FROM ${REQUEST_LOG_TABLE}
-                WHERE ${column} = ?
-                ${REQUEST_LOG_ORDER}
-                LIMIT ?`,
-            )
-            .bind(value, INVESTIGATION_MAX_REQUESTS)
-            .all<RequestLogRow>();
-
-    if (evaluationRows.results.length === 0 && requestRows.results.length === 0) {
+    if (evaluationRows.length === 0 && requestRows.length === 0) {
       throw new HttpError(404, "guardrail_investigation_not_found", `no evidence for ${selector}`);
     }
 
     const requestIds = [
       ...new Set([
-        ...evaluationRows.results.map((row) => row.request_id),
-        ...requestRows.results.map((row) => row.request_id),
+        ...evaluationRows.map((row) => row.request_id),
+        ...requestRows.map((row) => row.request_id),
       ]),
     ].slice(0, INVESTIGATION_MAX_REQUESTS);
 
-    // ---- 2. Projection discovery becomes exact object reads ---------------
-    const tenantGroups = investigationTenantGroups(
-      scope,
-      evaluationRows.results,
-      requestRows.results,
-      requestIds,
+    // ---- 2. Correlated evidence from the exact tenant objects --------------
+    // Request logs came from the objects in step 1, so they are already
+    // authoritative — only their attribution is split out here. Agent runs and
+    // events are still read per exact object off the discovered ids.
+    const tenantGroups = investigationTenantGroups(scope, evaluationRows, requestRows, requestIds);
+    const authoritativeRequestRows = requestRows.filter(
+      (row) => row.tenant !== null && row.tenant.trim() !== "",
     );
-    const authoritativeRequestRows =
-      scope.kind === "tenant"
-        ? requestRows.results
-        : await tenantEvidenceRows<RequestLogRow>(
-            tenantRouter,
-            tenantGroups,
-            (count) =>
-              `SELECT ${REQUEST_LOG_COLUMNS}
-                 FROM ${REQUEST_LOG_TABLE}
-                WHERE tenant = ? AND request_id IN (${placeholders(count)})
-                ${REQUEST_LOG_ORDER}`,
-          );
     const unscopedRequestRows =
       scope.kind === "platform_operator"
-        ? requestRows.results.filter((row) => row.tenant === null || row.tenant.trim() === "")
+        ? requestRows.filter((row) => row.tenant === null || row.tenant.trim() === "")
         : [];
     const responseRequestRows = [...authoritativeRequestRows, ...unscopedRequestRows].sort(
       requestLogRowOrder,
     );
-    if (evaluationRows.results.length === 0 && responseRequestRows.length === 0) {
+    if (evaluationRows.length === 0 && responseRequestRows.length === 0) {
       throw new HttpError(404, "guardrail_investigation_not_found", `no evidence for ${selector}`);
     }
     const joinedRequestIds = [
       ...new Set([
-        ...evaluationRows.results.map((row) => row.request_id),
+        ...evaluationRows.map((row) => row.request_id),
         ...authoritativeRequestRows.map((row) => row.request_id),
         ...unscopedRequestRows.map((row) => row.request_id),
       ]),
@@ -1455,12 +1444,20 @@ function getGuardrailInvestigationHandler(): Handler {
     );
 
     // ---- 3. Everything else hangs off ids cleared by exact evidence --------
-    const checks = await guardrailChecksFor(
-      scope.kind === "tenant" ? tenantDb : (db as D1Database),
-      evaluationRows.results,
-      scope.kind === "tenant" ? "tenant" : "control",
-      scope.kind === "tenant" ? scope.tenantId : undefined,
-    );
+    // Guardrail checks read from the SAME authoritative stores as their
+    // evaluations — each tenant object, plus the platform object for the
+    // un-attributed leg — never the shared control projection. Audit remains
+    // CONTROL-authoritative in this family and billing is the billing family's
+    // to relocate, so both still read control here.
+    const checks =
+      scope.kind === "tenant"
+        ? await guardrailChecksFor(
+            authoritativeTenantDb as D1Database,
+            evaluationRows,
+            "tenant",
+            scope.tenantId,
+          )
+        : await fleetInvestigationChecks(tenantRouter, platformDb, evaluationRows);
     const audit =
       db === null
         ? { records: [] }
@@ -1512,18 +1509,18 @@ function getGuardrailInvestigationHandler(): Handler {
       return typeof cost === "number" && Number.isFinite(cost) ? sum + cost : sum;
     }, 0);
 
-    const evaluations = evaluationRows.results.map((row) =>
-      guardrailEvaluationDocument(
-        row,
-        checks.get(scope.kind === "tenant" ? row.id : (row.projection_key ?? "")) ?? [],
-      ),
+    const evaluations = evaluationRows.map((row) =>
+      // Checks now key by evaluation `id` in EVERY scope: the operator leg reads
+      // them from the same tenant/platform objects as their evaluations, so the
+      // control projection's `projection_key` is gone with the projection.
+      guardrailEvaluationDocument(row, checks.get(row.id) ?? []),
     );
     const requests = responseRequestRows.map(requestLogDocument);
 
     return json(c, 200, {
       object: "guardrail_investigation",
       selector,
-      identity: investigationIdentity(evaluationRows.results, responseRequestRows),
+      identity: investigationIdentity(evaluationRows, responseRequestRows),
       agent_runs: agentRuns.records,
       agent_events: agentEvents.records,
       requests,
@@ -1533,7 +1530,7 @@ function getGuardrailInvestigationHandler(): Handler {
       approvals: [],
       billing_events: billing.records,
       total_cost_usd: totalCostUsd,
-      final_outcome: finalOutcome(evaluationRows.results, responseRequestRows),
+      final_outcome: finalOutcome(evaluationRows, responseRequestRows),
     });
   };
 }
@@ -1606,6 +1603,160 @@ async function tenantEvidenceRows<T>(
     rows.push(...result.results);
   }
   return rows;
+}
+
+/**
+ * Fleet discovery of guardrail evaluations for one operator investigation.
+ *
+ * Fans the bare selector out over EVERY provisioned tenant object UNION the
+ * platform object — never the shared control projection (#859/#881, Zero-D1
+ * Plan B), which mirrors nothing a tenant owns. This is the UNBOUNDED fan-out
+ * ({@link fanOutProvisionedTenants}), not the roster-paged one the list reader
+ * uses: the owning tenant of a raw `request_id`/`trace_id`/`agent_run_id` is
+ * unknown before the read, so a roster cursor could skip the one object that
+ * holds the incident. Each tenant object is fenced to its own tenant; the
+ * platform object carries the un-attributed rows with no fence ("the object IS
+ * the fence"). Every leg is capped at `INVESTIGATION_MAX_REQUESTS`, and an
+ * unreachable platform object contributes nothing rather than failing the read.
+ */
+async function fleetInvestigationEvaluations(
+  router: TenantDatabaseRouter,
+  platformDb: D1Database | null,
+  column: InvestigationSelector,
+  value: string,
+): Promise<GuardrailEvaluationRow[]> {
+  const tenantRows = await fanOutProvisionedTenants(
+    router,
+    async (db, tenantId) =>
+      (
+        await db
+          .prepare(
+            `SELECT ${GUARDRAIL_EVALUATION_COLUMNS}
+               FROM ${GUARDRAIL_EVALUATION_TABLE}
+              WHERE ${column} = ? AND tenant = ?
+              ${GUARDRAIL_EVALUATION_ORDER}
+              LIMIT ?`,
+          )
+          .bind(value, tenantId, INVESTIGATION_MAX_REQUESTS)
+          .all<GuardrailEvaluationRow>()
+      ).results,
+    "investigation-guardrail",
+  );
+  let platformRows: GuardrailEvaluationRow[] = [];
+  if (platformDb !== null) {
+    try {
+      platformRows = (
+        await platformDb
+          .prepare(
+            `SELECT ${GUARDRAIL_EVALUATION_COLUMNS}
+               FROM ${GUARDRAIL_EVALUATION_TABLE}
+              WHERE ${column} = ?
+              ${GUARDRAIL_EVALUATION_ORDER}
+              LIMIT ?`,
+          )
+          .bind(value, INVESTIGATION_MAX_REQUESTS)
+          .all<GuardrailEvaluationRow>()
+      ).results;
+    } catch {
+      // An unreachable platform object is isolated exactly as an unreachable
+      // tenant object is — the un-attributed leg is simply absent.
+    }
+  }
+  return [...tenantRows, ...platformRows];
+}
+
+/** The request-log twin of {@link fleetInvestigationEvaluations}. */
+async function fleetInvestigationRequestLogs(
+  router: TenantDatabaseRouter,
+  platformDb: D1Database | null,
+  column: InvestigationSelector,
+  value: string,
+): Promise<RequestLogRow[]> {
+  const tenantRows = await fanOutProvisionedTenants(
+    router,
+    async (db, tenantId) =>
+      (
+        await db
+          .prepare(
+            `SELECT ${REQUEST_LOG_COLUMNS}
+               FROM ${REQUEST_LOG_TABLE}
+              WHERE ${column} = ? AND tenant = ?
+              ${REQUEST_LOG_ORDER}
+              LIMIT ?`,
+          )
+          .bind(value, tenantId, INVESTIGATION_MAX_REQUESTS)
+          .all<RequestLogRow>()
+      ).results,
+    "investigation-request-log",
+  );
+  let platformRows: RequestLogRow[] = [];
+  if (platformDb !== null) {
+    try {
+      platformRows = (
+        await platformDb
+          .prepare(
+            `SELECT ${REQUEST_LOG_COLUMNS}
+               FROM ${REQUEST_LOG_TABLE}
+              WHERE ${column} = ?
+              ${REQUEST_LOG_ORDER}
+              LIMIT ?`,
+          )
+          .bind(value, INVESTIGATION_MAX_REQUESTS)
+          .all<RequestLogRow>()
+      ).results;
+    } catch {
+      // Un-attributed platform leg isolated, as above.
+    }
+  }
+  return [...tenantRows, ...platformRows];
+}
+
+/**
+ * The child checks for a fleet operator's evaluations, read from the SAME
+ * authoritative stores the evaluations came from: each tenant object for its
+ * own evaluations (fenced by tenant), the platform object for the un-attributed
+ * ones. Evaluation ids are globally unique, so the per-source maps merge by id
+ * without collision — never the shared control projection.
+ */
+async function fleetInvestigationChecks(
+  router: TenantDatabaseRouter,
+  platformDb: D1Database | null,
+  evaluations: readonly GuardrailEvaluationRow[],
+): Promise<Map<string, StoreRecord[]>> {
+  const merged = new Map<string, StoreRecord[]>();
+  const byTenant = new Map<string, GuardrailEvaluationRow[]>();
+  const platformEvaluations: GuardrailEvaluationRow[] = [];
+  for (const row of evaluations) {
+    const tenantId = row.tenant?.trim() ?? "";
+    if (tenantId === "") {
+      platformEvaluations.push(row);
+      continue;
+    }
+    const bucket = byTenant.get(tenantId);
+    if (bucket === undefined) byTenant.set(tenantId, [row]);
+    else bucket.push(row);
+  }
+  for (const [tenantId, rows] of byTenant) {
+    let db: D1Database;
+    try {
+      db = await tenantEvidenceDatabaseFor(router, tenantId);
+    } catch {
+      // A tenant whose object is unreachable contributes no checks rather than
+      // failing the whole investigation.
+      continue;
+    }
+    const perTenant = await guardrailChecksFor(db, rows, "tenant", tenantId);
+    for (const [id, checks] of perTenant) merged.set(id, checks);
+  }
+  if (platformDb !== null && platformEvaluations.length > 0) {
+    try {
+      const perPlatform = await guardrailChecksFor(platformDb, platformEvaluations, "platform");
+      for (const [id, checks] of perPlatform) merged.set(id, checks);
+    } catch {
+      // Unreachable platform object: its checks are simply absent.
+    }
+  }
+  return merged;
 }
 
 function requestLogRowOrder(a: RequestLogRow, b: RequestLogRow): number {

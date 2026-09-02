@@ -46,8 +46,13 @@ import {
   applyControlMigrations,
   resetExperimentTables,
   storedRequestLogs,
-  storedShadowLegs,
+  storedTenantShadowLegs,
 } from "./harness.js";
+
+// The deployed producer writes shadow legs to the owning tenant object; the
+// control projection is no longer mirrored (`projectToControl: false`), so this
+// suite reads the authoritative store.
+const storedShadowLegs = () => storedTenantShadowLegs("tenant_a");
 
 const BASE = "https://gw.test";
 const AUTHED = { authorization: "Bearer fg_exp_tenant", "content-type": "application/json" };

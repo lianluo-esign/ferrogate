@@ -35,7 +35,7 @@ import { GATEWAY_MIDDLEWARE, gatewayQueue } from "../../src/index.js";
 import type { PhysicalRoute } from "../../src/inference/index.js";
 import { InMemoryModelResolver, inferenceRouteModule } from "../../src/inference/index.js";
 import { createGatewayApp } from "../../src/routes/index.js";
-import { controlDb, resetOnlineEvalTables, storedScores } from "../evals/harness.js";
+import { controlDb, resetOnlineEvalTables, storedTenantScores } from "../evals/harness.js";
 import {
   type ProviderInterceptor,
   interceptProviderFetch,
@@ -261,7 +261,10 @@ describe("a sampled canary response is scored AS the canary arm", () => {
       } as never,
     );
 
-    const scores = await storedScores();
+    // The deployed consumer writes the object-authoritative score; the control
+    // projection is no longer mirrored (`projectToControl: false`), so the arm
+    // is read from the owning tenant object.
+    const scores = await storedTenantScores("tenant_optin");
     expect(scores).toHaveLength(1);
     const row = scores[0] as Record<string, unknown>;
 
