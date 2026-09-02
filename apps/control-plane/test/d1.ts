@@ -188,10 +188,12 @@ export async function resetD1(): Promise<void> {
     db().prepare("DELETE FROM spend_anomaly_runs"),
     db().prepare("DELETE FROM spend_anomaly_episodes"),
     db().prepare("DELETE FROM spend_throttles"),
-    db().prepare("DELETE FROM usage_aggregate_rollups"),
-    db().prepare("DELETE FROM usage_monthly_rollups"),
-    db().prepare("DELETE FROM usage_metadata_rollups"),
-    db().prepare("DELETE FROM observed_agent_presence"),
+    // `usage_aggregate_rollups`, `usage_monthly_rollups`, `usage_metadata_rollups`
+    // and `observed_agent_presence` were DROPPED from the control DO by
+    // `0036_drop_dead_tenant_projections.sql` (the metering sink stopped writing
+    // them to control; every reader now reads the tenant object). Truncating a
+    // table the schema no longer has fails the whole reset batch with
+    // "no such table", so they are gone from here with the migration.
     // Tuning rides `quota_policies`, so a policy row left behind would silently
     // re-tune the next test's detector.
     db().prepare("DELETE FROM quota_policies"),

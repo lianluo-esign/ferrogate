@@ -1,8 +1,10 @@
 /**
  * `/usage-aggregates` reads the tenant accumulator through the object for a
  * tenant caller, and — for a platform caller — a bounded live fan-out over each
- * provisioned tenant's Durable Object. The control-D1 `usage_aggregate_rollups`
- * projection is retired and must NOT be read by either path.
+ * provisioned tenant's Durable Object. The control-side `usage_aggregate_rollups`
+ * projection was DROPPED (control migration 0036); the authoritative rollups live
+ * only in each tenant object, so neither path can touch a control projection —
+ * there is no longer one to touch.
  */
 import { SELF, env } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -43,10 +45,9 @@ beforeEach(async () => {
     staticKeys: [operatorKey],
     nativeKeys: [tenantKey(TENANT_KEY, TENANT)],
   });
-  await db().batch([
-    db().prepare("DELETE FROM usage_aggregate_rollups"),
-    db().prepare("DELETE FROM tenant_databases"),
-  ]);
+  // The control `usage_aggregate_rollups` projection no longer exists (0036), so
+  // there is nothing to clear on the control side — only the tenant roster row.
+  await db().prepare("DELETE FROM tenant_databases").run();
   const tenant = await tenantDatabase();
   await tenant.batch([
     tenant.prepare("DELETE FROM usage_aggregate_rollups"),
@@ -55,7 +56,7 @@ beforeEach(async () => {
 });
 
 describe("usage aggregate authority and projection reads", () => {
-  it("reads the tenant object for tenant callers and fans out over tenant objects for operators, ignoring the control projection", async () => {
+  it("reads the tenant object for tenant callers and fans out over tenant objects for operators, never a control projection", async () => {
     const tenant = await tenantDatabase();
     await tenant.batch([
       tenant
@@ -75,33 +76,9 @@ describe("usage aggregate authority and projection reads", () => {
         .bind(AGGREGATE_ID, "usage-context", "model-object", "provider-object", 7, 3, 10, 20),
     ]);
 
-    // A DECOY row in the retired control-D1 projection. After the migration the
-    // operator fan-out reads the tenant OBJECT, so this row must be IGNORED.
-    await db()
-      .prepare(
-        `INSERT INTO usage_aggregate_rollups
-           (projection_key, id, tenant, tenant_context_id, organization_id,
-            project_id, api_key_id, logical_model, provider, prompt_tokens,
-            completion_tokens, total_tokens, updated_at_unix)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .bind(
-        `projection:${TENANT}`,
-        "forged-control-id",
-        TENANT,
-        "forged-context",
-        TENANT,
-        "project-control",
-        "key-control",
-        "model-control",
-        "provider-control",
-        100,
-        100,
-        200,
-        30,
-      )
-      .run();
-
+    // No control-side decoy is possible any more: the `usage_aggregate_rollups`
+    // control projection was dropped by migration 0036, so the only place a row
+    // can live is the tenant object seeded above. Both reads below must return it.
     const tenantResponse = await SELF.fetch(`${BASE}/admin/v1/usage-aggregates`, {
       headers: bearer(TENANT_KEY),
     });
@@ -126,8 +103,8 @@ describe("usage aggregate authority and projection reads", () => {
       data: Record<string, unknown>[];
     };
     // The operator page is a Durable-Object fan-out: it returns the tenant OBJECT
-    // row and pages the tenant roster. It no longer advertises a control
-    // projection source, and the forged control-D1 row above is ignored.
+    // row and pages the tenant roster. It advertises no control projection source
+    // (the control `usage_aggregate_rollups` mirror was dropped by 0036).
     expect(operatorBody.source).toBeUndefined();
     expect(operatorBody.tenant_page).toEqual(
       expect.objectContaining({ offset: 0, total: expect.any(Number) }),
@@ -140,6 +117,5 @@ describe("usage aggregate authority and projection reads", () => {
         usage: { prompt_tokens: 7, completion_tokens: 3, total_tokens: 10 },
       }),
     ]);
-    expect(operatorBody.data.some((row) => row.id === "forged-control-id")).toBe(false);
   });
 });
