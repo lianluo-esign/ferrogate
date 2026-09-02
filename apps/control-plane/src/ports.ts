@@ -749,6 +749,14 @@ export interface ControlPlaneBindings {
    */
   readonly CONTROL_PLANE_CONTROL_STORAGE?: string;
   /**
+   * Arms the one-time `POST /admin/v1/experiment-eval-backfill` sweep that copies
+   * historical `experiment_shadow_legs` / `online_eval_scores` PROJECTION rows
+   * from the control database into each owning tenant object. DEFAULT OFF: only
+   * exactly `"on"` runs it, exactly like the gateway's
+   * `GATEWAY_PLATFORM_BILLING_BACKFILL`. See `src/routes/experiment-eval-backfill.ts`.
+   */
+  readonly CONTROL_EXPERIMENT_EVAL_BACKFILL?: string;
+  /**
    * The gateway's singleton `ControlDataObject` namespace, bound CROSS-SCRIPT.
    */
   readonly CONTROL_DATA?: ControlDataNamespace;
