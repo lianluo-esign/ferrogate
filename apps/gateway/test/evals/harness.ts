@@ -8,6 +8,7 @@
 import { env } from "cloudflare:test";
 import { ONLINE_EVAL_REGRESSION_TABLE, ONLINE_EVAL_SCORE_TABLE } from "../../src/evals/index.js";
 import { applyControlMigrations } from "../requestlog/harness.js";
+import { tenantObjectDb } from "../tenant-object.js";
 
 /** The live `env.CONTROL_DB` binding. */
 export function controlDb(): D1Database {
@@ -38,7 +39,9 @@ export async function applyOnlineEvalMigrations(): Promise<void> {
 export async function resetOnlineEvalTables(): Promise<void> {
   await applyOnlineEvalMigrations();
   await controlDb().prepare(`DELETE FROM ${ONLINE_EVAL_SCORE_TABLE}`).run();
-  await controlDb().prepare(`DELETE FROM ${ONLINE_EVAL_REGRESSION_TABLE}`).run();
+  // The control `online_eval_regressions` mirror was DROPPED by control
+  // migration 0036 (the regression claim is tenant-object authoritative and
+  // was never mirrored): nothing to reset on the control side.
 }
 
 /** One stored score row, read straight out of the table. */
@@ -49,9 +52,12 @@ export async function storedScores(): Promise<Record<string, unknown>[]> {
   return result.results as Record<string, unknown>[];
 }
 
-/** One stored regression row. */
-export async function storedRegressions(): Promise<Record<string, unknown>[]> {
-  const result = await controlDb()
+/**
+ * One stored regression row, read from the TENANT object that owns it — the
+ * only place a regression claim is ever written (no control mirror exists).
+ */
+export async function storedRegressions(tenantId = "tenant_a"): Promise<Record<string, unknown>[]> {
+  const result = await tenantObjectDb(tenantId)
     .prepare(`SELECT * FROM ${ONLINE_EVAL_REGRESSION_TABLE} ORDER BY claim_key`)
     .all();
   return result.results as Record<string, unknown>[];

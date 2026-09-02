@@ -17,13 +17,14 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
 import {
-  ONLINE_EVAL_SCORE_PROJECTION_UPSERT_SQL,
+  TENANT_ONLINE_EVAL_SCORE_UPSERT_SQL,
   type OnlineEvalWindowAggregate,
   RECENT_WINDOW_SECONDS,
   detectOnlineEvalRegressions,
-  onlineEvalScoreProjectionBindings,
+  onlineEvalScoreBindings,
   sweepOnlineEvalRegressions,
 } from "../../src/evals/index.js";
+import { tenantObjectDb } from "../tenant-object.js";
 import { controlDb, resetOnlineEvalTables, storedRegressions } from "./harness.js";
 
 const POLICY = { regressionDrop: 0.1, regressionMinSamples: 20 };
@@ -94,14 +95,17 @@ describe("the detector believes only what the instrument supports", () => {
 
 const NOW_UNIX = 1_800_000_000;
 
-/** Insert `count` scores at `atUnix` with the given score value. */
+/**
+ * Insert `count` scores at `atUnix` with the given score value — into the
+ * TENANT object, which is the authoritative score store the sweep reads.
+ */
 async function seedScores(count: number, score: number, atUnix: number): Promise<void> {
-  const db = controlDb();
-  const statement = db.prepare(ONLINE_EVAL_SCORE_PROJECTION_UPSERT_SQL);
+  const db = tenantObjectDb("tenant_a");
+  const statement = db.prepare(TENANT_ONLINE_EVAL_SCORE_UPSERT_SQL);
   await db.batch(
     Array.from({ length: count }, (_, index) =>
       statement.bind(
-        ...onlineEvalScoreProjectionBindings({
+        ...onlineEvalScoreBindings({
           requestId: `fg-${atUnix}-${index}`,
           tenantId: "tenant_a",
           criterionId: "answer_relevance",
@@ -120,8 +124,26 @@ async function seedScores(count: number, score: number, atUnix: number): Promise
   );
 }
 
+/**
+ * The compatibility seam: `database` must resolve to SOMETHING for the sweep
+ * to run at all, and `tenantDatabase` points it at the tenant object that owns
+ * the scores and receives the claim. The control `online_eval_regressions`
+ * mirror was dropped (0036), so the tenant object is the only claim store.
+ */
+const SEAM = [
+  () => controlDb() as never,
+  (_env: unknown, tenantId: string) => tenantObjectDb(tenantId) as never,
+] as const;
+
 beforeEach(async () => {
   await resetOnlineEvalTables();
+  for (const tenantId of ["tenant_a", "tenant_b"]) {
+    const tenant = tenantObjectDb(tenantId);
+    await tenant.batch([
+      tenant.prepare("DELETE FROM online_eval_scores"),
+      tenant.prepare("DELETE FROM online_eval_regressions"),
+    ]);
+  }
 });
 
 describe("the sweep, against the real schema", () => {
@@ -131,13 +153,7 @@ describe("the sweep, against the real schema", () => {
     await seedScores(40, 0.9, NOW_UNIX - 3 * 24 * 60 * 60);
     await seedScores(40, 0.6, NOW_UNIX - 3600);
 
-    const first = await sweepOnlineEvalRegressions(
-      {},
-      "tenant_a",
-      POLICY,
-      NOW_UNIX,
-      () => controlDb() as never,
-    );
+    const first = await sweepOnlineEvalRegressions({}, "tenant_a", POLICY, NOW_UNIX, ...SEAM);
     expect(first).toEqual({ detected: 1, claimed: 1 });
 
     const rows = await storedRegressions();
@@ -156,13 +172,7 @@ describe("the sweep, against the real schema", () => {
     // The SECOND sweep sees the same regression — it has not gone away — and
     // must not record it again. Without the claim an operator gets one alert
     // per cron tick for as long as the regression lasts.
-    const second = await sweepOnlineEvalRegressions(
-      {},
-      "tenant_a",
-      POLICY,
-      NOW_UNIX,
-      () => controlDb() as never,
-    );
+    const second = await sweepOnlineEvalRegressions({}, "tenant_a", POLICY, NOW_UNIX, ...SEAM);
     expect(second).toEqual({ detected: 1, claimed: 0 });
     expect(await storedRegressions()).toHaveLength(1);
   });
@@ -171,13 +181,7 @@ describe("the sweep, against the real schema", () => {
     await seedScores(40, 0.9, NOW_UNIX - 3 * 24 * 60 * 60);
     await seedScores(40, 0.88, NOW_UNIX - 3600);
 
-    const result = await sweepOnlineEvalRegressions(
-      {},
-      "tenant_a",
-      POLICY,
-      NOW_UNIX,
-      () => controlDb() as never,
-    );
+    const result = await sweepOnlineEvalRegressions({}, "tenant_a", POLICY, NOW_UNIX, ...SEAM);
 
     expect(result).toEqual({ detected: 0, claimed: 0 });
     expect(await storedRegressions()).toEqual([]);
@@ -187,13 +191,7 @@ describe("the sweep, against the real schema", () => {
     await seedScores(40, 0.9, NOW_UNIX - 3 * 24 * 60 * 60);
     await seedScores(40, 0.6, NOW_UNIX - 3600);
 
-    const result = await sweepOnlineEvalRegressions(
-      {},
-      "tenant_b",
-      POLICY,
-      NOW_UNIX,
-      () => controlDb() as never,
-    );
+    const result = await sweepOnlineEvalRegressions({}, "tenant_b", POLICY, NOW_UNIX, ...SEAM);
 
     expect(result).toEqual({ detected: 0, claimed: 0 });
   });

@@ -86,10 +86,10 @@ beforeEach(async () => {
   await db.prepare("DELETE FROM usage_monthly_rollups").run();
   await db.prepare("DELETE FROM tenant_contexts").run();
   await db.prepare("DELETE FROM api_keys").run();
-  await controlDb.prepare("DELETE FROM usage_metadata_rollups").run();
-  await controlDb.prepare("DELETE FROM usage_monthly_rollups").run();
-  await controlDb.prepare("DELETE FROM usage_aggregate_rollups").run();
-  await controlDb.prepare("DELETE FROM observed_agent_presence").run();
+  // The control copies of usage_metadata/monthly/aggregate_rollups and
+  // observed_agent_presence were DROPPED by control migration 0036: there is
+  // nothing to truncate on the control side any more (see the red-line
+  // assertion below, which pins that the tables are gone).
   const tenantDb = tenantObjectDb("tenant_a");
   await tenantDb.batch([
     tenantDb.prepare("DELETE FROM observed_agent_presence"),
@@ -243,17 +243,21 @@ describe("the loop: the metering drain accumulates into the tenant database", ()
       },
     ]);
 
-    // The no-tenant-data mirror red line: the retired control-D1 projection is
-    // never written — not for usage, not for presence — and no durable repair
-    // intent is stamped onto the tenant object either.
+    // The no-tenant-data mirror red line: the retired control projection is
+    // never written — not for usage, not for presence. Since control migration
+    // 0036 the mirror tables do not even EXIST in the control store, which is
+    // the strongest form of "never mirrored"; pin that, so a writer that grows
+    // one back turns this red. No durable repair intent is stamped onto the
+    // tenant object either.
     expect(
-      (await controlDb.prepare("SELECT tenant FROM usage_monthly_rollups").all()).results,
-    ).toEqual([]);
-    expect(
-      (await controlDb.prepare("SELECT tenant FROM usage_aggregate_rollups").all()).results,
-    ).toEqual([]);
-    expect(
-      (await controlDb.prepare("SELECT tenant_id FROM observed_agent_presence").all()).results,
+      (
+        await controlDb
+          .prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN " +
+              "('usage_monthly_rollups', 'usage_aggregate_rollups', 'usage_metadata_rollups', 'observed_agent_presence')",
+          )
+          .all()
+      ).results,
     ).toEqual([]);
     expect(
       (
@@ -442,8 +446,11 @@ describe("the loop: the metering drain accumulates into the tenant database", ()
     const queue = new RecordingQueue();
     const sink = sinkFor(queue);
     const tenantDb = tenantObjectDb("tenant_a");
-    const { CONTROL_DATA: _noControlData, CONTROL_DB: _noControlDb, ...withoutControl } =
-      bindings(queue);
+    const {
+      CONTROL_DATA: _noControlData,
+      CONTROL_DB: _noControlDb,
+      ...withoutControl
+    } = bindings(queue);
 
     sink.record(usageFixture({ requestId: ATTRIBUTION.requestId }));
     await sink.flush({
