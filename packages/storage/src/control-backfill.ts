@@ -123,13 +123,11 @@ export const CONTROL_BACKFILL_TABLES: readonly ControlBackfillTable[] = Object.f
   table("guardrail_check_evaluations", ["projection_key"]),
   table("guardrail_policy_bindings", ["policy_id"]),
   table("guardrail_policy_revisions", ["policy_id", "revision"]),
-  table("managed_worker_isolation_evidence", ["projection_key"]),
   table("managed_worker_isolation_policies", ["session_id"]),
   table("managed_worker_isolation_selections", ["session_id"]),
   table("managed_worker_lifecycle_events", ["id"]),
   table("managed_worker_sessions", ["id"]),
   table("managed_worker_templates", ["id"]),
-  table("observed_agent_presence", ["projection_key"]),
   table("online_eval_leg_quality", [
     "tenant",
     "criterion_id",
@@ -138,7 +136,6 @@ export const CONTROL_BACKFILL_TABLES: readonly ControlBackfillTable[] = Object.f
     "provider",
     "provider_model",
   ]),
-  table("online_eval_regressions", ["projection_key"]),
   table("online_eval_scores", ["projection_key"]),
   table("permissions", ["id"]),
   table("plans", ["id"]),
@@ -195,9 +192,6 @@ export const CONTROL_BACKFILL_TABLES: readonly ControlBackfillTable[] = Object.f
   table("tenant_role_bindings_legacy", ["id"]),
   table("tenant_spend_rollups", ["tenant_id", "period"]),
   table("tenants", ["id"]),
-  table("usage_aggregate_rollups", ["projection_key"]),
-  table("usage_metadata_rollups", ["projection_key"]),
-  table("usage_monthly_rollups", ["projection_key"]),
 ]);
 
 /** A descriptive alias so call sites read naturally without a second copy. */

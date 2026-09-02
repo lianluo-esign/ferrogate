@@ -101,7 +101,6 @@ const KEEP_TENANT_ID = "tenant-9a03494f-728d-4871-bc9f-63baa0f48b24";
 const CONTROL_TENANT_ID_TABLES: readonly string[] = [
   "control_plane_replay_floors",
   "gateway_models", // only this tenant's PRIVATE models; global rows (tenant_id NULL) survive
-  "observed_agent_presence",
   "site_domain_verifications",
   "site_domains",
   "sso_pending_flows",
@@ -123,12 +122,8 @@ const CONTROL_TENANT_TABLES: readonly string[] = [
   "delegation_revocations",
   "experiment_shadow_legs",
   "online_eval_leg_quality",
-  "online_eval_regressions",
   "online_eval_scores",
   "siem_export_cursors",
-  "usage_aggregate_rollups",
-  "usage_metadata_rollups",
-  "usage_monthly_rollups",
   "guardrail_evaluations", // carries `tenant`; its child rows are swept just before it
 ];
 
