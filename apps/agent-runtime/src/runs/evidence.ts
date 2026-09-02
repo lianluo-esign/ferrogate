@@ -2,14 +2,17 @@
  * Tenant-authoritative agent evidence persistence (#859).
  *
  * `AgentRunState` keeps live state and subscribers in its run-shaped object.
- * These helpers write durable evidence into the tenant's `TenantDataObject`
- * first, then update the control-D1 `agent_runs` / `agent_run_events`
- * compatibility mirror for existing platform pages. A mirror failure is
- * observable but never changes object authority.
+ * These helpers write durable evidence into the tenant's `TenantDataObject` —
+ * the ONLY copy. The control-store `agent_runs` / `agent_run_events`
+ * compatibility mirror (`mirrorBestEffort`) is retired: every platform reader
+ * (the control-plane list, the `{run_id}` timeline and investigations) now
+ * fans out over the tenant objects, and mirroring tenant data into the shared
+ * control store is the no-tenant-data-mirror red line. Control migration
+ * 0037 drops the two mirror tables.
  *
- * Managed isolation evidence is NOT mirrored to control D1 (the no-tenant-data
- * mirror red line): its only authoritative copy is the tenant object, and the
- * gateway's scheduled managed-evidence rebuild sweep was removed with it.
+ * Managed isolation evidence was never mirrored either: its only authoritative
+ * copy is the tenant object, and the gateway's scheduled managed-evidence
+ * rebuild sweep was removed with it.
  */
 import {
   ControlDatabaseTenantRegistry,
@@ -32,26 +35,10 @@ export interface ManagedWorkerEvidenceContext {
   readonly isolationGrant?: IsolationGrant | null;
 }
 
-/** Keep this key format identical to sql/d1-ts/control/0014. */
-function evidenceProjectionKey(tenantId: string, logicalId: string): string {
-  // SQLite length() counts Unicode code points; JS string.length counts UTF-16 units.
-  return `${Array.from(tenantId).length}:${tenantId}:${logicalId}`;
-}
-
 const TENANT_AGENT_RUN_UPSERT_SQL = `INSERT INTO agent_runs (
   id, request_id, tenant, started_at_unix, completed_at_unix, run_json
 ) VALUES (?, ?, ?, ?, ?, ?)
 ON CONFLICT (id) DO UPDATE SET
-  request_id = CASE WHEN excluded.request_id = '' THEN agent_runs.request_id ELSE excluded.request_id END,
-  tenant = excluded.tenant,
-  started_at_unix = MIN(excluded.started_at_unix, agent_runs.started_at_unix),
-  completed_at_unix = COALESCE(excluded.completed_at_unix, agent_runs.completed_at_unix),
-  run_json = excluded.run_json`;
-
-const CONTROL_AGENT_RUN_UPSERT_SQL = `INSERT INTO agent_runs (
-  projection_key, id, request_id, tenant, started_at_unix, completed_at_unix, run_json
-) VALUES (?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT (projection_key) DO UPDATE SET
   request_id = CASE WHEN excluded.request_id = '' THEN agent_runs.request_id ELSE excluded.request_id END,
   tenant = excluded.tenant,
   started_at_unix = MIN(excluded.started_at_unix, agent_runs.started_at_unix),
@@ -113,16 +100,6 @@ ON CONFLICT (id) DO UPDATE SET
   occurred_at_unix = excluded.occurred_at_unix,
   event_json = excluded.event_json`;
 
-const CONTROL_AGENT_RUN_EVENT_UPSERT_SQL = `INSERT INTO agent_run_events (
-  projection_key, id, run_id, request_id, tenant, occurred_at_unix, event_json
-) VALUES (?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT (projection_key) DO UPDATE SET
-  run_id = excluded.run_id,
-  request_id = CASE WHEN excluded.request_id = '' THEN agent_run_events.request_id ELSE excluded.request_id END,
-  tenant = excluded.tenant,
-  occurred_at_unix = excluded.occurred_at_unix,
-  event_json = excluded.event_json`;
-
 const TENANT_ADDRESS_CACHE = new WeakMap<
   object,
   Map<string, Promise<TenantObjectAddress | undefined>>
@@ -173,11 +150,7 @@ async function tenantDatabase(env: AgentRuntimeBindings, tenantId: string): Prom
   );
   return new DurableObjectD1Database(tenantId, stub).asD1Database();
 }
-function controlDatabase(env: AgentRuntimeBindings): D1Database | undefined {
-  return controlDatabaseFrom(env);
-}
-
-/** Write one agent run to the tenant object, then to the derived mirror. */
+/** Write one agent run to the tenant object — the only copy. */
 export async function persistAgentRunEvidence(
   env: AgentRuntimeBindings,
   run: StoredAgentRun,
@@ -275,17 +248,12 @@ export async function persistAgentRunEvidence(
     }
   }
   await db.batch(statements);
-  await mirrorBestEffort(controlDatabase(env), CONTROL_AGENT_RUN_UPSERT_SQL, [
-    evidenceProjectionKey(run.tenant_id, run.run_id),
-    ...params,
-  ]);
-  // Managed isolation evidence is tenant-object authoritative and is NOT
-  // mirrored to control D1 (no-tenant-data mirror red line). The `managedEvidence`
-  // object above still drives the authoritative `TENANT_MANAGED_ISOLATION_EVIDENCE`
-  // write in the tenant batch.
+  // No control mirror: the tenant object is the only copy (red line). The
+  // `managedEvidence` object above drives the authoritative
+  // `TENANT_MANAGED_ISOLATION_EVIDENCE` write in the same tenant batch.
 }
 
-/** Write one append-only event to the tenant object, then to the mirror. */
+/** Write one append-only event to the tenant object — the only copy. */
 export async function persistAgentRunEventEvidence(
   env: AgentRuntimeBindings,
   tenantId: string,
@@ -306,25 +274,4 @@ export async function persistAgentRunEventEvidence(
       .prepare(TENANT_MANAGED_EVENT_UPSERT_SQL)
       .bind(event.id, event.occurred_at_unix, JSON.stringify(event)),
   ]);
-  await mirrorBestEffort(controlDatabase(env), CONTROL_AGENT_RUN_EVENT_UPSERT_SQL, [
-    evidenceProjectionKey(tenantId, event.id),
-    ...params,
-  ]);
-}
-
-async function mirrorBestEffort(
-  db: D1Database | undefined,
-  sql: string,
-  params: readonly (string | number | null)[],
-): Promise<void> {
-  if (db === undefined) return;
-  try {
-    const statement = db.prepare(sql);
-    await db.batch([statement.bind(...params)]);
-  } catch (error) {
-    console.error(
-      "agent evidence control projection failed; tenant object remains authoritative",
-      error,
-    );
-  }
 }

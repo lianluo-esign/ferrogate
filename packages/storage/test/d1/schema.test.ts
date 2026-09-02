@@ -98,8 +98,6 @@ const RELOCATING_TO_TENANT = ["spend_throttles", "quota_policies"] as const;
 
 /** Evidence whose authority is tenant-local but whose compatibility projection remains in CONTROL. */
 const DERIVED_EVIDENCE = [
-  "agent_runs",
-  "agent_run_events",
   "request_logs",
   "guardrail_evaluations",
   "guardrail_check_evaluations",
@@ -107,10 +105,26 @@ const DERIVED_EVIDENCE = [
   "billing_ledger",
   "billing_report_outbox",
   "billing_events",
+] as const;
+
+/**
+ * Tenant-authoritative evidence whose CONTROL compatibility projection has been
+ * DROPPED (Track A red-line): the tenant object is the only copy, every reader
+ * fans out over the tenant objects, and no writer mirrors to control any more.
+ *
+ *  - 0036: the four usage/presence rollups plus the two dead projections.
+ *  - 0037: `agent_runs` / `agent_run_events` (agent-runtime stopped mirroring;
+ *          the control-plane list + timeline read the tenant objects).
+ */
+const DROPPED_CONTROL_PROJECTIONS = [
   "usage_aggregate_rollups",
   "usage_monthly_rollups",
   "usage_metadata_rollups",
   "observed_agent_presence",
+  "managed_worker_isolation_evidence",
+  "online_eval_regressions",
+  "agent_runs",
+  "agent_run_events",
 ] as const;
 
 /** Families that must live ONLY in a tenant database. */
@@ -169,6 +183,15 @@ describe("control / tenant split", () => {
     const tenant = await tableNames(env.TENANT_DB_A);
     for (const table of DERIVED_EVIDENCE) {
       expect(control, `${table} compatibility projection must exist in CONTROL`).toContain(table);
+      expect(tenant, `${table} authority must exist in TENANT`).toContain(table);
+    }
+  });
+
+  test("dropped control projections are absent from CONTROL and authoritative in TENANT", async () => {
+    const control = await tableNames(env.CONTROL_DB);
+    const tenant = await tableNames(env.TENANT_DB_A);
+    for (const table of DROPPED_CONTROL_PROJECTIONS) {
+      expect(control, `${table} mirror must be DROPPED from CONTROL`).not.toContain(table);
       expect(tenant, `${table} authority must exist in TENANT`).toContain(table);
     }
   });

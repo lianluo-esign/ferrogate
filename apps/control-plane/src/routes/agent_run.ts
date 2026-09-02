@@ -20,12 +20,7 @@
 import type { TenantDatabaseRouter } from "@ferrogate/storage";
 import { HttpError } from "../middleware/errors.js";
 import type { CallerScope, StoreRecord } from "../ports.js";
-import {
-  adminListPaginated,
-  adminListPaginatedWithMetadata,
-  derivedControlProjectionMetadata,
-  parseListQuery,
-} from "../responses.js";
+import { adminListPaginated, parseListQuery } from "../responses.js";
 import { provisionedTenantPage, tenantFanoutOffset } from "../store/tenant-fanout.js";
 import { tenantEvidenceDatabaseFor } from "../store/tenancy.js";
 import {
@@ -41,22 +36,21 @@ import {
 } from "./resource.js";
 
 /**
- * PORT-TODO(P: inventory-edge-control §agent-worker) — these three read document
- * collections (`agent-runs`, `agent-run-events`, `self-hosted-runs`,
- * `self-hosted-run-events`) that nothing writes, so the operator-facing run
- * evidence is empty on every deployment.
+ * PORT-TODO(P: inventory-edge-control §agent-worker) — the run authority is the
+ * `apps/agent-runtime` `AgentRunState` Durable Object keyed
+ * `${tenant_id}:${run_id}`, projected into each tenant's OWN evidence database.
+ * The control schema's `agent_runs` / `agent_run_events` tables were derived
+ * cross-tenant compatibility projections; mirroring tenant data into the shared
+ * control store is the red line #859/#881 closed, so NEITHER the LIST nor the
+ * `{run_id}` TIMELINE reads them: a tenant-scoped read hits the exact object, a
+ * platform operator's LIST is a bounded roster fan-out (`fleetAgentRunPage`,
+ * mirroring `admin_spend_anomaly.ts`), and the TIMELINE for an operator naming no
+ * tenant is a whole-roster fan-out (`findRunOwners`) that preserves the 409
+ * `ambiguous_agent_run_id` collision contract by reporting when more than one
+ * object owns the id.
  *
- * The runs are real, and their authority is the `apps/agent-runtime`
- * `AgentRunState` Durable Object keyed `${tenant_id}:${run_id}`, projected into
- * each tenant's OWN evidence database. The control schema's `agent_runs` /
- * `agent_run_events` tables were derived cross-tenant compatibility projections;
- * mirroring tenant data into the shared control store is the red line #859/#881
- * closed, so the LIST no longer reads them: a tenant-scoped list reads the exact
- * object, and a platform operator's list is a bounded live fan-out over the
- * roster page (`fleetAgentRunPage`, mirroring `admin_spend_anomaly.ts`). The
- * `{run_id}` TIMELINE still reads the control projection for a platform operator
- * naming no tenant — its cross-object collision contract (409
- * `ambiguous_agent_run_id`) needs a fan-out design of its own and is a follow-up.
+ * The `self-hosted-runs` timeline still routes through the generic sub-list
+ * reader (`subListHandler`) against the control store — a separate follow-up.
  */
 
 const AGENT_RUN_COLUMNS = "id, request_id, tenant, started_at_unix, completed_at_unix, run_json";
@@ -231,83 +225,111 @@ function listAgentRunsHandler(): Handler {
   };
 }
 
+/**
+ * The tenant objects that own a run id, found by a whole-roster live fan-out.
+ *
+ * A run id is unique only WITHIN a tenant (its `AgentRunState` object is keyed
+ * `${tenant_id}:${run_id}`), so a platform operator naming no tenant cannot know
+ * which object holds it — or whether more than one does — without asking every
+ * object. Each check is a single indexed point lookup on the `agent_runs` primary
+ * key, and the scan STOPS as soon as a second owner appears, so the ambiguous
+ * case never fans out past the collision it reports. An unreachable object
+ * contributes nothing rather than failing the read, exactly as `fleetAgentRunPage`
+ * and the finops sweep isolate a bad object. This is the last reader of the
+ * retired cross-tenant control `agent_runs` projection (#859/#881) in this file.
+ */
+async function findRunOwners(
+  router: TenantDatabaseRouter,
+  runId: string,
+): Promise<{ tenantId: string; db: D1Database }[]> {
+  const owners: { tenantId: string; db: D1Database }[] = [];
+  for (const tenantId of [...(await router.provisionedTenants())].sort()) {
+    let db: D1Database;
+    try {
+      db = await tenantEvidenceDatabaseFor(router, tenantId);
+    } catch {
+      continue;
+    }
+    const run = await db
+      .prepare("SELECT id FROM agent_runs WHERE id = ? AND tenant = ?")
+      .bind(runId, tenantId)
+      .first<Record<string, unknown>>();
+    if (run !== null) {
+      owners.push({ tenantId, db });
+      if (owners.length > 1) break; // already ambiguous — stop scanning the roster
+    }
+  }
+  return owners;
+}
+
 function agentRunTimelineHandler(): Handler {
   return async (c) => {
     const deps = depsOf(c);
     const scope = scopeOf(c);
     const runId = pathParam(c, "run_id");
+    const url = new URL(c.req.url);
     const requestedTenantId =
       scope.kind === "platform_operator"
-        ? new URL(c.req.url).searchParams.get("tenant_id")?.trim() || null
+        ? url.searchParams.get("tenant_id")?.trim() || null
         : null;
     const selectedTenantId = scope.kind === "tenant" ? scope.tenantId : requestedTenantId;
-    const projectionBacked = scope.kind === "platform_operator" && selectedTenantId === null;
-    const db =
-      selectedTenantId !== null
-        ? await tenantEvidenceDatabaseFor(deps.tenantDatabases, selectedTenantId)
-        : deps.controlDatabase;
-    if (db === null) throw notFound("agent_run", runId);
+    // The same router the tenant-scoped read and the operator LIST route through,
+    // so every timeline path reads the exact objects the list paged over.
+    const router = deps.tenantStorage ?? deps.tenantDatabases;
 
-    let run: Record<string, unknown> | null;
-    if (projectionBacked) {
-      const matches = await db
-        .prepare(
-          `SELECT ${AGENT_RUN_COLUMNS}
-             FROM agent_runs
-            WHERE id = ?
-            ORDER BY tenant ASC`,
-        )
-        .bind(runId)
-        .all<Record<string, unknown>>();
-      if (matches.results.length > 1) {
+    let db: D1Database;
+    let eventTenant: string;
+    if (selectedTenantId !== null) {
+      // A tenant, or an operator naming one: the run lives in that exact object.
+      db = await tenantEvidenceDatabaseFor(router, selectedTenantId);
+      const run = await db
+        .prepare("SELECT id FROM agent_runs WHERE id = ? AND tenant = ?")
+        .bind(runId, selectedTenantId)
+        .first<Record<string, unknown>>();
+      if (run === null) throw notFound("agent_run", runId);
+      eventTenant = selectedTenantId;
+    } else {
+      // A platform operator naming NO tenant: a whole-roster live fan-out. More
+      // than one owning object is the documented 409 collision; the caller
+      // resolves it by naming a `tenant_id` (the branch above).
+      const owners = await findRunOwners(router, runId);
+      if (owners.length > 1) {
         throw new HttpError(
           409,
           "ambiguous_agent_run_id",
           `agent_run ${runId} belongs to multiple tenants; tenant_id is required`,
         );
       }
-      run = matches.results[0] ?? null;
-    } else {
-      run = await db
-        .prepare(
-          `SELECT ${AGENT_RUN_COLUMNS}
-             FROM agent_runs
-            WHERE id = ? AND tenant = ?`,
-        )
-        .bind(runId, selectedTenantId)
-        .first<Record<string, unknown>>();
+      const owner = owners[0];
+      if (owner === undefined) throw notFound("agent_run", runId);
+      db = owner.db;
+      eventTenant = owner.tenantId;
     }
-    if (run === null) throw notFound("agent_run", runId);
 
-    const query = parseListQuery(new URL(c.req.url), deps.listDefaultLimit, deps.listMaxLimit);
-    const eventTenant = selectedTenantId ?? (typeof run.tenant === "string" ? run.tenant : null);
-    const eventFence = eventTenant === null ? " AND tenant IS NULL" : " AND tenant = ?";
-    const eventParams = eventTenant === null ? [runId] : [runId, eventTenant];
+    const query = parseListQuery(url, deps.listDefaultLimit, deps.listMaxLimit);
+    // Agent runs are always tenant-owned (the `AgentRunState` DO is keyed
+    // `${tenant_id}:${run_id}`), so events are fenced to the owning tenant — there
+    // is no NULL-tenant control-projection branch any more.
     const events = await db
       .prepare(
         `SELECT ${AGENT_RUN_EVENT_COLUMNS}, count(*) OVER() AS total
            FROM agent_run_events
-          WHERE run_id = ?${eventFence}
+          WHERE run_id = ? AND tenant = ?
           ORDER BY occurred_at_unix ASC, id ASC
           LIMIT ? OFFSET ?`,
       )
-      .bind(...eventParams, query.limit, query.offset)
+      .bind(runId, eventTenant, query.limit, query.offset)
       .all<Record<string, unknown> & { total?: number }>();
-    const body = projectionBacked
-      ? adminListPaginatedWithMetadata(
-          events.results.map(eventDocument),
-          events.results[0]?.total ?? 0,
-          query.offset,
-          query.limit,
-          derivedControlProjectionMetadata(),
-        )
-      : adminListPaginated(
-          events.results.map(eventDocument),
-          events.results[0]?.total ?? 0,
-          query.offset,
-          query.limit,
-        );
-    return json(c, 200, body);
+    return json(
+      c,
+      200,
+      adminListPaginated(
+        events.results.map(eventDocument),
+        events.results[0]?.total ?? 0,
+        query.offset,
+        query.limit,
+      ),
+    );
   };
 }
 

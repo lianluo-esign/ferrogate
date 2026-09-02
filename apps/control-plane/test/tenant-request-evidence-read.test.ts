@@ -1,9 +1,13 @@
 /**
  * Tenant-authoritative request evidence reads (#859).
  *
- * This suite writes both the real TenantDataObject and the control-D1
- * compatibility projection, then mutates the projection. A read that still
- * treats control D1 as authoritative returns the forged values and fails.
+ * This suite writes the real TenantDataObject and — for `request_logs`, whose
+ * control compatibility projection still exists — the control projection too,
+ * then mutates the projection. A read that still treats the control store as
+ * authoritative returns the forged values and fails. The control `agent_runs` /
+ * `agent_run_events` projections were DROPPED (control migration 0037), so for
+ * agent evidence there is no longer a control decoy to forge: the tenant object
+ * is the only place a run can live.
  */
 import { SELF, env } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -60,45 +64,16 @@ async function seedAuthoritativeEvidence(): Promise<void> {
       document: { source: "control-projection" },
     },
   ]);
-  await db().batch([
-    db()
-      .prepare(
-        `INSERT INTO agent_runs
-           (id, request_id, tenant, started_at_unix, completed_at_unix, run_json)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-      )
-      .bind(RUN_ID, REQUEST_ID, TENANT, 100, 103, JSON.stringify({ source: "control-projection" })),
-    db()
-      .prepare(
-        `INSERT INTO agent_run_events
-           (id, run_id, request_id, tenant, occurred_at_unix, event_json)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-      )
-      .bind(
-        "evidence-event-1",
-        RUN_ID,
-        REQUEST_ID,
-        TENANT,
-        101,
-        JSON.stringify({ source: "control-projection" }),
-      ),
-  ]);
 
-  // The compatibility mirror is mutable and intentionally forged after the
-  // authoritative object has been populated.
-  await db().batch([
-    db()
-      .prepare(
-        "UPDATE request_logs SET route = 'forged-control-route', status_code = 418, request_json = ? WHERE request_id = ?",
-      )
-      .bind(JSON.stringify({ source: "forged-control" }), REQUEST_ID),
-    db()
-      .prepare("UPDATE agent_runs SET run_json = ? WHERE id = ?")
-      .bind(JSON.stringify({ source: "forged-control" }), RUN_ID),
-    db()
-      .prepare("UPDATE agent_run_events SET event_json = ? WHERE id = ?")
-      .bind(JSON.stringify({ source: "forged-control" }), "evidence-event-1"),
-  ]);
+  // The request-log compatibility mirror is mutable and intentionally forged
+  // after the authoritative object has been populated. (No agent-run decoy is
+  // possible any more: control 0037 dropped those projection tables.)
+  await db()
+    .prepare(
+      "UPDATE request_logs SET route = 'forged-control-route', status_code = 418, request_json = ? WHERE request_id = ?",
+    )
+    .bind(JSON.stringify({ source: "forged-control" }), REQUEST_ID)
+    .run();
 }
 
 async function seedObjectEvidence(tenantId: string, source: string, route: string): Promise<void> {
@@ -146,41 +121,6 @@ async function seedObjectEvidence(tenantId: string, source: string, route: strin
   ]);
 }
 
-async function seedDuplicateControlProjection(): Promise<void> {
-  await db().batch([
-    db()
-      .prepare(
-        `INSERT INTO agent_runs
-           (projection_key, id, request_id, tenant, started_at_unix, completed_at_unix, run_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .bind(
-        `projection-${OTHER_TENANT}-${RUN_ID}`,
-        RUN_ID,
-        REQUEST_ID,
-        OTHER_TENANT,
-        100,
-        103,
-        JSON.stringify({ source: "other-control-projection" }),
-      ),
-    db()
-      .prepare(
-        `INSERT INTO agent_run_events
-           (projection_key, id, run_id, request_id, tenant, occurred_at_unix, event_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .bind(
-        `projection-${OTHER_TENANT}-event`,
-        "evidence-event-other",
-        RUN_ID,
-        REQUEST_ID,
-        OTHER_TENANT,
-        101,
-        JSON.stringify({ source: "other-control-projection" }),
-      ),
-  ]);
-}
-
 beforeAll(applySchema);
 
 beforeEach(async () => {
@@ -191,10 +131,8 @@ beforeEach(async () => {
     nativeKeys: [tenantKey("evidence-key", TENANT), tenantKey("other-evidence-key", OTHER_TENANT)],
     rbac: { [TENANT]: ["guardrails.evidence.read"] },
   });
-  await db().batch([
-    db().prepare("DELETE FROM agent_run_events"),
-    db().prepare("DELETE FROM agent_runs"),
-  ]);
+  // The control `agent_runs` / `agent_run_events` projections no longer exist
+  // (0037); only the tenant objects hold agent evidence.
   await resetTenantEvidence();
 });
 
@@ -337,28 +275,38 @@ describe("tenant-authoritative request evidence reads", () => {
     expect(listBody.tenant_page).toMatchObject({ has_more: false });
     expect(listBody.tenant_page?.total).toEqual(expect.any(Number));
 
-    // The {run_id} TIMELINE is a SEPARATE handler still backed by the control
-    // projection for a platform operator naming no tenant — its cross-object
-    // collision contract (409 ambiguous_agent_run_id) needs a fan-out design of
-    // its own and is a deliberate follow-up — so it keeps the projection labels.
+    // The {run_id} TIMELINE is now the SAME DO fan-out: for a platform operator
+    // naming no tenant it scans the roster, finds the single owning object
+    // (TENANT), and serves that object's events — never the forged control
+    // mirror, and with no `derived_control_projection` envelope.
     const timeline = await SELF.fetch(`${BASE}/admin/v1/agent-runs/${RUN_ID}`, {
       headers: bearer(operatorKey.secret),
     });
-    const timelineBody = (await timeline.json()) as Record<string, unknown>;
-    expect(timelineBody.source).toBe("derived_control_projection");
-    expect(timelineBody.as_of_unix).toEqual(expect.any(Number));
+    expect(timeline.status, await timeline.clone().text()).toBe(200);
+    const timelineBody = (await timeline.json()) as Record<string, unknown> & {
+      data: Record<string, unknown>[];
+    };
+    expect(timelineBody.data).toEqual([
+      expect.objectContaining({ id: "evidence-event-1", source: "tenant-object" }),
+    ]);
+    expect(JSON.stringify(timelineBody)).not.toContain("forged-control");
+    expect(timelineBody.source).toBeUndefined();
+    expect(timelineBody.as_of_unix).toBeUndefined();
   });
 
-  it("fences projection timeline events to the selected parent tenant", async () => {
+  it("fences timeline events to the owning tenant even if a foreign-tenant row shares the run id", async () => {
     await seedAuthoritativeEvidence();
-    await db()
+    // Defence in depth: even if the owning object somehow held an event row
+    // stamped with ANOTHER tenant under the SAME run id, the timeline fences on
+    // the owner's tenant (`AND tenant = ?`) and never serves the foreign row.
+    const tenant = await routeTenant(TENANT);
+    await tenant
       .prepare(
         `INSERT INTO agent_run_events
-           (projection_key, id, run_id, request_id, tenant, occurred_at_unix, event_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+           (id, run_id, request_id, tenant, occurred_at_unix, event_json)
+         VALUES (?, ?, ?, ?, ?, ?)`,
       )
       .bind(
-        `projection-${OTHER_TENANT}-foreign-event`,
         "foreign-event",
         RUN_ID,
         REQUEST_ID,
@@ -382,9 +330,11 @@ describe("tenant-authoritative request evidence reads", () => {
   });
 
   it("rejects ambiguous platform timelines and supports an exact tenant selector", async () => {
+    // Two DISTINCT tenant objects both own RUN_ID (a run id is unique only within
+    // a tenant), so an operator naming no tenant hits the 409 collision — the
+    // ambiguity is a real cross-object condition now, not a forged control row.
     await seedAuthoritativeEvidence();
     await seedObjectEvidence(OTHER_TENANT, "other-tenant-object", "other-object-route");
-    await seedDuplicateControlProjection();
 
     const ambiguous = await SELF.fetch(`${BASE}/admin/v1/agent-runs/${RUN_ID}`, {
       headers: bearer(operatorKey.secret),

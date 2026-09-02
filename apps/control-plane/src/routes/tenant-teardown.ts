@@ -12,16 +12,16 @@
  * There is NO contract DELETE for a tenant — decommissioning is modelled as the
  * status transition `PATCH {status:"deleted"}`, which BLOCKS the tenant and
  * de-authenticates its keys but leaves every historical row alive: the DO's ~80
- * tables, the control projections (`agent_runs`, `request_logs`, `audit_events`,
- * usage rollups…), the api-key directory, memberships, quota/spend policies, the
+ * tables, the remaining control projections (`request_logs`, `audit_events`…;
+ * the agent-run and usage mirrors are dropped — 0036/0037), the api-key
+ * directory, memberships, quota/spend policies, the
  * roster row, and the KV/identity caches. Those are the orphans the operator
  * asked to cascade-delete. This route is the one place that reaches all of them.
  *
  * ## The load-bearing ORDER
  *
  * Control-plane evidence projections are RE-MATERIALIZED by live gateway
- * traffic (a request from a still-valid key writes `request_logs`/`agent_runs`
- * back). So the cascade must BLOCK FIRST — kill the keys (both hops: the KV
+ * traffic (a request from a still-valid key writes `request_logs` back). So the cascade must BLOCK FIRST — kill the keys (both hops: the KV
  * `akd:v1:*` mirror and the `api_key_directory` row) — and only then purge
  * projections, or the purge races the write-back and loses. Killing keys is
  * therefore step 1, and deleting the `tenants` row (which fence 5 reads) is the
@@ -115,8 +115,6 @@ const CONTROL_TENANT_ID_TABLES: readonly string[] = [
  * the evidence projections use) — deleted with `WHERE tenant = ?`.
  */
 const CONTROL_TENANT_TABLES: readonly string[] = [
-  "agent_runs",
-  "agent_run_events",
   "request_logs",
   "audit_events", // the control PROJECTION rows; the R2 anchor chain is kept
   "delegation_revocations",

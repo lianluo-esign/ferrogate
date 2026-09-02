@@ -104,8 +104,6 @@ export const CONTROL_BACKFILL_TABLES: readonly ControlBackfillTable[] = Object.f
   table("admin_user_refresh_tokens", ["id"]),
   table("admin_user_tenant_memberships", ["id"]),
   table("admin_users", ["id"]),
-  table("agent_run_events", ["projection_key"]),
-  table("agent_runs", ["projection_key"]),
   table("agent_worker_instances", ["id"]),
   table("api_key_directory", ["key_hash"]),
   table("audit_events", ["projection_key"]),
