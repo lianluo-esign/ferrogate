@@ -110,6 +110,41 @@ describe("PlatformBillingGroupStore", () => {
     expect(await auditActions()).toEqual(["create", "merge", "merge"]);
   });
 
+  it("round-trips the bilingual display variants, normalizing blank to null (中英双语)", async () => {
+    const s = store();
+
+    // Create with both variants populated: they survive the round-trip verbatim.
+    const created = await s.createGroup(OPERATOR, {
+      id: "g-bi",
+      name: "Enterprise",
+      name_zh: "企业版",
+      multiplier: 2,
+      description: "Marked-up tier",
+      description_zh: "面向企业的加价档",
+    });
+    expect(created.name_zh).toBe("企业版");
+    expect(created.description_zh).toBe("面向企业的加价档");
+
+    // A blank variant normalizes to null, so the frontend falls back to `name`
+    // rather than preferring an empty string.
+    const blank = await s.createGroup(OPERATOR, {
+      id: "g-blank",
+      name: "Basic",
+      name_zh: "   ",
+      multiplier: 1,
+    });
+    expect(blank.name_zh).toBeNull();
+    expect(blank.description_zh).toBeNull();
+
+    // Patch clears the Chinese name (explicit null) while leaving `name` intact.
+    const cleared = await s.updateGroup(OPERATOR, "g-bi", { name_zh: null });
+    expect(cleared.name).toBe("Enterprise");
+    expect(cleared.name_zh).toBeNull();
+    // A patch that names neither zh field leaves the stored variant untouched.
+    const untouched = await s.updateGroup(OPERATOR, "g-bi", { multiplier: 3 });
+    expect(untouched.description_zh).toBe("面向企业的加价档");
+  });
+
   it("updates the multiplier and reflects it in the snapshot the gateway reads", async () => {
     const s = store();
     await s.createGroup(OPERATOR, { id: "g", name: "G", multiplier: 1.0 });

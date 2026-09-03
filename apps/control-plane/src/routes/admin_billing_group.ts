@@ -60,9 +60,14 @@ const groupCreateSchema = z
   .object({
     id: z.string().trim().min(1).optional(),
     name: z.string().trim().min(1),
+    // Chinese display variant (中英双语): optional, nullable. The canonical `name`
+    // stays the fallback, so a group without a `name_zh` renders its English name
+    // in both locales.
+    name_zh: z.string().nullable().optional(),
     provider_type_id: z.enum(PROVIDER_TYPE_IDS).default(DEFAULT_PROVIDER_TYPE_ID),
     multiplier: z.number().nonnegative(),
     description: z.string().nullable().optional(),
+    description_zh: z.string().nullable().optional(),
     enabled: z.boolean().optional(),
   })
   .strict();
@@ -70,9 +75,11 @@ const groupCreateSchema = z
 const groupPatchSchema = z
   .object({
     name: z.string().trim().min(1).optional(),
+    name_zh: z.string().nullable().optional(),
     provider_type_id: z.enum(PROVIDER_TYPE_IDS).optional(),
     multiplier: z.number().nonnegative().optional(),
     description: z.string().nullable().optional(),
+    description_zh: z.string().nullable().optional(),
     enabled: z.boolean().optional(),
   })
   .strict();
@@ -191,9 +198,11 @@ async function createBillingGroup(c: Parameters<Handler>[0]): Promise<Response> 
   const input: BillingGroupInput = {
     id: body.id ?? crypto.randomUUID(),
     name: body.name,
+    name_zh: body.name_zh ?? null,
     provider_type_id: body.provider_type_id,
     multiplier: body.multiplier,
     description: body.description ?? null,
+    description_zh: body.description_zh ?? null,
     enabled: body.enabled,
   };
   const record = await billingGroupStore(c).createGroup(scope, input);

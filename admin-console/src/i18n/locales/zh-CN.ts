@@ -593,9 +593,11 @@ export const zhCN = {
   "resource.billingGroups.col.description": "描述",
   "resource.billingGroups.col.providers": "提供商",
   "resource.billingGroups.col.enabled": "已启用",
-  "resource.billingGroups.field.name": "名称",
+  "resource.billingGroups.field.name": "名称(英文)",
+  "resource.billingGroups.field.nameZh": "名称(中文)",
   "resource.billingGroups.field.multiplier": "倍率",
-  "resource.billingGroups.field.description": "描述",
+  "resource.billingGroups.field.description": "描述(英文)",
+  "resource.billingGroups.field.descriptionZh": "描述(中文)",
   "resource.billingGroups.field.enabled": "已启用",
 
   // 平台公告 (#948)。
@@ -2171,6 +2173,8 @@ export const zhCN = {
     "此操作会删除该分组及其全部提供商绑定。指向它的密钥将回退到未分组价格。此操作无法撤销。",
   "page.billingGroups.field.multiplier.hint":
     "应用于所绑定提供商的官方定价。必须大于或等于 0（1 表示不加价）。",
+  "page.billingGroups.field.name.hint": "默认名称,向未配置对应语言变体的客户展示。",
+  "page.billingGroups.field.localized.hint": "向使用该语言的客户展示;留空则回退到默认名称。",
   "page.billingGroups.toast.created": "计费分组已创建。",
   "page.billingGroups.toast.updated": "计费分组已更新。",
   "page.billingGroups.toast.deleted": "计费分组已删除。",

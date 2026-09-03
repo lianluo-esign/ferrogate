@@ -1209,9 +1209,14 @@ async function listSharedBillingGroupsHandler(c: Context<ControlPlaneEnv>): Prom
     .map((group) => ({
       id: group.id,
       name: group.name,
+      // Bilingual display (中英双语): the Vega frontend picks `name_zh`/
+      // `description_zh` when its locale is `zh-CN`, falling back to the canonical
+      // `name`/`description` when the operator left a variant blank (null here).
+      name_zh: group.name_zh,
       provider_type_id: group.provider_type_id,
       multiplier: group.multiplier,
       description: group.description,
+      description_zh: group.description_zh,
       enabled: group.enabled,
       provider_ids: group.provider_ids,
     }));

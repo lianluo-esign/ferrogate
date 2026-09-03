@@ -9913,20 +9913,28 @@ export interface components {
             /** @constant */
             scope: "platform";
             name: string;
+            /** @description Chinese (zh-CN) display variant of name; null falls back to name. */
+            name_zh: string | null;
             /** @enum {string|null} */
             provider_type_id: "openai" | "anthropic" | "gemini" | "minimax" | "deepseek" | "grok" | null;
             multiplier: number;
             description?: string | null;
+            /** @description Chinese (zh-CN) display variant of description; null falls back to description. */
+            description_zh: string | null;
             enabled: boolean;
             provider_ids: string[];
         };
         BillingGroupMutation: {
             id?: string;
             name: string;
+            /** @description Chinese (zh-CN) display variant of name; null/blank falls back to name. */
+            name_zh?: string | null;
             /** @enum {string} */
             provider_type_id?: "openai" | "anthropic" | "gemini" | "minimax" | "deepseek" | "grok";
             multiplier: number;
             description?: string | null;
+            /** @description Chinese (zh-CN) display variant of description; null/blank falls back to description. */
+            description_zh?: string | null;
             enabled?: boolean;
         };
         /** @description A platform announcement (公告) shared read-only to every tenant. */
@@ -16765,10 +16773,14 @@ export interface operations {
                         data: {
                             id: string;
                             name: string;
+                            /** @description Chinese (zh-CN) display variant of name; null falls back to name. */
+                            name_zh: string | null;
                             /** @enum {string|null} */
                             provider_type_id: "openai" | "anthropic" | "gemini" | "minimax" | "deepseek" | "grok" | null;
                             multiplier: number;
                             description?: string | null;
+                            /** @description Chinese (zh-CN) display variant of description; null falls back to description. */
+                            description_zh: string | null;
                             enabled: boolean;
                             provider_ids: string[];
                         }[];

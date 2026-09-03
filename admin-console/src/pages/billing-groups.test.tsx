@@ -27,8 +27,10 @@ function group(overrides: Partial<AdminBillingGroup> = {}): AdminBillingGroup {
     id: "bg-1",
     scope: "platform",
     name: "Enterprise",
+    name_zh: null,
     multiplier: 1.5,
     description: "Marked-up tier",
+    description_zh: null,
     enabled: true,
     provider_ids: [],
     ...overrides,
@@ -182,7 +184,7 @@ describe("billing-groups CRUD", () => {
 
     await flipToPlatform();
     await userEvent.click(screen.getByRole("button", { name: "New" }));
-    await userEvent.type(await screen.findByLabelText("Name *"), "Startup");
+    await userEvent.type(await screen.findByLabelText("Name (English) *"), "Startup");
     const multiplier = screen.getByLabelText("Multiplier *");
     await userEvent.clear(multiplier);
     await userEvent.type(multiplier, "2.5");
@@ -194,12 +196,39 @@ describe("billing-groups CRUD", () => {
     expect(post.authorization).toBe(`Bearer ${OPERATOR_KEY}`);
     expect(post.body).toMatchObject({
       name: "Startup",
+      // No Chinese variant typed → null, so the frontend falls back to `name`.
+      name_zh: null,
       multiplier: 2.5,
       description: null,
+      description_zh: null,
       enabled: true,
     });
     expect(post.body).not.toHaveProperty("tenant_id");
     expect(new URL(post.url).searchParams.has("tenant_id")).toBe(false);
+  });
+
+  it("sends the Chinese display variants when the operator fills them in (中英双语)", async () => {
+    const { writes } = stubBillingGroups([]);
+    renderPage();
+    await screen.findByText("No billing groups yet.");
+
+    await flipToPlatform();
+    await userEvent.click(screen.getByRole("button", { name: "New" }));
+    await userEvent.type(await screen.findByLabelText("Name (English) *"), "Enterprise");
+    await userEvent.type(screen.getByLabelText("Name (中文)"), "企业版");
+    await userEvent.type(screen.getByLabelText("Description (中文)"), "面向企业的加价档");
+    const multiplier = screen.getByLabelText("Multiplier *");
+    await userEvent.clear(multiplier);
+    await userEvent.type(multiplier, "1.5");
+    await userEvent.click(screen.getByRole("button", { name: "Create" }));
+
+    await waitFor(() => expect(writes).toHaveLength(1));
+    expect(writes[0].body).toMatchObject({
+      name: "Enterprise",
+      name_zh: "企业版",
+      description_zh: "面向企业的加价档",
+      multiplier: 1.5,
+    });
   });
 
   it("edits the multiplier through a PATCH", async () => {

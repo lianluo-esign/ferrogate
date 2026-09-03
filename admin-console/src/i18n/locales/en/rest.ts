@@ -554,9 +554,11 @@ export const enRest = {
   "resource.billingGroups.col.description": "Description",
   "resource.billingGroups.col.providers": "Providers",
   "resource.billingGroups.col.enabled": "Enabled",
-  "resource.billingGroups.field.name": "Name",
+  "resource.billingGroups.field.name": "Name (English)",
+  "resource.billingGroups.field.nameZh": "Name (中文)",
   "resource.billingGroups.field.multiplier": "Multiplier",
-  "resource.billingGroups.field.description": "Description",
+  "resource.billingGroups.field.description": "Description (English)",
+  "resource.billingGroups.field.descriptionZh": "Description (中文)",
   "resource.billingGroups.field.enabled": "Enabled",
 
   // Platform announcements (公告, #948). Resource row/column/field copy; the
@@ -2204,6 +2206,10 @@ export const enRest = {
     "This removes the group and all of its provider bindings. Keys pointing at it fall back to the ungrouped price. This cannot be undone.",
   "page.billingGroups.field.multiplier.hint":
     "Applied to the bound providers' official offering prices. Must be 0 or greater (1 = no markup).",
+  "page.billingGroups.field.name.hint":
+    "The default name, shown to customers whose language has no localized variant below.",
+  "page.billingGroups.field.localized.hint":
+    "Shown to customers using this language; leave blank to fall back to the default.",
   "page.billingGroups.toast.created": "Billing group created.",
   "page.billingGroups.toast.updated": "Billing group updated.",
   "page.billingGroups.toast.deleted": "Billing group deleted.",

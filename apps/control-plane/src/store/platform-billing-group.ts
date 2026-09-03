@@ -70,27 +70,35 @@ function isAuditAppendError(error: unknown): boolean {
 export interface BillingGroupInput {
   readonly id: string;
   readonly name: string;
+  /** Chinese display variant of `name`; null/blank means "fall back to name". */
+  readonly name_zh?: string | null;
   readonly provider_type_id?: ProviderTypeId;
   readonly multiplier: number;
   readonly description?: string | null;
+  /** Chinese display variant of `description`; null/blank means fall back. */
+  readonly description_zh?: string | null;
   readonly enabled?: boolean;
 }
 
 /** A partial edit; only present keys are touched. */
 export interface BillingGroupPatch {
   readonly name?: string;
+  readonly name_zh?: string | null;
   readonly provider_type_id?: ProviderTypeId;
   readonly multiplier?: number;
   readonly description?: string | null;
+  readonly description_zh?: string | null;
   readonly enabled?: boolean;
 }
 
 interface GroupRow {
   id: string;
   name: string;
+  name_zh: string | null;
   provider_type_id: string | null;
   multiplier: number;
   description: string | null;
+  description_zh: string | null;
   enabled: number;
 }
 
@@ -104,9 +112,13 @@ export interface BillingGroupRecord extends StoreRecord {
   readonly id: string;
   readonly scope: typeof PLATFORM_SCOPE;
   readonly name: string;
+  /** Chinese display variant of `name`, or null when none was configured. */
+  readonly name_zh: string | null;
   readonly provider_type_id: ProviderTypeId | null;
   readonly multiplier: number;
   readonly description: string | null;
+  /** Chinese display variant of `description`, or null when none configured. */
+  readonly description_zh: string | null;
   readonly enabled: boolean;
   readonly provider_ids: readonly string[];
 }
@@ -118,19 +130,34 @@ export interface BillingGroupMultiplier {
   readonly enabled: boolean;
 }
 
-const GROUP_SELECT = `SELECT id, name, provider_type_id, multiplier, description, enabled FROM ${BILLING_GROUP_TABLE}`;
+const GROUP_SELECT = `SELECT id, name, name_zh, provider_type_id, multiplier, description, description_zh, enabled FROM ${BILLING_GROUP_TABLE}`;
 
 function groupRecord(row: GroupRow, providerIds: readonly string[]): BillingGroupRecord {
   return {
     id: row.id,
     scope: PLATFORM_SCOPE,
     name: row.name,
+    name_zh: row.name_zh ?? null,
     provider_type_id: isProviderTypeId(row.provider_type_id) ? row.provider_type_id : null,
     multiplier: Number(row.multiplier),
     description: row.description,
+    description_zh: row.description_zh ?? null,
     enabled: boolValue(row.enabled, true),
     provider_ids: providerIds,
   };
+}
+
+/**
+ * Normalize an optional localized display string: trim, and treat blank as
+ * ABSENT (`null`) so an empty box in the console does not persist an empty
+ * string the frontend would then prefer over the canonical fallback. `undefined`
+ * (key not present in a patch) stays `undefined` so the column is left untouched.
+ */
+function normalizeLocalized(value: string | null | undefined): string | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  const trimmed = value.trim();
+  return trimmed.length === 0 ? null : trimmed;
 }
 
 export interface PlatformBillingGroupStoreOptions {
@@ -237,16 +264,18 @@ export class PlatformBillingGroupStore {
       this.#db
         .prepare(
           `INSERT OR IGNORE INTO ${BILLING_GROUP_TABLE}
-             (id, name, provider_type_id, multiplier, description, enabled,
-              created_at_unix, updated_at_unix)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+             (id, name, name_zh, provider_type_id, multiplier, description, description_zh,
+              enabled, created_at_unix, updated_at_unix)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .bind(
           input.id,
           normalized.name,
+          normalizeLocalized(input.name_zh) ?? null,
           providerTypeId,
           normalized.multiplier,
           input.description ?? null,
+          normalizeLocalized(input.description_zh) ?? null,
           boolSql(input.enabled),
           now,
           now,
@@ -273,6 +302,10 @@ export class PlatformBillingGroupStore {
       fields.push("name = ?");
       values.push(name);
     }
+    if (hasOwn(patch, "name_zh")) {
+      fields.push("name_zh = ?");
+      values.push(normalizeLocalized(patch.name_zh) ?? null);
+    }
     if (hasOwn(patch, "provider_type_id")) {
       const providerTypeId = this.#validateProviderType(patch.provider_type_id);
       if (!(await this.#boundProvidersSupportType(id, providerTypeId))) {
@@ -291,6 +324,10 @@ export class PlatformBillingGroupStore {
     if (hasOwn(patch, "description")) {
       fields.push("description = ?");
       values.push(patch.description ?? null);
+    }
+    if (hasOwn(patch, "description_zh")) {
+      fields.push("description_zh = ?");
+      values.push(normalizeLocalized(patch.description_zh) ?? null);
     }
     if (hasOwn(patch, "enabled")) {
       fields.push("enabled = ?");

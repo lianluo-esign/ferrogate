@@ -28,9 +28,11 @@ const OPERATOR = operatorKey.secret;
 type GroupRecord = {
   id: string;
   name: string;
+  name_zh: string | null;
   provider_type_id: string | null;
   multiplier: number;
   description: string | null;
+  description_zh: string | null;
   enabled: boolean;
   provider_ids: string[];
 };
@@ -116,14 +118,45 @@ describe("tenant reads the account-global shared billing groups", () => {
     expect(data[1]).toEqual({
       id: "bg_std",
       name: "Standard",
+      // No Chinese variant configured → null; the Vega frontend falls back to name.
+      name_zh: null,
       provider_type_id: "openai",
       multiplier: 1.5,
       description: "std",
+      description_zh: null,
       enabled: true,
       provider_ids: ["chan_openai"],
     });
     expect(typeof data[0]?.multiplier).toBe("number");
     expect(data[0]?.provider_ids).toEqual([]);
+  });
+
+  it("projects the Chinese display variants so the Vega frontend can switch language (中英双语)", async () => {
+    expect(
+      await createGroup({
+        id: "bg_bi",
+        name: "Enterprise",
+        name_zh: "企业版",
+        multiplier: 2,
+        description: "Marked-up tier",
+        description_zh: "面向企业的加价档",
+      }),
+    ).toBe(201);
+    // A group with only the English canonical value: its zh variants stay null so
+    // the frontend falls back to `name`/`description`.
+    expect(await createGroup({ id: "bg_en", name: "Basic", multiplier: 1 })).toBe(201);
+
+    const { status, data } = await read(TENANT_A_SECRET);
+    expect(status).toBe(200);
+    const bilingual = data.find((g) => g.id === "bg_bi");
+    expect(bilingual?.name).toBe("Enterprise");
+    expect(bilingual?.name_zh).toBe("企业版");
+    expect(bilingual?.description).toBe("Marked-up tier");
+    expect(bilingual?.description_zh).toBe("面向企业的加价档");
+    const englishOnly = data.find((g) => g.id === "bg_en");
+    expect(englishOnly?.name).toBe("Basic");
+    expect(englishOnly?.name_zh).toBeNull();
+    expect(englishOnly?.description_zh).toBeNull();
   });
 
   it("serves the identical account-global set to every tenant", async () => {

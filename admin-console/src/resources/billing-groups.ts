@@ -34,7 +34,7 @@ export interface BillingGroupColumn {
 }
 
 export interface BillingGroupField {
-  name: "name" | "multiplier" | "description" | "enabled";
+  name: "name" | "name_zh" | "multiplier" | "description" | "description_zh" | "enabled";
   labelKey: TranslationKey;
   type: "text" | "number" | "textarea" | "boolean";
   required?: boolean;
@@ -63,6 +63,11 @@ export const billingGroupsResource = {
       required: true,
     },
     {
+      name: "name_zh",
+      labelKey: "resource.billingGroups.field.nameZh",
+      type: "text",
+    },
+    {
       name: "multiplier",
       labelKey: "resource.billingGroups.field.multiplier",
       type: "number",
@@ -72,6 +77,11 @@ export const billingGroupsResource = {
     {
       name: "description",
       labelKey: "resource.billingGroups.field.description",
+      type: "textarea",
+    },
+    {
+      name: "description_zh",
+      labelKey: "resource.billingGroups.field.descriptionZh",
       type: "textarea",
     },
     {

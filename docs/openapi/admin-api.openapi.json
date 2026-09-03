@@ -7729,8 +7729,10 @@
                         "required": [
                           "id",
                           "name",
+                          "name_zh",
                           "provider_type_id",
                           "multiplier",
+                          "description_zh",
                           "enabled",
                           "provider_ids"
                         ],
@@ -7740,6 +7742,11 @@
                           },
                           "name": {
                             "type": "string"
+                          },
+                          "name_zh": {
+                            "type": "string",
+                            "nullable": true,
+                            "description": "Chinese (zh-CN) display variant of name; null falls back to name."
                           },
                           "provider_type_id": {
                             "type": [
@@ -7762,6 +7769,11 @@
                           "description": {
                             "type": "string",
                             "nullable": true
+                          },
+                          "description_zh": {
+                            "type": "string",
+                            "nullable": true,
+                            "description": "Chinese (zh-CN) display variant of description; null falls back to description."
                           },
                           "enabled": {
                             "type": "boolean"
@@ -38000,6 +38012,13 @@
           "name": {
             "type": "string"
           },
+          "name_zh": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Chinese (zh-CN) display variant of name; null falls back to name."
+          },
           "provider_type_id": {
             "type": [
               "string",
@@ -38025,6 +38044,13 @@
               "null"
             ]
           },
+          "description_zh": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Chinese (zh-CN) display variant of description; null falls back to description."
+          },
           "enabled": {
             "type": "boolean"
           },
@@ -38039,8 +38065,10 @@
           "id",
           "scope",
           "name",
+          "name_zh",
           "provider_type_id",
           "multiplier",
+          "description_zh",
           "enabled",
           "provider_ids"
         ]
@@ -38055,6 +38083,13 @@
           "name": {
             "type": "string",
             "minLength": 1
+          },
+          "name_zh": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Chinese (zh-CN) display variant of name; null/blank falls back to name."
           },
           "provider_type_id": {
             "type": "string",
@@ -38076,6 +38111,13 @@
               "string",
               "null"
             ]
+          },
+          "description_zh": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Chinese (zh-CN) display variant of description; null/blank falls back to description."
           },
           "enabled": {
             "type": "boolean"

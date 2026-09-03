@@ -53,20 +53,24 @@ import { toast } from "sonner";
 
 interface GroupFormState {
   name: string;
+  nameZh: string;
   multiplier: string;
   description: string;
+  descriptionZh: string;
   enabled: boolean;
 }
 
 function emptyForm(): GroupFormState {
-  return { name: "", multiplier: "1", description: "", enabled: true };
+  return { name: "", nameZh: "", multiplier: "1", description: "", descriptionZh: "", enabled: true };
 }
 
 function formFromGroup(group: BillingGroup): GroupFormState {
   return {
     name: group.name,
+    nameZh: group.name_zh ?? "",
     multiplier: String(group.multiplier),
     description: group.description ?? "",
+    descriptionZh: group.description_zh ?? "",
     enabled: group.enabled,
   };
 }
@@ -220,10 +224,14 @@ export default function BillingGroupsPage() {
       return;
     }
     const description = form.description.trim();
+    const nameZh = form.nameZh.trim();
+    const descriptionZh = form.descriptionZh.trim();
     const body: BillingGroupMutation = {
       name,
+      name_zh: nameZh === "" ? null : nameZh,
       multiplier,
       description: description === "" ? null : description,
+      description_zh: descriptionZh === "" ? null : descriptionZh,
       enabled: form.enabled,
     };
     if (editing) {
@@ -339,6 +347,20 @@ export default function BillingGroupsPage() {
                 value={form.name}
                 onChange={(event) => setForm((prev) => ({ ...prev, name: event.target.value }))}
               />
+              <p className="text-xs text-muted-foreground">
+                {t("page.billingGroups.field.name.hint")}
+              </p>
+            </div>
+            <div className="grid gap-1.5">
+              <Label htmlFor="name_zh">{t("resource.billingGroups.field.nameZh")}</Label>
+              <Input
+                id="name_zh"
+                value={form.nameZh}
+                onChange={(event) => setForm((prev) => ({ ...prev, nameZh: event.target.value }))}
+              />
+              <p className="text-xs text-muted-foreground">
+                {t("page.billingGroups.field.localized.hint")}
+              </p>
             </div>
             <div className="grid gap-1.5">
               <Label htmlFor="multiplier">{t("resource.billingGroups.field.multiplier")} *</Label>
@@ -365,6 +387,21 @@ export default function BillingGroupsPage() {
                   setForm((prev) => ({ ...prev, description: event.target.value }))
                 }
               />
+            </div>
+            <div className="grid gap-1.5">
+              <Label htmlFor="description_zh">
+                {t("resource.billingGroups.field.descriptionZh")}
+              </Label>
+              <Textarea
+                id="description_zh"
+                value={form.descriptionZh}
+                onChange={(event) =>
+                  setForm((prev) => ({ ...prev, descriptionZh: event.target.value }))
+                }
+              />
+              <p className="text-xs text-muted-foreground">
+                {t("page.billingGroups.field.localized.hint")}
+              </p>
             </div>
             <div className="flex items-center gap-2">
               <Switch
