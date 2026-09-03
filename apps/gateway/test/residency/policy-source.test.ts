@@ -124,6 +124,49 @@ describe("the D1 source binds the tenant, and only the tenant scope", () => {
   });
 });
 
+describe("the relocated quota_policies seek keeps placement on control (Track A)", () => {
+  it("reads the policy from the tenant object but the placement roster from control", async () => {
+    const control = fakeDb({ tenant_eu: { jurisdiction: "eu", location_hint: "weur" } });
+    const tenant = fakeDb({
+      tenant_eu: { residency_regions_json: '["eu-west-1"]', require_zero_data_retention: 0 },
+    });
+
+    const resolved = await d1ResidencyPolicySource(
+      control.db,
+      async () => tenant.db,
+    ).policyFor("tenant_eu");
+
+    expect(resolved).toMatchObject({
+      ok: true,
+      policy: { allowedRegions: ["eu-west-1"] },
+      jurisdiction: "eu",
+      locationHint: "weur",
+    });
+    // The per-tenant governance row moves to the tenant's OWN object…
+    expect(tenant.bound).toHaveLength(1);
+    expect(String(tenant.bound[0]?.[0])).toContain("quota_policies");
+    expect(String(tenant.bound[0]?.[0])).toContain("scope_id = ?");
+    // …but `tenant_databases` is account-global control state, not a per-tenant
+    // mirror, so that seek deliberately STAYS on control.
+    expect(control.bound).toHaveLength(1);
+    expect(String(control.bound[0]?.[0])).toContain("tenant_databases");
+    expect(String(control.bound[0]?.[0])).not.toContain("quota_policies");
+  });
+
+  it("reads a resolver refusal as an outage (fail-closed), never as 'not governed'", async () => {
+    const control = fakeDb({ tenant_eu: { jurisdiction: "eu" } });
+
+    const resolved = await d1ResidencyPolicySource(control.db, async () => {
+      throw new Error("tenant tenant_eu has no resolvable tenant database: unbound");
+    }).policyFor("tenant_eu");
+
+    // Fail CLOSED: an unreadable residency policy read as "not governed" would
+    // serve possibly out of region. The placement seek is never reached.
+    expect(resolved.ok).toBe(false);
+    expect(control.bound).toHaveLength(0);
+  });
+});
+
 describe("residency and the object namespace cannot disagree", () => {
   it("refuses a policy jurisdiction different from the recorded object", () => {
     expect(() => jurisdictionForPolicyAndAddress("eu", "us")).toThrow(

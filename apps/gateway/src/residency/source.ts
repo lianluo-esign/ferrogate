@@ -51,6 +51,10 @@ import {
 } from "@ferrogate/storage";
 import { controlDatabaseFrom } from "../control-data.js";
 import {
+  type QuotaPolicySourceBindings,
+  tenantQuotaPolicyDbFrom,
+} from "../tenancy/quota-policy-source.js";
+import {
   type ResidencyPolicy,
   type ResidencyPolicyRow,
   parseResidencyPolicyRow,
@@ -74,7 +78,7 @@ const SELECT_TENANT_JURISDICTION =
   "SELECT jurisdiction, location_hint FROM tenant_databases WHERE tenant_id = ?";
 
 /** Worker vars and bindings this slice reads. */
-export interface ResidencyBindings {
+export interface ResidencyBindings extends QuotaPolicySourceBindings {
   /**
    * DEV/TEST fallback: a JSON array of
    * `{ tenant_id, residency_regions, require_zero_data_retention, log_residency }`,
@@ -180,13 +184,29 @@ export function residencyPolicySourceFromVars(env: ResidencyBindings): Residency
   };
 }
 
-/** The durable source — one indexed seek against the CONTROL database. */
-export function d1ResidencyPolicySource(db: ResidencyDatabase): ResidencyPolicySource {
+/**
+ * The durable source — the `quota_policies` seek against the tenant's own row,
+ * plus the tenant PLACEMENT seek that STAYS on control.
+ *
+ * `quotaDbFor`, when supplied, relocates ONLY the `quota_policies` seek to the
+ * tenant's OWN object (Track A red line); `undefined` reads control `db` as
+ * before. The `tenant_databases` jurisdiction/location_hint seek deliberately
+ * does NOT move — that placement roster is account-global control state, not a
+ * per-tenant mirror, so it keeps reading `db`. Both seeks fail CLOSED: a
+ * resolver refusal is awaited inside the try and becomes `ok: false` → `503`,
+ * because an unreadable residency policy read as "not governed" serves possibly
+ * out of region and nobody finds out.
+ */
+export function d1ResidencyPolicySource(
+  db: ResidencyDatabase,
+  quotaDbFor?: (tenantId: string) => Promise<ResidencyDatabase>,
+): ResidencyPolicySource {
   return {
     async policyFor(tenantId: string): Promise<ResidencyResolution> {
       let row: Record<string, unknown> | null;
       try {
-        row = await db.prepare(SELECT_TENANT_POLICY).bind(tenantId).first();
+        const quotaDb = quotaDbFor === undefined ? db : await quotaDbFor(tenantId);
+        row = await quotaDb.prepare(SELECT_TENANT_POLICY).bind(tenantId).first();
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
         if (schemaPredatesResidency(detail)) return { ok: true, policy: null };
@@ -366,7 +386,9 @@ export function residencyPolicySourceFromEnv(env: ResidencyBindings): ResidencyP
   if (memoized !== undefined) return memoized;
   const db = controlDatabaseFrom(env);
   const source = cachedResidencyPolicySource(
-    db === undefined ? residencyPolicySourceFromVars(env) : d1ResidencyPolicySource(db),
+    db === undefined
+      ? residencyPolicySourceFromVars(env)
+      : d1ResidencyPolicySource(db, tenantQuotaPolicyDbFrom(env)),
   );
   SOURCES.set(key, source);
   return source;

@@ -150,6 +150,36 @@ describe("the D1 source binds the tenant, and only the tenant scope", () => {
   });
 });
 
+describe("the relocated quota_policies seek (Track A)", () => {
+  it("reads the tenant's OWN object, never the control database, when routed", async () => {
+    const control = fakeDb({ tenant_a: ENABLED_ROW });
+    const tenant = fakeDb({ tenant_a: ENABLED_ROW });
+
+    const resolved = await d1OnlineEvalPolicySource(
+      control.db,
+      async () => tenant.db,
+    ).policyFor("tenant_a");
+
+    expect(resolved.ok).toBe(true);
+    // The mirror in the shared control object is never touched.
+    expect(control.bound).toHaveLength(0);
+    expect(tenant.bound).toHaveLength(1);
+    expect(String(tenant.bound[0]?.[0])).toContain("scope_type = 'tenant' AND scope_id = ?");
+    expect(tenant.bound[0]?.[1]).toBe("tenant_a");
+  });
+
+  it("reads a resolver refusal as 'sample nothing' (ok:false), not a false opt-in", async () => {
+    const control = fakeDb({ tenant_a: ENABLED_ROW });
+
+    const resolved = await d1OnlineEvalPolicySource(control.db, async () => {
+      throw new Error("tenant tenant_a has no resolvable tenant database: unbound");
+    }).policyFor("tenant_a");
+
+    expect(resolved).toMatchObject({ ok: false });
+    expect(control.bound).toHaveLength(0);
+  });
+});
+
 describe("the memo is the tenant fence's second half, and what `peek` reads", () => {
   it("never answers tenant B from tenant A's entry", async () => {
     // MUTATION: key the cache on a constant and this goes red — with tenant

@@ -40,6 +40,10 @@
  */
 
 import { controlDatabaseFrom } from "../control-data.js";
+import {
+  type QuotaPolicySourceBindings,
+  tenantQuotaPolicyDbFrom,
+} from "../tenancy/quota-policy-source.js";
 import { type AttributionPolicy, parseAttributionPolicy, parseMissingTagAction } from "./policy.js";
 
 /** The `quota_policies` columns this module reads, named once. */
@@ -58,7 +62,7 @@ const ATTRIBUTION_COLUMNS = "required_tags_json, on_missing_tags";
 const SELECT_TENANT_POLICY = `SELECT ${ATTRIBUTION_COLUMNS} FROM quota_policies WHERE scope_type = 'tenant' AND scope_id = ?`;
 
 /** Worker vars this slice reads. */
-export interface AttributionBindings {
+export interface AttributionBindings extends QuotaPolicySourceBindings {
   /**
    * DEV/TEST fallback: a JSON array of
    * `{ tenant_id, required_tags, on_missing }`, mirroring how `src/adapters.ts`
@@ -141,12 +145,25 @@ export function attributionPolicySourceFromVars(env: AttributionBindings): Attri
   };
 }
 
-/** The durable source — one indexed seek against the CONTROL database. */
-export function d1AttributionPolicySource(db: AttributionDatabase): AttributionPolicySource {
+/**
+ * The durable source — one indexed seek against the tenant's `quota_policies`.
+ *
+ * `quotaDbFor`, when supplied, relocates that seek to the tenant's OWN object
+ * (Track A red line) instead of the shared CONTROL database `db`; it is
+ * `undefined` under the default `"control"` posture, in which case this reads
+ * `db` exactly as it always did. It is awaited INSIDE the try, so a resolver
+ * refusal becomes the same 503 outage an unreadable control database does —
+ * never a silent "not enforced".
+ */
+export function d1AttributionPolicySource(
+  db: AttributionDatabase,
+  quotaDbFor?: (tenantId: string) => Promise<AttributionDatabase>,
+): AttributionPolicySource {
   return {
     async policyFor(tenantId: string): Promise<AttributionResolution> {
       try {
-        const row = await db.prepare(SELECT_TENANT_POLICY).bind(tenantId).first();
+        const quotaDb = quotaDbFor === undefined ? db : await quotaDbFor(tenantId);
+        const row = await quotaDb.prepare(SELECT_TENANT_POLICY).bind(tenantId).first();
         if (row === null || row === undefined) return { ok: true, policy: null };
         return {
           ok: true,
@@ -278,7 +295,9 @@ export function attributionPolicySourceFromEnv(env: AttributionBindings): Attrib
   if (memoized !== undefined) return memoized;
   const db = controlDatabaseFrom(env);
   const source = cachedAttributionPolicySource(
-    db === undefined ? attributionPolicySourceFromVars(env) : d1AttributionPolicySource(db),
+    db === undefined
+      ? attributionPolicySourceFromVars(env)
+      : d1AttributionPolicySource(db, tenantQuotaPolicyDbFrom(env)),
   );
   SOURCES.set(key, source);
   return source;

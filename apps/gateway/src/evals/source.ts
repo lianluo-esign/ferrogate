@@ -47,6 +47,10 @@
 
 import { controlDatabaseFrom } from "../control-data.js";
 import {
+  type QuotaPolicySourceBindings,
+  tenantQuotaPolicyDbFrom,
+} from "../tenancy/quota-policy-source.js";
+import {
   type OnlineEvalPolicy,
   type OnlineEvalPolicyRow,
   parseOnlineEvalPolicyRow,
@@ -73,7 +77,7 @@ export interface OnlineEvalDatabase {
   };
 }
 
-export interface OnlineEvalBindings {
+export interface OnlineEvalBindings extends QuotaPolicySourceBindings {
   /**
    * DEV/TEST fallback: a JSON array of
    * `{ tenant_id, enabled, sample_rate, sampling_unit, judge_model, criteria }`,
@@ -183,13 +187,25 @@ export function onlineEvalPolicySourceFromVars(env: OnlineEvalBindings): OnlineE
   };
 }
 
-/** The durable source — one indexed seek against the CONTROL database. */
-export function d1OnlineEvalPolicySource(db: OnlineEvalDatabase): OnlineEvalPolicySource {
+/**
+ * The durable source — one indexed seek against the tenant's `quota_policies`.
+ *
+ * `quotaDbFor`, when supplied, relocates that seek to the tenant's OWN object
+ * (Track A red line) instead of the shared CONTROL database `db`; it is
+ * `undefined` under the default `"control"` posture, reading `db` as before. It
+ * is awaited INSIDE the try, so a resolver refusal lands in this control's safe
+ * direction — `ok: false`, i.e. sample nothing — never a false opt-in.
+ */
+export function d1OnlineEvalPolicySource(
+  db: OnlineEvalDatabase,
+  quotaDbFor?: (tenantId: string) => Promise<OnlineEvalDatabase>,
+): OnlineEvalPolicySource {
   return {
     async policyFor(tenantId: string): Promise<OnlineEvalResolution> {
       let row: Record<string, unknown> | null;
       try {
-        row = await db.prepare(SELECT_TENANT_ONLINE_EVAL_POLICY).bind(tenantId).first();
+        const quotaDb = quotaDbFor === undefined ? db : await quotaDbFor(tenantId);
+        row = await quotaDb.prepare(SELECT_TENANT_ONLINE_EVAL_POLICY).bind(tenantId).first();
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
         // A schema that predates this migration cannot hold an opt-in, so
@@ -304,7 +320,9 @@ export function onlineEvalPolicySourceFromEnv(env: OnlineEvalBindings): OnlineEv
   if (memoized !== undefined) return memoized;
   const db = controlDatabaseFrom(env);
   const source = cachedOnlineEvalPolicySource(
-    db === undefined ? onlineEvalPolicySourceFromVars(env) : d1OnlineEvalPolicySource(db),
+    db === undefined
+      ? onlineEvalPolicySourceFromVars(env)
+      : d1OnlineEvalPolicySource(db, tenantQuotaPolicyDbFrom(env)),
   );
   SOURCES.set(key, source);
   return source;

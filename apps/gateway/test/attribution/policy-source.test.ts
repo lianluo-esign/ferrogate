@@ -107,6 +107,42 @@ describe("d1AttributionPolicySource", () => {
   });
 });
 
+describe("d1AttributionPolicySource — the relocated quota_policies seek (Track A)", () => {
+  it("reads the tenant's OWN object, never the control database, when routed", async () => {
+    const control = fakeDb(() => TENANT_A_ROW);
+    const tenant = fakeDb(() => TENANT_A_ROW);
+
+    const resolved = await d1AttributionPolicySource(
+      control.db,
+      async () => tenant.db,
+    ).policyFor("tenant_a");
+
+    expect(resolved).toEqual({
+      ok: true,
+      policy: { requiredTagKeys: ["team"], onMissing: "default_from_key" },
+    });
+    // The whole point of the slice: the mirror in the shared control object is
+    // never touched — the seek lands on the tenant's own object, still bound.
+    expect(control.calls).toHaveLength(0);
+    expect(tenant.calls).toHaveLength(1);
+    expect(tenant.calls[0]?.sql).toContain("scope_type = 'tenant'");
+    expect(tenant.calls[0]?.params).toEqual(["tenant_a"]);
+  });
+
+  it("reports a resolver refusal as an OUTAGE, never as 'not enforced'", async () => {
+    const control = fakeDb(() => TENANT_A_ROW);
+
+    const resolved = await d1AttributionPolicySource(control.db, async () => {
+      throw new Error("tenant tenant_a has no resolvable tenant database: unbound");
+    }).policyFor("tenant_a");
+
+    // A router 503 is awaited inside the try, so it fails in this control's
+    // direction (503), not silently open. Control is still never read.
+    expect(resolved.ok).toBe(false);
+    expect(control.calls).toHaveLength(0);
+  });
+});
+
 describe("cachedAttributionPolicySource — the tenant fence in a warm isolate", () => {
   /** Answers a DIFFERENT policy per tenant, and counts reads. */
   function perTenant(): { readonly source: AttributionPolicySource; readonly reads: string[] } {
