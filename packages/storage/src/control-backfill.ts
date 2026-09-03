@@ -119,7 +119,18 @@ export const CONTROL_BACKFILL_TABLES: readonly ControlBackfillTable[] = Object.f
   table("control_plane_replay_floors_legacy", ["tenant_id", "deployment_id"]),
   table("control_plane_resources", ["resource_kind", "resource_id"]),
   table("delegation_revocations_legacy", ["tenant", "subject"]),
-  table("experiment_shadow_legs", ["projection_key"]),
+  // `experiment_shadow_legs` was DROPPED from the control DO by
+  // `0043_drop_experiment_eval_projections.sql` (no-tenant-data mirror red
+  // line): the shadow-arm dispatch evidence is authoritative in each tenant's
+  // own object now (gateway sink G2-stopped its control write in 8ece2dae;
+  // `admin_experiment.ts` fans out over the tenant objects since f11bd842). A
+  // table the live schema no longer has must NOT appear in this manifest (the
+  // parity guard would flag it) — same as the 0041 managed-worker family below
+  // and `online_eval_scores` (0043) further down. NOTE this family DID need the
+  // one-time gated `experiment-eval-backfill` sweep before its drop (the
+  // consumer wrote control from the D1→DO cutover until the G2 stop), unlike the
+  // pure-DROP siblings; the sweep copied the window rows into the tenant objects
+  // and was retired with this drop.
   // Parent before child: guardrail_check_evaluations FK → guardrail_evaluations
   // (projection_key), migration 0015.
   table("guardrail_evaluations", ["projection_key"]),
@@ -140,7 +151,14 @@ export const CONTROL_BACKFILL_TABLES: readonly ControlBackfillTable[] = Object.f
   // `online_eval_leg_quality` was DROPPED from control by migration 0039: the
   // recomputed leg-quality projection is single-source on each tenant object
   // now (Track A), so there is no control table left to back-fill.
-  table("online_eval_scores", ["projection_key"]),
+  // `online_eval_scores` was DROPPED from control by
+  // `0043_drop_experiment_eval_projections.sql` (with `experiment_shadow_legs`
+  // above): the online-eval judge scores are tenant-object authoritative now
+  // (gateway consumer G2-stopped its control write in 8ece2dae; the experiment
+  // report reader fans out over the tenant objects since f11bd842). A dropped
+  // table must NOT appear in this manifest (parity guard). Its window rows were
+  // moved by the one-time gated `experiment-eval-backfill` sweep before the
+  // drop, which was retired with it.
   table("permissions", ["id"]),
   table("plans", ["id"]),
   // Announcements (公告), migration 0030. `platform_announcements` and its

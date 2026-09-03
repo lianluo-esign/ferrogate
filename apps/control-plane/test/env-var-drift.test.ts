@@ -425,10 +425,6 @@ describe("the env-var drift gate itself", () => {
 
   it("parsed both sides — neither an empty read set nor an empty declared set", () => {
     expect([...DECLARED.vars.keys()].sort()).toEqual([
-      // Arms the one-time experiment/eval projection backfill sweep
-      // (`src/routes/experiment-eval-backfill.ts`). Default `"off"`; sorts first
-      // (`CONTROL_E…` < `CONTROL_P…`).
-      "CONTROL_EXPERIMENT_EVAL_BACKFILL",
       "CONTROL_PLANE_CONTROL_STORAGE",
       "CONTROL_PLANE_NATIVE_API_KEYS",
       "CONTROL_PLANE_SEED",
@@ -638,8 +634,9 @@ describe("which committed [vars] values this runner can actually observe", () =>
     // committed `[vars]` table, not by incrementing the old number.
     // #879 added `CONTROL_PLANE_CONTROL_STORAGE` (Zero-D1 S3 posture) ⇒ 9.
     // Tokyo-forced tenant placement added `TENANT_DEFAULT_LOCATION_HINT` ⇒ 10.
-    // The experiment/eval backfill gate `CONTROL_EXPERIMENT_EVAL_BACKFILL` ⇒ 11.
-    expect(rows.length).toBe(11);
+    // The experiment/eval backfill gate `CONTROL_EXPERIMENT_EVAL_BACKFILL` was
+    // added ⇒ 11, then RETIRED with the 0043 drop of its two projections ⇒ 10.
+    expect(rows.length).toBe(10);
   });
 
   it("explains every overridden var with an explicit pin in vitest.config.ts", () => {
@@ -668,6 +665,6 @@ describe("which committed [vars] values this runner can actually observe", () =>
     // reads the RUNTIME values, so it also fails if `env` stopped resolving.
     const observable = rows.filter((r) => r.runtime === r.committed).map((r) => r.name);
     expect(observable.sort()).toEqual([...DECLARED.vars.keys()].sort());
-    expect(observable.length).toBe(11);
+    expect(observable.length).toBe(10);
   });
 });

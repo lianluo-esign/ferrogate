@@ -118,12 +118,11 @@ const CONTROL_TENANT_TABLES: readonly string[] = [
   "request_logs",
   "audit_events", // the control PROJECTION rows; the R2 anchor chain is kept
   "delegation_revocations",
-  "experiment_shadow_legs",
-  // `online_eval_leg_quality` DROPPED from control by migration 0039 (Track A
-  // single-source): no control mirror row remains to sweep here. Its
-  // authoritative copy lives in the tenant object and is removed with the object
-  // itself, the same lifecycle as the object's own `online_eval_scores` rows.
-  "online_eval_scores",
+  // `experiment_shadow_legs` and `online_eval_scores` were DROPPED from control
+  // by `0043_drop_experiment_eval_projections.sql` (Track A red-line), like
+  // `online_eval_leg_quality` (0039) before them: no control mirror row remains
+  // to sweep here. Their authoritative copies live in the tenant object and are
+  // removed with the object itself.
   "siem_export_cursors",
   "guardrail_evaluations", // carries `tenant`; its child rows are swept just before it
 ];

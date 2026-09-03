@@ -1493,6 +1493,14 @@ describe("§4 fleet-wide ratchets", () => {
       // Worker starts CONSULTING any of these rows before admitting work, that
       // row becomes an operator control and moves into CONTROLS — the decision
       // this list exists to force rather than to skip.
+      //
+      // Their CONTROL-side projection mirror was DROPPED by
+      // `0041_drop_managed_worker_projections.sql` (no-tenant-data mirror red
+      // line): the tenant object is now the ONLY copy. They remain in this list
+      // because both Workers still SHARE them through the tenant-object schema —
+      // agent-runtime writes and the control-plane admin reader fans out over
+      // the same object rows — so §4.3 still evaluates them; the drop only
+      // removed the redundant second copy, not the sharing.
       "managed_worker_templates",
       "managed_worker_sessions",
       "agent_worker_instances",
@@ -1500,11 +1508,12 @@ describe("§4 fleet-wide ratchets", () => {
       "managed_worker_isolation_policies",
       "managed_worker_isolation_selections",
       // The evidence leg of the same family. Its control-D1 mirror and the
-      // gateway rebuild sweep were REMOVED (no-tenant-data mirror red line): the
-      // tenant object is now its only authority and the control table has no
-      // writer or reader, pending the physical drop of control D1. Kept in this
-      // list only because the control DDL still exists; it is no longer shared
-      // by two Workers, so 4.3 no longer evaluates it.
+      // gateway rebuild sweep were REMOVED first (migration 0036, no-tenant-data
+      // mirror red line), with the rest of the family following in 0041 above:
+      // the tenant object is now its only authority. UNLIKE its siblings above
+      // it is written by agent-runtime ONLY and no control-plane reader consults
+      // it, so it is no longer shared by two Workers and §4.3 no longer evaluates
+      // it; it is kept here only as a harmless family placeholder.
       "managed_worker_isolation_evidence",
       // #860 — guardrail screening evidence is tenant-object authoritative,
       // with a tenant-qualified CONTROL projection for the operator fleet
@@ -1533,9 +1542,9 @@ describe("§4 fleet-wide ratchets", () => {
       // registered as `admission`, and this table is only ever reached for a
       // request the caller has already been fenced onto.
       "billing_events",
-      // #692 — the judge scores from online evaluation, newly SHARED because
-      // #693's experiment report READS them from the control plane (the gateway
-      // queue consumer writes them). Classified exactly like `request_logs` and
+      // #692 — the judge scores from online evaluation, SHARED because the
+      // gateway queue consumer WRITES them and #693's experiment report READS
+      // them from the control plane. Classified exactly like `request_logs` and
       // the guardrail evidence above and for the same reason: a score records
       // what a JUDGE ANSWERED after the fact, and nothing consults it before
       // deciding anything. `evals/policy.ts` is emphatic that it is not a
@@ -1545,26 +1554,30 @@ describe("§4 fleet-wide ratchets", () => {
       // The CONTROL nearby is the per-tenant OPT-IN, which lives on
       // `quota_policies` and is a different table.
       //
-      // Answering this ratchet's question explicitly — "does a change to it
-      // apply to both Workers?" — yes, and the schema enforces it rather than a
-      // registry entry: both Workers name the columns of
-      // `sql/d1-ts/control/0009_online_eval.sql` +
-      // `0011_experiment_outcomes.sql`, both suites apply the deployed
-      // migrations rather than a fixture, and a column rename breaks
+      // Its CONTROL-side projection mirror was DROPPED by
+      // `0043_drop_experiment_eval_projections.sql` (no-tenant-data mirror red
+      // line): the tenant object is now the ONLY copy. It remains in this list
+      // because both Workers still SHARE it through the TENANT-object schema
+      // (`sql/d1-ts/tenant/0018_usage_evaluation_audit.sql`, not the dropped
+      // control `0009`) — the gateway consumer writes the tenant object
+      // (G2-stopped its control write in 8ece2dae) and the control-plane
+      // experiment report fans out over the same tenant objects (f11bd842) — so
+      // §4.3 still evaluates it and a column rename breaks
       // `apps/gateway/test/experiments/scored-arms.test.ts` and
-      // `apps/control-plane/test/experiment-report.test.ts` together.
-      //
-      // The tenant FENCE is not shared: only the control plane serves the read,
-      // and `experiment-report.test.ts` proves it. A second reading Worker
-      // makes that fence a fleet property and moves this into CONTROLS.
+      // `apps/control-plane/test/experiment-report.test.ts` together. The drop
+      // removed the redundant control copy, not the sharing. If a second reading
+      // Worker ever grows a FENCE, this moves into CONTROLS.
       "online_eval_scores",
       // #693 — the SHADOW arm's evidence, on identical terms: written by
-      // `apps/gateway/src/experiments/`, read by
-      // `apps/control-plane/src/routes/admin_experiment.ts`, and a record of
-      // what a mirrored dispatch DID rather than a decision anything consults.
-      // A mirror is by construction unable to influence a client's response
-      // (`inference/shadow.ts` lists the five mechanisms), so a row describing
-      // one cannot be a control over anything.
+      // `apps/gateway/src/experiments/` to the tenant object, read by
+      // `apps/control-plane/src/routes/admin_experiment.ts` via the same DO
+      // fan-out, and a record of what a mirrored dispatch DID rather than a
+      // decision anything consults. A mirror is by construction unable to
+      // influence a client's response (`inference/shadow.ts` lists the five
+      // mechanisms), so a row describing one cannot be a control over anything.
+      // Its control projection was DROPPED alongside `online_eval_scores` by
+      // 0043; it stays here for the same tenant-object sharing reason (tenant
+      // schema `0018`, not the dropped control `0011`).
       "experiment_shadow_legs",
       // Money the admission ladder reads; the CONTROL is the ladder, which is
       // registered as `admission`.

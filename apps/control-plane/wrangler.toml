@@ -194,15 +194,6 @@ region = "aws:ap-northeast-1"
 #   migrations_dir = "../../sql/d1-ts/control"
 #
 CONTROL_PLANE_CONTROL_STORAGE = "durable_object"
-# Arms the one-time POST /admin/v1/experiment-eval-backfill sweep
-# (src/routes/experiment-eval-backfill.ts), which copies historical
-# experiment_shadow_legs / online_eval_scores PROJECTION rows from the control
-# database into each owning tenant object. DEFAULT OFF: the route refuses with
-# 409 backfill_disabled unless this is exactly "on", so shipping the code changes
-# nothing at runtime. Flip to "on" at deploy (wrangler.deploy.toml) for the
-# one-time relocation, then flip back — same posture as the gateway's
-# GATEWAY_PLATFORM_BILLING_BACKFILL.
-CONTROL_EXPERIMENT_EVAL_BACKFILL = "off"
 # Home every NEW tenant Durable Object in Tokyo. Location hints only apply on
 # first get(); existing objects stay where they were created.
 TENANT_DEFAULT_LOCATION_HINT = "apac-ne"

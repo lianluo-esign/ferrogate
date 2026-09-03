@@ -51,7 +51,6 @@ import {
 } from "./middleware/errors.js";
 import type { ControlPlaneEnv } from "./ports.js";
 import { GROUP_MODULES, type RegisteredRoute, registerRoutes } from "./routes/index.js";
-import { mountExperimentEvalBackfill } from "./routes/experiment-eval-backfill.js";
 import { mountQuotaPolicyBackfill } from "./routes/quota-policy-backfill.js";
 import { mountTenantConsumptionPurge } from "./routes/tenant-consumption-purge.js";
 import { mountTenantTeardown } from "./routes/tenant-teardown.js";
@@ -200,17 +199,6 @@ export const MOUNTED_TEARDOWN_ROUTE: string = mountTenantTeardown(app);
  * every fence.
  */
 export const MOUNTED_QUOTA_BACKFILL_ROUTE: string = mountQuotaPolicyBackfill(app);
-
-/**
- * `POST /admin/v1/experiment-eval-backfill` — platform-operator-only,
- * out-of-contract, GATED (`CONTROL_EXPERIMENT_EVAL_BACKFILL="on"`, default off)
- * resumable sweep that copies historical `experiment_shadow_legs` /
- * `online_eval_scores` projection rows from the control database into each owning
- * tenant object, the same ordering keystone as the quota backfill above but for
- * the per-request experiment/eval evidence families. Idempotent, additive, and
- * paged with a returned `next_cursor`. See `./routes/experiment-eval-backfill.ts`.
- */
-export const MOUNTED_EXPERIMENT_EVAL_BACKFILL_ROUTE: string = mountExperimentEvalBackfill(app);
 
 app.get("/version", (c) =>
   c.json({

@@ -130,6 +130,12 @@ const DERIVED_EVIDENCE = [
  *          6f6f934e); admin listing reads the compatibility document store, not
  *          these typed tables. `self_hosted_worker_registrations` is NOT here —
  *          it stays the control-owned bootstrap directory (`worker_id`→tenant).
+ *  - 0043: the experiment/eval per-request evidence — `experiment_shadow_legs`
+ *          and `online_eval_scores`. The gateway sink/consumer G2-stopped their
+ *          control write (8ece2dae); `admin_experiment.ts` fans out over the
+ *          tenant objects (f11bd842). UNLIKE the pure-DROP siblings above this
+ *          family first needed the one-time gated `experiment-eval-backfill`
+ *          sweep to copy its D1→DO-cutover-to-G2 window rows into the objects.
  */
 const DROPPED_CONTROL_PROJECTIONS = [
   "usage_aggregate_rollups",
@@ -151,6 +157,8 @@ const DROPPED_CONTROL_PROJECTIONS = [
   "self_hosted_worker_checkpoints",
   "self_hosted_worker_heartbeats",
   "self_hosted_worker_telemetry_events",
+  "experiment_shadow_legs",
+  "online_eval_scores",
 ] as const;
 
 /** Families that must live ONLY in a tenant database. */

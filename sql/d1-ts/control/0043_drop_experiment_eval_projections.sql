@@ -1,0 +1,67 @@
+-- ===========================================================================
+-- Drop the experiment/eval per-request evidence control projections (Track A
+-- red-line) — the FINALISATION ("收官") of the experiment/eval family.
+--
+-- `experiment_shadow_legs` (0011_experiment_outcomes, rebuilt with a
+-- `projection_key TEXT PRIMARY KEY` by 0017/0018) and `online_eval_scores`
+-- (0009_online_eval, likewise rebuilt by 0017/0018) are the control-side
+-- projection *mirrors* of the gateway's shadow-arm dispatch evidence and the
+-- online-evaluation judge scores. Their authoritative home is the per-tenant
+-- TenantDataObject (tenant migration 0018_usage_evaluation_audit), and every
+-- live producer and reader now targets that tenant object, so the control
+-- copies have no remaining writer or reader:
+--
+--   * WRITE — STOPPED (G2). The gateway experiment sink runs
+--     `projectToControl: false` in production (`apps/gateway/src/experiments/
+--     sink.ts`, wired through `experimentObserverFor` ← `defaults.ts`), and the
+--     online-eval queue consumer is invoked `consumeOnlineEvalBatch(…, {
+--     projectToControl: false })` (`apps/gateway/src/index.ts`), so
+--     `consumer.ts` writes ONLY the tenant object. Committed in 8ece2dae
+--     ("retire 4 Track A projection legs"). The dormant `sweepExperiment
+--     Projections` / `sweepOnlineEvalRegressions` helpers still carry a control
+--     write branch but have NO production caller.
+--   * READ  — none. `apps/control-plane/src/routes/admin_experiment.ts` was
+--     switched to fan out over the tenant objects (f11bd842, "retire control
+--     projection reads … DO fan-out"); a fleet-wide scan finds zero
+--     `SELECT`/`FROM`/`JOIN` against either control table outside the tenant
+--     object, the migration SQL and the tests.
+--
+-- BACKFILL IS REQUIRED BEFORE THIS DROP — this is the ONE way this family
+-- differs from the pure-DROP siblings (0036/0041/0042). UNLIKE the self-hosted
+-- worker evidence (whose writer moved to the tenant object on 2026-08-05, BEFORE
+-- the 2026-09-01 D1→DO cutover, so no control-only rows accumulated), the
+-- experiment/eval consumer kept writing the CONTROL copy from the cutover until
+-- the recent G2 stop above. The control database therefore holds a WINDOW of
+-- rows the tenant objects do not yet have. The gated one-time sweep
+-- `POST /admin/v1/experiment-eval-backfill` (`CONTROL_EXPERIMENT_EVAL_BACKFILL=
+-- "on"`, default off) copies every such row into its owning tenant object under
+-- the NATURAL key, dropping the control-only `projection_key`. It MUST be run to
+-- completion (every table `next_cursor: null`, no residuals, no unprovisioned
+-- skips left unresolved) BEFORE this migration applies, or the window rows are
+-- lost. The slice that adds this migration RETIRES that one-time route (its
+-- source is being dropped and its test seeds the very tables this migration
+-- removes), so run the backfill on the deploy that still carries the route,
+-- then ship the deploy that drops these tables.
+--
+-- No inbound foreign key references either table, so drop order is free. Each
+-- table's indexes drop with it (`idx_experiment_shadow_legs_experiment` /
+-- `idx_experiment_shadow_legs_tenant`; `idx_online_eval_scores_experiment` /
+-- `idx_online_eval_scores_trend` / `idx_online_eval_scores_model` /
+-- `idx_online_eval_scores_sampling_key` / `idx_online_eval_scores_leg`).
+--
+-- Keeping the empty mirrors implies a second source of truth and lets a future
+-- writer accidentally bypass tenant isolation — the exact red line this program
+-- eliminates. `IF EXISTS` keeps this idempotent for fresh and already-migrated
+-- control databases (0013 / 0036 / 0037 / 0038 / 0039 / 0040 / 0041 / 0042
+-- precedent).
+--
+-- Deploy order: run the gated backfill to completion FIRST (see above), THEN
+-- deploy. The gateway bundle that defines the ControlDataObject carries this
+-- migration and applies it at cold start; an old isolate that somehow still hit
+-- a mirror during rollout skew would see `no such table`, but the writer was
+-- G2-stopped and the reader DO-fan-out-switched in prior deploys, so no such
+-- reader or writer exists.
+-- ===========================================================================
+
+DROP TABLE IF EXISTS experiment_shadow_legs;
+DROP TABLE IF EXISTS online_eval_scores;
