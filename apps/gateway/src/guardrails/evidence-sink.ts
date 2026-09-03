@@ -33,9 +33,15 @@
  *            ├── env.REQUEST_LOG bound?  → Queue.send(wire)       ← preferred
  *            │      … later, on the consumer:
  *            │      queue(batch) → object batch → CONTROL_DB projection
- *            └── no queue? → TenantDataObject first, then CONTROL_DB projection
- *                 (unscoped platform evidence ALSO → PLATFORM_DATA object)
+ *            └── no queue? → TenantDataObject first, then (UNLESS G2) CONTROL_DB
+ *                 projection (unscoped platform evidence ALSO → PLATFORM_DATA
+ *                 object, which is its authoritative home once the mirror is off)
  * ```
+ *
+ * The `then CONTROL_DB projection` step is gated by `projectToControl` (Track A
+ * G2): the production composition root wires it `false` so the fallback stops
+ * mirroring guardrail evidence into the control singleton, symmetric with the
+ * queue consumer's `projectGuardrailToControl` leg. See that option.
  *
  * ## The platform leg (Zero-D1 Plan B)
  *
@@ -134,6 +140,19 @@ export interface GuardrailEvidenceSinkOptions {
    * it will never get to write. 1024 is the Rust semaphore's permit count.
    */
   readonly capacity?: number;
+  /**
+   * Track A / G2 (red line {@link ../../ no-tenant-data-mirror-in-control-d1}):
+   * whether the DIRECT (no-queue) fallback still writes the derived CONTROL_DB
+   * guardrail projection. Defaults to `true` so the existing dual-write tests are
+   * unchanged. Wired to `false` at the production composition root
+   * (`../guardrails/config.ts`), which retires that mirror write so the tenant
+   * objects and the `PLATFORM_DATA` singleton are the SOLE homes — symmetric with
+   * the queue consumer's `projectGuardrailToControl` leg
+   * (`../requestlog/queue.ts`), which is already wired `false`. It gates ONLY the
+   * guardrail control mirror; the tenant-object and platform-object writes above
+   * it are untouched. Reversible — flipping back re-arms the mirror write.
+   */
+  readonly projectToControl?: boolean;
 }
 
 function isQueue(value: unknown): value is GuardrailEvidenceQueue {
@@ -227,6 +246,8 @@ export class DurableGuardrailEvidenceSink implements GuardrailEvidenceSink {
   readonly #platformDatabaseOf: (env: unknown) => GuardrailEvidenceDatabase | undefined;
   readonly #diagnostics: GuardrailEvidenceDiagnostics | undefined;
   readonly #capacity: number;
+  /** G2: false retires the direct-fallback control mirror write (see options). */
+  readonly #projectToControl: boolean;
   /**
    * Buffered by evidence id, so a re-`append` of the same
    * `(request, policy@revision, stage)` REPLACES rather than accumulates.
@@ -250,6 +271,7 @@ export class DurableGuardrailEvidenceSink implements GuardrailEvidenceSink {
     this.#platformDatabaseOf = options.platformDatabase ?? guardrailEvidencePlatformDatabaseFrom;
     this.#diagnostics = options.diagnostics;
     this.#capacity = options.capacity ?? 1024;
+    this.#projectToControl = options.projectToControl ?? true;
   }
 
   get stats(): GuardrailEvidenceStats {
@@ -423,14 +445,16 @@ export class DurableGuardrailEvidenceSink implements GuardrailEvidenceSink {
       }
     }
 
-    // Zero-D1 Plan B (G1 dual-write): unscoped/platform rows have no tenant
-    // object, so they ALSO go to the PLATFORM_DATA singleton — the authoritative
-    // home they will be READ from once the control projection is retired. A
-    // strictly ADDITIVE leg: the control projection write below is unchanged, so
-    // no evidence is dropped during the rollout, and this leg is best-effort
-    // (flush must not reject). It does NOT requeue on failure — the control
-    // write remains the counted authority for these rows in G1, and requeuing
-    // here would re-drive the whole envelope, control write included.
+    // Zero-D1 Plan B: unscoped/platform rows have no tenant object, so they ALSO
+    // go to the PLATFORM_DATA singleton — the authoritative home they are READ
+    // from once the control projection is retired. It is best-effort (flush must
+    // not reject) and does NOT requeue on failure — matching the queue
+    // consumer's platform leg (`../requestlog/queue.ts`): requeuing here would
+    // re-drive the whole envelope. In G1 (`#projectToControl` true) it is a
+    // strictly ADDITIVE leg alongside the unchanged control write below, which
+    // stays the counted authority for these rows. In G2 (`#projectToControl`
+    // false) the control write below is skipped, so PLATFORM_DATA IS the counted
+    // authority — credit `#written` here for the unscoped rows that land.
     if (unscoped.length > 0) {
       let platformDb: GuardrailEvidenceDatabase | undefined;
       try {
@@ -442,11 +466,19 @@ export class DurableGuardrailEvidenceSink implements GuardrailEvidenceSink {
       if (platformDb !== undefined) {
         try {
           await writePlatformGuardrailEvidence(platformDb, unscoped);
+          if (!this.#projectToControl) this.#written += unscoped.length;
         } catch (error) {
           this.#diagnostics?.onError?.("d1", error);
         }
       }
     }
+
+    // G2 (red line: no tenant/unattributed mirror in control): the derived
+    // control projection is retired. The tenant objects and the PLATFORM_DATA
+    // singleton written above are the SOLE, authoritative homes — symmetric with
+    // the queue consumer's `projectGuardrailToControl` leg. Skip the mirror write
+    // entirely; nothing below runs.
+    if (!this.#projectToControl) return;
 
     // The projection is best-effort compatibility state. It is written only
     // for object rows that landed, plus unscoped rows which have no object.

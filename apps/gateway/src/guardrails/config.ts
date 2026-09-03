@@ -198,7 +198,15 @@ function guardrailEvidenceSinkFor(env: Record<string, unknown>): GuardrailEviden
     guardrailEvidenceQueueFrom(env) !== undefined ||
     guardrailEvidenceDatabaseFrom(env) !== undefined ||
     env.TENANT_DATA !== undefined;
-  return durable ? new DurableGuardrailEvidenceSink() : new InMemoryGuardrailEvidenceSink();
+  // Track A / G2: retire the direct-fallback control guardrail mirror write
+  // (red line no-tenant-data-mirror-in-control-d1), symmetric with the queue
+  // consumer's `projectGuardrailToControl: false` (`src/index.ts`). Tenant
+  // objects + PLATFORM_DATA are the sole homes; the control projection now has
+  // zero writers and no steady-state reader (only the drain-on-read backfill
+  // bridges remain). Reversible by flipping this literal.
+  return durable
+    ? new DurableGuardrailEvidenceSink({ projectToControl: false })
+    : new InMemoryGuardrailEvidenceSink();
 }
 
 function guardrailOptions(

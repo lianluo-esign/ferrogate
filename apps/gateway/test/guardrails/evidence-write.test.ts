@@ -776,6 +776,64 @@ describe("unscoped evidence dual-writes the platform object", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Track A / G2: the direct-fallback control mirror is retired
+// (red line: no tenant/unattributed guardrail mirror in the control singleton)
+// ---------------------------------------------------------------------------
+
+describe("with projectToControl false the direct fallback stops the control mirror", () => {
+  it("writes unscoped evidence ONLY to the platform object, never the control projection", async () => {
+    // Empty first, so nothing below can be a leftover.
+    expect((await platformGuardrailRows()).evaluations).toHaveLength(0);
+    expect(await storedGuardrailEvaluations()).toHaveLength(0);
+
+    const sink = new DurableGuardrailEvidenceSink({ projectToControl: false });
+    const envelope = platformEnvelope("platform-g2-1");
+    expect(sink.append(envelope.evaluation, envelope.checks)).toBe(true);
+    // No queue → the DIRECT fallback path, the one this flag governs.
+    await sink.flush({
+      env: { ...(env as unknown as Record<string, unknown>), REQUEST_LOG: undefined },
+    });
+
+    // PLATFORM_DATA is now the SOLE authoritative home for unscoped rows: parent
+    // and child both land, both with `tenant` NULL.
+    const platform = await platformGuardrailRows();
+    expect(platform.evaluations).toEqual([
+      expect.objectContaining({ id: "platform-g2-1", tenant: null }),
+    ]);
+    expect(platform.checks).toHaveLength(1);
+
+    // RED LINE: the control singleton receives NOTHING — no parent, no child.
+    expect(await storedGuardrailEvaluations()).toEqual([]);
+    expect(await storedGuardrailChecks()).toEqual([]);
+
+    // The unscoped row that landed on the platform object is still COUNTED as
+    // written now that the platform leg is the authority rather than an additive
+    // shadow (in G1 the count came from the control write).
+    expect(sink.stats.written).toBe(1);
+  });
+
+  it("writes tenant-scoped evidence ONLY to the tenant object, never the control projection", async () => {
+    expect(await storedGuardrailEvaluations()).toHaveLength(0);
+
+    const sink = new DurableGuardrailEvidenceSink({ projectToControl: false });
+    const envelope = manualEnvelope("tenant_a");
+    expect(sink.append(envelope.evaluation, envelope.checks)).toBe(true);
+    await sink.flush({
+      env: { ...(env as unknown as Record<string, unknown>), REQUEST_LOG: undefined },
+    });
+
+    // The tenant object is the authoritative home for the evidence.
+    expect((await tenantGuardrailRows("tenant_a")).evaluations).toEqual([
+      expect.objectContaining({ tenant: "tenant_a" }),
+    ]);
+
+    // RED LINE: the control singleton receives NOTHING.
+    expect(await storedGuardrailEvaluations()).toEqual([]);
+    expect(await storedGuardrailChecks()).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // An evidence failure is never a request failure
 // ---------------------------------------------------------------------------
 
