@@ -105,17 +105,24 @@ export async function consumeRequestLogBatch(
   platformDatabaseOf: (
     env: unknown,
   ) => GuardrailEvidenceDatabase | undefined = guardrailEvidencePlatformDatabaseFrom,
-  // Track A / G2: when false, the guardrail evidence leg of the control batch is
-  // dropped — tenant object + PLATFORM_DATA become its sole homes (the control
-  // projection now has ZERO readers: the operator investigation view fans out
-  // over tenant/platform objects, SIEM exports only request_logs + audit_events,
-  // finops joins request_logs⋈billing). Defaults to true so the dual-write tests
-  // are unchanged. This gates ONLY guardrail: the request_logs leg of the same
-  // control batch stays, because SIEM still reads request_logs from control
-  // until #825. Reversible — flipping back re-arms the dual write.
-  options: { projectGuardrailToControl?: boolean } = {},
+  // Track A / G2: each control-projection leg is independently gated so it can be
+  // retired the moment its last reader moves off the control mirror. Both default
+  // to true so the dual-write tests are unchanged; production wires them false.
+  //
+  //  - `projectGuardrailToControl` false drops the derived guardrail projection
+  //    (tenant object + PLATFORM_DATA are its sole homes).
+  //  - `projectRequestLogToControl` false drops the request_logs compatibility
+  //    projection. Safe since #825 moved the SIEM pump onto the tenant object and
+  //    the finops JOIN readers (request_logs⋈billing_events) fan out over the
+  //    tenant/platform objects — the control projection now has ZERO runtime
+  //    readers. Un-attributed rows keep their PLATFORM_DATA home (the dual-write
+  //    leg below), so nothing is dropped; only the shared-DO mirror stops growing.
+  //
+  // Both are reversible — flipping back re-arms the dual write.
+  options: { projectGuardrailToControl?: boolean; projectRequestLogToControl?: boolean } = {},
 ): Promise<RequestLogConsumeResult> {
   const projectGuardrailToControl = options.projectGuardrailToControl ?? true;
+  const projectRequestLogToControl = options.projectRequestLogToControl ?? true;
   const records = [];
   const evidence: GuardrailEvidenceEnvelope[] = [];
   let malformed = 0;
@@ -206,14 +213,13 @@ export async function consumeRequestLogBatch(
     const projection = databaseOf(env);
     if (projection === undefined) throw new Error("derived request-log projection is unavailable");
 
-    // The control batch is only the request-log compatibility projection plus,
-    // UNLESS gated off by G2, the derived guardrail projection. It is not the
-    // source of truth for the tenant rows above. With `projectGuardrailToControl`
-    // false the guardrail leg is dropped while request_logs is preserved (SIEM
-    // still reads it from control), and a guardrail-only batch skips the empty
-    // control write entirely.
+    // The control batch is the request-log compatibility projection and the
+    // derived guardrail projection, each UNLESS gated off by its G2 flag. It is
+    // not the source of truth for the tenant rows above. With both flags false
+    // the batch is empty and skipped entirely; with either preserved only that
+    // leg is written.
     const statements: unknown[] = [];
-    if (records.length > 0) {
+    if (projectRequestLogToControl && records.length > 0) {
       const requestLogStatement = projection.prepare(REQUEST_LOG_UPSERT_SQL);
       statements.push(
         ...records.map((record) => requestLogStatement.bind(...requestLogBindings(record))),

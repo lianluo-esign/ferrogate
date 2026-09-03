@@ -752,18 +752,20 @@ export async function gatewayQueue(batch: RequestLogMessageBatch, env: unknown):
       batchJobFromWire(message.body) === undefined,
   );
   if (rest.length > 0) {
-    // Track A / G2: guardrail evidence is tenant data — it lands in the owning
-    // object (and PLATFORM_DATA for unscoped) and is NOT mirrored to the shared
-    // control store. The guardrail control projection now has zero readers, so
-    // the leg is dropped here. `request_logs` is UNAFFECTED (default deps): SIEM
-    // still exports it from control until #825.
+    // Track A / G2: request_logs AND guardrail evidence are tenant data — each
+    // lands in the owning TenantDataObject (and PLATFORM_DATA for unscoped) and
+    // is NOT mirrored to the shared control store. Both control projections now
+    // have ZERO runtime readers: the SIEM pump reads request_logs from each
+    // tenant object (#825), and the finops JOIN readers fan out. Both legs are
+    // dropped here; each flag is independently reversible (flip back re-arms the
+    // dual write).
     await consumeRequestLogBatch(
       view(rest) as RequestLogMessageBatch,
       env,
       undefined,
       undefined,
       undefined,
-      { projectGuardrailToControl: false },
+      { projectGuardrailToControl: false, projectRequestLogToControl: false },
     );
   }
 }

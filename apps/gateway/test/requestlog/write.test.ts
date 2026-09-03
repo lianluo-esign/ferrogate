@@ -393,12 +393,12 @@ describe("the Queue producer/consumer pair", () => {
   });
 
   /**
-   * Track A / G2: the guardrail leg of the control batch is gated off, but the
-   * request_logs leg is NOT — SIEM still exports request_logs from control until
-   * #825. This is the flag `src/index.ts` passes on the live path, so the writer
-   * must keep landing the compatibility projection under it.
+   * Track A / G2: each control-projection leg is independently gated. With ONLY
+   * the guardrail leg off (the intermediate posture), the request_logs
+   * compatibility projection is UNCHANGED — this pins that the two flags do not
+   * bleed into each other.
    */
-  it("still writes the request_logs control projection when guardrail projection is gated off", async () => {
+  it("still writes the request_logs control projection when only the guardrail leg is gated off", async () => {
     provider = interceptProviderFetch(() => providerJson(BUFFERED_COMPLETION));
     const queue = new RecordingQueue();
     const h = gateway({ requestId: "fg-g2-reqlog", queue });
@@ -420,6 +420,81 @@ describe("the Queue producer/consumer pair", () => {
     const rows = await storedRequestLogs();
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ request_id: "fg-g2-reqlog", status_code: 200 });
+  });
+
+  /**
+   * Track A / G2 (request_logs): this is the flag pair `src/index.ts` passes on
+   * the live path — BOTH legs off. The tenant object stays authoritative and the
+   * consumer still reports the row written, but the control `request_logs`
+   * projection mirror stops growing (its last runtime reader, the SIEM pump,
+   * moved onto the tenant object in #825; the finops JOIN readers fan out). The
+   * row must still land in the tenant's own object.
+   */
+  it("skips the request_logs control projection when its leg is gated off, keeping the tenant object", async () => {
+    provider = interceptProviderFetch(() => providerJson(BUFFERED_COMPLETION));
+    const queue = new RecordingQueue();
+    const h = gateway({ requestId: "fg-g2-reqlog-off", queue });
+    await h.call("/v1/chat/completions", { method: "POST", headers: AUTHED, body: chatBody() });
+    await h.settle();
+
+    expect(await storedRequestLogs()).toHaveLength(0);
+
+    const result = await consumeRequestLogBatch(
+      { messages: queue.sent.map((body) => ({ body })) },
+      env,
+      undefined,
+      undefined,
+      undefined,
+      { projectGuardrailToControl: false, projectRequestLogToControl: false },
+    );
+    // The row is still WRITTEN — the tenant object is its authoritative home.
+    expect(result).toMatchObject({ written: 1, malformed: 0, retried: false });
+
+    // The control projection mirror got nothing: the leg is retired.
+    expect(await storedRequestLogs()).toHaveLength(0);
+
+    // …but the tenant's authoritative object has the row.
+    const objectRows = await env.TENANT_DATA.get(env.TENANT_DATA.idFromName("tenant_a")).query({
+      tenantId: "tenant_a",
+      sql: "SELECT request_id, tenant FROM request_logs WHERE request_id = ?",
+      params: ["fg-g2-reqlog-off"],
+    });
+    expect(objectRows.results).toEqual([{ request_id: "fg-g2-reqlog-off", tenant: "tenant_a" }]);
+  });
+
+  /**
+   * Track A / G2 (request_logs), unscoped leg: an UNATTRIBUTED row has no tenant
+   * object, so its authoritative home is PLATFORM_DATA (Zero-D1 Plan B, G1). With
+   * the control leg gated off, the platform dual-write must still land it while
+   * the control mirror stays empty — nothing is dropped, only the mirror stops.
+   */
+  it("keeps the platform object for an unscoped row when the control leg is gated off", async () => {
+    expect(await storedPlatformRequestLogs()).toHaveLength(0);
+    provider = interceptProviderFetch(() => providerJson(BUFFERED_COMPLETION));
+    const queue = new RecordingQueue();
+    const h = gateway({ queue });
+    // An OPERATOR credential carries no tenant → the row is unattributed.
+    const response = await h.call("/v1/models", { headers: OPERATOR });
+    expect(response.status).toBe(200);
+    await h.settle();
+    const requestId = response.headers.get("x-request-id");
+
+    const result = await consumeRequestLogBatch(
+      { messages: queue.sent.map((body) => ({ body })) },
+      env,
+      undefined,
+      undefined,
+      undefined,
+      { projectGuardrailToControl: false, projectRequestLogToControl: false },
+    );
+    expect(result).toMatchObject({ malformed: 0, retried: false });
+
+    // Control mirror empty; platform object authoritative and populated.
+    expect(await storedRequestLogs()).toHaveLength(0);
+    const platform = await storedPlatformRequestLogs();
+    expect(platform).toHaveLength(1);
+    expect(platform[0]?.request_id).toBe(requestId);
+    expect(platform[0]?.tenant).toBeNull();
   });
 
   /** At-least-once delivery: the second copy must not fail, and must not double. */
