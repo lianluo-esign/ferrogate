@@ -17,7 +17,7 @@ class Operation(TypedDict):
     security: SecurityRequirements
     tags: tuple[str, ...]
 
-OPENAPI_OPERATION_COUNT: Final[int] = 340
+OPENAPI_OPERATION_COUNT: Final[int] = 341
 
 OPERATIONS: Final[dict[str, Operation]] = {
     "abortAssetUpload": {
@@ -625,6 +625,12 @@ OPERATIONS: Final[dict[str, Operation]] = {
         "path": "/admin/v1/assets/{asset_id}",
         "security": ((("bearerAuth", ()),),),
         "tags": ("admin-write",),
+    },
+    "geminiGenerateContent": {
+        "method": "POST",
+        "path": "/v1beta/models/{model_action}",
+        "security": ((("bearerAuth", ()),),),
+        "tags": ("gateway",),
     },
     "getAdminAgentRunTimeline": {
         "method": "GET",
