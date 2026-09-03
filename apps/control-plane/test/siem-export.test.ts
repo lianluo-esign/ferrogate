@@ -45,7 +45,13 @@ import { SIEM_EXPORT_SINKS_VAR, parseSiemSinks } from "../src/siem/config.js";
 import { advanceSiemCursor, readSiemCursor } from "../src/siem/cursor.js";
 import { redactSecrets } from "../src/siem/destination.js";
 import { type SiemExportReport, runSiemExportPass } from "../src/siem/pump.js";
-import { applySchema, db, resetD1, seedAuditEvents, seedRequestLogs } from "./d1.js";
+import {
+  applySchema,
+  db,
+  resetD1,
+  seedAuditEvents,
+  seedRequestLogs as seedControlRequestLogs,
+} from "./d1.js";
 import { BASE, arm, bearer, operatorKey, tenantKey } from "./harness.js";
 
 // ---------------------------------------------------------------------------
@@ -161,47 +167,70 @@ function rows(tenant: string, prefix: string, count: number, from = OLD) {
 
 type RequestLogSeed = ReturnType<typeof rows>[number];
 
-/** Register the tenant and mirror the SIEM fixture into its authoritative object. */
-async function seedTenantRequestLogs(
-  tenantId: string,
-  records: readonly RequestLogSeed[],
-): Promise<void> {
-  await db()
-    .prepare(
-      `INSERT INTO tenant_databases
-         (tenant_id, binding_name, schema_version,
-          storage_backend, provisioning_status, migration_state, provisioned_at_unix, updated_at_unix)
-       VALUES (?, NULL, 12, 'durable_object', 'ready', 'done', 1, 1)
-       ON CONFLICT (tenant_id) DO UPDATE SET
-         storage_backend = 'durable_object', provisioning_status = 'ready', migration_state = 'done'`,
-    )
-    .bind(tenantId)
-    .run();
-  const tenant = (
-    await resolveTenantDatabases(env as unknown as ControlPlaneBindings).forTenant(tenantId)
-  ).db;
-  await tenant.prepare("DELETE FROM request_logs").run();
-  await tenant.batch(
-    records.map((record) =>
-      tenant
-        .prepare(
-          `INSERT INTO request_logs
-             (request_id, tenant, started_at_unix, completed_at_unix, route, status_code,
-              guardrail_verdict, request_json)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        )
-        .bind(
-          record.requestId,
-          tenantId,
-          record.startedAtUnix,
-          record.completedAtUnix ?? null,
-          record.route ?? null,
-          record.statusCode ?? null,
-          "not_screened",
-          JSON.stringify(record.document ?? {}),
-        ),
-    ),
-  );
+/**
+ * Seed request-log rows into each tenant's AUTHORITATIVE TenantDataObject — the
+ * only place the pump reads a `request_logs` leg from since Track A / #825
+ * retired the control projection as a SIEM source. Rows are grouped by tenant,
+ * the roster row is upserted so `resolveTenantDatabases` routes the tenant to
+ * its object, and rows are appended (`INSERT OR REPLACE`) so a test can seed a
+ * tenant across several calls the way traffic actually arrives.
+ *
+ * Seeding the OBJECT only (never the mirror) is deliberate: a regression that
+ * read the control `request_logs` projection instead would now find it empty
+ * and deliver nothing, failing the test. A platform/un-attributed row has no
+ * tenant object by definition and must be seeded straight into the control
+ * mirror with {@link seedControlRequestLogs} as a decoy the pump must not read.
+ */
+async function seedRequestLogs(records: readonly RequestLogSeed[]): Promise<void> {
+  const byTenant = new Map<string, RequestLogSeed[]>();
+  for (const record of records) {
+    const tenant = record.tenant;
+    if (tenant === null || tenant === undefined || tenant === "") {
+      throw new Error(
+        "seedRequestLogs: a request_logs row must carry a tenant (its object is the pump's source); seed platform/un-attributed decoys with seedControlRequestLogs",
+      );
+    }
+    const bucket = byTenant.get(tenant) ?? [];
+    bucket.push(record);
+    byTenant.set(tenant, bucket);
+  }
+  for (const [tenantId, tenantRows] of byTenant) {
+    await db()
+      .prepare(
+        `INSERT INTO tenant_databases
+           (tenant_id, binding_name, schema_version,
+            storage_backend, provisioning_status, migration_state, provisioned_at_unix, updated_at_unix)
+         VALUES (?, NULL, 12, 'durable_object', 'ready', 'done', 1, 1)
+         ON CONFLICT (tenant_id) DO UPDATE SET
+           storage_backend = 'durable_object', provisioning_status = 'ready', migration_state = 'done'`,
+      )
+      .bind(tenantId)
+      .run();
+    const tenant = (
+      await resolveTenantDatabases(env as unknown as ControlPlaneBindings).forTenant(tenantId)
+    ).db;
+    await tenant.batch(
+      tenantRows.map((record) =>
+        tenant
+          .prepare(
+            `INSERT OR REPLACE INTO request_logs
+               (request_id, tenant, started_at_unix, completed_at_unix, route, status_code,
+                guardrail_verdict, request_json)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .bind(
+            record.requestId,
+            tenantId,
+            record.startedAtUnix,
+            record.completedAtUnix ?? null,
+            record.route ?? null,
+            record.statusCode ?? null,
+            "not_screened",
+            JSON.stringify(record.document ?? {}),
+          ),
+      ),
+    );
+  }
 }
 
 beforeAll(applySchema);
@@ -235,10 +264,13 @@ afterEach(async () => {
 describe("the tenant fence on what leaves the platform", () => {
   it("delivers this tenant's rows and NEVER another tenant's or a platform row", async () => {
     await seedRequestLogs(rows("acme", "acme", 3));
-    await seedRequestLogs(rows("globex", "globex", 3));
-    await seedRequestLogs([
-      // An un-attributed row: a PLATFORM-operator call. Strict equality means
-      // NULL matches nobody, so this must not reach a tenant's SIEM either.
+    // globex and the un-attributed PLATFORM row are DECOYS in the control mirror
+    // the pump used to read. The pump now reads acme's own TenantDataObject, so
+    // neither can reach acme's sink — and their presence in the mirror proves
+    // the pump is not reading it. A platform-operator call has NULL tenant, and
+    // strict equality means NULL matches nobody.
+    await seedControlRequestLogs(rows("globex", "globex", 3));
+    await seedControlRequestLogs([
       {
         requestId: "platform-000",
         tenant: null,
@@ -568,8 +600,9 @@ describe("the pump is not a second read path over the same tables", () => {
   it("delivers exactly the documents the JSONL export serves that tenant", async () => {
     const acmeRows = rows("acme", "acme", 3);
     await seedRequestLogs(acmeRows);
-    await seedRequestLogs(rows("globex", "globex", 2));
-    await seedTenantRequestLogs("acme", acmeRows);
+    // globex is a decoy in the control mirror: neither the pump nor the export
+    // path reads it, so it must appear in neither side of the equality below.
+    await seedControlRequestLogs(rows("globex", "globex", 2));
 
     await runSiemExportPass(bindings(), NOW);
 
@@ -584,11 +617,12 @@ describe("the pump is not a second read path over the same tables", () => {
 
     const byId = (records: Record<string, unknown>[]) =>
       [...records].sort((a, b) => String(a.id).localeCompare(String(b.id)));
-    // The SIEM is a bounded fleet reader and remains on the control-D1 derived
-    // projection until #825 supplies the common freshness/as-of contract. The
-    // tenant list/export path is separately pinned to TenantDataObject in the
-    // request-log reader tests; this test keeps the projection-backed SIEM and
-    // its own JSONL control projection in lockstep.
+    // Both sides now read the SAME authoritative TenantDataObject: the pump's
+    // `request_logs` leg and `GET /admin/v1/request-log-exports` are one read
+    // path over one table (#825 closed the freshness/as-of gap that had kept the
+    // pump on the control projection). A row the console can see the pump must
+    // see, projected identically — a divergence here is a customer's SIEM and
+    // this platform's API disagreeing about what happened.
     expect(byId(deliveredDocuments())).toEqual(byId(served));
   });
 });

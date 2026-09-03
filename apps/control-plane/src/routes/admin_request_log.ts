@@ -691,10 +691,14 @@ function listRequestLogsHandler(): Handler {
     // platform object — never the control projection. A one-time copy of the
     // pre-cutover un-attributed control rows into the platform object runs first,
     // idempotent and marked, exactly as the guardrail operator read backfills the
-    // same object. The three finops JOIN readers (cost-record/investigation/
-    // experiment) still read the control `request_logs` projection directly via
-    // their own billing JOINs, which G1 keeps dual-written, so this cutover of the
-    // list/export readers does not disturb them.
+    // same object. The finops JOIN readers (cost-record/investigation/experiment)
+    // ALSO fan out over the tenant/platform objects: their `request_logs⋈
+    // billing_events` join forces both sides into the same object, and
+    // `billing_events` only ever lands in the tenant object, so the control
+    // `request_logs` projection is useless to them and they never read it. Since
+    // Track A / #825 moved the SIEM pump onto the tenant object too, the control
+    // `request_logs` projection now has NO runtime reader (only the one-time
+    // platform backfill above drains its pre-cutover un-attributed rows).
     const platformDb = deps.platformData ?? null;
     await ensurePlatformRequestLogBackfill(db, platformDb);
     const fleet = await fleetRequestLogPage(tenantRouter, platformDb, query, tenantFanoutOffset(url));

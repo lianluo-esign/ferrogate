@@ -38,9 +38,29 @@
  * a bounded number of batches per tick, and the cursor makes an interrupted
  * tick a resumption rather than a loss — which is exactly the property that
  * lets a cheap scheduler carry it.
+ *
+ * ## Where each stream reads from (Track A / #825)
+ *
+ * The `request_logs` legs now read each sink's own authoritative
+ * TenantDataObject, never the control-DO projection mirror — a SIEM sink is
+ * per-tenant (`parseSiemSinks` refuses one without a tenant), so each leg reads
+ * exactly one object and there is no cross-object as-of to reconcile: the shared
+ * `horizon` bounds every object and the per-(sink,stream) keyset cursor names
+ * the last row acknowledged. This removes the last runtime reader of the control
+ * `request_logs` projection and is what lets the gateway stop dual-writing it.
+ * The `audit_events` legs stay on the control DO: the hash chain is
+ * control-authoritative and is a deliberate red-line exception. The cursor table
+ * (`siem_export_cursors`) is the pump's own bookkeeping and stays on control
+ * regardless of stream.
  */
-import { resolveControlDatabase, resolveSiemExportBucket } from "../adapters.js";
+import type { TenantDatabaseRouter } from "@ferrogate/storage";
+import {
+  resolveControlDatabase,
+  resolveSiemExportBucket,
+  resolveTenantDatabases,
+} from "../adapters.js";
 import type { ControlPlaneBindings } from "../ports.js";
+import { tenantEvidenceDatabaseFor } from "../store/tenancy.js";
 import { type SiemSink, type SiemStream, parseSiemSinks } from "./config.js";
 import {
   type SiemCursorPosition,
@@ -129,16 +149,39 @@ async function resumePosition(
  * turn every delivery failure into a permanent, invisible gap.
  */
 async function pumpStream(
-  db: D1Database,
+  controlDb: D1Database,
+  tenantDatabases: TenantDatabaseRouter,
   env: ControlPlaneBindings,
   sink: SiemSink,
   stream: SiemStream,
   now: number,
 ): Promise<SiemStreamReport> {
   const horizon = now - sink.visibilityLagSeconds;
-  let { position, replayEpoch } = await resumePosition(db, sink, stream, now);
+  // The CURSOR always lives in control (`siem_export_cursors` is the pump's own
+  // per-(sink,stream) bookkeeping, not tenant row data), so replay/resume and
+  // advance both run against `controlDb` regardless of where the SOURCE reads.
+  let { position, replayEpoch } = await resumePosition(controlDb, sink, stream, now);
   let batches = 0;
   let rows = 0;
+
+  // Track A / #825: the SOURCE of a `request_logs` leg is the tenant's
+  // authoritative TenantDataObject, NEVER the control projection mirror (red
+  // line no-tenant-data-mirror-in-control-d1). `tenantEvidenceDatabaseFor`
+  // fails closed (503) rather than falling back to the control mirror, so an
+  // unreachable object reports `failed` and the cursor does not advance —
+  // at-least-once holds, and no straggler is silently skipped. The `audit`
+  // stream stays on control: `audit_events` is the hash-chain authority and is
+  // a deliberate red-line exception that keeps living in the control DO.
+  // Resolved ONCE per leg, alongside the credential.
+  let sourceDb: D1Database;
+  try {
+    sourceDb =
+      stream === "request_logs"
+        ? await tenantEvidenceDatabaseFor(tenantDatabases, sink.tenant)
+        : controlDb;
+  } catch (error) {
+    return report(sink, stream, "failed", 0, 0, position, error, []);
+  }
 
   // Resolved ONCE per leg rather than per batch: one place where a live
   // credential exists, and one place where a resolution failure can happen.
@@ -153,7 +196,14 @@ async function pumpStream(
 
   try {
     while (batches < sink.maxBatchesPerTick) {
-      const batch = await readSiemBatch(db, stream, sink.tenant, position, horizon, sink.batchSize);
+      const batch = await readSiemBatch(
+        sourceDb,
+        stream,
+        sink.tenant,
+        position,
+        horizon,
+        sink.batchSize,
+      );
       if (batch.length === 0) break;
       const last = batch[batch.length - 1] as (typeof batch)[number];
       const ref = { sink, stream, position: last.position };
@@ -165,8 +215,8 @@ async function pumpStream(
         { credential, bucket },
       );
 
-      // ACKNOWLEDGED — and only now does the cursor move.
-      await advanceSiemCursor(db, {
+      // ACKNOWLEDGED — and only now does the cursor move (in control).
+      await advanceSiemCursor(controlDb, {
         sinkId: sink.id,
         stream,
         tenant: sink.tenant,
@@ -249,21 +299,26 @@ export async function runSiemExportPass(
   }
   if (sinks.length === 0) return { sinks: 0, streams: [], configError: null };
 
-  const db = resolveControlDatabase(env);
-  if (db === null) {
-    // `CONTROL_PLANE_STORE = "memory"` or no `DB`: there is no evidence table to
-    // export from. Loud, because a deployment that configured a sink and gets
-    // nothing has no other way to find out.
+  const controlDb = resolveControlDatabase(env);
+  if (controlDb === null) {
+    // `CONTROL_PLANE_STORE = "memory"` or no `DB`: there is no cursor table to
+    // resume from and no `audit_events` to export. Loud, because a deployment
+    // that configured a sink and gets nothing has no other way to find out.
     console.warn(
       "control-plane: SIEM export configured but no control database is bound; nothing to export",
     );
     return { sinks: sinks.length, streams: [], configError: null };
   }
+  // The `request_logs` legs read each sink's own TenantDataObject through this
+  // router; the cursor and the `audit` legs stay on `controlDb` (see
+  // `pumpStream`). Resolved once, control handle threaded in to avoid a second
+  // `controlDatabaseFor` lookup.
+  const tenantDatabases = resolveTenantDatabases(env, controlDb);
 
   const streams: SiemStreamReport[] = [];
   for (const sink of sinks) {
     for (const stream of sink.streams) {
-      streams.push(await pumpStream(db, env, sink, stream, now));
+      streams.push(await pumpStream(controlDb, tenantDatabases, env, sink, stream, now));
     }
   }
   return { sinks: sinks.length, streams, configError: null };

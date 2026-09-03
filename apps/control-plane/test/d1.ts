@@ -250,6 +250,13 @@ export async function resetD1(): Promise<void> {
         const handle = await router.forTenant(tenantId);
         await handle.db.batch([
           handle.db.prepare(`DELETE FROM ${TENANT_RESOURCE_TABLE}`),
+          // The authoritative `request_logs` evidence now lives in the tenant
+          // object (Track A / #825 moved the SIEM pump and every reader onto it),
+          // and no control truncate can reach it. A leftover row makes a later
+          // test's "delivers exactly these rows" / "empty first" assertion pass
+          // over a previous test's evidence — the same lie the control-side
+          // `request_logs` truncate guards against, one storage layer out.
+          handle.db.prepare(`DELETE FROM ${REQUEST_LOG_TABLE}`),
           // The TYPED projections the routes write alongside the documents.
           // `wallet_settlements` in particular is the idempotency ledger, so a
           // leftover row makes a later test's movement replay itself silently.
