@@ -342,6 +342,16 @@ export interface AdmissionBindings {
   readonly CONTROL_DATA?: DurableObjectNamespace | undefined;
   /** The SHARED `RateLimiterDurableObject` namespace (see `./counters.ts`). */
   readonly RATE_LIMIT?: RateLimiterNamespace | undefined;
+  /**
+   * Quota-storage posture (Track A red line). `"tenant_object"` reads the
+   * RELOCATED `quota_policies` + `spend_throttles` legs from each caller
+   * tenant's OWN object (tenant migrations 0033 / 0032); anything else (the
+   * default) keeps them on the control database. Default OFF and independent of
+   * the routing posture — flip it only after the per-tenant `quota_policies`
+   * rows are backfilled, or the limiter would read an empty tenant object and
+   * admit unlimited traffic. See {@link admissionFromEnv}.
+   */
+  readonly MCP_QUOTA_POLICY_SOURCE?: string | undefined;
 }
 
 /**
@@ -361,13 +371,44 @@ export function admissionFromEnv(
   if (db === undefined) return ADMIT_ALL;
   return new McpAdmissionGate({
     limiter: limiterForEnv(env),
-    quotas: d1QuotaPolicySource(db),
+    quotas: d1QuotaPolicySource(db, undefined, quotaTenantPolicyDb(env, router)),
     ...(router === undefined ? {} : { router }),
     // The registry table is probed before the router is used, so a deployment
     // that has not applied the control migration admits (nothing is
     // provisioned) instead of answering 503 forever.
     spendFor: tenantSpendResolver(db, router),
   });
+}
+
+/**
+ * The RELOCATED-quota resolver (Track A red line), or `undefined` to keep the
+ * default control read.
+ *
+ * Returns a per-tenant accessor for the caller tenant's OWN object ONLY when the
+ * `MCP_QUOTA_POLICY_SOURCE = "tenant_object"` posture is set AND a tenant router
+ * is bound. `TenantDatabaseRouter.forTenant` already resolves the handle for
+ * exactly the requested tenant, so `handle.tenantId` must equal it — the same
+ * cross-tenant tripwire the spend legs arm, refusing rather than reading one
+ * tenant's caps from another's object. Any resolution failure (a router that
+ * throws, an unprovisioned tenant) propagates to {@link d1QuotaPolicySource} as
+ * a 503, never a silent fall-through to control.
+ */
+function quotaTenantPolicyDb(
+  env: AdmissionBindings,
+  router?: TenantDatabaseRouter,
+): ((tenantId: string) => Promise<D1Database>) | undefined {
+  if (router === undefined) return undefined;
+  if ((env.MCP_QUOTA_POLICY_SOURCE ?? "").trim() !== "tenant_object") return undefined;
+  return async (tenantId: string): Promise<D1Database> => {
+    const handle = await router.forTenant(tenantId);
+    if (handle.tenantId !== tenantId) {
+      throw new Error(
+        `the routed tenant database is tenant ${handle.tenantId}'s but this quota lookup is for ` +
+          `tenant ${tenantId}; refusing rather than reading the wrong tenant's policies`,
+      );
+    }
+    return handle.db;
+  };
 }
 
 export { NO_QUOTA_POLICIES };

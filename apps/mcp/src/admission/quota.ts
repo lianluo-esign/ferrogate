@@ -410,23 +410,65 @@ export function d1QuotaPolicySource(
    * production reads the real clock at call time, never at module load.
    */
   nowSeconds: () => number = () => Math.floor(Date.now() / 1000),
+  /**
+   * Resolver for the RELOCATED tenant-scoped legs (Track A red line).
+   *
+   * Per-scope `quota_policies` and `spend_throttles` rows are TENANT data whose
+   * authoritative home is the tenant's OWN object (tenant migrations 0033 /
+   * 0032), not the shared control database. When wired — the
+   * `MCP_QUOTA_POLICY_SOURCE = "tenant_object"` posture, decided in
+   * {@link admissionFromEnv} — AND the subject is tenant-attributed, those two
+   * legs read from the resolved tenant object; the account-global `plans` floor
+   * stays on the control `db`. Absent (the default/OFF posture) or for an
+   * ownerless subject with no `tenantId`, every leg reads `db` exactly as
+   * before, so the switch is inert until an operator BOTH backfills the tenant
+   * objects AND flips the posture — never a window where the limiter reads an
+   * empty tenant object and admits unlimited traffic.
+   */
+  tenantPolicyDb?: (tenantId: string) => Promise<D1Database>,
 ): QuotaPolicySource {
   return {
     async policiesFor(subject: QuotaSubject): Promise<QuotaPolicySnapshot> {
-      let tables: ReadonlySet<string>;
+      const { tenantId, projectId, workspaceId, keyId } = subject.chain;
+
+      // Where the tenant-scoped legs read from. A failure to RESOLVE the tenant
+      // handle is a 503, never a silent fall-through to control: answering from
+      // the wrong authority would apply the wrong caps to live traffic.
+      let policyDb = db;
+      if (tenantPolicyDb !== undefined && tenantId !== undefined) {
+        try {
+          policyDb = await tenantPolicyDb(tenantId);
+        } catch (error) {
+          return {
+            ok: false,
+            detail: `cloudflare d1: routed tenant quota database unavailable: ${describe(error)}`,
+          };
+        }
+      }
+      const routed = policyDb !== db;
+
+      // Probe each database for the tables IT now owns: `quota_policies` +
+      // `spend_throttles` on `policyDb`, `plans` + `tenants` on the control `db`.
+      // When not routed they are the same handle and the same single probe, so
+      // the pre-relocation behavior is preserved byte-for-byte. The probe is
+      // per-handle ({@link quotaTables} keys its cache on the D1 object), so the
+      // two reads never contaminate each other.
+      let policyTables: ReadonlySet<string>;
+      let planTables: ReadonlySet<string>;
       try {
-        tables = await quotaTables(db);
+        policyTables = await quotaTables(policyDb);
+        planTables = routed ? await quotaTables(db) : policyTables;
       } catch (error) {
         return {
           ok: false,
           detail: `cloudflare d1: control database probe failed: ${describe(error)}`,
         };
       }
-      // Not provisioned: there is no policy table, therefore no policy.
-      if (!tables.has(QUOTA_POLICY_TABLE)) return { ok: true, lookup: () => undefined };
+      // Not provisioned: there is no policy table where the policies now live,
+      // therefore no policy.
+      if (!policyTables.has(QUOTA_POLICY_TABLE)) return { ok: true, lookup: () => undefined };
 
       const scopes: [QuotaScopeKind, string][] = [];
-      const { tenantId, projectId, workspaceId, keyId } = subject.chain;
       if (tenantId !== undefined) scopes.push(["tenant", tenantId]);
       if (projectId !== undefined) scopes.push(["project", projectId]);
       if (workspaceId !== undefined) scopes.push(["workspace", workspaceId]);
@@ -438,34 +480,18 @@ export function d1QuotaPolicySource(
       if (scopes.length === 0) return { ok: true, lookup: () => undefined };
 
       const predicate = scopes.map(() => "(scope_type = ? AND scope_id = ?)").join(" OR ");
+      // The tenant-scoped statements: `quota_policies`, and `spend_throttles`
+      // (#697) when provisioned in whichever database now owns it — both on
+      // `policyDb`.
       const statements = [
-        db
+        policyDb
           .prepare(`SELECT ${QUOTA_POLICY_COLUMNS} FROM quota_policies WHERE ${predicate}`)
           .bind(...scopes.flat()),
       ];
-      // The plan FLOOR is only reachable when both of its tables exist; a
-      // deployment with `quota_policies` but no `plans` simply has no floor.
-      //
-      // Indices are COMPUTED rather than written as literals below, because
-      // this leg is conditional: a hard-coded `results[2]` would read the PLAN
-      // row as a throttle for a credential with no tenant, and a mis-indexed
-      // read there does not fail — it applies the wrong rpm cap to live traffic.
-      const planIndex =
-        tenantId !== undefined && tables.has(PLAN_TABLE) && tables.has(TENANT_TABLE)
-          ? statements.length
-          : -1;
-      if (planIndex >= 0) {
-        statements.push(
-          db
-            .prepare("SELECT p.* FROM plans p JOIN tenants t ON t.plan_id = p.id WHERE t.id = ?")
-            .bind(tenantId as string),
-        );
-      }
-      // #697 — the auto-throttle overlay, in the same batch as everything else.
-      const throttleIndex = tables.has(SPEND_THROTTLE_TABLE) ? statements.length : -1;
+      const throttleIndex = policyTables.has(SPEND_THROTTLE_TABLE) ? statements.length : -1;
       if (throttleIndex >= 0) {
         statements.push(
-          db
+          policyDb
             .prepare(
               `SELECT scope_type, scope_id, rpm_limit
                  FROM ${SPEND_THROTTLE_TABLE}
@@ -475,14 +501,45 @@ export function d1QuotaPolicySource(
         );
       }
 
+      // The plan FLOOR is only reachable when both of its control tables exist;
+      // a deployment with `quota_policies` but no `plans` simply has no floor.
+      // Indices are COMPUTED rather than written as literals, because this leg is
+      // conditional: a hard-coded `results[2]` would read the PLAN row as a
+      // throttle for a credential with no tenant, and a mis-indexed read there
+      // does not fail — it applies the wrong rpm cap to live traffic. When routed
+      // the plan is its own batch on control, so its index is 0 there.
+      const planStatement =
+        tenantId !== undefined && planTables.has(PLAN_TABLE) && planTables.has(TENANT_TABLE)
+          ? db
+              .prepare("SELECT p.* FROM plans p JOIN tenants t ON t.plan_id = p.id WHERE t.id = ?")
+              .bind(tenantId)
+          : undefined;
+      const planIndex = planStatement === undefined ? -1 : routed ? 0 : statements.length;
+      if (planStatement !== undefined && !routed) {
+        statements.push(planStatement);
+      }
+
       let results: { results?: unknown[] }[];
       try {
-        results = (await db.batch(statements)) as unknown as { results?: unknown[] }[];
+        results = (await policyDb.batch(statements)) as unknown as { results?: unknown[] }[];
       } catch (error) {
         return {
           ok: false,
           detail: `cloudflare d1: quota policy lookup failed: ${describe(error)}`,
         };
+      }
+
+      // When routed, the plan floor is a second batch against the control `db`.
+      let planResults: { results?: unknown[] }[] = results;
+      if (routed && planStatement !== undefined) {
+        try {
+          planResults = (await db.batch([planStatement])) as unknown as { results?: unknown[] }[];
+        } catch (error) {
+          return {
+            ok: false,
+            detail: `cloudflare d1: quota plan lookup failed: ${describe(error)}`,
+          };
+        }
       }
 
       const index = new Map<string, StoredQuotaPolicy>();
@@ -493,7 +550,7 @@ export function d1QuotaPolicySource(
           index.set(`${policy.scopeType}:${policy.scopeId}`, policy);
         }
         if (planIndex >= 0) {
-          const planRow = (results[planIndex]?.results ?? [])[0] as
+          const planRow = (planResults[planIndex]?.results ?? [])[0] as
             | Record<string, unknown>
             | undefined;
           if (planRow !== undefined) plan = rowToStoredPlan(planRow);

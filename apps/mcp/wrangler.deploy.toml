@@ -27,6 +27,13 @@ compatibility_flags = ["nodejs_compat"]
 FG_DEV_IN_MEMORY_PORTS = "1"
 FG_DEV_MCP_GUARDRAILS = ""
 MCP_CONTROL_STORAGE = "durable_object"
+# Quota-storage posture (Track A red line). "control" (default) reads
+# quota_policies + spend_throttles from control; "tenant_object" reads the
+# RELOCATED per-tenant rows (tenant 0033 / 0032) from each caller tenant's OWN
+# object. Default-OFF, independent of routing: flip only AFTER backfilling the
+# per-tenant quota_policies rows, or the limiter reads an empty tenant object
+# and admits unlimited traffic.
+MCP_QUOTA_POLICY_SOURCE = "control"
 
 # --- KV: per-user MCP OAuth flow state (real live id) ------------------------
 [[kv_namespaces]]

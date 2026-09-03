@@ -425,6 +425,10 @@ describe("the env-var drift gate itself", () => {
       "AGENT_JOB_MAX_OPEN_PER_TENANT",
       "AGENT_RUNTIME_CONTROL_STORAGE",
       "AGENT_RUNTIME_ENABLED",
+      // Track A quota-read relocation (#quota-spend-throttle): default "control",
+      // flipped to "tenant_object" once operators backfill the per-tenant objects.
+      // Read at src/admission/admit.ts to route quota_policies + spend_throttles.
+      "AGENT_RUNTIME_QUOTA_POLICY_SOURCE",
       // WAVE 20 — committed by the integrate step, on this file's own written
       // instruction, once the tool-side workflow graph gate landed.
       "AGENT_WORKFLOWS",
@@ -602,7 +606,7 @@ describe("which committed [vars] values this runner can actually observe", () =>
 
   it("compared every committed [vars] value against the runtime one", () => {
     expect(rows.length).toBe(DECLARED.vars.size);
-    expect(rows.length).toBe(9);
+    expect(rows.length).toBe(10);
   });
 
   it("explains every overridden var with an explicit pin in vitest.config.ts", () => {
@@ -631,10 +635,10 @@ describe("which committed [vars] values this runner can actually observe", () =>
     }
   });
 
-  it("records that all eight committed values reach this runner unchanged", () => {
+  it("records that all ten committed values reach this runner unchanged", () => {
     const observable = rows.filter((r) => r.runtime === r.committed).map((r) => r.name);
     expect(observable.sort()).toEqual([...DECLARED.vars.keys()].sort());
-    expect(observable.length).toBe(9);
+    expect(observable.length).toBe(10);
   });
 
   /**

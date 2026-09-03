@@ -504,7 +504,11 @@ describe("the env-var drift gate itself", () => {
     // drain). ⇒ 69, re-counted off the merged file with
     // `grep -cE '^[A-Z][A-Z0-9_]*[[:space:]]*=' wrangler.toml` rather than
     // incremented — same parallel-branch hazard as every line above.
-    expect(DECLARED.vars.size).toBe(69);
+    // Track A quota_policies slice added `GATEWAY_QUOTA_POLICY_SOURCE` (the
+    // relocate-the-quota_policies-read posture, committed OFF as "control" and
+    // flipped to "tenant_object" only after the per-tenant backfill lands) ⇒ 70,
+    // re-counted off the merged file with the same grep rather than incremented.
+    expect(DECLARED.vars.size).toBe(70);
     expect(DECLARED.bindings.size).toBeGreaterThanOrEqual(9);
     expect(READS.named.size).toBeGreaterThanOrEqual(60);
 
@@ -802,7 +806,9 @@ describe("which committed [vars] values this runner can actually observe", () =>
     // control-plane-d1 §Phase3: + `GATEWAY_TENANT_STATUS_KV`,
     // `GATEWAY_PLATFORM_BILLING_BACKFILL` (both committed OFF) ⇒ 69, re-counted
     // off the merged file with the same grep.
-    expect(rows.length).toBe(69);
+    // Track A quota_policies slice: + `GATEWAY_QUOTA_POLICY_SOURCE` (committed
+    // OFF as "control") ⇒ 70, re-counted off the merged file with the same grep.
+    expect(rows.length).toBe(70);
   });
 
   it("explains every overridden var with an explicit pin in vitest.config.ts", () => {
@@ -914,8 +920,14 @@ describe("which committed [vars] values this runner can actually observe", () =>
     // value reaches the runner unchanged and each is observable rather than
     // overridden. Committed "off" is INERT: both readers arm only on exactly
     // "on", so the suite behaves as if the gates were absent.
+    //
+    // Track A quota_policies slice: 64 -> 65, overridden stays 5.
+    // `GATEWAY_QUOTA_POLICY_SOURCE` is committed "control" and NOT pinned in
+    // vitest.config.ts, so it reaches the runner unchanged and is observable.
+    // "control" is INERT: the relocation arms only on exactly "tenant_object",
+    // so the suite reads `quota_policies` off control exactly as before.
     const observable = rows.filter((r) => r.runtime === r.committed);
-    expect(observable.length).toBe(64);
+    expect(observable.length).toBe(65);
     expect(rows.length - observable.length).toBe(5);
   });
 });

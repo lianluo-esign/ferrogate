@@ -179,6 +179,19 @@ export interface RateLimitBindings
    */
   readonly GATEWAY_TENANT_DB_ROUTING?: string | undefined;
   /**
+   * The quota-storage posture (Track A red line). `"tenant_object"` reads the
+   * RELOCATED `quota_policies` + `spend_throttles` legs from the tenant's OWN
+   * object; anything else (the default) keeps them on the control database. Held
+   * separate from {@link GATEWAY_TENANT_DB_ROUTING} on purpose: that posture is
+   * already `"durable_object"` in production, and quota must not follow it into
+   * the tenant object until an operator has backfilled the per-tenant
+   * `quota_policies` rows and flipped THIS flag — otherwise the limiter would
+   * read an empty tenant object and admit unlimited traffic. Default OFF, so the
+   * relocation is code-ready but inert until deliberately enabled. See
+   * {@link quotaTenantPolicyDb}.
+   */
+  readonly GATEWAY_QUOTA_POLICY_SOURCE?: string | undefined;
+  /**
    * The per-tenant Durable Object namespace. Read only to distinguish "routing
    * is on and the storage is bound" from "routing is on and this Worker has no
    * tenant storage at all" — see {@link defaultWalletAdmission}. The namespace
@@ -479,6 +492,41 @@ function defaultWalletAdmission(c: Context<GatewayEnv>, env: RateLimitBindings):
  * {@link routedWalletSpendSource} for why the ROLLUP leg deliberately does not
  * move with it.
  */
+/**
+ * The RELOCATED-quota resolver (Track A red line), or `undefined` to keep the
+ * default control read.
+ *
+ * Returns a per-request accessor for the tenant's OWN object ONLY when the
+ * `GATEWAY_QUOTA_POLICY_SOURCE = "tenant_object"` posture is set AND this
+ * request is tenant-attributed. `quotaPolicySourceFromEnv` passes it to
+ * {@link d1QuotaPolicySource}, which reads `quota_policies` + `spend_throttles`
+ * from it while the account-global `plans` floor stays on the control database.
+ *
+ * The same cross-tenant guard {@link defaultSpendSource} makes: the routed
+ * handle is for exactly one tenant, and resolving one tenant's quota from
+ * another tenant's object would apply the wrong caps — a refusal, not a read.
+ * A platform-operator credential (`tenantId === null`) has no single tenant
+ * object, so it stays on control, exactly like its wallet/spend legs.
+ */
+function quotaTenantPolicyDb(
+  c: Context<GatewayEnv>,
+  env: RateLimitBindings,
+): ((tenantId: string) => Promise<D1Database>) | undefined {
+  if ((env.GATEWAY_QUOTA_POLICY_SOURCE ?? "").trim() !== "tenant_object") return undefined;
+  const accessor = tenantDatabaseOf(c);
+  if (accessor.tenantId === null) return undefined;
+  return async (tenantId: string): Promise<D1Database> => {
+    const handle = await accessor.handle();
+    if (handle.tenantId !== tenantId) {
+      throw new Error(
+        `the routed tenant database is tenant ${handle.tenantId}'s but this quota lookup is for ` +
+          `tenant ${tenantId}; refusing rather than reading the wrong tenant's policies`,
+      );
+    }
+    return handle.db;
+  };
+}
+
 function defaultSpendSource(c: Context<GatewayEnv>, env: RateLimitBindings): SpendSource {
   const mode = parseTenantDatabaseRoutingMode(env.GATEWAY_TENANT_DB_ROUTING);
   if (mode === "durable_object" && env.TENANT_DATA === undefined) {
@@ -583,7 +631,7 @@ export function rateLimit(deps: RateLimitDeps = {}): MiddlewareHandler<GatewayEn
     const quotas =
       typeof deps.quotas === "function"
         ? deps.quotas(env)
-        : (deps.quotas ?? quotaPolicySourceFromEnv(env));
+        : (deps.quotas ?? quotaPolicySourceFromEnv(env, quotaTenantPolicyDb(c, env)));
     const spend =
       typeof deps.spend === "function"
         ? deps.spend(env)

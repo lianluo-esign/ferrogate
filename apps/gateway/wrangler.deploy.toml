@@ -633,6 +633,13 @@ GATEWAY_CACHE_DISABLED_PROFILES = "[]"
 #
 # ---------------------------------------------------------------------------
 GATEWAY_TENANT_DB_ROUTING = "durable_object"
+# Quota-storage posture (Track A red line). "control" (the committed default)
+# reads quota_policies + spend_throttles from the control database; set to
+# "tenant_object" to read the RELOCATED per-tenant rows from each tenant's OWN
+# object. Kept default-OFF and INDEPENDENT of GATEWAY_TENANT_DB_ROUTING: flip it
+# only AFTER the per-tenant quota_policies rows are backfilled, or the limiter
+# would read an empty tenant object and admit unlimited traffic.
+GATEWAY_QUOTA_POLICY_SOURCE = "control"
 # Control-plane read backend posture. "durable_object" reads the CONTROL_DATA
 # DO facade; "d1" opens a colo-local read-replica session on CONTROL_D1
 # (withSession "first-unconstrained", src/control-data.ts). The ONE-SHOT cutover

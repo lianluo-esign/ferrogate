@@ -70,6 +70,15 @@ FG_DEV_MCP_GUARDRAILS = ""
 # UNDECLARED_BINDINGS until the posture flips to "d1".
 MCP_CONTROL_STORAGE = "durable_object"
 
+# Quota-storage posture (Track A red line). "control" (the committed default)
+# reads quota_policies + spend_throttles from the control database; set to
+# "tenant_object" to read the RELOCATED per-tenant rows (tenant migrations
+# 0033 / 0032) from each caller tenant's OWN object. Default-OFF and INDEPENDENT
+# of the routing posture: flip it only AFTER the per-tenant quota_policies rows
+# are backfilled, or the limiter would read an empty tenant object and admit
+# unlimited traffic.
+MCP_QUOTA_POLICY_SOURCE = "control"
+
 # ---------------------------------------------------------------------------
 # KV — per-user MCP OAuth flow state
 #

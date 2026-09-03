@@ -465,6 +465,16 @@ export interface GatewayBindings {
    */
   readonly GATEWAY_TENANT_DB_ROUTING?: string;
 
+  /**
+   * Quota-storage posture — `src/ratelimit/middleware.ts` ({@link quotaTenantPolicyDb}).
+   * `"tenant_object"` reads the RELOCATED `quota_policies` + `spend_throttles`
+   * legs from the tenant's OWN object (Track A red line); anything else (the
+   * committed default) keeps them on the control database. Independent of
+   * `GATEWAY_TENANT_DB_ROUTING` so quota can be flipped only after its per-tenant
+   * rows are backfilled.
+   */
+  readonly GATEWAY_QUOTA_POLICY_SOURCE?: string;
+
   // -------------------------------------------------------------------------
   // Wave-10 bindings. Same rule: each is declared in `wrangler.toml` and read
   // by the module named below.

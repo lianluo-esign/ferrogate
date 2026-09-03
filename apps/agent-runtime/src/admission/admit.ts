@@ -232,13 +232,44 @@ function refuse(refusal: { status: number; code: string }, message: string): Htt
  * step in isolation, and so the composition in {@link admissionFromEnv} is the
  * only place that names a binding.
  */
+/**
+ * The RELOCATED-quota resolver (Track A red line), or `undefined` to keep the
+ * default control read.
+ *
+ * Returns a per-subject accessor for the tenant's OWN object ONLY when the
+ * `AGENT_RUNTIME_QUOTA_POLICY_SOURCE = "tenant_object"` posture is set AND a
+ * router is bound. {@link quotaPolicySourceFromEnv} hands it to
+ * {@link d1QuotaPolicySource}, which reads `quota_policies` + `spend_throttles`
+ * from it while the account-global `plans` floor stays on control. The same
+ * cross-tenant guard the routed MONEY legs make: resolving one tenant's quota
+ * from another tenant's object would apply the wrong caps — a refusal, not a
+ * read.
+ */
+function quotaTenantPolicyDb(
+  env: AdmissionBindings,
+  router: TenantDatabaseRouter | undefined,
+): ((tenantId: string) => Promise<D1Database>) | undefined {
+  if (router === undefined) return undefined;
+  if ((env.AGENT_RUNTIME_QUOTA_POLICY_SOURCE ?? "").trim() !== "tenant_object") return undefined;
+  return async (tenantId: string): Promise<D1Database> => {
+    const handle = await router.forTenant(tenantId);
+    if (handle.tenantId !== tenantId) {
+      throw new Error(
+        `the routed tenant database is tenant ${handle.tenantId}'s but this quota lookup is for ` +
+          `tenant ${tenantId}; refusing rather than reading the wrong tenant's policies`,
+      );
+    }
+    return handle.db;
+  };
+}
+
 export function admissionPort(
   deps: AdmissionDeps & { readonly env: AdmissionBindings },
 ): AdmissionPort {
-  const quotas = deps.quotas ?? quotaPolicySourceFromEnv(deps.env);
+  const router = deps.router;
+  const quotas = deps.quotas ?? quotaPolicySourceFromEnv(deps.env, quotaTenantPolicyDb(deps.env, router));
   const counter = deps.counter ?? counterFromEnv(deps.env);
   const now = deps.nowUnixSeconds ?? ((): number => Math.floor(Date.now() / 1000));
-  const router = deps.router;
   // Since #821 PR2-delete the shared `ferrogate-tenant` D1 (`env.DB`) is gone,
   // so there is no legacy leg to fall back to: the MONEY sources are either the
   // routed per-tenant Durable Object (below) or the fail-open opt-in NO_* stand-
