@@ -104,7 +104,12 @@ export const CONTROL_BACKFILL_TABLES: readonly ControlBackfillTable[] = Object.f
   table("admin_user_refresh_tokens", ["id"]),
   table("admin_user_tenant_memberships", ["id"]),
   table("admin_users", ["id"]),
-  table("agent_worker_instances", ["id"]),
+  // `agent_worker_instances` was DROPPED from control by 0041 with the rest of
+  // the managed-worker family (see the block below): it is tenant-authoritative
+  // (agent-runtime writes the tenant object only, admin reads fan out over the
+  // tenant objects), so the empty control mirror has no writer or reader and a
+  // table the live schema no longer has must NOT appear in this manifest (the
+  // parity guard would flag it).
   table("api_key_directory", ["key_hash"]),
   table("audit_events", ["projection_key"]),
   table("billing_events", ["billing_event_id"]),
@@ -121,11 +126,17 @@ export const CONTROL_BACKFILL_TABLES: readonly ControlBackfillTable[] = Object.f
   table("guardrail_check_evaluations", ["projection_key"]),
   table("guardrail_policy_bindings", ["policy_id"]),
   table("guardrail_policy_revisions", ["policy_id", "revision"]),
-  table("managed_worker_isolation_policies", ["session_id"]),
-  table("managed_worker_isolation_selections", ["session_id"]),
-  table("managed_worker_lifecycle_events", ["id"]),
-  table("managed_worker_sessions", ["id"]),
-  table("managed_worker_templates", ["id"]),
+  // `managed_worker_isolation_policies`, `managed_worker_isolation_selections`,
+  // `managed_worker_lifecycle_events`, `managed_worker_sessions` and
+  // `managed_worker_templates` (with `agent_worker_instances` above) were
+  // DROPPED from the control DO by `0041_drop_managed_worker_projections.sql` —
+  // the managed-worker family is authoritative in each tenant's own object
+  // (agent-runtime `runs/evidence.ts` writes the tenant object as the ONLY copy;
+  // `store/tenant-worker.ts` + `routes/admin_managed_worker.ts` read it by
+  // fan-out), so the control mirror has no writer or reader. A table the live
+  // schema no longer has must NOT appear in this manifest (the parity guard
+  // would flag it), same as `spend_anomaly_episodes` (0038) and the tenant push
+  // rollups (0040) below. Siblings of `managed_worker_isolation_evidence` (0036).
   // `online_eval_leg_quality` was DROPPED from control by migration 0039: the
   // recomputed leg-quality projection is single-source on each tenant object
   // now (Track A), so there is no control table left to back-fill.
@@ -157,12 +168,15 @@ export const CONTROL_BACKFILL_TABLES: readonly ControlBackfillTable[] = Object.f
   table("quota_policies", ["id"]),
   table("request_logs", ["projection_key"]),
   table("roles", ["id"]),
-  table("self_hosted_run_dispatches", ["dispatch_id"]),
-  table("self_hosted_worker_artifacts", ["id"]),
-  table("self_hosted_worker_checkpoints", ["id"]),
-  table("self_hosted_worker_heartbeats", ["id"]),
+  // The self-hosted-worker EVIDENCE mirrors (`self_hosted_run_dispatches`,
+  // `self_hosted_worker_artifacts`, `self_hosted_worker_checkpoints`,
+  // `self_hosted_worker_heartbeats`, `self_hosted_worker_telemetry_events`) were
+  // DROPPED from control by 0042: they are tenant-authoritative (written into the
+  // tenant object by `control-plane/store/tenant-worker.ts` since 6f6f934e) with
+  // no control reader, so they must NOT appear here or the manifest-parity guard
+  // flags them as unclassified live control tables. Only the bootstrap directory
+  // stays control-owned:
   table("self_hosted_worker_registrations", ["id"]),
-  table("self_hosted_worker_telemetry_events", ["id"]),
   table("semantic_cache_policies_legacy", ["scope_type", "scope_id"]),
   // Shared-config push watermark (#948), migration 0029. No FK; one row per
   // shared-config domain. Net-new and control-owned, so it has no legacy D1

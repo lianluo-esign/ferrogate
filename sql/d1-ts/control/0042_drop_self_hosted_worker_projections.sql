@@ -1,0 +1,71 @@
+-- ===========================================================================
+-- Drop the self-hosted-worker evidence control projections (Track A red-line)
+--
+-- `self_hosted_run_dispatches`, `self_hosted_worker_artifacts`,
+-- `self_hosted_worker_checkpoints`, `self_hosted_worker_heartbeats` and
+-- `self_hosted_worker_telemetry_events` (all 0001_init_control) are the
+-- control-side projection *mirrors* of the self-hosted (customer-operated)
+-- agent-worker plane's per-worker evidence. Their authoritative home is the
+-- per-tenant TenantDataObject, and every live producer and reader targets that
+-- tenant object, so the control copies have no remaining writer or reader.
+--
+--   * WRITE — `control-plane/store/tenant-worker.ts` (`recordHeartbeat`,
+--     `recordArtifact`, `recordCheckpoint`, `recordTelemetry`,
+--     `recordDispatch`) inserts every one of these rows through
+--     `openTenantWorkerRepository` → `tenantDatabaseFor`, i.e. into the tenant's
+--     OWN object, never a control facade. These typed rows were born
+--     tenant-only: commit 6f6f934e ("move tenant worker and schedule state to
+--     objects", 2026-08-05) ADDED the tenant-object INSERTs together with the
+--     tenant migration 0017_worker_schedule_state.sql; it removed no
+--     control-side writer, because none existed for the typed family — the
+--     control tables are the Rust-era dual-provisioned skeleton.
+--   * READ  — none. The admin listing surface reads the compatibility DOCUMENT
+--     store (`deps.store` collections WORKERS / ARTIFACTS / CHECKPOINTS /
+--     EVENTS via `subListHandler`), which is a separate generic-collection
+--     projection, NOT these typed SQL tables. A fleet-wide scan finds zero
+--     `SELECT`/`FROM`/`JOIN` against any of the five (the lone reference in
+--     `agent-runtime/workers/plane.ts` is a module doc comment, not SQL).
+--
+-- No historical backfill is required. The control copies were populated ONLY by
+-- the one-time D1→control lift-and-shift; the SAME source rows were lift-and-
+-- shifted into the tenant objects (all five are in the tenant-backfill manifest
+-- under `SELF_HOSTED_WORKER_OWNERSHIP` / dispatch ownership), so each tenant
+-- object is a superset of its dead control mirror. The writer moved to the
+-- tenant object on 2026-08-05, well BEFORE the 2026-09-01 D1→DO cutover, so no
+-- control-only rows accumulated after the cut — unlike the experiment/eval
+-- projection whose consumer kept writing control until its recent G2 stop and
+-- therefore needs a gated backfill. This family does not.
+--
+-- `self_hosted_worker_registrations` is deliberately KEPT in control: it is the
+-- bootstrap directory that resolves a bare `worker_id` to its `tenant_id`
+-- BEFORE any tenant object can be addressed (`readWorkerRegistration(db, id)`
+-- on the control database), so it is control-owned, not a tenant mirror.
+-- `self_hosted_worker_identities` is already tenant-only (absent from the
+-- control-backfill manifest) and is untouched here.
+--
+-- Keeping the empty mirrors implies a second source of truth and lets a future
+-- writer accidentally bypass tenant isolation — the exact red line this program
+-- eliminates. `IF EXISTS` keeps this idempotent for fresh and already-migrated
+-- control databases (0013 / 0036 / 0037 / 0038 / 0039 / 0040 / 0041 precedent).
+-- None of the five is referenced by an inbound foreign key, so drop order is
+-- free; each table's indexes (`idx_self_hosted_worker_heartbeats_worker`,
+-- `idx_self_hosted_worker_telemetry_worker`,
+-- `idx_self_hosted_worker_telemetry_run`,
+-- `idx_self_hosted_worker_artifacts_worker`,
+-- `idx_self_hosted_worker_checkpoints_worker`,
+-- `idx_self_hosted_run_dispatches_queued`) drop with their table.
+--
+-- Deploy order: this is a pure DROP of an already-dead mirror (like 0036 /
+-- 0041), with no companion reader/writer switch — the writer and reader moved
+-- to the tenant object in a prior deploy (6f6f934e, already live) — so there is
+-- no CP→gateway ordering constraint. The gateway bundle that defines the
+-- ControlDataObject carries this migration; an old isolate that somehow still
+-- hit a mirror during rollout skew would see `no such table`, but no such
+-- reader exists.
+-- ===========================================================================
+
+DROP TABLE IF EXISTS self_hosted_run_dispatches;
+DROP TABLE IF EXISTS self_hosted_worker_artifacts;
+DROP TABLE IF EXISTS self_hosted_worker_checkpoints;
+DROP TABLE IF EXISTS self_hosted_worker_heartbeats;
+DROP TABLE IF EXISTS self_hosted_worker_telemetry_events;

@@ -116,6 +116,20 @@ const DERIVED_EVIDENCE = [
  *  - 0036: the four usage/presence rollups plus the two dead projections.
  *  - 0037: `agent_runs` / `agent_run_events` (agent-runtime stopped mirroring;
  *          the control-plane list + timeline read the tenant objects).
+ *  - 0041: the rest of the managed-worker family — `agent_worker_instances`,
+ *          `managed_worker_sessions`, `managed_worker_lifecycle_events`,
+ *          `managed_worker_isolation_policies` / `_selections` and
+ *          `managed_worker_templates` — siblings of the `_isolation_evidence`
+ *          projection 0036 dropped. agent-runtime writes the tenant object as
+ *          the only copy; admin listing fans out over the tenant objects.
+ *  - 0042: the self-hosted-worker EVIDENCE family —
+ *          `self_hosted_run_dispatches`, `self_hosted_worker_artifacts`,
+ *          `self_hosted_worker_checkpoints`, `self_hosted_worker_heartbeats`,
+ *          `self_hosted_worker_telemetry_events`. control-plane's
+ *          `tenant-worker.ts` writes the tenant object as the only copy (since
+ *          6f6f934e); admin listing reads the compatibility document store, not
+ *          these typed tables. `self_hosted_worker_registrations` is NOT here —
+ *          it stays the control-owned bootstrap directory (`worker_id`→tenant).
  */
 const DROPPED_CONTROL_PROJECTIONS = [
   "usage_aggregate_rollups",
@@ -126,6 +140,17 @@ const DROPPED_CONTROL_PROJECTIONS = [
   "online_eval_regressions",
   "agent_runs",
   "agent_run_events",
+  "agent_worker_instances",
+  "managed_worker_sessions",
+  "managed_worker_lifecycle_events",
+  "managed_worker_isolation_policies",
+  "managed_worker_isolation_selections",
+  "managed_worker_templates",
+  "self_hosted_run_dispatches",
+  "self_hosted_worker_artifacts",
+  "self_hosted_worker_checkpoints",
+  "self_hosted_worker_heartbeats",
+  "self_hosted_worker_telemetry_events",
 ] as const;
 
 /** Families that must live ONLY in a tenant database. */
