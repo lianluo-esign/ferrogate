@@ -1291,12 +1291,14 @@ interface TimelineLeg {
  *
  * Guardrail evaluations/checks are tenant-object authoritative with a derived
  * CONTROL projection. Audit events remain CONTROL-authoritative in this issue
- * and are explicitly tenant-fenced below; billing is read only for operator or
- * unscoped calls because its table has no tenant column. Request logs, agent
- * runs and agent events are object-authoritative; their control tables are
- * bounded discovery/projection state for fleet joins only. A platform operator
- * therefore sees an as-of projection for the fleet until #825 supplies the
- * general bounded fan-out/read-freshness contract.
+ * and are explicitly tenant-fenced below. Billing is tenant-object + platform
+ * authoritative (relocated with #f11bd842, same as cost-records) and is read
+ * only for operator or unscoped calls because a tenant-scoped answer keeps the
+ * historical "no tenant column" empty-leg. Request logs, agent runs and agent
+ * events are object-authoritative; their control tables are bounded discovery/
+ * projection state for fleet joins only. A platform operator therefore sees an
+ * as-of projection for the fleet until #825 supplies the general bounded
+ * fan-out/read-freshness contract.
  *
  * `approvals` is `[]` and stays `[]`: there is no approvals table in
  * `sql/d1-ts/control/`, and fabricating an empty array is the honest answer
@@ -1444,11 +1446,14 @@ function getGuardrailInvestigationHandler(): Handler {
     );
 
     // ---- 3. Everything else hangs off ids cleared by exact evidence --------
-    // Guardrail checks read from the SAME authoritative stores as their
-    // evaluations — each tenant object, plus the platform object for the
-    // un-attributed leg — never the shared control projection. Audit remains
-    // CONTROL-authoritative in this family and billing is the billing family's
-    // to relocate, so both still read control here.
+    // Guardrail checks AND billing now read from the SAME authoritative stores
+    // as their evaluations — each tenant object, plus the platform object for
+    // the un-attributed leg — never the shared control projection (billing
+    // relocated with #f11bd842; see fleetInvestigationBilling). Audit alone
+    // remains CONTROL-authoritative here: its un-attributed rows have no DO
+    // landing spot yet (no audit_events table in sql/d1-ts/platform/, and the
+    // empty-chain-key rows are control-owned per sql/d1-ts/tenant/0018), so its
+    // relocation waits on a platform/unattributed audit-home decision.
     const checks =
       scope.kind === "tenant"
         ? await guardrailChecksFor(
@@ -1485,24 +1490,12 @@ function getGuardrailInvestigationHandler(): Handler {
         .sort(timelineRowOrder("occurred_at_unix"))
         .map((row) => correlatedDocument(row, "event_json", "agent_run_event")),
     };
-    const billing =
-      scope.kind === "tenant" || db === null
-        ? { records: [] }
-        : await investigationLeg(
-            db,
-            `SELECT billing_event_id, request_id, provider_attempt_index, occurred_at_unix, event_json
-               FROM billing_events
-              WHERE request_id IN (${placeholders(joinedRequestIds.length)})
-              ORDER BY occurred_at_unix ASC, billing_event_id ASC`,
-            joinedRequestIds,
-            (row) =>
-              correlatedDocument(
-                row as Record<string, unknown>,
-                "event_json",
-                "billing_event",
-                "billing_event_id",
-              ),
-          );
+    const billing = {
+      records:
+        scope.kind === "tenant"
+          ? []
+          : await fleetInvestigationBilling(tenantRouter, platformDb, tenantGroups, joinedRequestIds),
+    };
 
     const totalCostUsd = billing.records.reduce((sum, record) => {
       const cost = record.cost_usd;
@@ -1757,6 +1750,72 @@ async function fleetInvestigationChecks(
     }
   }
   return merged;
+}
+
+/**
+ * The billing twin of {@link fleetInvestigationChecks}: an operator's billing
+ * events read from the SAME authoritative stores the rest of the investigation
+ * came from — each attributed tenant's OWN object (fenced by `tenant_id`), plus
+ * the PlatformDataObject for the un-attributed leg — never the shared control
+ * projection. `billing_events` settles into the tenant's own object
+ * (`sql/d1-ts/tenant/0020_*`) and the platform object (`sql/d1-ts/platform/
+ * 0004_billing.sql`) for `tenant_id IS NULL` charges, and is NEVER projected to
+ * control — the same relocation the cost-record reader already made
+ * (`admin_cost_record.ts::fleetCostRecordPage`, #f11bd842). Attribution is
+ * already known from step-1 discovery, so the tenant leg targets the exact
+ * `tenantGroups` (like the agent-run/event legs) rather than fanning the whole
+ * roster; the platform leg carries every remaining (un-attributed) id. Like the
+ * sibling readers this shares the fleet's #825 as-of freshness contract:
+ * pre-cutover un-attributed rows surface once the gated gateway billing
+ * backfill has folded them into the platform object, exactly as cost-records do.
+ */
+async function fleetInvestigationBilling(
+  router: TenantDatabaseRouter,
+  platformDb: D1Database | null,
+  groups: readonly InvestigationTenantGroup[],
+  joinedRequestIds: readonly string[],
+): Promise<StoreRecord[]> {
+  const tenantRows = await tenantEvidenceRows<Record<string, unknown>>(
+    router,
+    groups,
+    (count) =>
+      `SELECT billing_event_id, request_id, provider_attempt_index, occurred_at_unix, event_json
+         FROM billing_events
+        WHERE tenant_id = ? AND request_id IN (${placeholders(count)})
+        ORDER BY occurred_at_unix ASC, billing_event_id ASC`,
+  );
+
+  const attributed = new Set<string>();
+  for (const group of groups) for (const id of group.requestIds) attributed.add(id);
+  const platformRequestIds = joinedRequestIds.filter((id) => !attributed.has(id));
+
+  let platformRows: Record<string, unknown>[] = [];
+  if (platformDb !== null && platformRequestIds.length > 0) {
+    try {
+      platformRows = (
+        await platformDb
+          .prepare(
+            `SELECT billing_event_id, request_id, provider_attempt_index, occurred_at_unix, event_json
+               FROM billing_events
+              WHERE request_id IN (${placeholders(platformRequestIds.length)})
+              ORDER BY occurred_at_unix ASC, billing_event_id ASC`,
+          )
+          .bind(...platformRequestIds)
+          .all<Record<string, unknown>>()
+      ).results;
+    } catch {
+      // Unreachable platform object: the un-attributed billing leg is absent,
+      // isolated exactly as the sibling fleet readers isolate it.
+    }
+  }
+
+  return [...tenantRows, ...platformRows]
+    .sort((a, b) => {
+      const at = typeof a.occurred_at_unix === "number" ? a.occurred_at_unix : 0;
+      const bt = typeof b.occurred_at_unix === "number" ? b.occurred_at_unix : 0;
+      return at - bt || String(a.billing_event_id ?? "").localeCompare(String(b.billing_event_id ?? ""));
+    })
+    .map((row) => correlatedDocument(row, "event_json", "billing_event", "billing_event_id"));
 }
 
 function requestLogRowOrder(a: RequestLogRow, b: RequestLogRow): number {

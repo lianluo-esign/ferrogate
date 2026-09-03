@@ -46,6 +46,7 @@ import {
   type GuardrailEvaluationSeed,
   applySchema,
   db,
+  platformDb,
   resetD1,
   seedAuditEvents,
   seedBillingEvents,
@@ -105,6 +106,7 @@ async function clearExactTenantEvidence(): Promise<void> {
       tenant.prepare("DELETE FROM agent_run_events"),
       tenant.prepare("DELETE FROM agent_runs"),
       tenant.prepare("DELETE FROM request_logs"),
+      tenant.prepare("DELETE FROM billing_events"),
       tenant
         .prepare("DELETE FROM tenant_provisioning_marks WHERE tenant_id = ? AND mark = ?")
         .bind(tenantId, GUARDRAIL_EVIDENCE_BACKFILL_MARK),
@@ -614,7 +616,10 @@ describe("GET /admin/v1/investigations joins one request's evidence", () => {
     expect(body.total_cost_usd).toBe(0);
   });
 
-  it("joins unscoped request ids into the control-owned billing leg", async () => {
+  it("joins unscoped request ids into the platform-object billing leg", async () => {
+    // The un-attributed request log folds into the platform object via the
+    // operator backfill; its billing row lives on the platform object directly
+    // (relocated with #f11bd842) — never the shared control mirror.
     await seedRequestLogs([
       {
         requestId: "fg-platform-request",
@@ -624,14 +629,17 @@ describe("GET /admin/v1/investigations joins one request's evidence", () => {
         route: "platform.route",
       },
     ]);
-    await seedBillingEvents([
-      {
-        id: "billing-platform-request",
-        requestId: "fg-platform-request",
-        occurredAtUnix: 1_700_000_201,
-        event: { cost_usd: 1.25 },
-      },
-    ]);
+    await seedBillingEvents(
+      [
+        {
+          id: "billing-platform-request",
+          requestId: "fg-platform-request",
+          occurredAtUnix: 1_700_000_201,
+          event: { cost_usd: 1.25 },
+        },
+      ],
+      platformDb(),
+    );
 
     const { status, body } = await investigate(
       operatorKey.secret,
@@ -645,6 +653,35 @@ describe("GET /admin/v1/investigations joins one request's evidence", () => {
       expect.objectContaining({ request_id: "fg-platform-request", cost_usd: 1.25 }),
     ]);
     expect(body.total_cost_usd).toBe(1.25);
+  });
+
+  it("joins an ATTRIBUTED request's billing out of its tenant object", async () => {
+    // The tenant leg is the mirror image of the platform one: an attributed
+    // request's billing row lives on the OWNING tenant's object (relocated with
+    // #f11bd842), and the operator investigation fans out to read it there —
+    // never the shared control mirror.
+    await seedExactTenantGuardrailEvaluations([BLOCKED]);
+    await seedExactTenantRequestLog("fg-block-1", "t-1", 1_700_000_100);
+    const tenant = await exactTenantDatabase("t-1");
+    await seedBillingEvents(
+      [
+        {
+          id: "billing-fg-block-1",
+          requestId: "fg-block-1",
+          occurredAtUnix: 1_700_000_101,
+          event: { cost_usd: 2.5 },
+        },
+      ],
+      tenant,
+      "t-1",
+    );
+
+    const { status, body } = await investigate(operatorKey.secret, "?request_id=fg-block-1");
+    expect(status).toBe(200);
+    expect(body.billing_events).toEqual([
+      expect.objectContaining({ request_id: "fg-block-1", cost_usd: 2.5 }),
+    ]);
+    expect(body.total_cost_usd).toBe(2.5);
   });
 
   it("finds the same request by trace_id", async () => {
