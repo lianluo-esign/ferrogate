@@ -203,6 +203,15 @@ TENANCY_LIFECYCLE = "{}"
 TENANT_RBAC_ACTIONS = "{}"
 CONTROL_PLANE_SEED = "{}"
 SIEM_EXPORT_SINKS = "[]"
+# Track A G2 (stop-control-write) for `spend_throttles`. "control" (the DEFAULT)
+# keeps the finops auto-throttle authoritative on the shared CONTROL_DATA object
+# with a best-effort tenant-object shadow. "tenant_object" INVERTS it — the
+# throttle is written ONLY to the owning tenant's own object and the control
+# mirror is not written at all. DEFAULT-OFF and GATED: flip to "tenant_object"
+# only once every admission worker (gateway/agent-runtime/mcp) resolves throttles
+# from the tenant object (`GATEWAY_QUOTA_POLICY_SOURCE = "tenant_object"`), or a
+# control-reading admission path stops seeing new throttles.
+CONTROL_SPEND_THROTTLE_SOURCE = "control"
 
 # ---------------------------------------------------------------------------
 # Bootstrap model-catalog import (#892) — OPTIONAL fallback bindings

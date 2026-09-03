@@ -108,6 +108,22 @@ const SPEND_THROTTLE_UPSERT_SQL = `INSERT INTO ${SPEND_THROTTLE_TABLE}
 export const SPEND_ANOMALY_CLAIM_LEASE_SECS = 15 * 60;
 
 /**
+ * Track A G2 (stop-control-write) for `spend_throttles`.
+ *
+ * DEFAULT (unset/`"control"`): the throttle is authoritative on the shared
+ * control object with a best-effort tenant-object shadow — the dual-write the
+ * admission readers depend on until `GATEWAY_QUOTA_POLICY_SOURCE` flips. When
+ * this reads `"tenant_object"` the auto-throttle writes ONLY the owning tenant's
+ * own object and NEVER the shared control mirror, which is the
+ * [[no-tenant-data-mirror-in-control-d1]] end state. Any other value reads as
+ * the safe default (a config typo must not silently stop the brake). See the
+ * `CONTROL_SPEND_THROTTLE_SOURCE` binding docs for the deploy-ordering gate.
+ */
+function spendThrottleWritesTenantObjectOnly(env: ControlPlaneBindings): boolean {
+  return (env.CONTROL_SPEND_THROTTLE_SOURCE ?? "").trim() === "tenant_object";
+}
+
+/**
  * What one pass reports back on the tick summary.
  *
  * `skipped` distinguishes the three silences an operator most needs to tell
@@ -449,10 +465,15 @@ async function evaluateWindow(
         const rpm = evaluation.tuning.autoThrottleRpm;
         if (rpm !== undefined && outcome.severity === "critical" && outcome.shouldNotify) {
           // `episodeDb` is this tenant's own object (resolved just above for the
-          // episode write); mirror the throttle into its `spend_throttles` table
-          // so the row is present when the admission readers cut over to the DO.
+          // episode write). G2 (stop-control-write): when routed to the object the
+          // throttle is authoritative THERE and the shared control mirror is not
+          // written at all; until the flip it stays authoritative on control with
+          // the object as a best-effort shadow, so the DO-side row is present when
+          // the admission readers cut over. The winning arg is always a WRITABLE
+          // db (the episode upsert on `episodeDb` just succeeded).
+          const toObjectOnly = spendThrottleWritesTenantObjectOnly(env);
           throttledRpm = await applyThrottle(
-            db,
+            toObjectOnly ? episodeDb : db,
             {
               scopeId: evaluation.scopeId,
               rpm,
@@ -461,7 +482,7 @@ async function evaluateWindow(
               signal,
               now,
             },
-            episodeDb,
+            toObjectOnly ? undefined : episodeDb,
           );
           if (throttledRpm !== null) throttled += 1;
         }
@@ -742,14 +763,17 @@ async function closeEpisode(
 /**
  * Write (or extend) the auto-throttle for a scope.
  *
- * The authoritative write stays on the control database (the three admission
- * readers still read it there); `shadow` — the owning tenant's own object — gets
- * the SAME row on a best-effort basis, so the DO-side `spend_throttles` table is
- * already populated when the admission readers are later pointed at it. A shadow
- * outage or a not-yet-provisioned tenant must NEVER fail the control write the
- * gateway enforces, so it is caught and logged, exactly like the quota-policy
- * shadow in `routes/quota_policy.ts`. The scope is always a tenant here
- * (`scope_id` IS the tenant id), so the shadow row belongs wholly to that tenant.
+ * `db` is the AUTHORITATIVE target and the caller chooses which object it is
+ * (Track A G2, see `spendThrottleWritesTenantObjectOnly`): the shared control
+ * object while the admission readers still read it there, or — once flipped —
+ * the owning tenant's OWN object, with no `shadow` and so no control mirror at
+ * all. When present, `shadow` gets the SAME row on a best-effort basis so the
+ * DO-side `spend_throttles` table is already populated when the admission
+ * readers are later pointed at it. A shadow outage or a not-yet-provisioned
+ * tenant must NEVER fail the authoritative write the gateway enforces, so it is
+ * caught and logged, exactly like the quota-policy shadow in
+ * `routes/quota_policy.ts`. The scope is always a tenant here (`scope_id` IS the
+ * tenant id), so both rows belong wholly to that tenant.
  *
  * Returns the applied RPM (from the authoritative write), or `null` when nothing
  * was written there.

@@ -729,6 +729,39 @@ describe("auto-throttle", () => {
     expect(shadow[0]?.expires_at_unix).toBe(NOW + 3_600);
   });
 
+  it("writes ONLY the tenant object and no control mirror when routed (G2)", async () => {
+    // Track A G2 (stop-control-write): with `CONTROL_SPEND_THROTTLE_SOURCE`
+    // flipped, the auto-throttle is authoritative in the owning tenant's own
+    // object and the shared control `spend_throttles` mirror is NOT written at
+    // all — the no-tenant-data-mirror-in-control end state. The default topology
+    // (control-authoritative + shadow) is the "writes an EXPIRING throttle" case
+    // above, so this is the same scenario with the write inverted.
+    await seedFlatBaseline("brake", 2);
+    await seedHour("brake", 0, 80, 40);
+    await setPolicy("brake", { spend_anomaly_auto_throttle_rpm: 5 });
+
+    const report = await runScheduledTick(
+      bindings({ CONTROL_SPEND_THROTTLE_SOURCE: "tenant_object" }),
+      NOW,
+    );
+
+    // The brake still fired and the operator was still told.
+    expect(report.spendAnomaly.throttled).toBe(1);
+    expect(delivered[0]?.body.auto_throttled_rpm).toBe(5);
+
+    // Authoritative in the tenant's OWN object…
+    const tenant = await tenantThrottles();
+    expect(tenant).toHaveLength(1);
+    expect(tenant[0]?.scope_id).toBe("brake");
+    expect(tenant[0]?.rpm_limit).toBe(5);
+    expect(tenant[0]?.expires_at_unix).toBe(NOW + 3_600);
+
+    // THE RED LINE: the shared control facade holds NO throttle row — the mirror
+    // the dual-write used to keep is gone. (The table itself still exists in this
+    // slice; the DROP is a later, gated step, so this asserts a count of zero.)
+    expect(await throttles()).toEqual([]);
+  });
+
   it("does not throttle on a warning", async () => {
     // 5x the baseline is above the 4x ratio bar and below the 10x critical one.
     // The brake is the only leg that changes what the gateway does to live

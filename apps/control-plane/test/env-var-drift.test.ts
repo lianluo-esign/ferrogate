@@ -429,6 +429,12 @@ describe("the env-var drift gate itself", () => {
       "CONTROL_PLANE_NATIVE_API_KEYS",
       "CONTROL_PLANE_SEED",
       "CONTROL_PLANE_STATIC_API_KEYS",
+      // Track A G2: the `spend_throttles` write source. `"control"` (default)
+      // dual-writes the finops auto-throttle to the shared control object with a
+      // tenant-object shadow; `"tenant_object"` writes ONLY the tenant object and
+      // no control mirror. A plain `[vars]` entry — it names a topology, holds no
+      // secret. Read by `spendThrottleWritesTenantObjectOnly` in `finops/pass.ts`.
+      "CONTROL_SPEND_THROTTLE_SOURCE",
       // #683: the SIEM export sinks. A `[vars]` entry rather than a secret
       // because it holds no secret BY CONSTRUCTION — a sink's credential is an
       // `env://` REFERENCE and `src/siem/config.ts` refuses an inline literal,
@@ -636,7 +642,9 @@ describe("which committed [vars] values this runner can actually observe", () =>
     // Tokyo-forced tenant placement added `TENANT_DEFAULT_LOCATION_HINT` ⇒ 10.
     // The experiment/eval backfill gate `CONTROL_EXPERIMENT_EVAL_BACKFILL` was
     // added ⇒ 11, then RETIRED with the 0043 drop of its two projections ⇒ 10.
-    expect(rows.length).toBe(10);
+    // Track A G2 added `CONTROL_SPEND_THROTTLE_SOURCE` (spend_throttles write
+    // source) ⇒ 11.
+    expect(rows.length).toBe(11);
   });
 
   it("explains every overridden var with an explicit pin in vitest.config.ts", () => {
@@ -665,6 +673,6 @@ describe("which committed [vars] values this runner can actually observe", () =>
     // reads the RUNTIME values, so it also fails if `env` stopped resolving.
     const observable = rows.filter((r) => r.runtime === r.committed).map((r) => r.name);
     expect(observable.sort()).toEqual([...DECLARED.vars.keys()].sort());
-    expect(observable.length).toBe(10);
+    expect(observable.length).toBe(11);
   });
 });
