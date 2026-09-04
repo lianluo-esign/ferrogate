@@ -21,14 +21,18 @@
  *     exactly the 429s and 403s an audit is for.
  *  2. BEHAVIOURAL, through `SELF.fetch` — i.e. through `export default app` in
  *     `src/index.ts`, which is what `wrangler deploy` ships — reading the row
- *     back out of the real `CONTROL_DB`. It fails if the middleware is
- *     unmounted, if `requestLogBindingsFromEnv` stops resolving, or if the
- *     upsert stops landing; the structural gate sees none of those.
+ *     back out of the TENANT object that owns it. After G2
+ *     (`projectRequestLogToControl: false`) a tenant-attributed row is
+ *     authoritative in its tenant object and is no longer mirrored to the
+ *     control projection, so the tenant object — not `CONTROL_DB` — is where
+ *     the served row now lands. It fails if the middleware is unmounted, if
+ *     `requestLogBindingsFromEnv` stops resolving, or if the upsert stops
+ *     landing; the structural gate sees none of those.
  */
 import { SELF, env } from "cloudflare:test";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { GATEWAY_MIDDLEWARE } from "../../src/index.js";
-import { evidenceProjectionKey, platformRequestLogStatements } from "../../src/requestlog/d1.js";
+import { platformRequestLogStatements } from "../../src/requestlog/d1.js";
 import {
   REQUEST_LOG_RETENTION_DAYS_VAR,
   REQUEST_LOG_RETENTION_POLICIES_VAR,
@@ -40,7 +44,6 @@ import {
   sweepRequestLogRetention,
   sweepRequestLogs,
   writeRequestLogs,
-  writeTenantRequestLogs,
 } from "../../src/requestlog/index.js";
 import type { RequestLogRecord } from "../../src/requestlog/index.js";
 import {
@@ -53,8 +56,10 @@ import {
   controlDb,
   resetPlatformRequestLogs,
   resetRequestLogs,
+  resetTenantRequestLogs,
   storedPlatformRequestLogs,
   storedRequestLogs,
+  storedTenantRequestLogs,
 } from "./harness.js";
 
 /** Runtime names of the handlers `GATEWAY_MIDDLEWARE` is built from. */
@@ -141,6 +146,7 @@ beforeAll(async () => {
 beforeEach(async () => {
   await resetRequestLogs();
   await resetPlatformRequestLogs();
+  await resetTenantRequestLogs("tenant_a");
 });
 
 afterEach(() => {
@@ -175,17 +181,22 @@ const COMPLETION = {
  * A missing `queue` handler on the default export fails HERE (the message is
  * produced and never consumed), which is a failure mode no unit test can see.
  */
-async function awaitRow(budgetMs = 20000): Promise<Awaited<ReturnType<typeof storedRequestLogs>>> {
+async function awaitRow(
+  budgetMs = 20000,
+): Promise<Awaited<ReturnType<typeof storedTenantRequestLogs>>> {
   const deadline = Date.now() + budgetMs;
   for (;;) {
-    const rows = await storedRequestLogs();
+    // The probe key is scoped to `tenant_a`, so its row is authoritative in that
+    // tenant's own object post-G2 — never in the (frozen, DROP-bound) control
+    // projection.
+    const rows = await storedTenantRequestLogs("tenant_a");
     if (rows.length > 0) return rows;
     if (Date.now() >= deadline) return rows;
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
 }
 
-describe("composition root — a request through SELF lands a row in CONTROL_DB", () => {
+describe("composition root — a request through SELF lands a row in the tenant object", () => {
   it("records the completion the app the Worker exports actually served", async () => {
     provider = interceptProviderFetch(() => providerJson(COMPLETION));
     const response = await SELF.fetch("https://gw.test/v1/chat/completions", {
@@ -279,54 +290,35 @@ describe("policy-driven retention", () => {
 
   it("KEEPS everything when nothing is configured", async () => {
     await writeRequestLogs(controlDb(), [record("fg-ancient", 0)]);
-    const result = await sweepRequestLogs(controlDb(), {}, NOW);
+    const result = await sweepRequestLogs({}, [], NOW);
     expect(result).toEqual({ scanned: 0, pruned: 0 });
+    // The control projection is never touched by the sweep any more (its leg was
+    // retired ahead of the DROP), so a row written straight into it is untouched.
     expect(await storedRequestLogs()).toHaveLength(1);
   });
 
   it("keeps the scheduled sweep alive when a tenant object binding is missing", async () => {
     await expect(
       sweepRequestLogs(
-        controlDb(),
         { [REQUEST_LOG_RETENTION_POLICIES_VAR]: JSON.stringify({ ghost: { days: 1 } }) },
+        [],
         NOW,
       ),
     ).resolves.toEqual({ scanned: 0, pruned: 0 });
   });
 
-  it("does not let 5000 recent tenants block an eligible tenant", async () => {
+  it("discovers an eligible tenant from the provisioned roster, not from control", async () => {
+    // Discovery no longer reads `SELECT DISTINCT tenant FROM request_logs` off the
+    // control mirror: the sweep is handed the provisioned roster and prunes each
+    // tenant's OWN object. This proves the roster — not any control row — is what
+    // brings a tenant into scope, so the sweep still works once the control
+    // projection is dropped.
     const eligibleTenant = "zz-retention-eligible";
     const old = record("retention-after-discovery-window", NOW - 40 * DAY, eligibleTenant);
     const objectDb = requestLogTenantDatabaseFromEnv(env, eligibleTenant);
     if (objectDb === undefined) throw new Error("TENANT_DATA binding is required");
 
     await objectDb.prepare(`DELETE FROM ${REQUEST_LOG_TABLE}`).bind().run();
-    await controlDb()
-      .prepare(
-        `WITH RECURSIVE
-          first(n) AS (SELECT 0 UNION ALL SELECT n + 1 FROM first WHERE n < 99),
-          second(n) AS (SELECT 0 UNION ALL SELECT n + 1 FROM second WHERE n < 49)
-        INSERT INTO ${REQUEST_LOG_TABLE} (request_id, tenant, started_at_unix)
-        SELECT 'retention-blocked-' || printf('%04d', first.n * 50 + second.n),
-               'retention-blocked-' || printf('%04d', first.n * 50 + second.n),
-               ?
-        FROM first CROSS JOIN second`,
-      )
-      .bind(NOW - DAY)
-      .run();
-    await controlDb()
-      .prepare(
-        `INSERT INTO ${REQUEST_LOG_TABLE}
-          (projection_key, request_id, tenant, started_at_unix, request_json)
-        VALUES (?, ?, ?, ?, '{}')`,
-      )
-      .bind(
-        evidenceProjectionKey(eligibleTenant, old.requestId),
-        old.requestId,
-        eligibleTenant,
-        old.startedAtUnix,
-      )
-      .run();
     await objectDb
       .prepare(
         `INSERT INTO ${REQUEST_LOG_TABLE}
@@ -337,11 +329,11 @@ describe("policy-driven retention", () => {
       .run();
 
     const result = await sweepRequestLogs(
-      controlDb(),
       {
         TENANT_DATA: env.TENANT_DATA,
         [REQUEST_LOG_RETENTION_DAYS_VAR]: "30",
       },
+      [eligibleTenant],
       NOW,
     );
 
@@ -351,52 +343,6 @@ describe("policy-driven retention", () => {
       .bind(old.requestId)
       .all()) as { results?: unknown[] };
     expect(objectRows.results ?? []).toHaveLength(0);
-    expect(
-      await controlDb()
-        .prepare(`SELECT request_id FROM ${REQUEST_LOG_TABLE} WHERE request_id = ?`)
-        .bind(old.requestId)
-        .first(),
-    ).toBeNull();
-  }, 20_000);
-
-  it("deletes the tenant object before its control projection", async () => {
-    const tenantId = "retention-order-tenant";
-    const old = record("retention-order-old", NOW - 10 * DAY, tenantId);
-    const objectDb = requestLogTenantDatabaseFromEnv(env, tenantId);
-    if (objectDb === undefined) throw new Error("TENANT_DATA binding is required");
-    await objectDb.prepare(`DELETE FROM ${REQUEST_LOG_TABLE}`).bind().run();
-    await writeRequestLogs(controlDb(), [old]);
-    await writeTenantRequestLogs(objectDb, [old]);
-
-    // A failing projection batch is a mutation-backed ordering probe: if the
-    // implementation deletes control first, the object row would still exist.
-    const failingProjection = {
-      prepare: (query: string) => controlDb().prepare(query),
-      batch: async () => {
-        throw new Error("control projection unavailable");
-      },
-    };
-    const result = await sweepRequestLogs(
-      failingProjection,
-      {
-        TENANT_DATA: env.TENANT_DATA,
-        [REQUEST_LOG_RETENTION_POLICIES_VAR]: JSON.stringify({ [tenantId]: { days: 1 } }),
-      },
-      NOW,
-    );
-
-    expect(result.pruned).toBe(1);
-    const objectRows = (await objectDb
-      .prepare(`SELECT request_id FROM ${REQUEST_LOG_TABLE} WHERE request_id = ?`)
-      .bind(old.requestId)
-      .all()) as { results?: unknown[] };
-    expect(objectRows.results ?? []).toHaveLength(0);
-    expect(
-      await controlDb()
-        .prepare(`SELECT request_id FROM ${REQUEST_LOG_TABLE} WHERE request_id = ?`)
-        .bind(old.requestId)
-        .first(),
-    ).not.toBeNull();
   });
 
   it("reads the fleet default and the per-tenant overrides off env", () => {
@@ -484,8 +430,8 @@ describe("policy-driven retention", () => {
     expect(await storedRequestLogs()).toHaveLength(0);
 
     const result = await sweepRequestLogs(
-      controlDb(),
       { ...(env as unknown as Record<string, unknown>), [REQUEST_LOG_RETENTION_DAYS_VAR]: "30" },
+      [],
       NOW,
     );
 

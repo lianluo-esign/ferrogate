@@ -41,13 +41,18 @@
  * ## Where the policy comes from
  *
  * NOT from `retention_policies`, and this is worth being explicit about because
- * that table exists. It is a TENANT-database table, while this gateway's
- * `request_logs` control table is only a derived compatibility projection.
- * Retention therefore resolves the policy from `[vars]`, discovers a bounded
- * tenant set through that projection, and deletes each authoritative object
- * before deleting its mirror. The operator config is the device this gateway
- * already uses for every other fleet-wide operator table
- * (`GATEWAY_PROVIDERS`, `TENANCY_LIFECYCLE`, `TENANT_RBAC_ACTIONS`).
+ * that table exists. It is a TENANT-database table. Retention resolves the
+ * policy from `[vars]`, discovers its tenant set from the PROVISIONED ROSTER
+ * (`provisionedTenants()`, the same fan-out every other Track-A sweep takes),
+ * and deletes each tenant's authoritative object plus the unattributed
+ * PLATFORM_DATA object. The control `request_logs` projection this sweep once
+ * also pruned is NOT touched any more: its dual-write was G2-stopped, it has no
+ * runtime reader, and its mirror is frozen awaiting the physical DROP — a sweep
+ * that DELETEd from it would be the last tenant-data write into the shared
+ * control singleton (no-tenant-data-mirror red line) and would fault the moment
+ * the table is dropped. The operator config is the device this gateway already
+ * uses for every other fleet-wide operator table (`GATEWAY_PROVIDERS`,
+ * `TENANCY_LIFECYCLE`, `TENANT_RBAC_ACTIONS`).
  *
  * Two vars:
  *
@@ -176,12 +181,7 @@ interface RetentionFence {
   readonly params: readonly (string | number | null)[];
 }
 
-/** `?` placeholders for the bounded projection discovery queries. */
-function placeholders(count: number): string {
-  return new Array(count).fill("?").join(", ");
-}
-
-/** Delete exactly one projection namespace, never every tenant's same id. */
+/** Delete exactly one object's rows by id, never every tenant's same id. */
 function deleteCandidateStatements(
   db: RequestLogDatabase,
   rows: readonly CandidateRow[],
@@ -210,12 +210,12 @@ function tenantDatabaseForSweep(env: unknown, tenantId: string): RequestLogDatab
 }
 
 /**
- * Plan and delete one bounded candidate window.
+ * Plan and delete one bounded candidate window against ONE authoritative
+ * database — a tenant's own object, or the unattributed PLATFORM_DATA object.
  *
- * `authoritativeDb` is always deleted FIRST. `projectionDb` is optional so
- * this primitive remains useful for the old unit-level projection tests, but
- * the scheduled tenant path always supplies the control projection explicitly
- * and therefore enforces object-first ordering.
+ * There is no second (projection) database any more: the control mirror this
+ * sweep once also deleted from was retired (see the module header), so the sweep
+ * is single-destination and needs no cross-database ordering guarantee.
  */
 async function sweepCandidates(
   authoritativeDb: RequestLogDatabase,
@@ -223,7 +223,6 @@ async function sweepCandidates(
   nowUnix: number,
   maxRows: number,
   fence: RetentionFence,
-  projectionDb?: RequestLogDatabase,
 ): Promise<RequestLogSweepResult> {
   let rows: CandidateRow[];
   try {
@@ -252,16 +251,6 @@ async function sweepCandidates(
   } catch {
     return { scanned: rows.length, pruned: 0 };
   }
-
-  // D1 has no cross-database transaction. Once the object has committed, a
-  // projection failure leaves stale discovery state, never a missing authority.
-  if (projectionDb !== undefined && projectionDb !== authoritativeDb) {
-    try {
-      await projectionDb.batch(deleteCandidateStatements(projectionDb, doomedRows));
-    } catch {
-      return { scanned: rows.length, pruned: doomed.length };
-    }
-  }
   return { scanned: rows.length, pruned: doomed.length };
 }
 
@@ -281,25 +270,12 @@ export async function sweepRequestLogRetention(
   scope: RequestLogRetentionScope,
   nowUnix: number,
   maxRows: number = REQUEST_LOG_SWEEP_MAX_ROWS,
-  projectionDb?: RequestLogDatabase,
 ): Promise<RequestLogSweepResult> {
   const fence =
     scope.tenantId === undefined
       ? { sql: "", params: [] }
       : { sql: " WHERE tenant = ?", params: [scope.tenantId] };
-  return sweepCandidates(authoritativeDb, scope.policy, nowUnix, maxRows, fence, projectionDb);
-}
-
-/** Sweep only unattributed platform rows, which have no tenant object. */
-async function sweepUnscopedProjection(
-  projectionDb: RequestLogDatabase,
-  policy: RetentionPolicy,
-  nowUnix: number,
-): Promise<RequestLogSweepResult> {
-  return sweepCandidates(projectionDb, policy, nowUnix, REQUEST_LOG_SWEEP_MAX_ROWS, {
-    sql: " WHERE tenant IS NULL OR tenant = ''",
-    params: [],
-  });
+  return sweepCandidates(authoritativeDb, scope.policy, nowUnix, maxRows, fence);
 }
 
 /**
@@ -307,10 +283,10 @@ async function sweepUnscopedProjection(
  *
  * The whole table IS the platform domain — every row is unattributed by
  * construction — so there is no tenant fence and the sweep considers the oldest
- * rows across the object. This leg is INDEPENDENT of the control projection's
- * `sweepUnscopedProjection` above: each keeps its own copy bounded, so the
- * authoritative platform object stays correct once G2 retires the control
- * projection and its unscoped sweep with it.
+ * rows across the object. This is now the ONLY place unattributed request-log
+ * rows are pruned: the control projection's `sweepUnscopedProjection`, which
+ * once also bounded the (frozen, DROP-bound) control mirror, was retired with
+ * this slice.
  *
  * Never throws — a retention failure is an unpruned table, which is safe.
  */
@@ -335,57 +311,24 @@ function platformDatabaseForSweep(env: unknown): RequestLogDatabase | undefined 
 }
 
 /**
- * Discover a bounded set of attributed tenants from the derived projection.
- *
- * This is the unavoidable fleet limitation until #825 defines the general
- * bounded/as-of fan-out and freshness contract. The query discovers tenant ids
- * only; every deletion still targets that tenant's authoritative object.
- */
-async function tenantIdsFromProjection(
-  projectionDb: RequestLogDatabase,
-  maxRows: number,
-  excluded: readonly string[],
-  policy: RetentionPolicy,
-  nowUnix: number,
-): Promise<string[]> {
-  // `planLogRetention` prunes age-only rows only when age is strictly greater
-  // than maxAgeSecs. Discovering the same boundary here means tenants whose
-  // rows are all still within policy do not occupy the bounded tenant window.
-  // Without this predicate, the first 5,000 recent tenants are returned on
-  // every tick and tenants after them can never be reached.
-  const maxAgeSecs = policy.maxAgeSecs;
-  if (maxAgeSecs === undefined || !Number.isFinite(maxAgeSecs)) return [];
-  const eligibleBeforeUnix = nowUnix - maxAgeSecs;
-  const exclusion =
-    excluded.length === 0 ? "" : ` AND tenant NOT IN (${placeholders(excluded.length)})`;
-  try {
-    const result = (await projectionDb
-      .prepare(
-        `SELECT tenant FROM ${REQUEST_LOG_TABLE}
-          WHERE tenant IS NOT NULL AND tenant <> ''
-            AND started_at_unix < ?${exclusion}
-          GROUP BY tenant ORDER BY tenant ASC LIMIT ?`,
-      )
-      .bind(eligibleBeforeUnix, ...excluded, maxRows)
-      .all()) as { results?: { tenant?: unknown }[] };
-    return (result.results ?? [])
-      .map((row) => (typeof row.tenant === "string" ? row.tenant : ""))
-      .filter((tenantId) => tenantId !== "");
-  } catch {
-    return [];
-  }
-}
-
-/**
  * Every configured scope, swept once. The `scheduled` handler's entry point.
  *
+ * `tenants` is the PROVISIONED ROSTER (`provisionedTenants()`) the scheduled
+ * handler already resolved — the same fleet fan-out every other Track-A sweep
+ * takes. It REPLACES the old `SELECT DISTINCT tenant FROM request_logs` against
+ * the control mirror: discovery no longer reads control, and every deletion
+ * targets a tenant's own authoritative object. Unattributed rows are pruned on
+ * the PLATFORM_DATA object. The control projection is not touched at all.
+ *
  * With no vars configured this resolves to zero scopes and returns without
- * touching the database — an operator who has not opted into retention keeps
- * everything, which is the only safe default for evidence.
+ * touching any database — an operator who has not opted into retention keeps
+ * everything, which is the only safe default for evidence. With the registry
+ * unavailable the roster is empty, so only explicit per-tenant overrides and the
+ * platform object are swept; under-pruning is the fail-safe direction.
  */
 export async function sweepRequestLogs(
-  db: RequestLogDatabase,
   env: unknown,
+  tenants: readonly string[],
   nowUnix: number,
 ): Promise<RequestLogSweepResult> {
   let scanned = 0;
@@ -399,50 +342,34 @@ export async function sweepRequestLogs(
   for (const [tenantId, policy] of overrides) {
     const authoritative = tenantDatabaseForSweep(env, tenantId);
     if (authoritative === undefined) continue;
-    const result = await sweepRequestLogRetention(
-      authoritative,
-      { tenantId, policy },
-      nowUnix,
-      REQUEST_LOG_SWEEP_MAX_ROWS,
-      db,
-    );
+    const result = await sweepRequestLogRetention(authoritative, { tenantId, policy }, nowUnix);
     scanned += result.scanned;
     pruned += result.pruned;
   }
 
   const fleet = scopes.find((scope) => scope.tenantId === undefined);
   if (fleet !== undefined) {
-    const unscoped = await sweepUnscopedProjection(db, fleet.policy, nowUnix);
-    scanned += unscoped.scanned;
-    pruned += unscoped.pruned;
-
-    // Zero-D1 Plan B: the authoritative platform object gets its own sweep so it
-    // stays bounded independently of the control projection's unscoped sweep, and
-    // remains correct once G2 retires that projection. Skipped when PLATFORM_DATA
-    // is not yet bound — the control unscoped sweep above still bounds the mirror.
+    // The unattributed platform object, swept under the fleet policy. This is the
+    // only place unscoped rows are pruned now that the control unscoped sweep is
+    // retired. Skipped when PLATFORM_DATA is not yet bound.
     const platformDb = platformDatabaseForSweep(env);
-    if (platformDb !== undefined && platformDb !== db) {
+    if (platformDb !== undefined) {
       const platform = await sweepPlatformRequestLogRetention(platformDb, fleet.policy, nowUnix);
       scanned += platform.scanned;
       pruned += platform.pruned;
     }
 
-    const tenantIds = await tenantIdsFromProjection(
-      db,
-      REQUEST_LOG_SWEEP_MAX_ROWS,
-      [...overrides.keys()],
-      fleet.policy,
-      nowUnix,
-    );
-    for (const tenantId of tenantIds) {
+    // Every provisioned tenant the fleet default governs, minus those with an
+    // explicit override already swept above. Each deletion hits that tenant's own
+    // authoritative object; no control read discovers them any more.
+    for (const tenantId of tenants) {
+      if (tenantId === "" || overrides.has(tenantId)) continue;
       const authoritative = tenantDatabaseForSweep(env, tenantId);
       if (authoritative === undefined) continue;
       const result = await sweepRequestLogRetention(
         authoritative,
         { tenantId, policy: fleet.policy },
         nowUnix,
-        REQUEST_LOG_SWEEP_MAX_ROWS,
-        db,
       );
       scanned += result.scanned;
       pruned += result.pruned;

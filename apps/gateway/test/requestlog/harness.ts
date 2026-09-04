@@ -17,7 +17,11 @@
  */
 import { env } from "cloudflare:test";
 import { GUARDRAIL_CHECK_TABLE, GUARDRAIL_EVALUATION_TABLE } from "../../src/guardrails/index.js";
-import { REQUEST_LOG_TABLE, requestLogPlatformDatabaseFrom } from "../../src/requestlog/index.js";
+import {
+  REQUEST_LOG_TABLE,
+  requestLogPlatformDatabaseFrom,
+  requestLogTenantDatabaseFromEnv,
+} from "../../src/requestlog/index.js";
 
 /** The live `env.CONTROL_DB` binding. */
 export function controlDb(): D1Database {
@@ -179,6 +183,36 @@ export async function storedPlatformRequestLogs(): Promise<StoredRequestLog[]> {
     .bind()
     .all()) as { results: StoredRequestLog[] };
   return result.results;
+}
+
+/**
+ * One tenant object's `request_logs` rows, read through the SAME facade the
+ * production write path uses (`requestLogTenantDatabaseFromEnv`). After G2
+ * (`projectRequestLogToControl: false`) a tenant-attributed row is authoritative
+ * in its own object and is no longer mirrored to the control projection, so this
+ * — not `storedRequestLogs()` — is where a row served for a tenant now lands.
+ */
+export async function storedTenantRequestLogs(tenantId: string): Promise<StoredRequestLog[]> {
+  const db = requestLogTenantDatabaseFromEnv(env, tenantId);
+  if (db === undefined) {
+    // Loud, never a silent skip: TENANT_DATA is declared in `wrangler.toml`, so
+    // an absent one means the tenant-object leg cannot be under test at all.
+    throw new Error(
+      "request-log tenant tests expect the `TENANT_DATA` binding (apps/gateway/wrangler.toml).",
+    );
+  }
+  const result = (await db
+    .prepare(`SELECT * FROM ${REQUEST_LOG_TABLE} ORDER BY started_at_unix ASC, request_id ASC`)
+    .bind()
+    .all()) as { results: StoredRequestLog[] };
+  return result.results;
+}
+
+/** Empty one tenant object's `request_logs`, so each test starts from zero. */
+export async function resetTenantRequestLogs(tenantId: string): Promise<void> {
+  const db = requestLogTenantDatabaseFromEnv(env, tenantId);
+  if (db === undefined) return;
+  await db.prepare(`DELETE FROM ${REQUEST_LOG_TABLE}`).bind().run();
 }
 
 /** Empty the platform object's `request_logs`, so each test starts from zero. */

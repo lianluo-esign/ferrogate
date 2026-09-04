@@ -596,7 +596,7 @@ export async function gatewayScheduled(
   if (tenantRouter !== undefined && tenantIds !== undefined) {
     await sweepAssetRetentionForTenants(env, tenantRouter, tenantIds);
   }
-  await gatewayRequestLogRetention(env);
+  await gatewayRequestLogRetention(env, tenantIds ?? []);
   // Zero-D1 Plan B billing-outbox co-migration: recover crash-stranded PLATFORM
   // outbox rows. RECOVERY ONLY — the request path publishes each unattributed
   // platform charge once and reaps its platform outbox row in the same pass, so
@@ -681,10 +681,18 @@ export async function gatewayScheduled(
  * resolves zero scopes and touches nothing, because keeping evidence is the
  * only safe default.
  */
-async function gatewayRequestLogRetention(env: unknown): Promise<void> {
+async function gatewayRequestLogRetention(
+  env: unknown,
+  tenants: readonly string[],
+): Promise<void> {
   const db = requestLogDatabaseFrom(env);
   const nowUnix = Math.floor(Date.now() / 1000);
-  if (db !== undefined) await sweepRequestLogs(db, env, nowUnix);
+  // Track A / G2: request-log retention no longer touches the control mirror.
+  // It fans the fleet default over the PROVISIONED ROSTER (each tenant's own
+  // object) and the PLATFORM_DATA object; the control projection's discovery
+  // SELECT and mirror-DELETE were retired (see `requestlog/retention.ts`), so a
+  // dropped control `request_logs` cannot fault this sweep.
+  await sweepRequestLogs(env, tenants, nowUnix);
   // Guardrail screening evidence (#665/#860) is swept on the SAME tick with
   // the SAME policy. Tenant-attributed rows are deleted from their object first
   // and the CONTROL rows here are removed only as derived mirrors. Deliberately

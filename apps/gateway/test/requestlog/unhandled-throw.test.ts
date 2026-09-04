@@ -33,12 +33,16 @@ import { createGatewayApp } from "../../src/routes/index.js";
 import {
   RecordingQueue,
   applyControlMigrations,
+  resetPlatformRequestLogs,
   resetRequestLogs,
-  storedRequestLogs,
+  storedPlatformRequestLogs,
 } from "./harness.js";
 
 beforeAll(applyControlMigrations);
-beforeEach(resetRequestLogs);
+beforeEach(async () => {
+  await resetRequestLogs();
+  await resetPlatformRequestLogs();
+});
 
 /** A body whose `messages[0].content` is `depth` nested arrays. */
 function nestedBody(depth: number): string {
@@ -51,11 +55,18 @@ function nestedBody(depth: number): string {
  * Poll for the row. `SELF.fetch` resolves when the RESPONSE is flushed and the
  * durable write is deliberately after that; the pool runs the real queue, whose
  * `max_batch_timeout` is 5 seconds. See `mount.test.ts::awaitRow`.
+ *
+ * The request is authenticated as `fg_root`, a `platform_operator` key, so its
+ * row is UNATTRIBUTED and — post-G2 (`projectRequestLogToControl: false`) —
+ * authoritative in the PLATFORM_DATA object, never in the (frozen, DROP-bound)
+ * control projection. So the poll reads the platform object.
  */
-async function awaitRow(budgetMs = 20000): Promise<Awaited<ReturnType<typeof storedRequestLogs>>> {
+async function awaitRow(
+  budgetMs = 20000,
+): Promise<Awaited<ReturnType<typeof storedPlatformRequestLogs>>> {
   const deadline = Date.now() + budgetMs;
   for (;;) {
-    const rows = await storedRequestLogs();
+    const rows = await storedPlatformRequestLogs();
     if (rows.length > 0) return rows;
     if (Date.now() >= deadline) return rows;
     await new Promise((resolve) => setTimeout(resolve, 10));
