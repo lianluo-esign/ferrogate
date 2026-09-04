@@ -38,6 +38,7 @@ import { type ApiOperation, STABLE_PATH_PREFIX } from "../contract.js";
 import { HttpError } from "../middleware/errors.js";
 import {
   type CallerScope,
+  type ControlPlaneBindings,
   type ControlPlaneDeps,
   type ControlPlaneEnv,
   StoreConflictError,
@@ -243,7 +244,12 @@ export interface CollectionSpec {
    * deployment has no control database for a typed row to live in, and the
    * document store it is running on is not durable either.
    */
-  readonly project?: (db: D1Database, record: StoreRecord, nowUnix: number) => Promise<void>;
+  readonly project?: (
+    db: D1Database,
+    record: StoreRecord,
+    nowUnix: number,
+    env: ControlPlaneBindings,
+  ) => Promise<void>;
   /**
    * Project a tenant-owned record into its authoritative TenantDataObject.
    * Unlike {@link project}, this hook receives the full dependency set because
@@ -356,7 +362,12 @@ interface ResolvedSpec {
   readonly body: z.ZodTypeAny;
   readonly patch: z.ZodTypeAny;
   readonly project:
-    | ((db: D1Database, record: StoreRecord, nowUnix: number) => Promise<void>)
+    | ((
+        db: D1Database,
+        record: StoreRecord,
+        nowUnix: number,
+        env: ControlPlaneBindings,
+      ) => Promise<void>)
     | null;
   readonly tenantProject:
     | ((deps: ControlPlaneDeps, record: StoreRecord, nowUnix: number) => Promise<void>)
@@ -411,7 +422,10 @@ async function runProjection(
   const deps = depsOf(c);
   const db = deps.controlDatabase;
   if (spec.project !== null && db !== null) {
-    await spec.project(db, record, Math.floor(Date.now() / 1000));
+    // `c.env` reaches the projector so the tenant-account hook can honour
+    // `CONTROL_TENANT_ACCOUNT_SOURCE` (Track A G2). Every other project hook
+    // ignores the 4th arg — a 3-param function is assignable to the 4-param type.
+    await spec.project(db, record, Math.floor(Date.now() / 1000), c.env);
   }
   if (spec.tenantProject !== null) {
     await spec.tenantProject(deps, record, Math.floor(Date.now() / 1000));

@@ -404,6 +404,93 @@ describe("SplitControlPlaneStore", () => {
     });
   });
 
+  describe("operator tenant-accounts LIST with CONTROL_TENANT_ACCOUNT_SOURCE=tenant_object (Track A G2)", () => {
+    const FLAG_ON = { CONTROL_TENANT_ACCOUNT_SOURCE: "tenant_object" } as const;
+
+    // The flipped writer STOPS mirroring: it writes the typed registry columns
+    // but leaves `document_json = NULL`. The flipped reader IGNORES the (now
+    // empty) mirror and fans out across each tenant's own object.
+    function fanOutStore() {
+      return new SplitControlPlaneStore(db(), router(), {
+        requestId: "split-store-test",
+        tenantAccountSource: "tenant_object",
+      });
+    }
+
+    async function seed(
+      split: SplitControlPlaneStore,
+      id: string,
+      extra: Record<string, unknown>,
+    ): Promise<StoreRecord> {
+      const stored = await split.create("tenant-accounts", PLATFORM, { id, ...extra });
+      await projectTenantAccount(db(), stored, 1000, FLAG_ON);
+      return stored;
+    }
+
+    async function fanoutReference(seededById: Map<string, StoreRecord>, query: ListQuery) {
+      const roster = await router().provisionedTenants();
+      const docs = roster
+        .map((id) => seededById.get(id))
+        .filter((doc): doc is StoreRecord => doc !== undefined);
+      return pageOf(docs, query);
+    }
+
+    it("stops writing the control mirror yet still serves the LIST from the object fan-out", async () => {
+      const split = fanOutStore();
+      const a = await seed(split, TENANT_A, {
+        name: "Ärzte Klinik",
+        status: "active",
+        plan_id: "pro",
+        plan_effective_at: 1234567890,
+        contact_email: "ops@aerzte.example",
+      });
+      const b = await seed(split, TENANT_B, {
+        name: "Beta Corp",
+        status: "suspended",
+        plan_id: "free",
+      });
+      const seeded = new Map([
+        [TENANT_A, a],
+        [TENANT_B, b],
+      ]);
+
+      // Red line: the WHOLE-document mirror is retired — the typed registry row
+      // exists (roster/JOIN needs it) but its `document_json` is NULL.
+      const mirrorRow = await db()
+        .prepare("SELECT status, document_json FROM tenants WHERE id = ?")
+        .bind(TENANT_A)
+        .first<{ status: string; document_json: string | null }>();
+      expect(mirrorRow?.status).toBe("active");
+      expect(mirrorRow?.document_json).toBeNull();
+
+      // The reader ignores the empty mirror and reproduces the object fan-out
+      // exactly — same search/filter/pagination surface as the mirror path.
+      const search: ListQuery = {
+        offset: 0,
+        limit: 100,
+        paginate: true,
+        search: "ärzte",
+        filters: {},
+      };
+      const cases: ListQuery[] = [
+        { offset: 0, limit: 100, paginate: false, search: null, filters: {} },
+        search,
+        { offset: 0, limit: 100, paginate: true, search: null, filters: { status: "active" } },
+        { offset: 1, limit: 1, paginate: true, search: null, filters: {} },
+      ];
+      for (const query of cases) {
+        const page = await split.list("tenant-accounts", PLATFORM, query);
+        expect(page).toEqual(await fanoutReference(seeded, query));
+      }
+
+      // Raw fields the typed columns drop still survive — proof the fan-out
+      // returns the object document, not a registry-column reconstruction.
+      const searchPage = await split.list("tenant-accounts", PLATFORM, search);
+      expect(searchPage.items.map((i) => i.id)).toEqual([TENANT_A]);
+      expect(searchPage.items[0]).toMatchObject({ plan_effective_at: 1234567890 });
+    });
+  });
+
   it("fans out platform reads across provisioned tenants without weakening object isolation", async () => {
     const split = store();
     await split.create(

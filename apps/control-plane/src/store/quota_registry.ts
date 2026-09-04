@@ -396,20 +396,81 @@ export async function projectPlan(
 }
 
 /**
+ * Track A G2 (stop-control-write) for the `tenants.document_json` tenant-account
+ * mirror ([[no-tenant-data-mirror-in-control-d1]]).
+ *
+ * DEFAULT (unset/`"control"`): {@link projectTenantAccount} keeps writing the
+ * WHOLE tenant-account admin document into the shared CONTROL object's
+ * `document_json` column, and the operator LIST is served from that one-query
+ * mirror ({@link SplitControlPlaneStore} `#listTenantAccountsMirror`). When this
+ * reads `"tenant_object"` the projection stops mirroring the document (writes
+ * `document_json = NULL`, retiring the tenant-data copy from control) and the
+ * LIST fans out across each tenant's own object instead — the pre-#75 authority
+ * path. Any other value reads as the safe default (a config typo must not blank
+ * the mirror the reader still points at). See the `CONTROL_TENANT_ACCOUNT_SOURCE`
+ * binding docs: the reader and writer flip TOGETHER on one var, because a mirror
+ * that stops being written while the LIST still reads it would list nothing.
+ */
+export function tenantAccountWritesTenantObjectOnly(env: {
+  readonly CONTROL_TENANT_ACCOUNT_SOURCE?: string;
+}): boolean {
+  return (env.CONTROL_TENANT_ACCOUNT_SOURCE ?? "").trim() === "tenant_object";
+}
+
+/**
+ * Track A G2 (stop-control-write) for the typed `quota_policies` enforcement row
+ * ([[no-tenant-data-mirror-in-control-d1]]).
+ *
+ * DEFAULT (unset/`"control"`): the quota-policy write legs keep writing the typed
+ * enforcement row into the shared CONTROL object (via {@link projectQuotaPolicy}
+ * / {@link deleteQuotaPolicyRow}) ALONGSIDE the tenant-object shadow write, so the
+ * gateway / agent-runtime / mcp admission gate that still reads control stays
+ * current. When this reads `"tenant_object"` the control leg is SKIPPED — the
+ * typed row lands ONLY in the owning tenant's own object (the shadow write, which
+ * always runs, becomes the sole authority). Any other value reads as the safe
+ * default (a config typo must not silently stop enforcement writes while a reader
+ * still points at control).
+ *
+ * GATED: flip only once EVERY admission reader resolves the policy from the
+ * tenant object (`{GATEWAY,AGENT_RUNTIME,MCP}_QUOTA_POLICY_SOURCE = "tenant_object"`)
+ * AND the one-time `quota-policy-backfill` has populated the objects — quota is a
+ * limiter, so a reader still on control that finds no row fails OPEN. The reader
+ * flip and this writer flip are on SEPARATE vars by design (a coupled pair, but
+ * the reader must lead the writer), unlike the tenant-account/`spend_throttles`
+ * single-var flips whose reader and writer are the same store.
+ */
+export function quotaPolicyWritesTenantObjectOnly(env: {
+  readonly CONTROL_QUOTA_POLICY_SOURCE?: string;
+}): boolean {
+  return (env.CONTROL_QUOTA_POLICY_SOURCE ?? "").trim() === "tenant_object";
+}
+
+/**
  * Project a `tenant-accounts` admin document into the typed `tenants` row.
  *
  * Only two of its columns are load-bearing for the data plane — `id` and
  * `plan_id`, the two the gateway's `JOIN plans p ON t.plan_id = p.id` traverses
  * — but `name`/`slug`/`status` are `NOT NULL`, so they are carried faithfully
- * rather than stubbed.
+ * rather than stubbed. These typed columns are the account-global control
+ * REGISTRY (roster + plan join) and are ALWAYS written; only `document_json`
+ * (the whole-document tenant-data mirror) is Track-A-gated by `env`.
+ *
+ * `env` omitted (the one-time backfill, tests) keeps the mirror ON — its job is
+ * to fill the mirror, so it must never be the leg that blanks it.
  */
 export async function projectTenantAccount(
   db: D1Database,
   record: StoreRecord,
   nowUnix: number,
+  env?: { readonly CONTROL_TENANT_ACCOUNT_SOURCE?: string },
 ): Promise<void> {
   const id = String(record.id);
   const planId = record.plan_id;
+  // `null` retires the tenant-data copy from the shared control object; the
+  // reader ({@link SplitControlPlaneStore.list}) flips to the tenant-object
+  // fan-out under the SAME var, so a NULL mirror is never read.
+  const mirrorDocument =
+    env === undefined || !tenantAccountWritesTenantObjectOnly(env) ? JSON.stringify(record) : null;
   try {
     await db
       .prepare(
@@ -441,7 +502,7 @@ export async function projectTenantAccount(
         typeof planId === "string" && planId.trim() !== "" ? planId.trim() : NO_PLAN_ID,
         nowUnix,
         nowUnix,
-        JSON.stringify(record),
+        mirrorDocument,
       )
       .run();
   } catch (error) {

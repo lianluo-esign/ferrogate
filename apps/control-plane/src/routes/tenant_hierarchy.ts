@@ -403,7 +403,9 @@ export const tenantHierarchyRoutes: GroupModule = crudGroup(
       // moves a tenant between plans.
       const db = deps.controlDatabase;
       if (db !== null) {
-        await projectTenantAccount(db, stored, Math.floor(Date.now() / 1000));
+        // `c.env` carries `CONTROL_TENANT_ACCOUNT_SOURCE` so this override honours
+        // the same document-mirror gate as the spec `project` hook (Track A G2).
+        await projectTenantAccount(db, stored, Math.floor(Date.now() / 1000), c.env);
       }
       // #820, and for the same "this route is an OVERRIDE, so the spec hooks do
       // not run for it" reason as the projection above. This route cannot create

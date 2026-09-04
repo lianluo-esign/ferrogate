@@ -67,6 +67,16 @@ export interface SplitControlPlaneStoreOptions {
    * deferral across the whole split. Absent for every non-login path/test.
    */
   readonly auditSink?: AuditSink | null;
+  /**
+   * Track A G2 for the `tenants.document_json` mirror. `"tenant_object"` serves
+   * the operator `tenant-accounts` LIST from the per-tenant object fan-out
+   * ({@link SplitControlPlaneStore.#listTenantResources}) instead of the control
+   * mirror, flipping in lockstep with the writer's `CONTROL_TENANT_ACCOUNT_SOURCE`
+   * (see `store/quota_registry.ts::tenantAccountWritesTenantObjectOnly`). Unset/
+   * `"control"` keeps the one-query mirror read (#75). Resolved once in
+   * `adapters.ts::resolveStore` from the same var the writer reads.
+   */
+  readonly tenantAccountSource?: string;
 }
 
 export class SplitControlPlaneStore implements ControlPlaneStore {
@@ -75,6 +85,9 @@ export class SplitControlPlaneStore implements ControlPlaneStore {
   readonly #tenantRouter: TenantDatabaseRouter;
   readonly #registry: ControlDatabaseTenantRegistry;
   readonly #options: SplitControlPlaneStoreOptions;
+  // Track A G2: when true, operator `tenant-accounts` LIST fans out across the
+  // tenant objects instead of reading the control `document_json` mirror.
+  readonly #tenantAccountFanOut: boolean;
   // Per-request memo (this store is constructed per request — `#options.requestId`).
   readonly #tenantStores = new Map<string, Promise<D1ControlPlaneStore>>();
 
@@ -87,6 +100,7 @@ export class SplitControlPlaneStore implements ControlPlaneStore {
     this.#tenantRouter = tenantRouter;
     this.#registry = new ControlDatabaseTenantRegistry(controlDb);
     this.#options = options;
+    this.#tenantAccountFanOut = options.tenantAccountSource === "tenant_object";
     this.#control = new D1ControlPlaneStore(controlDb, options);
   }
 
@@ -336,8 +350,13 @@ export class SplitControlPlaneStore implements ControlPlaneStore {
     }
     // Operator `tenant-accounts` LIST is served from the control-DO full-document
     // mirror in ONE query — no per-tenant fan-out (#75). Every other tenant-private
-    // kind still fans out via `#listTenantResources`.
-    if (collection === "tenant-accounts") return this.#listTenantAccountsMirror(query);
+    // kind still fans out via `#listTenantResources`. Track A G2: once
+    // `CONTROL_TENANT_ACCOUNT_SOURCE = "tenant_object"` retires the mirror write,
+    // this kind fans out too (the pre-#75 authority path) so the retired mirror is
+    // never read.
+    if (collection === "tenant-accounts" && !this.#tenantAccountFanOut) {
+      return this.#listTenantAccountsMirror(query);
+    }
     return this.#listTenantResources(collection, query);
   }
 

@@ -212,6 +212,29 @@ SIEM_EXPORT_SINKS = "[]"
 # from the tenant object (`GATEWAY_QUOTA_POLICY_SOURCE = "tenant_object"`), or a
 # control-reading admission path stops seeing new throttles.
 CONTROL_SPEND_THROTTLE_SOURCE = "control"
+# Track A G2 (stop-control-write) for the `tenants.document_json` tenant-account
+# mirror. "control" (the DEFAULT) keeps mirroring the WHOLE admin document into the
+# shared CONTROL object and serves the operator `tenant-accounts` LIST from that
+# one-query mirror (#75). "tenant_object" INVERTS it — the projection writes
+# `document_json = NULL` (retiring the tenant-data copy from control) and the LIST
+# fans out across each tenant's own object (the pre-#75 authority path). Reader and
+# writer flip on this ONE var so a mirror is never unwritten while still read.
+# DEFAULT-OFF and GATED: the flip trades one control query for an N-object fan-out
+# that #75/0031 removed for exceeding the 1s LIST SLA, so validate a bounded/
+# paginated fan-out at fleet scale before flipping. The typed `tenants` columns
+# (id/name/slug/status/plan_id) are the account-global `JOIN plans` registry and are
+# always written regardless of this var.
+CONTROL_TENANT_ACCOUNT_SOURCE = "control"
+# Track A G2 (stop-control-write) for the `quota_policies` typed rows. "control"
+# (the DEFAULT) writes the shared CONTROL row AND a tenant-object shadow on every
+# create/replace/update/delete. "tenant_object" INVERTS it — skips the control leg
+# so the tenant object's own row is the sole authority. DEFAULT-OFF and GATED, with
+# a STRICTER flip order than a plain mirror: quota is a limiter that fails OPEN on a
+# missing row, so this WRITE flip must TRAIL the READ flip — every admission worker
+# ({GATEWAY,AGENT_RUNTIME,MCP}_QUOTA_POLICY_SOURCE = "tenant_object") must read the
+# tenant object AND the shadow backfill must be complete first, or a still-control
+# reader silently loses every limit. A malformed value reads as the safe default.
+CONTROL_QUOTA_POLICY_SOURCE = "control"
 
 # ---------------------------------------------------------------------------
 # Bootstrap model-catalog import (#892) — OPTIONAL fallback bindings

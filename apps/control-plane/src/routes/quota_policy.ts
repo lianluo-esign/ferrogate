@@ -85,7 +85,11 @@ import {
   type StoreRecord,
 } from "../ports.js";
 import { adminDeleted, adminItem } from "../responses.js";
-import { deleteQuotaPolicyRow, projectQuotaPolicy } from "../store/quota_registry.js";
+import {
+  deleteQuotaPolicyRow,
+  projectQuotaPolicy,
+  quotaPolicyWritesTenantObjectOnly,
+} from "../store/quota_registry.js";
 import {
   type GroupModule,
   type Handler,
@@ -199,7 +203,12 @@ async function projectPolicy(
   // must be written or the operator's edit is silently lost. (memory store:
   // `controlDatabase` is null and the typed row is not projected at all — the
   // route's contract/auth tests assert only on the document, read back by GET.)
-  if (db !== null) {
+  //
+  // Track A G2 (stop-control-write): once `CONTROL_QUOTA_POLICY_SOURCE` reads
+  // `"tenant_object"` the control leg is SKIPPED — the tenant-object shadow write
+  // below becomes the sole enforcement authority. DEFAULT-OFF, so the control row
+  // keeps being written until every admission reader has flipped to the object.
+  if (db !== null && !quotaPolicyWritesTenantObjectOnly(c.env)) {
     await projectQuotaPolicy(
       db,
       record as Parameters<typeof projectQuotaPolicy>[1],
@@ -593,7 +602,11 @@ export const quotaPolicyRoutes: GroupModule = crudGroup(
       // direction a limiter must fail in; the inverse leaves a policy the
       // console lists and the gateway no longer applies.
       const db = deps.controlDatabase;
-      if (db !== null) await deleteQuotaPolicyRow(db, scopeType, scopeId);
+      // Track A G2: skip the control delete once admission reads the object (the
+      // shadow delete below removes the sole remaining typed row). DEFAULT-OFF.
+      if (db !== null && !quotaPolicyWritesTenantObjectOnly(c.env)) {
+        await deleteQuotaPolicyRow(db, scopeType, scopeId);
+      }
       // Mirror the delete into the owning tenant object (writer dual-write, delete
       // side) so its typed row does not outlive the document once admission reads
       // from the object. Best-effort, for the same reason the create-side shadow

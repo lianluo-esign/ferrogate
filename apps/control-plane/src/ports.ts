@@ -911,6 +911,43 @@ export interface ControlPlaneBindings {
    * a silent stop.
    */
   readonly CONTROL_SPEND_THROTTLE_SOURCE?: string;
+  /**
+   * Track A G2 (stop-control-write) for the `tenants.document_json` tenant-account
+   * mirror. DEFAULT (unset/`"control"`): every tenant-account write mirrors the
+   * WHOLE admin document into the shared CONTROL object's `document_json`, and the
+   * operator LIST is served from that one-query mirror (#75). `"tenant_object"`
+   * INVERTS it — the projection writes `document_json = NULL` (retiring the
+   * tenant-data copy from control, [[no-tenant-data-mirror-in-control-d1]]) and the
+   * LIST fans out across each tenant's own object (the pre-#75 authority path).
+   *
+   * The reader and writer flip on this SINGLE var so a mirror is never both
+   * unwritten and read. DEFAULT-OFF and GATED: the flip trades one control query
+   * for an N-object fan-out — migration 0031/#75 removed that fan-out because its
+   * floor exceeded the 1s LIST SLA on the live fleet — so flipping needs a bounded/
+   * paginated fan-out validated at fleet scale first. A malformed value reads as
+   * the safe default (a config typo must not blank the mirror the reader points at).
+   * The typed `tenants` columns (`id/name/slug/status/plan_id`) are the account-
+   * global registry the data plane's `JOIN plans` reads and are ALWAYS written.
+   */
+  readonly CONTROL_TENANT_ACCOUNT_SOURCE?: string;
+  /**
+   * Track A G2 (stop-control-write) for the `quota_policies` typed rows. DEFAULT
+   * (unset/`"control"`): every quota-policy create/replace/update/delete writes the
+   * shared CONTROL object's `quota_policies` row AND a best-effort tenant-object
+   * shadow. `"tenant_object"` INVERTS it — the control leg is skipped and the
+   * tenant object's own row becomes the sole authority
+   * ([[no-tenant-data-mirror-in-control-d1]]).
+   *
+   * DEFAULT-OFF and GATED, and the flip ordering is STRICTER than a plain mirror:
+   * quota is a LIMITER that fails OPEN when the reader finds no row, so the WRITE
+   * flip (this var) must trail the READ flip — every admission worker
+   * (`{GATEWAY,AGENT_RUNTIME,MCP}_QUOTA_POLICY_SOURCE = "tenant_object"`) must
+   * resolve policies from the tenant object AND the shadow backfill must be
+   * complete before this stops the control write, or a still-control reader would
+   * silently lose every limit. A malformed value reads as the safe default
+   * (control-authoritative dual-write), never as a silent stop.
+   */
+  readonly CONTROL_QUOTA_POLICY_SOURCE?: string;
 }
 
 /** Per-request context values set by the middleware chain. */

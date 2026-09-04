@@ -429,6 +429,13 @@ describe("the env-var drift gate itself", () => {
       "CONTROL_PLANE_NATIVE_API_KEYS",
       "CONTROL_PLANE_SEED",
       "CONTROL_PLANE_STATIC_API_KEYS",
+      // Track A G2: the `quota_policies` write source. `"control"` (default)
+      // dual-writes each quota policy to the shared control object with a
+      // tenant-object shadow; `"tenant_object"` writes ONLY the tenant object and
+      // skips the control mirror. A plain `[vars]` entry — names a topology, holds
+      // no secret. Read by `quotaPolicyWritesTenantObjectOnly` in
+      // `store/quota_registry.ts`.
+      "CONTROL_QUOTA_POLICY_SOURCE",
       // Track A G2: the `spend_throttles` write source. `"control"` (default)
       // dual-writes the finops auto-throttle to the shared control object with a
       // tenant-object shadow; `"tenant_object"` writes ONLY the tenant object and
@@ -439,6 +446,13 @@ describe("the env-var drift gate itself", () => {
       // because it holds no secret BY CONSTRUCTION — a sink's credential is an
       // `env://` REFERENCE and `src/siem/config.ts` refuses an inline literal,
       // which is what makes this list safe to commit.
+      // Track A G2: the `tenants.document_json` tenant-account write/read source.
+      // `"control"` (default) mirrors the whole admin document into the shared
+      // control object and serves the operator LIST from it; `"tenant_object"`
+      // NULLs the mirror and fans the LIST out across each tenant object. A plain
+      // `[vars]` entry — names a topology, holds no secret. Read by
+      // `tenantAccountWritesTenantObjectOnly` in `store/quota_registry.ts`.
+      "CONTROL_TENANT_ACCOUNT_SOURCE",
       "SIEM_EXPORT_SINKS",
       "SPEND_ANOMALY_WEBHOOK_TIMEOUT_SECS",
       "SPEND_ANOMALY_WEBHOOK_URL",
@@ -644,7 +658,11 @@ describe("which committed [vars] values this runner can actually observe", () =>
     // added ⇒ 11, then RETIRED with the 0043 drop of its two projections ⇒ 10.
     // Track A G2 added `CONTROL_SPEND_THROTTLE_SOURCE` (spend_throttles write
     // source) ⇒ 11.
-    expect(rows.length).toBe(11);
+    // Track A G2 added `CONTROL_TENANT_ACCOUNT_SOURCE` (tenants.document_json
+    // write/read source) ⇒ 12.
+    // Track A G2 added `CONTROL_QUOTA_POLICY_SOURCE` (quota_policies write
+    // source) ⇒ 13.
+    expect(rows.length).toBe(13);
   });
 
   it("explains every overridden var with an explicit pin in vitest.config.ts", () => {
@@ -673,6 +691,6 @@ describe("which committed [vars] values this runner can actually observe", () =>
     // reads the RUNTIME values, so it also fails if `env` stopped resolving.
     const observable = rows.filter((r) => r.runtime === r.committed).map((r) => r.name);
     expect(observable.sort()).toEqual([...DECLARED.vars.keys()].sort());
-    expect(observable.length).toBe(11);
+    expect(observable.length).toBe(13);
   });
 });

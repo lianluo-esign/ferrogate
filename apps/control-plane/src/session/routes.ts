@@ -418,7 +418,9 @@ async function handleRegister(c: Ctx): Promise<Response> {
   // rather than left to the generic path this handler does not take.
   const controlDb = console_.deps.controlDatabase;
   if (controlDb !== null) {
-    await projectTenantAccount(controlDb, tenantAccount, now);
+    // Self-registration bypasses `crudGroup`, so pass `c.env` explicitly to honour
+    // `CONTROL_TENANT_ACCOUNT_SOURCE` (Track A G2) the spec hook would apply.
+    await projectTenantAccount(controlDb, tenantAccount, now, c.env);
   }
   await provisionTenantStorageFor(console_.deps, tenantId, c.req.raw);
   await store.create(PROJECTS_COLLECTION, PLATFORM, {

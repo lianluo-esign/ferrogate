@@ -104,6 +104,7 @@ import {
 } from "./store/lifecycle.js";
 import { MemoryControlPlaneStore, type MemoryStoreSeed } from "./store/memory.js";
 import { PlatformModelCatalogStore } from "./store/platform-model-catalog.js";
+import { tenantAccountWritesTenantObjectOnly } from "./store/quota_registry.js";
 import { SplitControlPlaneStore } from "./store/split.js";
 import { UnprovisionedTenantDatabaseRouter } from "./store/tenancy.js";
 
@@ -1203,6 +1204,9 @@ export function resolveStore(
   return new SplitControlPlaneStore(controlDb, resolveTenantStorage(env, controlDb), {
     requestId: context.requestId ?? null,
     auditSink: context.auditSink ?? null,
+    // Track A G2: the reader flips to the tenant-object fan-out in lockstep with
+    // the writer's `document_json` stop-write, on the one shared var.
+    tenantAccountSource: tenantAccountWritesTenantObjectOnly(env) ? "tenant_object" : "control",
   });
 }
 
