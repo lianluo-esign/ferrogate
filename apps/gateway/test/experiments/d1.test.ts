@@ -1,13 +1,7 @@
-import { env } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
-import {
-  D1ExperimentObserver,
-  type ShadowLegRecord,
-  sweepExperimentProjections,
-} from "../../src/experiments/index.js";
-import { controlNamespace } from "../support/control-namespace.js";
+import { D1ExperimentObserver, type ShadowLegRecord } from "../../src/experiments/index.js";
 import { tenantObjectDb } from "../tenant-object.js";
-import { controlDb, resetExperimentTables, storedShadowLegs } from "./harness.js";
+import { resetExperimentTables, storedTenantShadowLegs } from "./harness.js";
 
 const RECORD: ShadowLegRecord = {
   legId: "request-1~shadow",
@@ -30,106 +24,34 @@ const RECORD: ShadowLegRecord = {
 
 beforeEach(async () => {
   await resetExperimentTables();
-  await tenantObjectDb("tenant_a").prepare("DELETE FROM experiment_shadow_legs").run();
 });
 
 describe("tenant-authoritative experiment legs", () => {
-  it("writes the object and a tenant-qualified projection idempotently", async () => {
-    const observer = new D1ExperimentObserver({
-      tenantDatabase: (_env, tenantId) => tenantObjectDb(tenantId),
-      projectionDatabase: () => controlDb(),
-    });
-
-    await observer.observeShadowLeg(RECORD, {});
-    const tenant = tenantObjectDb("tenant_a");
-    expect(
-      await tenant
-        .prepare("SELECT COUNT(*) AS count FROM experiment_shadow_legs")
-        .first<{ count: number }>(),
-    ).toEqual({ count: 1 });
-    expect(await storedShadowLegs()).toHaveLength(1);
-
-    await observer.observeShadowLeg(RECORD, {});
-    expect(
-      await tenant
-        .prepare("SELECT COUNT(*) AS count FROM experiment_shadow_legs")
-        .first<{ count: number }>(),
-    ).toEqual({ count: 1 });
-    expect(await storedShadowLegs()).toHaveLength(1);
-    const projection = (await storedShadowLegs())[0] as unknown as Record<string, unknown>;
-    expect(projection.projection_key).toContain("tenant_a");
-  });
-
-  it("writes the object only and never the control projection when projectToControl is false", async () => {
+  it("writes the object idempotently — the sole destination, no control projection", async () => {
     // The production contract (#859/#881): a shadow leg is tenant data. The
-    // owning object is the sole destination; the control mirror is off, and an
-    // absent projection binding is not a reason to drop the leg.
+    // owning object is the ONLY destination; the control projection was DROPPED
+    // by control migration 0043, so there is nowhere else for the leg to go.
     const observer = new D1ExperimentObserver({
       tenantDatabase: (_env, tenantId) => tenantObjectDb(tenantId),
-      projectionDatabase: () => undefined,
-      projectToControl: false,
     });
 
     await observer.observeShadowLeg(RECORD, {});
     expect(observer.stats).toMatchObject({ written: 1, dropped: 0, failed: 0 });
-    const tenant = tenantObjectDb("tenant_a");
-    expect(
-      await tenant
-        .prepare("SELECT COUNT(*) AS count FROM experiment_shadow_legs")
-        .first<{ count: number }>(),
-    ).toEqual({ count: 1 });
-    // The control projection stays empty — nothing is mirrored to it.
-    expect(await storedShadowLegs()).toHaveLength(0);
-  });
+    expect(await storedTenantShadowLegs("tenant_a")).toHaveLength(1);
 
-  it("repairs a missing control projection from the object on a scheduled sweep", async () => {
-    const observer = new D1ExperimentObserver({
-      tenantDatabase: (_env, tenantId) => tenantObjectDb(tenantId),
-      projectionDatabase: () => controlDb(),
-    });
+    // `ON CONFLICT (leg_id)` replaces the row rather than double-counting the arm.
     await observer.observeShadowLeg(RECORD, {});
-    await controlDb().prepare("DELETE FROM experiment_shadow_legs").run();
-
-    await sweepExperimentProjections(
-      {
-        CONTROL_DB: controlDb(),
-        CONTROL_DATA: controlNamespace(),
-        TENANT_DATA: (env as unknown as { TENANT_DATA: unknown }).TENANT_DATA,
-      },
-      ["tenant_a"],
-    );
-
-    expect(await storedShadowLegs()).toHaveLength(1);
+    expect(observer.stats).toMatchObject({ written: 2, dropped: 0, failed: 0 });
+    expect(await storedTenantShadowLegs("tenant_a")).toHaveLength(1);
   });
 
-  it("pages through every object leg instead of repeating the first page", async () => {
+  it("drops the leg — never half-writes it — when the tenant object is unreachable", async () => {
     const observer = new D1ExperimentObserver({
-      tenantDatabase: (_env, tenantId) => tenantObjectDb(tenantId),
-      projectionDatabase: () => controlDb(),
+      tenantDatabase: () => undefined,
     });
-    for (let index = 0; index < 3; index += 1) {
-      await observer.observeShadowLeg(
-        {
-          ...RECORD,
-          legId: `request-${index}~shadow`,
-          clientRequestId: `request-${index}`,
-          observedAtUnix: RECORD.observedAtUnix + index,
-        },
-        {},
-      );
-    }
-    await controlDb().prepare("DELETE FROM experiment_shadow_legs").run();
 
-    await sweepExperimentProjections(
-      {
-        CONTROL_DB: controlDb(),
-        CONTROL_DATA: controlNamespace(),
-        TENANT_DATA: (env as unknown as { TENANT_DATA: unknown }).TENANT_DATA,
-      },
-      ["tenant_a"],
-      2,
-    );
-
-    expect(await storedShadowLegs()).toHaveLength(3);
+    await observer.observeShadowLeg(RECORD, {});
+    expect(observer.stats).toMatchObject({ written: 0, dropped: 1, failed: 0 });
+    expect(await storedTenantShadowLegs("tenant_a")).toHaveLength(0);
   });
 });

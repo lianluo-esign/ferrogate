@@ -1,9 +1,12 @@
 /**
- * THE JUDGE LEG (#692), against the REAL control D1 and the REAL migration.
+ * THE JUDGE LEG (#692), against the REAL tenant object and the REAL migration.
  *
- * The rows are read back out of `online_eval_scores` with SQL rather than off a
- * recording double, because the claim being made is "scores land in D1" and a
- * fake writer proves only that a function was called.
+ * The rows are read back out of the tenant object's `online_eval_scores` with SQL
+ * rather than off a recording double, because the claim being made is "scores land
+ * in the owning object" and a fake writer proves only that a function was called.
+ * The score is tenant data: it lives in the tenant object and nowhere else — the
+ * control projection this suite once dual-wrote was retired and its mirror table
+ * DROPped (0043).
  *
  * ## MUTATION LOG
  *
@@ -23,7 +26,16 @@ import {
 } from "../../src/evals/index.js";
 import type { PhysicalRoute } from "../../src/inference/index.js";
 import { tenantObjectDb } from "../tenant-object.js";
-import { controlDb, resetOnlineEvalTables, storedScores } from "./harness.js";
+import { resetOnlineEvalTables, storedTenantScores } from "./harness.js";
+
+/**
+ * The production wiring, in one place: a score is tenant data, so the consumer
+ * writes it to the owning object and nowhere else. The control `online_eval_scores`
+ * projection that this suite once dual-wrote was retired end to end and its
+ * mirror table DROPped (0043); there is no `database`/`projectionDatabase`/
+ * `projectToControl` seam left to exercise.
+ */
+const TENANT_DB = (_env: unknown, tenantId: string) => tenantObjectDb(tenantId);
 
 const JUDGE_ROUTE: PhysicalRoute = {
   logicalModel: "judge-model",
@@ -141,13 +153,13 @@ describe("a sampled exchange becomes durable scores", () => {
       {
         routeFor: () => JUDGE_ROUTE,
         dispatcher: () => judge.dispatcher,
-        database: () => controlDb() as never,
+        tenantDatabase: TENANT_DB,
         now: () => 1_700_000_500_000,
       },
     );
 
     expect(result).toMatchObject({ scored: 2, malformed: 0, retried: false });
-    const rows = await storedScores();
+    const rows = await storedTenantScores("tenant_a");
     expect(rows).toHaveLength(2);
     expect(rows[0]).toMatchObject({
       request_id: "fg-req-1",
@@ -176,39 +188,6 @@ describe("a sampled exchange becomes durable scores", () => {
     expect(JSON.stringify(asked.messages)).toContain("Paris.");
   });
 
-  it("writes the tenant object first and keeps a retry-safe control projection", async () => {
-    const judge = judgeAnswering(VERDICT);
-    const delivery = batchOf(sample());
-    const dependencies = {
-      routeFor: () => JUDGE_ROUTE,
-      dispatcher: () => judge.dispatcher,
-      tenantDatabase: (_env: unknown, tenantId: string) => tenantObjectDb(tenantId),
-      projectionDatabase: () => controlDb(),
-      now: () => 1_700_000_500_000,
-    };
-
-    const first = await consumeOnlineEvalBatch(delivery.batch, {}, dependencies);
-    expect(first).toMatchObject({ scored: 2, retried: false });
-    const tenant = tenantObjectDb("tenant_a");
-    expect(
-      await tenant
-        .prepare("SELECT COUNT(*) AS count FROM online_eval_scores")
-        .first<{ count: number }>(),
-    ).toEqual({ count: 2 });
-    const firstProjection = await storedScores();
-    expect(firstProjection).toHaveLength(2);
-    expect(firstProjection[0]?.projection_key).toContain("tenant_a");
-
-    const second = await consumeOnlineEvalBatch(batchOf(sample()).batch, {}, dependencies);
-    expect(second).toMatchObject({ scored: 2, retried: false });
-    expect(
-      await tenant
-        .prepare("SELECT COUNT(*) AS count FROM online_eval_scores")
-        .first<{ count: number }>(),
-    ).toEqual({ count: 2 });
-    expect(await storedScores()).toHaveLength(2);
-  });
-
   it("a redelivered sample corrects its row instead of doubling the sample", async () => {
     // Queues are at-least-once. A doubled row would silently over-weight
     // whichever requests happened to be redelivered, which is invisible in
@@ -220,7 +199,7 @@ describe("a sampled exchange becomes durable scores", () => {
       {
         routeFor: () => JUDGE_ROUTE,
         dispatcher: () => first.dispatcher,
-        database: () => controlDb() as never,
+        tenantDatabase: TENANT_DB,
       },
     );
 
@@ -233,11 +212,11 @@ describe("a sampled exchange becomes durable scores", () => {
       {
         routeFor: () => JUDGE_ROUTE,
         dispatcher: () => second.dispatcher,
-        database: () => controlDb() as never,
+        tenantDatabase: TENANT_DB,
       },
     );
 
-    const rows = await storedScores();
+    const rows = await storedTenantScores("tenant_a");
     expect(rows).toHaveLength(2);
     expect(rows.find((row) => row.criterion_id === "answer_relevance")).toMatchObject({
       score: 0.25,
@@ -268,7 +247,7 @@ describe("the score also reaches the metric store", () => {
       {
         routeFor: () => JUDGE_ROUTE,
         dispatcher: () => judge.dispatcher,
-        database: () => controlDb() as never,
+        tenantDatabase: TENANT_DB,
       },
     );
 
@@ -300,12 +279,12 @@ describe("the score also reaches the metric store", () => {
       {
         routeFor: () => JUDGE_ROUTE,
         dispatcher: () => judge.dispatcher,
-        database: () => controlDb() as never,
+        tenantDatabase: TENANT_DB,
       },
     );
 
     expect(result).toMatchObject({ scored: 2, retried: false });
-    expect(await storedScores()).toHaveLength(2);
+    expect(await storedTenantScores("tenant_a")).toHaveLength(2);
   });
 });
 
@@ -322,7 +301,7 @@ describe("residency governs the JUDGE route too", () => {
       {
         routeFor: () => US_JUDGE_ROUTE,
         dispatcher: () => judge.dispatcher,
-        database: () => controlDb() as never,
+        tenantDatabase: TENANT_DB,
       },
     );
 
@@ -330,7 +309,7 @@ describe("residency governs the JUDGE route too", () => {
     // The decisive assertion: the prompt never left. A gate that only skipped
     // the WRITE would still have shipped the tenant's content out of region.
     expect(judge.requests).toEqual([]);
-    expect(await storedScores()).toEqual([]);
+    expect(await storedTenantScores("tenant_a")).toEqual([]);
   });
 
   it("judges on an in-region route for the same tenant", async () => {
@@ -347,7 +326,7 @@ describe("residency governs the JUDGE route too", () => {
       {
         routeFor: () => ({ ...JUDGE_ROUTE, region: "eu-west-1" }),
         dispatcher: () => judge.dispatcher,
-        database: () => controlDb() as never,
+        tenantDatabase: TENANT_DB,
       },
     );
 
@@ -370,7 +349,7 @@ describe("a bad judge run costs a sample, never a retry storm", () => {
       {},
       {
         routeFor: () => JUDGE_ROUTE,
-        database: () => controlDb() as never,
+        tenantDatabase: TENANT_DB,
       },
     );
     expect(result).toMatchObject({ malformed: 1, scored: 0, retried: false });
@@ -388,12 +367,12 @@ describe("a bad judge run costs a sample, never a retry storm", () => {
       {
         routeFor: () => JUDGE_ROUTE,
         dispatcher: () => judge.dispatcher,
-        database: () => controlDb() as never,
+        tenantDatabase: TENANT_DB,
       },
     );
 
     expect(result).toMatchObject({ scored: 0, unjudgeable: 1, retried: false });
-    expect(await storedScores()).toEqual([]);
+    expect(await storedTenantScores("tenant_a")).toEqual([]);
   });
 
   it("does not retry an unreachable judge", async () => {
@@ -408,7 +387,7 @@ describe("a bad judge run costs a sample, never a retry storm", () => {
             throw new Error("connection refused");
           },
         }),
-        database: () => controlDb() as never,
+        tenantDatabase: TENANT_DB,
       },
     );
 
@@ -426,7 +405,7 @@ describe("a bad judge run costs a sample, never a retry storm", () => {
       {
         routeFor: () => JUDGE_ROUTE,
         dispatcher: () => judge.dispatcher,
-        database: () => ({
+        tenantDatabase: () => ({
           prepare: () => ({
             bind: () => ({
               run: async () => undefined,
@@ -445,33 +424,10 @@ describe("a bad judge run costs a sample, never a retry storm", () => {
     expect(delivery.retried).toBe(true);
   });
 
-  it("retries when the control projection is unavailable after judging", async () => {
-    const judge = judgeAnswering(VERDICT);
-    const delivery = batchOf(sample());
-    const result = await consumeOnlineEvalBatch(
-      delivery.batch,
-      {},
-      {
-        routeFor: () => JUDGE_ROUTE,
-        dispatcher: () => judge.dispatcher,
-        tenantDatabase: (_env: unknown, tenantId: string) => tenantObjectDb(tenantId),
-        projectionDatabase: () => undefined,
-      },
-    );
-
-    expect(result).toMatchObject({ scored: 0, retried: true });
-    expect(delivery.retried).toBe(true);
-    expect(delivery.acked).toEqual([]);
-    expect(
-      await tenantObjectDb("tenant_a")
-        .prepare("SELECT COUNT(*) AS count FROM online_eval_scores")
-        .first<{ count: number }>(),
-    ).toEqual({ count: 0 });
-  });
-
-  it("writes the tenant object only and never the control projection when projectToControl is false", async () => {
+  it("writes the tenant object as the sole durable destination", async () => {
     // The production contract (#859/#881): a score is tenant data. The owning
-    // object is the sole durable destination; nothing is mirrored to control.
+    // object is the sole durable destination; nothing is mirrored to control —
+    // the mirror table was DROPped (0043), so there is no second copy to write.
     const judge = judgeAnswering(VERDICT);
     const delivery = batchOf(sample());
     const result = await consumeOnlineEvalBatch(
@@ -480,8 +436,7 @@ describe("a bad judge run costs a sample, never a retry storm", () => {
       {
         routeFor: () => JUDGE_ROUTE,
         dispatcher: () => judge.dispatcher,
-        tenantDatabase: (_env: unknown, tenantId: string) => tenantObjectDb(tenantId),
-        projectToControl: false,
+        tenantDatabase: TENANT_DB,
         now: () => 1_700_000_500_000,
       },
     );
@@ -493,35 +448,5 @@ describe("a bad judge run costs a sample, never a retry storm", () => {
         .prepare("SELECT COUNT(*) AS count FROM online_eval_scores")
         .first<{ count: number }>(),
     ).toEqual({ count: 2 });
-    // The control projection stays empty — the object is the only destination.
-    expect(await storedScores()).toHaveLength(0);
-  });
-
-  it("does not retry when the control projection is unavailable but projectToControl is false", async () => {
-    // A missing projection binding is no longer a durable-write failure once the
-    // mirror is off: the object write alone is the durable result.
-    const judge = judgeAnswering(VERDICT);
-    const delivery = batchOf(sample());
-    const result = await consumeOnlineEvalBatch(
-      delivery.batch,
-      {},
-      {
-        routeFor: () => JUDGE_ROUTE,
-        dispatcher: () => judge.dispatcher,
-        tenantDatabase: (_env: unknown, tenantId: string) => tenantObjectDb(tenantId),
-        projectionDatabase: () => undefined,
-        projectToControl: false,
-        now: () => 1_700_000_500_000,
-      },
-    );
-
-    expect(result).toMatchObject({ scored: 2, retried: false });
-    expect(delivery.retried).toBe(false);
-    expect(
-      await tenantObjectDb("tenant_a")
-        .prepare("SELECT COUNT(*) AS count FROM online_eval_scores")
-        .first<{ count: number }>(),
-    ).toEqual({ count: 2 });
-    expect(await storedScores()).toHaveLength(0);
   });
 });

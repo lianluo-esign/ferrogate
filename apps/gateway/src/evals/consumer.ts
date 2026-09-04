@@ -64,8 +64,6 @@ import {
   type OnlineEvalScoreDatabase,
   onlineEvalDatabaseFrom,
   onlineEvalTenantDatabaseFrom,
-  writeOnlineEvalScoreProjections,
-  writeOnlineEvalScores,
   writeTenantOnlineEvalScores,
 } from "./d1.js";
 import { buildJudgeRequestBody, parseJudgeVerdict } from "./judge.js";
@@ -99,20 +97,16 @@ export interface OnlineEvalConsumeResult {
 export interface OnlineEvalConsumerDeps {
   readonly routeFor?: (env: unknown, model: string) => PhysicalRoute | null;
   readonly dispatcher?: (env: unknown) => UpstreamDispatcher;
-  readonly database?: (env: unknown) => OnlineEvalScoreDatabase | undefined;
-  /** Object-authoritative score database, grouped one tenant at a time. */
-  readonly tenantDatabase?: (env: unknown, tenantId: string) => OnlineEvalScoreDatabase | undefined;
-  /** Control-D1 projection database. */
-  readonly projectionDatabase?: (env: unknown) => OnlineEvalScoreDatabase | undefined;
   /**
-   * Whether the object-authoritative batch is ALSO mirrored to the control
-   * projection. `false` in production — a score is tenant data and lives in the
-   * owning object, never mirrored into the shared control store (#859/#881 red
-   * line). The default stays `true` so the existing dual-write tests are
-   * unchanged; the production caller passes `false`, and re-enabling it is the
-   * whole rollback.
+   * Object-authoritative score database, grouped one tenant at a time. This is
+   * the ONLY durable destination: a score is tenant data and lives in the owning
+   * object, never mirrored into the shared control store (#859/#881 red line).
+   * The control projection that once dual-wrote here was retired end to end —
+   * production has always run `projectToControl: false`, and control migration
+   * 0043 has since DROPped the `online_eval_scores` mirror table, so there is no
+   * longer a second copy to write, to drift, or to reconcile.
    */
-  readonly projectToControl?: boolean;
+  readonly tenantDatabase?: (env: unknown, tenantId: string) => OnlineEvalScoreDatabase | undefined;
   readonly now?: () => number;
   /** Judge call timeout. A wedged judge must not hold the consumer open. */
   readonly timeoutMs?: number;
@@ -178,10 +172,7 @@ export async function consumeOnlineEvalBatch(
     ((e: unknown, model: string) => modelsFromEnv(e as InferenceBindings).resolve(model));
   const dispatcherFor =
     deps.dispatcher ?? ((e: unknown) => dispatcherFromEnv(e as InferenceBindings));
-  const databaseFor = deps.database ?? onlineEvalDatabaseFrom;
   const tenantDatabaseFor = deps.tenantDatabase ?? onlineEvalTenantDatabaseFrom;
-  const projectionDatabaseFor = deps.projectionDatabase ?? onlineEvalDatabaseFrom;
-  const projectToControl = deps.projectToControl ?? true;
   const now = deps.now ?? (() => Date.now());
   const timeoutMs = deps.timeoutMs ?? DEFAULT_JUDGE_TIMEOUT_MS;
   const maxBytes = deps.maxResponseBytes ?? DEFAULT_JUDGE_MAX_BYTES;
@@ -284,45 +275,27 @@ export async function consumeOnlineEvalBatch(
   // is about to re-derive.
   const refreshed: string[] = [];
   try {
-    if (deps.database !== undefined) {
-      // Explicit database injection is the legacy/test seam. Production does
-      // not pass it: tenant rows are authoritative and the control DB is only
-      // their fleet projection.
-      const db = databaseFor(env);
-      if (db === undefined) throw new Error("online evaluation database is unavailable");
-      await writeOnlineEvalScores(db, records);
-    } else {
-      // Production runs with `projectToControl: false`: the tenant object is the
-      // only durable destination, so the projection is neither resolved nor
-      // required. While the mirror is still on, a missing projection remains a
-      // durable-write failure — the judge has already been paid for, and
-      // throwing into the common handler arms retryAll without acknowledging a
-      // result that has not reached the projection store.
-      const projection = projectToControl ? projectionDatabaseFor(env) : undefined;
-      if (projectToControl && projection === undefined) {
-        throw new Error("online evaluation projection database is unavailable");
+    // The tenant object is the sole durable destination. A score is tenant data
+    // and lives in the owning object, never mirrored into the shared control
+    // store (#859/#881 red line); the control projection that once dual-wrote
+    // beside this was retired and its table DROPped (0043). Grouped one tenant
+    // at a time so each batch reaches exactly one object.
+    const byTenant = new Map<string, OnlineEvalScoreRecord[]>();
+    for (const record of records) {
+      if (record.tenantId.trim() === "") {
+        throw new Error("online evaluation score has no tenant authority");
       }
-
-      const byTenant = new Map<string, OnlineEvalScoreRecord[]>();
-      for (const record of records) {
-        if (record.tenantId.trim() === "") {
-          throw new Error("online evaluation score has no tenant authority");
-        }
-        const group = byTenant.get(record.tenantId) ?? [];
-        group.push(record);
-        byTenant.set(record.tenantId, group);
+      const group = byTenant.get(record.tenantId) ?? [];
+      group.push(record);
+      byTenant.set(record.tenantId, group);
+    }
+    for (const [tenantId, group] of byTenant) {
+      const tenantDatabase = tenantDatabaseFor(env, tenantId);
+      if (tenantDatabase === undefined) {
+        throw new Error(`tenant evaluation database is unavailable for ${tenantId}`);
       }
-      for (const [tenantId, group] of byTenant) {
-        const tenantDatabase = tenantDatabaseFor(env, tenantId);
-        if (tenantDatabase === undefined) {
-          throw new Error(`tenant evaluation database is unavailable for ${tenantId}`);
-        }
-        await writeTenantOnlineEvalScores(tenantDatabase, group);
-        if (projection !== undefined) {
-          await writeOnlineEvalScoreProjections(projection, group);
-        }
-        refreshed.push(tenantId);
-      }
+      await writeTenantOnlineEvalScores(tenantDatabase, group);
+      refreshed.push(tenantId);
     }
   } catch {
     batch.retryAll?.();
@@ -335,15 +308,18 @@ export async function consumeOnlineEvalBatch(
   // failed recompute must not retry the batch (which would re-judge every
   // sample). The next batch, or the cron sweep, recomputes the same window.
   for (const tenantId of refreshed) {
-    // The resolvers are passed THROUGH rather than re-defaulted, so the
-    // object-first guard inside `refreshOnlineEvalLegQuality` sees the identity
-    // it checks (`=== onlineEvalDatabaseFrom`) on a production env and a test's
-    // injected pair stays the same seam `regression.ts` offers.
+    // `onlineEvalDatabaseFrom` is passed as the `database` arg SOLELY to satisfy
+    // the object-first guard inside `refreshOnlineEvalLegQuality`, which keys off
+    // that exact identity (`=== onlineEvalDatabaseFrom`) to decide that an absent
+    // tenant-object binding is a misconfiguration rather than licence to
+    // aggregate a shared control table. The recompute itself reads and writes the
+    // tenant object resolved by `tenantDatabaseFor`; nothing is written to
+    // control.
     await refreshOnlineEvalLegQuality(
       env,
       tenantId,
       Math.floor(now() / 1000),
-      projectionDatabaseFor,
+      onlineEvalDatabaseFrom,
       tenantDatabaseFor,
     ).catch(() => 0);
   }

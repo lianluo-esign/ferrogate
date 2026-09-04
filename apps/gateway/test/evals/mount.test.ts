@@ -22,11 +22,9 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { controlNamespace } from "../support/control-namespace.js";
 
 import {
-  ONLINE_EVAL_SCORE_PROJECTION_UPSERT_SQL,
   TENANT_ONLINE_EVAL_SCORE_UPSERT_SQL,
   onlineEvalSampleToWire,
   onlineEvalScoreBindings,
-  onlineEvalScoreProjectionBindings,
 } from "../../src/evals/index.js";
 import { GATEWAY_MIDDLEWARE, gatewayQueue, gatewayScheduled } from "../../src/index.js";
 import { REQUEST_LOG_OBJECT } from "../../src/requestlog/index.js";
@@ -167,7 +165,7 @@ describe("seam 2 — the queue entry point routes both queues", () => {
               started_at_unix: 1_700_000_000,
               completed_at_unix: 1_700_000_001,
               latency_ms: 12,
-              tenant: "tenant_a",
+              tenant_id: "tenant_a",
             },
             ack: () => {},
           },
@@ -176,7 +174,12 @@ describe("seam 2 — the queue entry point routes both queues", () => {
       env(),
     );
 
-    const logs = await controlDb()
+    // Read the request-log row back from the TENANT object that owns it. The
+    // deployed `gatewayQueue` runs the request-log consumer with
+    // `projectRequestLogToControl: false` (G2): a tenant-attributed row is
+    // authoritative in its tenant object and is no longer mirrored to the control
+    // projection, so the tenant object is where seam 2's routing proof must land.
+    const logs = await tenantObjectDb("tenant_a")
       .prepare("SELECT request_id FROM request_logs WHERE request_id = ?")
       .bind("fg-log-1")
       .all();
@@ -206,11 +209,11 @@ describe("seam 3 — the cron tick sweeps regressions", () => {
         completionTruncated: false,
         scoredAtUnix: atUnix,
       }));
+      // Tenant-object authoritative and ONLY there: the sweep discovers this
+      // tenant from the provisioned roster (`provisionedTenants()`) and reads its
+      // scores from its own object. The control `online_eval_scores` projection
+      // this used to also seed was retired and DROPped (0043).
       await db.batch(records.map((record) => statement.bind(...onlineEvalScoreBindings(record))));
-      const projection = controlDb().prepare(ONLINE_EVAL_SCORE_PROJECTION_UPSERT_SQL);
-      await controlDb().batch(
-        records.map((record) => projection.bind(...onlineEvalScoreProjectionBindings(record))),
-      );
     };
     await seed(40, 0.95, nowUnix - 3 * 24 * 60 * 60);
     await seed(40, 0.5, nowUnix - 3600);

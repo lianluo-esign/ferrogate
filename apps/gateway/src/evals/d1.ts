@@ -1,12 +1,15 @@
 /**
- * `online_eval_scores` and `online_eval_regressions` in the tenant object and
- * their CONTROL-D1 fleet projections.
+ * `online_eval_scores` and `online_eval_regressions`, authoritative in the
+ * TENANT object and nowhere else.
  *
- * The tenant tables are defined by `sql/d1-ts/tenant/0018_usage_evaluation_audit.sql`;
- * matching control projections remain in `sql/d1-ts/control/0017_*` and
- * `0018_*`. `apps/gateway` is the only producer (the queue consumer and the
- * cron sweep); admin report reads remain projection-backed until their bounded
- * fleet-read contract is implemented.
+ * The tenant tables are defined by `sql/d1-ts/tenant/0018_usage_evaluation_audit.sql`.
+ * The control-D1 fleet projections these once mirrored to were retired end to
+ * end and their mirror tables DROPped — `online_eval_regressions` by 0036,
+ * `online_eval_scores` by 0043 (a score is tenant data and lives only in its
+ * owning object; production has always run the queue consumer with
+ * `projectToControl: false`). `apps/gateway` is the only producer (the queue
+ * consumer and the cron sweep), and both the consumer write and the sweep's read
+ * are per-tenant-object.
  *
  * ============================================================================
  * THE JOIN THIS SCHEMA EXISTS TO MAKE POSSIBLE
@@ -31,9 +34,10 @@
  *  GROUP BY s.logical_model;
  * ```
  *
- * Tenant-attributed rows live in the owning object. The control projection keeps
- * the existing fleet join available; tenant authority is never recovered from
- * that projection when the object cannot be reached.
+ * Tenant-attributed rows live in the owning object; the cost side of the join
+ * (`billing_events`) lives in the SAME object, so the JOIN above runs entirely
+ * inside one tenant's object with no cross-tenant read. There is no control
+ * projection to recover authority from — the mirror was DROPped.
  *
  * ### And the denormalised columns are not redundant
  *
@@ -46,7 +50,7 @@
  */
 
 import { controlDatabaseFrom } from "../control-data.js";
-import { evidenceProjectionKey, requestLogTenantDatabaseFrom } from "../requestlog/d1.js";
+import { requestLogTenantDatabaseFrom } from "../requestlog/d1.js";
 import type { OnlineEvalScoreRecord } from "./record.js";
 
 export const ONLINE_EVAL_SCORE_TABLE = "online_eval_scores";
@@ -83,24 +87,6 @@ export const TENANT_ONLINE_EVAL_SCORE_UPSERT_SQL = `INSERT INTO ${ONLINE_EVAL_SC
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (request_id, criterion_id) ${ONLINE_EVAL_SCORE_UPDATE_SET}`;
 
-/** Control-D1 compatibility projection, keyed by tenant plus logical score id. */
-export const ONLINE_EVAL_SCORE_PROJECTION_UPSERT_SQL = `INSERT INTO ${ONLINE_EVAL_SCORE_TABLE} (
-  projection_key, request_id, criterion_id, tenant, project, workspace, api_key_id, agent_run_id,
-  operation_id, provider, logical_model, provider_model,
-  experiment_id, experiment_arm,
-  sampling_key, sampling_unit, sample_rate,
-  judge_model, score, rationale,
-  prompt_truncated, completion_truncated, scored_at_unix
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT (projection_key) ${ONLINE_EVAL_SCORE_UPDATE_SET}`;
-
-/**
- * Kept as the public legacy name for callers that explicitly inject the
- * control database. Production object writes use the tenant-specific constant
- * above; a control write must include the projection key.
- */
-export const ONLINE_EVAL_SCORE_UPSERT_SQL = ONLINE_EVAL_SCORE_PROJECTION_UPSERT_SQL;
-
 /** Bind order for the tenant-object score upsert. */
 export function onlineEvalScoreBindings(record: OnlineEvalScoreRecord): unknown[] {
   return [
@@ -129,14 +115,6 @@ export function onlineEvalScoreBindings(record: OnlineEvalScoreRecord): unknown[
   ];
 }
 
-/** Bind order for the control-D1 projection upsert. */
-export function onlineEvalScoreProjectionBindings(record: OnlineEvalScoreRecord): unknown[] {
-  return [
-    evidenceProjectionKey(record.tenantId, `${record.requestId}:${record.criterionId}`),
-    ...onlineEvalScoreBindings(record),
-  ];
-}
-
 /** The `D1Database` subset the writers need. A live binding fits. */
 export interface OnlineEvalScoreDatabase {
   prepare(query: string): {
@@ -147,24 +125,6 @@ export interface OnlineEvalScoreDatabase {
     };
   };
   batch(statements: unknown[]): Promise<unknown[]>;
-}
-
-/**
- * Persist a batch of scores in ONE D1 round trip.
- *
- * REJECTS on failure, deliberately and unlike most of this slice: the caller is
- * the queue consumer, whose retry ladder needs a rejection to arm. A batch fails
- * whole, which is what makes redelivery safe against the upsert above.
- */
-export async function writeOnlineEvalScores(
-  db: OnlineEvalScoreDatabase,
-  records: readonly OnlineEvalScoreRecord[],
-): Promise<void> {
-  if (records.length === 0) return;
-  const statement = db.prepare(ONLINE_EVAL_SCORE_PROJECTION_UPSERT_SQL);
-  await db.batch(
-    records.map((record) => statement.bind(...onlineEvalScoreProjectionBindings(record))),
-  );
 }
 
 /** Resolve one tenant's authoritative score database when the object binding exists. */
@@ -178,7 +138,15 @@ export function onlineEvalTenantDatabaseFrom(
   return requestLogTenantDatabaseFrom(env, tenantId) as OnlineEvalScoreDatabase | undefined;
 }
 
-/** Write a same-tenant score batch to its object-authoritative table. */
+/**
+ * Write a same-tenant score batch to its object-authoritative table.
+ *
+ * REJECTS on failure, deliberately and unlike most of this slice: the caller is
+ * the queue consumer, whose retry ladder needs a rejection to arm. A batch fails
+ * whole, which is what makes redelivery safe against the upsert above. This is
+ * the ONLY durable destination for a score — the control projection this module
+ * once also wrote was retired and its mirror table DROPped (0043).
+ */
 export async function writeTenantOnlineEvalScores(
   db: OnlineEvalScoreDatabase,
   records: readonly OnlineEvalScoreRecord[],
@@ -186,18 +154,6 @@ export async function writeTenantOnlineEvalScores(
   if (records.length === 0) return;
   const statement = db.prepare(TENANT_ONLINE_EVAL_SCORE_UPSERT_SQL);
   await db.batch(records.map((record) => statement.bind(...onlineEvalScoreBindings(record))));
-}
-
-/** Write the retry-safe control projection for a score batch. */
-export async function writeOnlineEvalScoreProjections(
-  db: OnlineEvalScoreDatabase,
-  records: readonly OnlineEvalScoreRecord[],
-): Promise<void> {
-  if (records.length === 0) return;
-  const statement = db.prepare(ONLINE_EVAL_SCORE_PROJECTION_UPSERT_SQL);
-  await db.batch(
-    records.map((record) => statement.bind(...onlineEvalScoreProjectionBindings(record))),
-  );
 }
 
 /** The CONTROL database facade, when it really is a D1 binding. */

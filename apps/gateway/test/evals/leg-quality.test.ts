@@ -264,9 +264,9 @@ describe("the per-leg aggregate, against the real schema", () => {
     // so a prune appended only `if (aggregates.length > 0)` never runs and the
     // last value the leg ever had keeps its `lagging` verdict for ever —
     // `d1OnlineEvalLegQualitySource` would serve it to the router indefinitely,
-    // and `sweepAllOnlineEvalRegressions` cannot recover it because
-    // `ONLINE_EVAL_ACTIVE_TENANTS_SQL` only returns tenants that HAVE scores in
-    // the window, i.e. precisely not this one.
+    // and `sweepAllOnlineEvalRegressions` — which now fans out the provisioned
+    // roster and recomputes each tenant's OWN object — recovers exactly this
+    // quiet-tenant case: the empty recompute prunes the last cell.
     await seedLeg({ provider: "openai-main", providerModel: "gpt-4o-mini", count: 20, score: 0.9 });
     const refresh = (atUnix: number): Promise<number> =>
       refreshOnlineEvalLegQuality(
@@ -373,6 +373,10 @@ describe("the per-leg aggregate, against the real schema", () => {
 
     await sweepAllOnlineEvalRegressions(
       { GATEWAY_ONLINE_EVAL_POLICIES: JSON.stringify([{ tenant_id: TENANT, ...OPT_IN_ROW }]) },
+      // Discovery is now the provisioned-tenant ROSTER, not a scores-table
+      // SELECT — the tenant is swept because it is provisioned, and its scores
+      // are read from its own object below.
+      [TENANT],
       NOW_UNIX,
       () => tenantObjectDb(TENANT) as never,
       (_env: unknown, tenantId: string) => tenantObjectDb(tenantId) as never,

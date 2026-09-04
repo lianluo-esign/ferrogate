@@ -64,7 +64,6 @@
 
 import {
   ONLINE_EVAL_REGRESSION_CLAIM_SQL,
-  ONLINE_EVAL_SCORE_TABLE,
   ONLINE_EVAL_WINDOW_AGGREGATE_SQL,
   type OnlineEvalScoreDatabase,
   TENANT_ONLINE_EVAL_REGRESSION_CLAIM_SQL,
@@ -305,22 +304,26 @@ export async function sweepOnlineEvalRegressions(
 }
 
 /**
- * Which tenants have been scored recently enough to be worth comparing.
+ * The whole cron leg: every provisioned tenant, under that tenant's own
+ * thresholds, reading that tenant's OWN object.
  *
- * Read from the SCORES rather than from the policy table on purpose: a tenant
- * that opted in last week and has since been switched off still has a week of
- * scores whose regression is real, and a tenant that opted in five minutes ago
- * has nothing to compare yet. The `LIMIT` is a bound on one cron tick's work,
- * not a correctness boundary — the next tick sees the same set.
- */
-export const ONLINE_EVAL_ACTIVE_TENANTS_SQL = `SELECT DISTINCT tenant
-FROM ${ONLINE_EVAL_SCORE_TABLE}
-WHERE scored_at_unix >= ?1
-LIMIT 200`;
-
-/**
- * The whole cron leg: every tenant with recent scores, under that tenant's own
- * thresholds.
+ * ## Tenant discovery is the ROSTER, not a scores table
+ *
+ * `tenants` is the provisioned-tenant roster (`provisionedTenants()`), threaded
+ * from `gatewayScheduled` exactly as the batch and asset-retention sweeps beside
+ * it receive it. It is deliberately NOT a `SELECT DISTINCT tenant` over a shared
+ * `online_eval_scores`: that query read a tenant-attributed table in the shared
+ * CONTROL object — the Track A red line — and migration `0043` has since DROPped
+ * that control mirror, so the old discovery would now hit `no such table` and
+ * silently sweep nothing. The roster is account-global catalog (legitimately
+ * shared); each tenant's scores are read from its OWN object by the per-tenant
+ * leg below.
+ *
+ * The swept set is unchanged: a provisioned tenant with no recent scores yields
+ * an empty aggregate in `sweepOnlineEvalRegressions` and is a cheap no-op, and a
+ * tenant that has ever been scored necessarily has a provisioned object (its
+ * scores live there), so it is in the roster — no coverage is lost relative to
+ * the old scores-table discovery.
  *
  * NEVER throws — it is called from `gatewayScheduled`, beside the billing-outbox
  * sweep, and a quality measurement must never be able to take money recovery
@@ -333,6 +336,7 @@ LIMIT 200`;
  */
 export async function sweepAllOnlineEvalRegressions(
   env: unknown,
+  tenants: readonly string[],
   nowUnix: number,
   database: (env: unknown) => OnlineEvalScoreDatabase | undefined = onlineEvalDatabaseFrom,
   tenantDatabase: (
@@ -340,28 +344,11 @@ export async function sweepAllOnlineEvalRegressions(
     tenantId: string,
   ) => OnlineEvalScoreDatabase | undefined = onlineEvalTenantDatabaseFrom,
 ): Promise<OnlineEvalSweepResult> {
-  const db = database(env);
-  if (db === undefined) return { detected: 0, claimed: 0 };
-
-  let tenants: string[];
-  try {
-    const result = (await db
-      .prepare(ONLINE_EVAL_ACTIVE_TENANTS_SQL)
-      .bind(nowUnix - BASELINE_WINDOW_SECONDS)
-      .all()) as { results?: Record<string, unknown>[] } | undefined;
-    tenants = (result?.results ?? [])
-      .map((row) => row.tenant)
-      .filter((tenant): tenant is string => typeof tenant === "string" && tenant !== "");
-  } catch {
-    // A schema that predates `0009_online_eval.sql`, or a D1 blip. Nothing to
-    // sweep and nothing to report.
-    return { detected: 0, claimed: 0 };
-  }
-
   const policies = onlineEvalPolicySourceFromEnv(env as OnlineEvalBindings);
   let detected = 0;
   let claimed = 0;
   for (const tenantId of tenants) {
+    if (typeof tenantId !== "string" || tenantId === "") continue;
     const resolved = await policies.policyFor(tenantId).catch(() => undefined);
     if (resolved === undefined || !resolved.ok || resolved.policy === null) continue;
     const result = await sweepOnlineEvalRegressions(

@@ -61,7 +61,9 @@ const SHADOW_LEG_TEST_TENANTS = ["tenant_a", "tenant_optin"] as const;
 export async function resetExperimentTables(): Promise<void> {
   await applyControlMigrations();
   await controlDb().prepare(`DELETE FROM ${REQUEST_LOG_TABLE}`).run();
-  await controlDb().prepare(`DELETE FROM ${EXPERIMENT_SHADOW_LEG_TABLE}`).run();
+  // The control `experiment_shadow_legs` projection was DROPPED by control
+  // migration 0043 — the shadow leg is tenant-object authoritative now, so only
+  // the owning tenant objects are cleared.
   for (const tenantId of SHADOW_LEG_TEST_TENANTS) {
     await tenantObjectDb(tenantId).prepare(`DELETE FROM ${EXPERIMENT_SHADOW_LEG_TABLE}`).run();
   }
@@ -74,19 +76,10 @@ export async function storedRequestLogs(): Promise<StoredExperimentRequestLog[]>
   return result.results;
 }
 
-export async function storedShadowLegs(): Promise<StoredShadowLeg[]> {
-  const result = await controlDb()
-    .prepare(
-      `SELECT * FROM ${EXPERIMENT_SHADOW_LEG_TABLE} ORDER BY observed_at_unix ASC, leg_id ASC`,
-    )
-    .all<StoredShadowLeg>();
-  return result.results;
-}
-
 /**
  * Shadow legs read from the TENANT object that owns them — the authoritative
- * destination the deployed producer writes to now that the control projection is
- * no longer mirrored (`projectToControl: false`).
+ * (and only) destination now that the control projection was DROPPED by control
+ * migration 0043.
  */
 export async function storedTenantShadowLegs(tenantId: string): Promise<StoredShadowLeg[]> {
   const result = await tenantObjectDb(tenantId)

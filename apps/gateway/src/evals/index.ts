@@ -245,18 +245,13 @@ export {
   ONLINE_EVAL_REGRESSION_CLAIM_SQL,
   ONLINE_EVAL_REGRESSION_TABLE,
   ONLINE_EVAL_SCORE_TABLE,
-  ONLINE_EVAL_SCORE_PROJECTION_UPSERT_SQL,
-  ONLINE_EVAL_SCORE_UPSERT_SQL,
   TENANT_ONLINE_EVAL_SCORE_UPSERT_SQL,
   ONLINE_EVAL_WINDOW_AGGREGATE_SQL,
   onlineEvalDatabaseFrom,
   onlineEvalRegressionBindings,
   onlineEvalTenantDatabaseFrom,
   onlineEvalScoreBindings,
-  onlineEvalScoreProjectionBindings,
-  writeOnlineEvalScoreProjections,
   writeTenantOnlineEvalScores,
-  writeOnlineEvalScores,
 } from "./d1.js";
 export type { OnlineEvalScoreDatabase } from "./d1.js";
 
@@ -276,7 +271,6 @@ export {
 
 export {
   BASELINE_WINDOW_SECONDS,
-  ONLINE_EVAL_ACTIVE_TENANTS_SQL,
   RECENT_WINDOW_SECONDS,
   detectOnlineEvalRegressions,
   sweepAllOnlineEvalRegressions,

@@ -557,14 +557,12 @@ export async function gatewayScheduled(
     // red line). Admission reads the tenant object directly; nothing reads the
     // control copy.
     // The experiment-shadow-leg → control-D1 projection repair sweep is
-    // intentionally NOT run (Zero-D1 no-tenant-data-mirror red line). It re-paged
-    // EVERY tenant's entire `experiment_shadow_legs` table into the control
-    // projection on every one-minute tick — the cursor restarts from the head
-    // each invocation, so it is the same full-table reprojection churn that made
-    // the usage/presence and asset-audit sweeps a D1 billing hazard. The tenant
-    // object is authoritative; the inline dual-write in `experiments/sink.ts`
-    // keeps the control projection current for the operator reader until that
-    // reader moves to a tenant-object fan-out (sequenced with request_logs).
+    // intentionally NOT run (removed with `sweepExperimentProjections` and the
+    // control projection in `experiments/{d1,sink}.ts`): the shadow leg is
+    // tenant-object authoritative and the control projection was DROPPED by
+    // control migration 0043 (no-tenant-data mirror red line). The operator
+    // report reads the tenant objects by fan-out (`admin_experiment.ts`);
+    // nothing reads the control copy.
     // The managed-isolation-evidence → control-D1 rebuild sweep is intentionally
     // NOT run (removed with `src/managed-evidence-projection.ts`): that evidence
     // is tenant-object authoritative and no longer mirrored to control D1
@@ -646,7 +644,15 @@ export async function gatewayScheduled(
   // the SAME tick as the other two sweeps and after them, because it is the
   // one that can be skipped without consequence: it never throws, and a
   // quality measurement must not be able to delay money recovery.
-  await sweepAllOnlineEvalRegressions(env, Math.floor(Date.now() / 1000));
+  //
+  // Tenant DISCOVERY is the provisioned-tenant roster (`tenantIds`, from
+  // `provisionedTenants()`), threaded in exactly like `sweepBatchExecution`
+  // below. It used to `SELECT DISTINCT tenant` over the shared-control
+  // `online_eval_scores` mirror — a Track A red line that migration `0043` has
+  // since DROPped — so the roster is now the only discovery source, and each
+  // tenant's scores are read from its own object. An unresolved registry
+  // (degraded fallback) yields an empty roster and the sweep is a clean no-op.
+  await sweepAllOnlineEvalRegressions(env, tenantIds ?? [], Math.floor(Date.now() / 1000));
   // #698 slice 2/3 — advance every tenant's claimable batch jobs.
   //
   // LAST on the tick, and only when the tenant registry resolved, for the same
@@ -731,10 +737,11 @@ export async function gatewayQueue(batch: RequestLogMessageBatch, env: unknown):
   );
   if (evalMessages.length > 0) {
     // A judge score is tenant data: it lands in the owning object and is NOT
-    // mirrored to the shared control store (#859/#881 red line). The historical
-    // control projection is read only by the one-shot control->object backfill
-    // until it is retired; nothing on the request path reads it.
-    await consumeOnlineEvalBatch(view(evalMessages), env, { projectToControl: false });
+    // mirrored to the shared control store (#859/#881 red line). The control
+    // projection that once dual-wrote beside it has been retired end to end and
+    // its mirror table DROPped (0043); the consumer is now tenant-object
+    // single-source, so there is no projection flag left to pass.
+    await consumeOnlineEvalBatch(view(evalMessages), env);
   }
   // #698 — the THIRD queue on this entry point. Same rule as the second: the
   // partition is on the body's `object` discriminator (`batch.job`), not on

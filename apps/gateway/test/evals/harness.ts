@@ -35,21 +35,19 @@ export async function applyOnlineEvalMigrations(): Promise<void> {
   await applyControlMigrations();
 }
 
-/** Empty both tables, so each test starts from zero rows. */
+/**
+ * Apply the control schema; each test resets its OWN tenant objects.
+ *
+ * There is nothing to reset on the control side any more: the
+ * `online_eval_scores` projection was DROPPED by control migration 0043 (a score
+ * is tenant data and lives only in its owning object; production runs the queue
+ * consumer with `projectToControl: false`), and the `online_eval_regressions`
+ * mirror was DROPPED earlier by 0036. Deleting from either now would hit
+ * `no such table`. Kept as an exported async no-op-over-migrations so callers
+ * need no edit.
+ */
 export async function resetOnlineEvalTables(): Promise<void> {
   await applyOnlineEvalMigrations();
-  await controlDb().prepare(`DELETE FROM ${ONLINE_EVAL_SCORE_TABLE}`).run();
-  // The control `online_eval_regressions` mirror was DROPPED by control
-  // migration 0036 (the regression claim is tenant-object authoritative and
-  // was never mirrored): nothing to reset on the control side.
-}
-
-/** One stored score row, read straight out of the CONTROL projection table. */
-export async function storedScores(): Promise<Record<string, unknown>[]> {
-  const result = await controlDb()
-    .prepare(`SELECT * FROM ${ONLINE_EVAL_SCORE_TABLE} ORDER BY criterion_id`)
-    .all();
-  return result.results as Record<string, unknown>[];
 }
 
 /**
