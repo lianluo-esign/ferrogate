@@ -23,7 +23,7 @@
  *
  * Every case drives one real inference request through the real composition —
  * `createGatewayApp` with `meteringDrain(sink)` outermost, a real
- * `ExecutionContext`, the real `BILLING_DB` D1 binding — and then reads the
+ * `ExecutionContext`, the real `PLATFORM_DATA` object binding — and then reads the
  * `event_json` column of `billing_events` (joined to its settled
  * `billing_ledger` row) back OUT OF SQLITE, plus the message
  * the `BILLING` Queue received. Those two are the artefacts an operator's
@@ -46,7 +46,12 @@ import {
 import { createGatewayApp } from "../../src/routes/index.js";
 import { OPENAI_ROUTE } from "../inference/fixtures.js";
 import { interceptProviderFetch, providerJson } from "../inference/provider-mock.js";
-import { RecordingQueue, billingDb, resetMeteringTables } from "./d1-harness.js";
+import {
+  RecordingQueue,
+  platformBillingDb,
+  resetMeteringTables,
+  resetPlatformBilling,
+} from "./d1-harness.js";
 import { chargeFixture, pricedBook, usageFixture } from "./fixtures.js";
 
 declare global {
@@ -56,10 +61,14 @@ declare global {
 }
 
 const BASE = "https://gw.test";
-const db = billingDb();
+// Track A hard-cut: the unattributed `fg_root` (platform-operator) charge now
+// settles into the PLATFORM_DATA object, so its event/ledger rows are read back
+// out of the platform store rather than the removed control billing mirror.
+const db = platformBillingDb();
 
 beforeEach(async () => {
   await resetMeteringTables();
+  await resetPlatformBilling();
 });
 
 /**

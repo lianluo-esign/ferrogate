@@ -47,7 +47,11 @@ import { type ApiOperation, operationById } from "../src/contract.js";
 import { type AuthOutcome, authenticateRequest, recordOperation } from "../src/http.js";
 import { type McpEnv, resolvePorts } from "../src/ports.js";
 import { EXEC_KEY, seedFixture } from "./fixtures.js";
-import { resetTenantObjectState, seedTenantRoleProjection } from "./tenant-object.js";
+import {
+  registerDurableObjectTenant,
+  resetTenantObjectState,
+  seedTenantRoleProjection,
+} from "./tenant-object.js";
 
 function controlDb(): D1Database {
   const binding = (env as unknown as { DB?: D1Database }).DB;
@@ -137,6 +141,11 @@ beforeEach(async () => {
   const db = controlDb();
   await db.batch([db.prepare("DELETE FROM roles"), db.prepare("DELETE FROM permissions")]);
   await resetTenantObjectState([RBAC_TENANT, "tenant-somebody-else"]);
+  // This suite authenticates as `RBAC_TENANT` (not the default `TENANT` the
+  // global `setup-d1.ts` provisions), so it needs its own `tenant_databases`
+  // roster row or admission 503s before the RBAC chokepoint is reached
+  // (0045 tenant-object quota resolution).
+  await registerDurableObjectTenant(RBAC_TENANT);
 });
 
 describe("FC-7 — the deployed MCP chokepoint consults the durable role graph", () => {

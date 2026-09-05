@@ -127,15 +127,6 @@ export interface QuotaBindings {
   readonly CONTROL_DB?: D1Database | undefined;
   /** DEV/TEST ONLY: JSON array of `quota_policies` rows in wire (snake_case) shape. */
   readonly FG_DEV_QUOTA_POLICIES?: string | undefined;
-  /**
-   * Quota-storage posture (Track A red line). `"tenant_object"` reads the
-   * RELOCATED `quota_policies` + `spend_throttles` legs from the tenant's OWN
-   * object; anything else (the default) keeps them on `CONTROL_DB`. Default OFF
-   * and independent of the money-leg routing, so quota is only moved once its
-   * per-tenant rows are backfilled — otherwise the limiter reads an empty tenant
-   * object and admits unlimited traffic. See {@link admissionPort}.
-   */
-  readonly AGENT_RUNTIME_QUOTA_POLICY_SOURCE?: string | undefined;
 }
 
 function parseJsonVar<T>(raw: string | undefined, fallback: T): T {
@@ -419,16 +410,16 @@ export function d1QuotaPolicySource(
    */
   nowSeconds: () => number = () => Math.floor(Date.now() / 1000),
   /**
-   * Resolver for the RELOCATED tenant-scoped legs (Track A red line). Per-scope
-   * `quota_policies` and `spend_throttles` rows are TENANT data whose home is
-   * the tenant's OWN object, not the shared control. When wired (the
-   * `AGENT_RUNTIME_QUOTA_POLICY_SOURCE = "tenant_object"` posture, decided in
-   * {@link admissionFromEnv}) AND the subject is tenant-attributed, those two
-   * legs read the resolved tenant object; the account-global `plans` floor stays
-   * on control `db` (no per-tenant snapshot). Absent (default/OFF) or for an
-   * ownerless subject, every leg reads `db` as before, so the switch is inert
-   * until an operator backfills the tenant objects and flips the flag — never a
-   * window where a limiter reads an empty object and admits unlimited traffic.
+   * Resolver for the RELOCATED tenant-scoped legs (Track A red line, HARD CUT).
+   * Per-scope `quota_policies` and `spend_throttles` rows are TENANT data whose
+   * SOLE home is the tenant's OWN object — the shared control mirror was removed.
+   * When wired (from {@link admissionFromEnv}, which resolves the caller tenant's
+   * object via the router) AND the subject is tenant-attributed, those two legs
+   * read the resolved tenant object; the account-global `plans` floor stays on
+   * control `db` (no per-tenant snapshot). Absent (no router bound) or for an
+   * ownerless subject, there is no object to read: the legs are SKIPPED and the
+   * limiter fails OPEN — safe because such a subject has no relocated rows to
+   * enforce and control no longer holds a mirror to fall back to.
    */
   tenantPolicyDb?: (tenantId: string) => Promise<D1Database>,
 ): QuotaPolicySource {
@@ -441,19 +432,17 @@ export function d1QuotaPolicySource(
       if (workspaceId !== undefined) scopes.push(["workspace", workspaceId]);
       if (keyId !== undefined) scopes.push(["key", keyId]);
 
-      // A credential with no scope chain at all cannot be governed by any
-      // policy row, so the round trip is skipped rather than issued with an
-      // empty predicate (which would scan the table).
-      if (scopes.length === 0) return { ok: true, lookup: () => undefined };
+      const index = new Map<string, StoredQuotaPolicy>();
+      let plan: StoredPlan | undefined;
 
-      const predicate = scopes.map(() => "(scope_type = ? AND scope_id = ?)").join(" OR ");
-
-      // Where the tenant-scoped legs (`quota_policies` + `spend_throttles`) read
-      // from: the tenant's OWN object under the posture, else control `db`. A
-      // failure to RESOLVE the handle is a 503, never a silent fall-through —
-      // answering from the wrong authority applies the wrong caps to traffic.
-      let policyDb = db;
-      if (tenantPolicyDb !== undefined && tenantId !== undefined) {
+      // The tenant-scoped legs (`quota_policies` + the #697 `spend_throttles`
+      // overlay) read ONLY the tenant's OWN object — never the shared control
+      // `db`, which no longer holds a mirror (Track A hard-cut). Without a
+      // resolver, or for an ownerless subject with no tenant to resolve, there is
+      // no object to read: the legs are skipped and the limiter fails OPEN, which
+      // is safe because such a subject has no relocated rows to enforce anyway.
+      if (tenantPolicyDb !== undefined && tenantId !== undefined && scopes.length > 0) {
+        let policyDb: D1Database;
         try {
           policyDb = await tenantPolicyDb(tenantId);
         } catch (error) {
@@ -463,90 +452,83 @@ export function d1QuotaPolicySource(
             detail: `cloudflare d1: routed tenant quota database unavailable: ${detail}`,
           };
         }
-      }
-      const routed = policyDb !== db;
 
-      const statements = [
-        policyDb
-          .prepare(`SELECT ${QUOTA_POLICY_COLUMNS} FROM quota_policies WHERE ${predicate}`)
-          .bind(...scopes.flat()),
-      ];
-      // #697 — the auto-throttle overlay, in the SAME batch as its sibling
-      // `quota_policies` (both tenant-scoped, both on `policyDb`).
-      let throttleIndex = -1;
-      try {
-        if (await spendThrottlesProvisioned(policyDb)) {
-          throttleIndex = statements.length;
-          statements.push(
-            policyDb
-              .prepare(
-                `SELECT scope_type, scope_id, rpm_limit
-                   FROM ${SPEND_THROTTLE_TABLE}
-                  WHERE expires_at_unix > ? AND (${predicate})`,
-              )
-              .bind(nowSeconds(), ...scopes.flat()),
-          );
-        }
-      } catch (error) {
-        // A failed PROBE is a database outage, and a limiter that answered
-        // "no policies" during one would be a free-traffic hole.
-        const detail = error instanceof Error ? error.message : String(error);
-        return { ok: false, detail: `cloudflare d1: spend throttle probe failed: ${detail}` };
-      }
+        const predicate = scopes.map(() => "(scope_type = ? AND scope_id = ?)").join(" OR ");
+        const bindings = scopes.flat();
 
-      // The plan floor joins `tenants.plan_id → plans.id`, both control-owned,
-      // so it stays on `db`. Indices are COMPUTED rather than written as
-      // literals, because the plan leg is conditional: a hard-coded `results[2]`
-      // would read the PLAN row as a throttle for a credential with no tenant,
-      // and a mis-indexed read there does not fail — it applies the wrong rpm
-      // cap to live traffic. When routed, the plan is its own batch, index 0.
-      const planStatement =
-        tenantId === undefined
-          ? undefined
-          : db
-              .prepare("SELECT p.* FROM plans p JOIN tenants t ON t.plan_id = p.id WHERE t.id = ?")
-              .bind(tenantId);
-      const planIndex = planStatement === undefined ? -1 : routed ? 0 : statements.length;
-      if (planStatement !== undefined && !routed) statements.push(planStatement);
-
-      let results: { results?: unknown[] }[];
-      try {
-        results = (await policyDb.batch(statements)) as unknown as { results?: unknown[] }[];
-      } catch (error) {
-        const detail = error instanceof Error ? error.message : String(error);
-        return { ok: false, detail: `cloudflare d1: quota policy lookup failed: ${detail}` };
-      }
-
-      // When routed, the plan floor is a second batch against the control `db`.
-      let planResults: { results?: unknown[] }[] = results;
-      if (routed && planStatement !== undefined) {
+        const statements = [
+          policyDb
+            .prepare(`SELECT ${QUOTA_POLICY_COLUMNS} FROM quota_policies WHERE ${predicate}`)
+            .bind(...bindings),
+        ];
+        // #697 — the auto-throttle overlay, in the SAME batch as its sibling
+        // `quota_policies` (both tenant-scoped, both read the tenant object).
+        let throttleIndex = -1;
         try {
-          planResults = (await db.batch([planStatement])) as unknown as { results?: unknown[] }[];
+          if (await spendThrottlesProvisioned(policyDb)) {
+            throttleIndex = statements.length;
+            statements.push(
+              policyDb
+                .prepare(
+                  `SELECT scope_type, scope_id, rpm_limit
+                     FROM ${SPEND_THROTTLE_TABLE}
+                    WHERE expires_at_unix > ? AND (${predicate})`,
+                )
+                .bind(nowSeconds(), ...bindings),
+            );
+          }
+        } catch (error) {
+          // A failed PROBE is a database outage, and a limiter that answered
+          // "no policies" during one would be a free-traffic hole.
+          const detail = error instanceof Error ? error.message : String(error);
+          return { ok: false, detail: `cloudflare d1: spend throttle probe failed: ${detail}` };
+        }
+
+        let results: { results?: unknown[] }[];
+        try {
+          results = (await policyDb.batch(statements)) as unknown as { results?: unknown[] }[];
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          return { ok: false, detail: `cloudflare d1: quota policy lookup failed: ${detail}` };
+        }
+
+        try {
+          for (const row of (results[0]?.results ?? []) as Record<string, unknown>[]) {
+            const policy = rowToStoredPolicy(row);
+            index.set(`${policy.scopeType}:${policy.scopeId}`, policy);
+          }
+          if (throttleIndex >= 0) {
+            applySpendThrottles(index, (results[throttleIndex]?.results ?? []) as ThrottleRow[]);
+          }
+        } catch (error) {
+          if (error instanceof QuotaRowError) return { ok: false, detail: error.message };
+          throw error;
+        }
+      }
+
+      // The plan floor joins `tenants.plan_id → plans.id`, both control-owned, so
+      // it stays on the control `db` in its own round trip.
+      if (tenantId !== undefined) {
+        let planResults: { results?: unknown[] }[];
+        try {
+          planResults = (await db.batch([
+            db
+              .prepare("SELECT p.* FROM plans p JOIN tenants t ON t.plan_id = p.id WHERE t.id = ?")
+              .bind(tenantId),
+          ])) as unknown as { results?: unknown[] }[];
         } catch (error) {
           const detail = error instanceof Error ? error.message : String(error);
           return { ok: false, detail: `cloudflare d1: quota plan lookup failed: ${detail}` };
         }
-      }
-
-      const index = new Map<string, StoredQuotaPolicy>();
-      let plan: StoredPlan | undefined;
-      try {
-        for (const row of (results[0]?.results ?? []) as Record<string, unknown>[]) {
-          const policy = rowToStoredPolicy(row);
-          index.set(`${policy.scopeType}:${policy.scopeId}`, policy);
+        const planRow = (planResults[0]?.results ?? [])[0] as Record<string, unknown> | undefined;
+        if (planRow !== undefined) {
+          try {
+            plan = rowToStoredPlan(planRow);
+          } catch (error) {
+            if (error instanceof QuotaRowError) return { ok: false, detail: error.message };
+            throw error;
+          }
         }
-        if (planIndex >= 0) {
-          const planRow = (planResults[planIndex]?.results ?? [])[0] as
-            | Record<string, unknown>
-            | undefined;
-          if (planRow !== undefined) plan = rowToStoredPlan(planRow);
-        }
-        if (throttleIndex >= 0) {
-          applySpendThrottles(index, (results[throttleIndex]?.results ?? []) as ThrottleRow[]);
-        }
-      } catch (error) {
-        if (error instanceof QuotaRowError) return { ok: false, detail: error.message };
-        throw error;
       }
 
       return {
@@ -571,9 +553,10 @@ export function d1QuotaPolicySource(
 export function quotaPolicySourceFromEnv(
   env: QuotaBindings,
   /**
-   * The RELOCATED tenant-scoped resolver, wired by {@link admissionFromEnv} ONLY
-   * under the `AGENT_RUNTIME_QUOTA_POLICY_SOURCE = "tenant_object"` posture; the
-   * default omits it and keeps reading control. See {@link d1QuotaPolicySource}.
+   * The RELOCATED tenant-scoped resolver, wired by {@link admissionFromEnv} from
+   * the caller tenant's router (Track A hard-cut). When omitted (no router bound)
+   * the tenant-scoped legs are skipped and the limiter fails open — control holds
+   * no mirror to read. See {@link d1QuotaPolicySource}.
    */
   tenantPolicyDb?: (tenantId: string) => Promise<D1Database>,
 ): QuotaPolicySource {

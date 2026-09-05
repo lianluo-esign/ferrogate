@@ -58,22 +58,56 @@ export interface StoredShadowLeg {
  */
 const SHADOW_LEG_TEST_TENANTS = ["tenant_a", "tenant_optin"] as const;
 
+/**
+ * The tenant objects the experiment-family suites attribute request logs to now
+ * that the control `request_logs` mirror was DROPPED by control migration 0045
+ * (Track A): `attribution.test.ts` runs as `tenant_a`, `routing-decision-log.
+ * test.ts` as `tenant_cq`. Every request these suites make is authenticated, so
+ * every row is tenant-attributed and lands in its OWNER's object — never the
+ * platform singleton — via the same by-name routing the production sink uses
+ * (`requestLogTenantDatabaseFrom`, which does not consult the roster). Cleared
+ * on reset and fanned over on read so a suite sees exactly its own rows.
+ */
+const REQUEST_LOG_TEST_TENANTS = ["tenant_a", "tenant_optin", "tenant_cq"] as const;
+
 export async function resetExperimentTables(): Promise<void> {
   await applyControlMigrations();
-  await controlDb().prepare(`DELETE FROM ${REQUEST_LOG_TABLE}`).run();
-  // The control `experiment_shadow_legs` projection was DROPPED by control
-  // migration 0043 — the shadow leg is tenant-object authoritative now, so only
-  // the owning tenant objects are cleared.
+  // The control `request_logs` mirror was DROPPED by control migration 0045
+  // (Track A) and the control `experiment_shadow_legs` projection by 0043 — both
+  // are tenant-object authoritative now, so only the owning tenant objects are
+  // cleared here.
   for (const tenantId of SHADOW_LEG_TEST_TENANTS) {
     await tenantObjectDb(tenantId).prepare(`DELETE FROM ${EXPERIMENT_SHADOW_LEG_TABLE}`).run();
   }
+  for (const tenantId of REQUEST_LOG_TEST_TENANTS) {
+    await tenantObjectDb(tenantId).prepare(`DELETE FROM ${REQUEST_LOG_TABLE}`).run();
+  }
 }
 
+/**
+ * Every stored `request_logs` row across the experiment-family tenant objects,
+ * oldest first. The control mirror is gone (0045); a row served for a tenant is
+ * authoritative in that tenant's object, so this fans out over the suites'
+ * tenants and merges. Callers still key on the request id they alone control, so
+ * a foreign tenant's row can neither be counted nor read in place of it.
+ */
 export async function storedRequestLogs(): Promise<StoredExperimentRequestLog[]> {
-  const result = await controlDb()
-    .prepare(`SELECT * FROM ${REQUEST_LOG_TABLE} ORDER BY started_at_unix ASC, request_id ASC`)
-    .all<StoredExperimentRequestLog>();
-  return result.results;
+  const perTenant = await Promise.all(
+    REQUEST_LOG_TEST_TENANTS.map((tenantId) =>
+      tenantObjectDb(tenantId)
+        .prepare(`SELECT * FROM ${REQUEST_LOG_TABLE} ORDER BY started_at_unix ASC, request_id ASC`)
+        .all<StoredExperimentRequestLog & { readonly started_at_unix: number }>()
+        .then((result) => result.results),
+    ),
+  );
+  return perTenant
+    .flat()
+    .sort(
+      (a, b) =>
+        (a as { started_at_unix: number }).started_at_unix -
+          (b as { started_at_unix: number }).started_at_unix ||
+        a.request_id.localeCompare(b.request_id),
+    );
 }
 
 /**

@@ -45,6 +45,7 @@ import { inMemoryPorts } from "../src/ports.js";
 import { parseSseEvents } from "../src/transport.js";
 import { EXEC_KEY, TENANT, rpcRequest, seedFixture, setMcpEnvVar, tenantAuth } from "./fixtures.js";
 import { clearMcpIdentityTables, tenantDataNamespace, tenantDatabase } from "./tenant-storage.js";
+import { registerDurableObjectTenant } from "./tenant-object.js";
 
 const TENANT_DATA = tenantDataNamespace(env);
 
@@ -91,6 +92,10 @@ beforeEach(async () => {
   ]);
   await seedServerRow(TENANT, "alpha-owned-by-a");
   await seedServerRow(OTHER_TENANT, "beta-owned-by-b");
+  // `TENANT` is provisioned by the global `setup-d1.ts`; the fence also drives
+  // `OTHER_TENANT`, whose admission needs its own `tenant_databases` roster row
+  // (0045 tenant-object quota resolution) or it 503s before the fence is tested.
+  await registerDurableObjectTenant(OTHER_TENANT);
 });
 
 afterEach(() => {

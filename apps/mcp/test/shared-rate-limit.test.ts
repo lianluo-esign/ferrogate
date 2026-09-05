@@ -181,7 +181,9 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   await control().batch([
-    control().prepare("DELETE FROM quota_policies"),
+    // `quota_policies` was DROPPED from control by 0045 (Track A finalisation):
+    // it is tenant-object authoritative now, so there is no control copy to
+    // reset.
     control().prepare("DELETE FROM tenant_databases"),
     control().prepare("DELETE FROM api_key_directory"),
     control().prepare("DELETE FROM roles"),

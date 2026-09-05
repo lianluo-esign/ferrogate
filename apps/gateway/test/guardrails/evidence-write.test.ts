@@ -43,7 +43,6 @@ import {
   guardrailEvidenceTenantDatabaseFromEnv,
   guardrails,
   sweepGuardrailEvidence,
-  writeGuardrailEvidence,
   writePlatformGuardrailEvidence,
   writeTenantGuardrailEvidence,
 } from "../../src/guardrails/index.js";
@@ -58,14 +57,8 @@ import {
   interceptProviderFetch,
   providerJson,
 } from "../inference/provider-mock.js";
-import {
-  RecordingQueue,
-  applyControlMigrations,
-  controlDb,
-  resetGuardrailEvidence,
-  storedGuardrailChecks,
-  storedGuardrailEvaluations,
-} from "../requestlog/harness.js";
+import { RecordingQueue, applyControlMigrations } from "../requestlog/harness.js";
+import type { StoredGuardrailCheck, StoredGuardrailEvaluation } from "../requestlog/harness.js";
 import {
   EVIDENCE_HMAC_KEY,
   PROBE_SECRET,
@@ -256,13 +249,16 @@ async function tenantGuardrailRows(tenantId: string): Promise<{
   checks: Record<string, unknown>[];
 }> {
   const object = env.TENANT_DATA.get(env.TENANT_DATA.idFromName(tenantId));
+  // SELECT * so the same helper serves both the identity assertions and the
+  // headline/redaction tests that read the full row now that the tenant object
+  // — not the retired control projection — is where attributed evidence lands.
   const evaluations = await object.query({
     tenantId,
-    sql: "SELECT id, request_id, tenant FROM guardrail_evaluations ORDER BY id",
+    sql: "SELECT * FROM guardrail_evaluations ORDER BY occurred_at_unix ASC, id ASC",
   });
   const checks = await object.query({
     tenantId,
-    sql: "SELECT id, evaluation_id, tenant FROM guardrail_check_evaluations ORDER BY id",
+    sql: "SELECT * FROM guardrail_check_evaluations ORDER BY evaluation_id ASC, check_id ASC",
   });
   return { evaluations: evaluations.results, checks: checks.results };
 }
@@ -291,11 +287,11 @@ async function platformGuardrailRows(): Promise<{
   const db = guardrailEvidencePlatformDatabaseFrom(env);
   if (db === undefined) throw new Error("PLATFORM_DATA binding is required");
   const evaluations = (await db
-    .prepare("SELECT id, request_id, tenant FROM guardrail_evaluations ORDER BY id")
+    .prepare("SELECT * FROM guardrail_evaluations ORDER BY occurred_at_unix ASC, id ASC")
     .bind()
     .all()) as { results: Record<string, unknown>[] };
   const checks = (await db
-    .prepare("SELECT id, evaluation_id, tenant FROM guardrail_check_evaluations ORDER BY id")
+    .prepare("SELECT * FROM guardrail_check_evaluations ORDER BY evaluation_id ASC, check_id ASC")
     .bind()
     .all()) as { results: Record<string, unknown>[] };
   return { evaluations: evaluations.results, checks: checks.results };
@@ -317,7 +313,9 @@ let provider: ProviderInterceptor | undefined;
 beforeAll(applyControlMigrations);
 
 beforeEach(async () => {
-  await resetGuardrailEvidence();
+  // 0045 (Track A) DROPPED the control `guardrail_evaluations` /
+  // `guardrail_check_evaluations` mirrors; only the tenant and platform objects
+  // remain, so only those are reset here.
   await resetTenantGuardrailEvidence("tenant_a");
   await resetTenantGuardrailEvidence("tenant_b");
   await resetPlatformGuardrailEvidence();
@@ -331,8 +329,10 @@ beforeEach(async () => {
 
 describe("a BLOCKED request produces durable evidence", () => {
   it("records the policy, stage, verdict, action, tenant and detector", async () => {
+    // Track A retired the control projection; attributed evidence is now
+    // authoritative in the owning tenant object, so the row is read from there.
     // Empty first, so the row below cannot be a leftover.
-    expect(await storedGuardrailEvaluations()).toHaveLength(0);
+    expect((await tenantGuardrailRows("tenant_a")).evaluations).toHaveLength(0);
 
     const h = gateway({ requestId: "fg-blocked-1" });
     const response = await h.call("/v1/chat/completions", {
@@ -343,17 +343,13 @@ describe("a BLOCKED request produces durable evidence", () => {
     expect(response.status, await response.clone().text()).toBe(403);
     await h.settle();
 
-    const rows = await storedGuardrailEvaluations();
-    expect(rows).toHaveLength(1);
-    const row = rows[0] as NonNullable<(typeof rows)[0]>;
-
-    // The control row is only the fleet projection. The same evidence must
-    // exist in the owning object, where a tenant-scoped reader can get it
-    // without trusting a shared-D1 fallback.
+    // The owning object is where a tenant-scoped reader gets the evidence without
+    // trusting a shared-D1 fallback — the sole authoritative home now.
     const authoritative = await tenantGuardrailRows("tenant_a");
-    expect(authoritative.evaluations).toEqual([
-      expect.objectContaining({ id: row.id, request_id: row.request_id, tenant: "tenant_a" }),
-    ]);
+    const rows = authoritative.evaluations as unknown as StoredGuardrailEvaluation[];
+    expect(rows).toHaveLength(1);
+    const row = rows[0] as StoredGuardrailEvaluation;
+    expect(row.tenant).toBe("tenant_a");
     expect(authoritative.checks).toEqual([
       expect.objectContaining({ evaluation_id: row.id, tenant: "tenant_a" }),
     ]);
@@ -387,9 +383,9 @@ describe("a BLOCKED request produces durable evidence", () => {
     expect(row.input_fingerprint).toMatch(/^hmac-sha256:[0-9a-f]+$/);
 
     // WHICH DETECTOR — the child row, with its version and config digest.
-    const checks = await storedGuardrailChecks();
+    const checks = authoritative.checks as unknown as StoredGuardrailCheck[];
     expect(checks).toHaveLength(1);
-    const check = checks[0] as NonNullable<(typeof checks)[0]>;
+    const check = checks[0] as StoredGuardrailCheck;
     expect(check.evaluation_id).toBe(row.id);
     expect(check.check_id).toBe("deterministic");
     expect(check.verdict).toBe("fail");
@@ -436,7 +432,8 @@ describe("a BLOCKED request produces durable evidence", () => {
     expect(response.status, await response.clone().text()).toBe(200);
     await h.settle();
 
-    const rows = await storedGuardrailEvaluations();
+    // Track A: the passed evaluation is authoritative in the tenant object.
+    const rows = (await tenantGuardrailRows("tenant_a")).evaluations;
     expect(rows.map((entry) => entry.verdict)).toContain("pass");
     const requestId = response.headers.get("x-request-id");
     expect(rows.every((entry) => entry.request_id === requestId)).toBe(true);
@@ -458,8 +455,8 @@ describe("the stored evidence carries no plaintext", () => {
     expect(response.status).toBe(403);
     await h.settle();
 
-    const rows = await storedGuardrailEvaluations();
-    const checks = await storedGuardrailChecks();
+    // Track A: read the RAW stored bytes from the authoritative tenant object.
+    const { evaluations: rows, checks } = await tenantGuardrailRows("tenant_a");
     expect(rows).toHaveLength(1);
     expect(checks).toHaveLength(1);
 
@@ -554,8 +551,8 @@ describe("the stored evidence carries no plaintext", () => {
     expect(response.status).toBe(403);
     await h.settle();
 
-    const rows = await storedGuardrailEvaluations();
-    const checks = await storedGuardrailChecks();
+    // Track A: read the RAW stored bytes from the authoritative tenant object.
+    const { evaluations: rows, checks } = await tenantGuardrailRows("tenant_a");
     expect(rows).toHaveLength(1);
     expect(checks).toHaveLength(1);
 
@@ -590,10 +587,11 @@ describe("the Queue producer/consumer pair carries guardrail evidence too", () =
     await h.settle();
 
     expect(queue.sent.length).toBeGreaterThan(0);
-    // The hot path is off the write, so D1 is still empty at this point.
-    expect(await storedGuardrailEvaluations()).toHaveLength(0);
+    // The hot path is off the write, so the tenant object is still empty here.
+    expect((await tenantGuardrailRows("tenant_a")).evaluations).toHaveLength(0);
 
-    // …and the SAME consumer #664 built is what lands it.
+    // …and the SAME consumer #664 built is what lands it — in the tenant object,
+    // the sole authoritative home now that the control projection is retired.
     const result = await consumeRequestLogBatch(
       { messages: queue.sent.map((body) => ({ body })) },
       env,
@@ -601,12 +599,10 @@ describe("the Queue producer/consumer pair carries guardrail evidence too", () =
     expect(result.malformed).toBe(0);
     expect(result.retried).toBe(false);
 
-    const rows = await storedGuardrailEvaluations();
+    const rows = (await tenantGuardrailRows("tenant_a")).evaluations;
     expect(rows).toHaveLength(1);
     expect(rows[0]?.request_id).toBe(response.headers.get("x-request-id"));
-    expect((await tenantGuardrailRows("tenant_a")).evaluations).toEqual([
-      expect.objectContaining({ id: rows[0]?.id, tenant: "tenant_a" }),
-    ]);
+    expect(rows).toEqual([expect.objectContaining({ tenant: "tenant_a" })]);
   });
 
   /** At-least-once delivery: the second copy must not fail, and must not double. */
@@ -624,55 +620,20 @@ describe("the Queue producer/consumer pair carries guardrail evidence too", () =
     await consumeRequestLogBatch({ messages }, env);
     await consumeRequestLogBatch({ messages }, env);
 
-    expect(await storedGuardrailEvaluations()).toHaveLength(1);
-    expect(await storedGuardrailChecks()).toHaveLength(1);
+    // At-least-once, but the id-keyed upsert means the tenant object holds one row.
+    const { evaluations, checks } = await tenantGuardrailRows("tenant_a");
+    expect(evaluations).toHaveLength(1);
+    expect(checks).toHaveLength(1);
   });
 
-  /**
-   * Track A / G2: with `projectGuardrailToControl` false the guardrail leg of
-   * the control batch is dropped — the tenant object is the sole home. The
-   * request_logs leg of the same batch is UNTOUCHED (SIEM still reads it from
-   * control until #825); that preservation is proven in
-   * `test/requestlog/write.test.ts`, where a real request_log message exists.
-   * This is the posture `src/index.ts` wires.
-   */
-  it("stops the guardrail control projection while keeping the tenant object", async () => {
-    const queue = new RecordingQueue();
-    const h = gateway({ requestId: "fg-g2-stop", queue });
-    await h.call("/v1/chat/completions", {
-      method: "POST",
-      headers: AUTHED,
-      body: chatBody(bodyWithProbeSecret()),
-    });
-    await h.settle();
-
-    expect(await storedGuardrailEvaluations()).toHaveLength(0);
-
-    const messages = queue.sent.map((body) => ({ body }));
-    const result = await consumeRequestLogBatch(
-      { messages },
-      env,
-      undefined,
-      undefined,
-      undefined,
-      { projectGuardrailToControl: false },
-    );
-    expect(result.malformed).toBe(0);
-    expect(result.retried).toBe(false);
-
-    // The guardrail control projection is READER-FREE and now WRITER-FREE too.
-    expect(await storedGuardrailEvaluations()).toHaveLength(0);
-    expect(await storedGuardrailChecks()).toHaveLength(0);
-
-    // The tenant object remains the authoritative home for the evidence.
-    expect((await tenantGuardrailRows("tenant_a")).evaluations).toEqual([
-      expect.objectContaining({ tenant: "tenant_a" }),
-    ]);
-  });
+  // Deleted: "stops the guardrail control projection while keeping the tenant
+  // object" — Track A retired the control mirror and the `projectGuardrailToControl`
+  // consumer option, so the consumer now writes ONLY the tenant object
+  // unconditionally (proven by the two cases above); the flag it toggled is gone.
 });
 
 describe("tenant-qualified evidence identity", () => {
-  it("does not overwrite same logical ids across tenant objects or projections", async () => {
+  it("does not overwrite same logical ids across tenant objects", async () => {
     await resetTenantGuardrailEvidence("tenant_b");
     const sink = new DurableGuardrailEvidenceSink();
     expect(sink.append(manualEnvelope("tenant_a").evaluation, [])).toBe(true);
@@ -693,10 +654,8 @@ describe("tenant-qualified evidence identity", () => {
     expect(tenantB.evaluations).toEqual([
       expect.objectContaining({ id: "same-evaluation-id", tenant: "tenant_b" }),
     ]);
-
-    const projectionRows = await storedGuardrailEvaluations();
-    expect(projectionRows).toHaveLength(2);
-    expect(projectionRows.map((row) => row.tenant).sort()).toEqual(["tenant_a", "tenant_b"]);
+    // Track A retired the shared control projection; the two objects being the
+    // sole homes is exactly why the shared logical id cannot collide any more.
   });
 });
 
@@ -704,11 +663,10 @@ describe("tenant-qualified evidence identity", () => {
 // The platform dual-write leg (Zero-D1 Plan B, G1)
 // ---------------------------------------------------------------------------
 
-describe("unscoped evidence dual-writes the platform object", () => {
-  it("lands in the PLATFORM_DATA object AND still writes the control projection", async () => {
+describe("unscoped evidence lands in the platform object", () => {
+  it("writes the parent and child to PLATFORM_DATA, both tenant NULL", async () => {
     // Empty first, so nothing below can be a leftover.
     expect((await platformGuardrailRows()).evaluations).toHaveLength(0);
-    expect(await storedGuardrailEvaluations()).toHaveLength(0);
 
     const sink = new DurableGuardrailEvidenceSink();
     const envelope = platformEnvelope("platform-ev-1");
@@ -717,15 +675,16 @@ describe("unscoped evidence dual-writes the platform object", () => {
       env: { ...(env as unknown as Record<string, unknown>), REQUEST_LOG: undefined },
     });
 
-    // The platform object is the authoritative home these rows will be READ from
-    // once the projection is retired: parent AND child, both `tenant` NULL — the
-    // whole object is the platform domain, so nothing carries an org id.
+    // Track A retired the control projection; the platform object is the SOLE
+    // authoritative home for these rows: parent AND child, both `tenant` NULL —
+    // the whole object is the platform domain, so nothing carries an org id.
     const platform = await platformGuardrailRows();
     expect(platform.evaluations).toEqual([
       expect.objectContaining({
         id: "platform-ev-1",
         request_id: "request-platform-ev-1",
         tenant: null,
+        scope_type: "platform",
       }),
     ]);
     expect(platform.checks).toEqual([
@@ -735,20 +694,13 @@ describe("unscoped evidence dual-writes the platform object", () => {
         tenant: null,
       }),
     ]);
-
-    // G1 is strictly ADDITIVE: the control projection write is UNCHANGED, so the
-    // same row is still there for every current operator reader.
-    expect(await storedGuardrailEvaluations()).toEqual([
-      expect.objectContaining({ id: "platform-ev-1", tenant: null, scope_type: "platform" }),
-    ]);
-    expect(await storedGuardrailChecks()).toHaveLength(1);
   });
 
-  it("keeps the control projection when the platform leg fails (best-effort, never drops)", async () => {
-    // A platform object that refuses every batch. The additive leg must swallow
-    // this and the control write below must still land — the control projection
-    // is the COUNTED authority for these rows in G1, so a platform blip is a
-    // narrower future read, never lost evidence.
+  it("counts a platform-object write failure and requeues it, never a control fallback", async () => {
+    // A platform object that refuses every batch. Track A retired the control
+    // mirror, so a failed platform write is the COUNTED authority failing: it
+    // credits `failed` and requeues for the next flush rather than falling back
+    // to a shared projection that no longer exists.
     const sink = new DurableGuardrailEvidenceSink({
       platformDatabase: () => ({
         prepare: () => ({
@@ -761,17 +713,16 @@ describe("unscoped evidence dual-writes the platform object", () => {
     });
     const envelope = platformEnvelope("platform-ev-2");
     expect(sink.append(envelope.evaluation, envelope.checks)).toBe(true);
-    // NEVER rejects, even when the additive leg throws.
+    // NEVER rejects, even when the authoritative leg throws.
     await sink.flush({
       env: { ...(env as unknown as Record<string, unknown>), REQUEST_LOG: undefined },
     });
 
     // The REAL platform object got nothing (the failing double intercepted the
-    // write), but the control projection is intact.
+    // write); the failure is counted and requeued for a later flush.
     expect((await platformGuardrailRows()).evaluations).toHaveLength(0);
-    expect(await storedGuardrailEvaluations()).toEqual([
-      expect.objectContaining({ id: "platform-ev-2", tenant: null }),
-    ]);
+    expect(sink.stats).toMatchObject({ written: 0, failed: 1, dropped: 0 });
+    expect(sink.pending).toBe(1);
   });
 });
 
@@ -780,13 +731,15 @@ describe("unscoped evidence dual-writes the platform object", () => {
 // (red line: no tenant/unattributed guardrail mirror in the control singleton)
 // ---------------------------------------------------------------------------
 
-describe("with projectToControl false the direct fallback stops the control mirror", () => {
+describe("the direct fallback never writes the retired control mirror", () => {
   it("writes unscoped evidence ONLY to the platform object, never the control projection", async () => {
-    // Empty first, so nothing below can be a leftover.
+    // Empty first, so nothing below can be a leftover. (0045 DROPPED the control
+    // guardrail-evidence mirror, so only the platform object is checked.)
     expect((await platformGuardrailRows()).evaluations).toHaveLength(0);
-    expect(await storedGuardrailEvaluations()).toHaveLength(0);
 
-    const sink = new DurableGuardrailEvidenceSink({ projectToControl: false });
+    // Track A retired the `projectToControl` option; the direct path writes only
+    // the authoritative object unconditionally.
+    const sink = new DurableGuardrailEvidenceSink();
     const envelope = platformEnvelope("platform-g2-1");
     expect(sink.append(envelope.evaluation, envelope.checks)).toBe(true);
     // No queue → the DIRECT fallback path, the one this flag governs.
@@ -802,9 +755,9 @@ describe("with projectToControl false the direct fallback stops the control mirr
     ]);
     expect(platform.checks).toHaveLength(1);
 
-    // RED LINE: the control singleton receives NOTHING — no parent, no child.
-    expect(await storedGuardrailEvaluations()).toEqual([]);
-    expect(await storedGuardrailChecks()).toEqual([]);
+    // RED LINE (retired): 0045 DROPPED the control guardrail-evidence mirror, so
+    // there is no control singleton left to assert "receives NOTHING" against —
+    // the platform object above is now the sole authoritative home.
 
     // The unscoped row that landed on the platform object is still COUNTED as
     // written now that the platform leg is the authority rather than an additive
@@ -813,9 +766,9 @@ describe("with projectToControl false the direct fallback stops the control mirr
   });
 
   it("writes tenant-scoped evidence ONLY to the tenant object, never the control projection", async () => {
-    expect(await storedGuardrailEvaluations()).toHaveLength(0);
-
-    const sink = new DurableGuardrailEvidenceSink({ projectToControl: false });
+    // (0045 DROPPED the control guardrail-evidence mirror; the tenant object is
+    // the sole authoritative home and is asserted below.)
+    const sink = new DurableGuardrailEvidenceSink();
     const envelope = manualEnvelope("tenant_a");
     expect(sink.append(envelope.evaluation, envelope.checks)).toBe(true);
     await sink.flush({
@@ -827,9 +780,9 @@ describe("with projectToControl false the direct fallback stops the control mirr
       expect.objectContaining({ tenant: "tenant_a" }),
     ]);
 
-    // RED LINE: the control singleton receives NOTHING.
-    expect(await storedGuardrailEvaluations()).toEqual([]);
-    expect(await storedGuardrailChecks()).toEqual([]);
+    // RED LINE (retired): 0045 DROPPED the control guardrail-evidence mirror, so
+    // there is no control singleton left to assert "receives NOTHING" against —
+    // the tenant object above is now the sole authoritative home.
   });
 });
 
@@ -848,9 +801,11 @@ describe("the data plane does not depend on the evidence path", () => {
       }),
     );
     const stages: string[] = [];
+    // Track A: the attributed request lands in the tenant object, so a failing
+    // tenant-object resolver is what exercises the "D1 write fails" branch now.
     const evidence = new DurableGuardrailEvidenceSink({
       queue: () => undefined,
-      database: () => ({
+      tenantDatabase: () => ({
         prepare: () => ({
           bind: () => ({
             run: async () => {
@@ -918,7 +873,6 @@ describe("the data plane does not depend on the evidence path", () => {
     };
     const evidence = new DurableGuardrailEvidenceSink({
       queue: () => undefined,
-      database: () => undefined,
       tenantDatabase: () => {
         attempts += 1;
         return attempts === 1 ? failingObject : authoritative;
@@ -934,37 +888,10 @@ describe("the data plane does not depend on the evidence path", () => {
     expect((await tenantGuardrailRows("tenant_a")).evaluations).toHaveLength(1);
   });
 
-  it("retains a failed direct projection batch and persists it after recovery", async () => {
-    const envelope = manualEnvelope("tenant_a");
-    const authoritative = guardrailEvidenceTenantDatabaseFromEnv(env, "tenant_a");
-    if (authoritative === undefined) throw new Error("TENANT_DATA binding is required");
-
-    let projectionAvailable = false;
-    const failingProjection = {
-      prepare: (query: string) => controlDb().prepare(query),
-      batch: async () => {
-        throw new Error("control projection unavailable");
-      },
-    };
-    const evidence = new DurableGuardrailEvidenceSink({
-      queue: () => undefined,
-      database: () => (projectionAvailable ? controlDb() : failingProjection),
-      tenantDatabase: () => authoritative,
-    });
-
-    expect(evidence.append(envelope.evaluation, envelope.checks)).toBe(true);
-    await evidence.flush({ env: {} });
-    expect(evidence.pending).toBe(1);
-    expect((await tenantGuardrailRows("tenant_a")).evaluations).toHaveLength(1);
-    expect(await storedGuardrailEvaluations()).toHaveLength(0);
-
-    projectionAvailable = true;
-    await evidence.flush({ env: {} });
-    expect(evidence.pending).toBe(0);
-    expect(await storedGuardrailEvaluations()).toEqual([
-      expect.objectContaining({ id: envelope.evaluation.id, tenant: "tenant_a" }),
-    ]);
-  });
+  // Deleted: "retains a failed direct projection batch and persists it after
+  // recovery" — Track A retired the shared control projection and the sink's
+  // `database` fallback option, so there is no second (projection) database leg
+  // to fail and recover; the tenant-object retry is covered by the case above.
 
   /**
    * With NO queue and NO control database the sink counts a `dropped` and the
@@ -1019,7 +946,7 @@ describe("the data plane does not depend on the evidence path", () => {
 describe("guardrail evidence retention", () => {
   const NOW = 1_800_000_000;
 
-  it("sweeps a tenant object before its shared projection", async () => {
+  it("prunes a tenant object under its per-tenant override, leaving others", async () => {
     const tenantA = manualEnvelope("tenant_a");
     const tenantB = {
       ...tenantA,
@@ -1036,29 +963,25 @@ describe("guardrail evidence retention", () => {
     }
     await writeTenantGuardrailEvidence(objectA, [tenantA]);
     await writeTenantGuardrailEvidence(objectB, [tenantB]);
-    await writeGuardrailEvidence(controlDb(), [tenantA, tenantB]);
 
+    // Track A retired the control mirror; the sweep now takes env + the roster.
+    // An override sweeps its own object regardless of the roster, so tenant_b —
+    // absent from both the override and the (empty) roster — is untouched.
     const result = await sweepGuardrailEvidence(
-      controlDb(),
       {
         TENANT_DATA: env.TENANT_DATA,
         REQUEST_LOG_RETENTION_POLICIES: JSON.stringify({ tenant_a: { days: 30 } }),
       },
+      [],
       NOW,
     );
 
     expect(result.pruned).toBe(1);
-    const objectRowsA = await tenantGuardrailRows("tenant_a");
-    const objectRowsB = await tenantGuardrailRows("tenant_b");
-    expect(objectRowsA.evaluations).toHaveLength(0);
-    expect(objectRowsB.evaluations).toHaveLength(1);
-    const projectionRows = await storedGuardrailEvaluations();
-    expect(projectionRows).toEqual([
-      expect.objectContaining({ id: tenantB.evaluation.id, tenant: "tenant_b" }),
-    ]);
+    expect((await tenantGuardrailRows("tenant_a")).evaluations).toHaveLength(0);
+    expect((await tenantGuardrailRows("tenant_b")).evaluations).toHaveLength(1);
   });
 
-  it("discovers old tenant objects from the fleet projection", async () => {
+  it("discovers old tenant objects from the provisioned roster", async () => {
     const tenantA = manualEnvelope("tenant_a");
     const tenantB = manualEnvelope("tenant_b");
     const objectA = guardrailEvidenceTenantDatabaseFromEnv(env, "tenant_a");
@@ -1068,58 +991,24 @@ describe("guardrail evidence retention", () => {
     }
     await writeTenantGuardrailEvidence(objectA, [tenantA]);
     await writeTenantGuardrailEvidence(objectB, [tenantB]);
-    await writeGuardrailEvidence(controlDb(), [tenantA, tenantB]);
 
+    // Track A: discovery is the provisioned roster handed to the sweep, NOT a
+    // `SELECT DISTINCT tenant` off the retired control mirror.
     const result = await sweepGuardrailEvidence(
-      controlDb(),
       { TENANT_DATA: env.TENANT_DATA, REQUEST_LOG_RETENTION_DAYS: "30" },
+      ["tenant_a", "tenant_b"],
       NOW,
     );
 
     expect(result.pruned).toBe(2);
     expect((await tenantGuardrailRows("tenant_a")).evaluations).toHaveLength(0);
     expect((await tenantGuardrailRows("tenant_b")).evaluations).toHaveLength(0);
-    expect(await storedGuardrailEvaluations()).toHaveLength(0);
   });
 
-  it("keeps the projection when it fails after the object was pruned", async () => {
-    const envelope = manualEnvelope("tenant_a");
-    const object = guardrailEvidenceTenantDatabaseFromEnv(env, "tenant_a");
-    if (object === undefined) throw new Error("TENANT_DATA binding is required");
-    await writeTenantGuardrailEvidence(object, [envelope]);
-    await writeGuardrailEvidence(controlDb(), [envelope]);
-
-    const failingProjection = {
-      prepare: (query: string) => controlDb().prepare(query),
-      batch: async () => {
-        throw new Error("control projection unavailable");
-      },
-    };
-    const result = await sweepGuardrailEvidence(
-      failingProjection,
-      {
-        TENANT_DATA: env.TENANT_DATA,
-        REQUEST_LOG_RETENTION_POLICIES: JSON.stringify({ tenant_a: { days: 30 } }),
-      },
-      NOW,
-    );
-
-    expect(result.pruned).toBe(1);
-    expect((await tenantGuardrailRows("tenant_a")).evaluations).toHaveLength(0);
-    expect(await storedGuardrailEvaluations()).toHaveLength(1);
-
-    // A later tick can prove the object has no matching authority and remove
-    // the stale derived row once the projection database is available again.
-    await sweepGuardrailEvidence(
-      controlDb(),
-      {
-        TENANT_DATA: env.TENANT_DATA,
-        REQUEST_LOG_RETENTION_POLICIES: JSON.stringify({ tenant_a: { days: 30 } }),
-      },
-      NOW,
-    );
-    expect(await storedGuardrailEvaluations()).toHaveLength(0);
-  });
+  // Deleted: "keeps the projection when it fails after the object was pruned" —
+  // Track A retired the shared control projection and the sweep's projection-db
+  // argument, so there is no second database leg to fail, keep, and reconcile on
+  // a later tick; the surviving per-object pruning is covered by the cases above.
 
   it("runs tenant retention from Cron with TENANT_DATA and no CONTROL_DB", async () => {
     const envelope = manualEnvelope("tenant_a");
@@ -1149,11 +1038,11 @@ describe("guardrail evidence retention", () => {
     expect((await platformGuardrailRows()).evaluations).toHaveLength(1);
 
     // The fleet default governs the WHOLE platform object — no tenant fence, and
-    // no second database to reconcile. `db` is left undefined so ONLY the
-    // platform leg runs here; the control unscoped sweep is covered above.
+    // no second database to reconcile. An empty roster means ONLY the platform
+    // leg runs here.
     const result = await sweepGuardrailEvidence(
-      undefined,
       { ...(env as unknown as Record<string, unknown>), REQUEST_LOG_RETENTION_DAYS: "30" },
+      [],
       NOW,
     );
 

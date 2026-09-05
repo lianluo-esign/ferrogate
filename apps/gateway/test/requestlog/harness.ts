@@ -54,10 +54,18 @@ export function controlDb(): D1Database {
  */
 export async function applyControlMigrations(): Promise<void> {}
 
-/** Empty `request_logs`, so each test starts from zero rows. */
-export async function resetRequestLogs(): Promise<void> {
-  await applyControlMigrations();
-  await controlDb().prepare(`DELETE FROM ${REQUEST_LOG_TABLE}`).run();
+/**
+ * Empty `request_logs` for the named tenant objects and the platform singleton,
+ * so each test starts from zero rows.
+ *
+ * The control `request_logs` mirror was DROPPED by control migration 0045
+ * (Track A): a tenant-attributed row is authoritative in its OWNER's object and
+ * an unattributed row in the platform singleton, so there is no shared control
+ * table left to truncate. Callers pass the tenants they authenticate as.
+ */
+export async function resetRequestLogs(tenantIds: readonly string[] = []): Promise<void> {
+  for (const tenantId of tenantIds) await resetTenantRequestLogs(tenantId);
+  await resetPlatformRequestLogs();
 }
 
 /**
@@ -154,12 +162,21 @@ export interface StoredRequestLog {
   readonly request_json: string;
 }
 
-/** Every stored row, oldest first. */
-export async function storedRequestLogs(): Promise<StoredRequestLog[]> {
-  const result = await controlDb()
-    .prepare(`SELECT * FROM ${REQUEST_LOG_TABLE} ORDER BY started_at_unix ASC, request_id ASC`)
-    .all<StoredRequestLog>();
-  return result.results;
+/**
+ * Every stored row across the named tenant objects and the platform singleton,
+ * oldest first.
+ *
+ * The control mirror is gone (0045), so this fans out over the tenants the
+ * caller authenticates as (attributed rows) and the platform singleton
+ * (unattributed rows) and merges — the same by-name routing the production sink
+ * writes through. Callers still key on the request id they alone control.
+ */
+export async function storedRequestLogs(tenantIds: readonly string[] = []): Promise<StoredRequestLog[]> {
+  const perTenant = await Promise.all(tenantIds.map((tenantId) => storedTenantRequestLogs(tenantId)));
+  const platform = await storedPlatformRequestLogs();
+  return [...perTenant.flat(), ...platform].sort(
+    (a, b) => a.started_at_unix - b.started_at_unix || a.request_id.localeCompare(b.request_id),
+  );
 }
 
 /**

@@ -3,16 +3,16 @@
  * #860).
  *
  * Tenant-attributed rows are authoritative in the owning TenantDataObject from
- * `sql/d1-ts/tenant/0013_guardrail_evaluations.sql`. The control-D1 tables from
- * `sql/d1-ts/control/0004_guardrail_evaluations.sql` remain a derived,
- * tenant-qualified projection for platform/fleet readers until #825.
+ * `sql/d1-ts/tenant/0013_guardrail_evaluations.sql`; un-attributed rows in the
+ * PLATFORM_DATA singleton. Track A retired the shared-CONTROL projection — the
+ * `projection_key`-keyed control mirror and its writers are gone — so both homes
+ * are id-keyed and there is no cross-database mirror left to build.
  *
  * Both stores use the same COALESCE upsert semantics and parent-before-child
- * batch ordering. The database-specific conflict key is the important split:
- * a tenant object can use its local logical id, while the shared projection
- * must use the tenant-qualified `evidenceProjectionKey`.
+ * batch ordering, differing only in bindings (the platform object writes the
+ * `tenant` column NULL).
  */
-import { evidenceProjectionKey, requestLogTenantDatabaseFrom } from "../requestlog/d1.js";
+import { requestLogTenantDatabaseFrom } from "../requestlog/d1.js";
 import { type GuardrailEvidenceEnvelope, guardrailEvidenceToWire } from "./evidence-wire.js";
 
 /** The tables `apps/control-plane/src/store/d1.ts` reads. */
@@ -70,16 +70,6 @@ const GUARDRAIL_EVALUATION_UPDATE_SET = `DO UPDATE SET
   occurred_at_unix = excluded.occurred_at_unix,
   evaluation_json = excluded.evaluation_json`;
 
-/** Control-D1 projection write; the tenant-qualified key is the conflict key. */
-export const GUARDRAIL_EVALUATION_UPSERT_SQL = `INSERT INTO ${GUARDRAIL_EVALUATION_TABLE} (
-  projection_key, id, request_id, trace_id, agent_run_id, subject_id, tenant,
-  scope_type, scope_id, target, protocol, stage, mode,
-  policy_id, policy_revision, verdict, action, enforcement_status,
-  latency_ms, finding_count, input_fingerprint, action_fingerprint,
-  occurred_at_unix, evaluation_json
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT (projection_key) ${GUARDRAIL_EVALUATION_UPDATE_SET}`;
-
 /** Tenant-object authoritative write; one object contains one tenant. */
 export const TENANT_GUARDRAIL_EVALUATION_UPSERT_SQL = `INSERT INTO ${GUARDRAIL_EVALUATION_TABLE} (
   id, request_id, trace_id, agent_run_id, subject_id, tenant,
@@ -107,14 +97,6 @@ const GUARDRAIL_CHECK_UPDATE_SET = `DO UPDATE SET
   enforcement_status = excluded.enforcement_status,
   error_kind = COALESCE(excluded.error_kind, ${GUARDRAIL_CHECK_TABLE}.error_kind),
   check_json = excluded.check_json`;
-
-/** Control-D1 projection child write; its parent key carries tenant scope. */
-export const GUARDRAIL_CHECK_UPSERT_SQL = `INSERT INTO ${GUARDRAIL_CHECK_TABLE} (
-  projection_key, id, evaluation_projection_key, evaluation_id, tenant,
-  check_id, detector_id, detector_version, config_digest,
-  verdict, action, enforcement_status, error_kind, check_json
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT (projection_key) ${GUARDRAIL_CHECK_UPDATE_SET}`;
 
 /** Tenant-object authoritative child write. */
 export const TENANT_GUARDRAIL_CHECK_UPSERT_SQL = `INSERT INTO ${GUARDRAIL_CHECK_TABLE} (
@@ -168,26 +150,6 @@ function tenantIdOf(envelope: GuardrailEvidenceEnvelope): string {
   return tenantId;
 }
 
-/**
- * Persist a batch of evidence envelopes in ONE D1 round trip.
- *
- * The PARENT statements are emitted before the child ones, and D1 applies a
- * batch in order: `guardrail_check_evaluations.evaluation_id` is a foreign key,
- * so a child written first would be rejected on a database with enforcement on.
- *
- * Rejects on failure — deliberately, and unlike everything else on this path.
- * The caller is either the Queue consumer (whose retry ladder needs a rejection
- * to arm) or {@link DurableGuardrailEvidenceSink}, which swallows it and counts
- * it.
- */
-export async function writeGuardrailEvidence(
-  db: GuardrailEvidenceDatabase,
-  envelopes: readonly GuardrailEvidenceEnvelope[],
-): Promise<void> {
-  if (envelopes.length === 0) return;
-  await db.batch(guardrailEvidenceStatements(db, envelopes));
-}
-
 /** Persist one same-tenant batch in its authoritative object. */
 export async function writeTenantGuardrailEvidence(
   db: GuardrailEvidenceDatabase,
@@ -215,78 +177,6 @@ export async function writePlatformGuardrailEvidence(
 ): Promise<void> {
   if (envelopes.length === 0) return;
   await db.batch(platformGuardrailEvidenceStatements(db, envelopes));
-}
-
-/**
- * The prepared statements for a batch, WITHOUT running them.
- *
- * Exported so the shared queue consumer can put request-log and guardrail
- * statements into the SAME `db.batch` — one delivery, one round trip, one
- * atomic unit, which is what makes `retryAll()` safe for a mixed batch.
- */
-export function guardrailEvidenceStatements(
-  db: GuardrailEvidenceDatabase,
-  envelopes: readonly GuardrailEvidenceEnvelope[],
-): unknown[] {
-  const evaluationStatement = db.prepare(GUARDRAIL_EVALUATION_UPSERT_SQL);
-  const checkStatement = db.prepare(GUARDRAIL_CHECK_UPSERT_SQL);
-  const parents: unknown[] = [];
-  const children: unknown[] = [];
-  for (const envelope of envelopes) {
-    const wire = guardrailEvidenceToWire(envelope);
-    const evaluation = envelope.evaluation;
-    const tenantId = evaluation.tenant.organizationId;
-    parents.push(
-      evaluationStatement.bind(
-        evidenceProjectionKey(tenantId, evaluation.id),
-        evaluation.id,
-        evaluation.requestId,
-        bindOptional(evaluation.traceId),
-        bindOptional(evaluation.agentRunId),
-        bindOptional(evaluation.subjectId),
-        bindOptional(evaluation.tenant.organizationId),
-        evaluation.scopeType,
-        bindOptional(evaluation.scopeId),
-        evaluation.target,
-        evaluation.protocol,
-        evaluation.stage,
-        evaluation.mode,
-        evaluation.policyId,
-        evaluation.policyRevision,
-        evaluation.verdict,
-        evaluation.action,
-        evaluation.enforcementStatus,
-        evaluation.latencyMs,
-        evaluation.findingCount,
-        evaluation.inputFingerprint,
-        bindOptional(evaluation.actionFingerprint),
-        evaluation.occurredAtUnix,
-        JSON.stringify(wire),
-      ),
-    );
-    const checkWires = Array.isArray(wire.checks) ? (wire.checks as unknown[]) : [];
-    envelope.checks.forEach((check, index) => {
-      children.push(
-        checkStatement.bind(
-          evidenceProjectionKey(tenantId, check.id),
-          check.id,
-          evidenceProjectionKey(tenantId, evaluation.id),
-          evaluation.id,
-          tenantId ?? null,
-          check.checkId,
-          check.detectorId,
-          check.detectorVersion,
-          check.configDigest,
-          check.verdict,
-          check.action,
-          check.enforcementStatus,
-          bindOptional(check.errorKind),
-          JSON.stringify(checkWires[index] ?? {}),
-        ),
-      );
-    });
-  }
-  return [...parents, ...children];
 }
 
 /** Prepared parent-before-child statements for one same-tenant object batch. */

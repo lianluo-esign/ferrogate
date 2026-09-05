@@ -42,6 +42,7 @@ import {
   tenantAuth,
   upstreamConfig,
 } from "./fixtures.js";
+import { registerDurableObjectTenant } from "./tenant-object.js";
 
 interface ApprovalBindings {
   readonly DB: D1Database;
@@ -106,6 +107,10 @@ beforeEach(async () => {
     OTHER_TENANT_KEY,
     tenantAuth({ organizationId: OTHER_TENANT, apiKeyId: "key-other" }),
   );
+  // `TENANT` is provisioned by the global `setup-d1.ts`; the isolation test also
+  // drives `OTHER_TENANT`, whose admission would otherwise 503 on a missing
+  // `tenant_databases` roster row (0045 tenant-object quota resolution).
+  await registerDurableObjectTenant(OTHER_TENANT);
 });
 
 // ---------------------------------------------------------------------------

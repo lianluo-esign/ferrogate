@@ -184,10 +184,12 @@ describe("one D1 database per tenant — physical isolation", () => {
         .bind(name)
         .first()) !== null;
 
-    // CONTROL: the tenant registry, the credential directory, plans, billing.
+    // CONTROL: the tenant registry, the credential directory, plans.
     expect(await tableIn(env.CONTROL_DB, "tenant_databases")).toBe(true);
     expect(await tableIn(env.CONTROL_DB, "api_key_directory")).toBe(true);
-    expect(await tableIn(env.CONTROL_DB, "billing_report_outbox")).toBe(true);
+    // `billing_report_outbox` was DROPPED from control by migration 0045 (Track
+    // A) and now lives only on the tenant/platform object, so the control mirror
+    // no longer carries it — this pin is retired rather than inverted.
     // TENANT: the tenant's own money/usage/asset state.
     expect(await tableIn(env.TENANT_DB_ACME, "wallets")).toBe(true);
     expect(await tableIn(env.TENANT_DB_ACME, "usage_monthly_rollups")).toBe(true);

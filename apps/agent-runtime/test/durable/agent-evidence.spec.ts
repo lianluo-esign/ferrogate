@@ -9,10 +9,6 @@ const RUN_ID = "run-evidence-authority";
 const RETRY_TENANT = "tenant-evidence-retry";
 const RETRY_RUN_ID = "run-evidence-retry";
 
-function projectionKey(tenantId: string, logicalId: string): string {
-  return `${Array.from(tenantId).length}:${tenantId}:${logicalId}`;
-}
-
 function createInput(tenantId: string, runId: string) {
   return {
     runId,
@@ -115,23 +111,6 @@ describe("agent evidence source of truth", () => {
       sql: "SELECT id FROM agent_runs WHERE id = ?",
       params: [RUN_ID],
     });
-    const controlRuns = await env.CONTROL_DB.prepare(
-      "SELECT projection_key, id, tenant FROM agent_runs WHERE id = ? ORDER BY tenant",
-    )
-      .bind(RUN_ID)
-      .all<{ projection_key: string; id: string; tenant: string }>();
-    const controlEvents = await env.CONTROL_DB.prepare(
-      "SELECT projection_key, id, tenant FROM agent_run_events " +
-        "WHERE run_id = ? ORDER BY tenant, occurred_at_unix, id",
-    )
-      .bind(RUN_ID)
-      .all<{ projection_key: string; id: string; tenant: string }>();
-    const controlManagedEvidence = await env.CONTROL_DB.prepare(
-      "SELECT projection_key, id, tenant FROM managed_worker_isolation_evidence " +
-        "WHERE id IN (?, ?) ORDER BY tenant",
-    )
-      .bind(`managed:session-${RUN_ID}:${RUN_ID}`, `managed:session-${RUN_ID}:${RUN_ID}`)
-      .all<{ projection_key: string; id: string; tenant: string }>();
 
     expect(runsA.results).toHaveLength(1);
     expect(runsA.results[0]?.tenant).toBe(TENANT_A);
@@ -158,51 +137,14 @@ describe("agent evidence source of truth", () => {
       params: [RUN_ID],
     });
     expect(managedB.results).toEqual([{ id: RUN_ID }]);
-    expect(controlRuns.results).toEqual([
-      { projection_key: projectionKey(TENANT_A, RUN_ID), id: RUN_ID, tenant: TENANT_A },
-      { projection_key: projectionKey(TENANT_B, RUN_ID), id: RUN_ID, tenant: TENANT_B },
-    ]);
-    expect(controlEvents.results).toEqual([
-      {
-        projection_key: projectionKey(TENANT_A, `${RUN_ID}-evt-000001`),
-        id: `${RUN_ID}-evt-000001`,
-        tenant: TENANT_A,
-      },
-      {
-        projection_key: projectionKey(TENANT_A, `${RUN_ID}-evt-000003`),
-        id: `${RUN_ID}-evt-000003`,
-        tenant: TENANT_A,
-      },
-      {
-        projection_key: projectionKey(TENANT_A, `${RUN_ID}-evt-000002`),
-        id: `${RUN_ID}-evt-000002`,
-        tenant: TENANT_A,
-      },
-      {
-        projection_key: projectionKey(TENANT_B, `${RUN_ID}-evt-000001`),
-        id: `${RUN_ID}-evt-000001`,
-        tenant: TENANT_B,
-      },
-      {
-        projection_key: projectionKey(TENANT_B, `${RUN_ID}-evt-000002`),
-        id: `${RUN_ID}-evt-000002`,
-        tenant: TENANT_B,
-      },
-    ]);
-    // Managed isolation evidence is no longer mirrored to control D1 (the
-    // no-tenant-data mirror red line): the tenant object is its only authority,
-    // asserted by `managedA` above. The control table stays empty.
-    expect(controlManagedEvidence.results).toEqual([]);
-
-    await env.CONTROL_DB.prepare("UPDATE agent_runs SET run_json = ? WHERE projection_key = ?")
-      .bind('{"tenant_id":"forged"}', projectionKey(TENANT_A, RUN_ID))
-      .run();
-    const afterMirrorMutation = await objectA.query({
-      tenantId: TENANT_A,
-      sql: "SELECT run_json FROM agent_runs WHERE id = ?",
-      params: [RUN_ID],
-    });
-    expect(JSON.parse(String(afterMirrorMutation.results[0]?.run_json)).tenant_id).toBe(TENANT_A);
+    // Agent runs, run events, and managed isolation evidence are NO LONGER
+    // mirrored to the control database — the per-tenant object is their sole
+    // authority (agent family Track A: migration 0037 dropped the `agent_runs`
+    // / `agent_run_events` control projections, 0041 dropped
+    // `managed_worker_isolation_evidence`). This test's `TENANT_A` reuses the
+    // same run/event ids as `TENANT_B`; the object-scoped reads above prove the
+    // two never collide, which is the fence the removed control `projection_key`
+    // once carried.
   });
 
   it("replays the stored run and events when authoritative rows need repair", async () => {
@@ -262,20 +204,5 @@ describe("agent evidence source of truth", () => {
       "event.first-attempt",
       "event.retry",
     ]);
-  });
-
-  it("uses SQLite code-point length for non-BMP tenant projection keys", async () => {
-    const tenantId = "tenant-😀";
-    const runId = "run-evidence-unicode";
-    const run = runStateStub(env, tenantId, runId);
-
-    await run.create(createInput(tenantId, runId));
-
-    const rows = await env.CONTROL_DB.prepare(
-      "SELECT projection_key FROM agent_runs WHERE id = ? AND tenant = ?",
-    )
-      .bind(runId, tenantId)
-      .all<{ projection_key: string }>();
-    expect(rows.results).toEqual([{ projection_key: `8:${tenantId}:${runId}` }]);
   });
 });

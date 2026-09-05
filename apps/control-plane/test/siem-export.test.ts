@@ -48,9 +48,10 @@ import { type SiemExportReport, runSiemExportPass } from "../src/siem/pump.js";
 import {
   applySchema,
   db,
+  platformDb,
   resetD1,
   seedAuditEvents,
-  seedRequestLogs as seedControlRequestLogs,
+  seedRequestLogs as seedRequestLogsInto,
 } from "./d1.js";
 import { BASE, arm, bearer, operatorKey, tenantKey } from "./harness.js";
 
@@ -175,11 +176,13 @@ type RequestLogSeed = ReturnType<typeof rows>[number];
  * its object, and rows are appended (`INSERT OR REPLACE`) so a test can seed a
  * tenant across several calls the way traffic actually arrives.
  *
- * Seeding the OBJECT only (never the mirror) is deliberate: a regression that
- * read the control `request_logs` projection instead would now find it empty
- * and deliver nothing, failing the test. A platform/un-attributed row has no
- * tenant object by definition and must be seeded straight into the control
- * mirror with {@link seedControlRequestLogs} as a decoy the pump must not read.
+ * Seeding the OBJECT only is deliberate: a regression that read some other
+ * `request_logs` leg would find nothing here and deliver nothing, failing the
+ * test. A platform/un-attributed row has no tenant object by definition and
+ * lives on the PLATFORM_DATA singleton — seed it with
+ * `seedRequestLogsInto(rows, platformDb())` as a decoy the tenant pump must not
+ * read. (Track A migration 0045 DROPPED the old shared control `request_logs`
+ * mirror, so there is no control leg left to seed a decoy into.)
  */
 async function seedRequestLogs(records: readonly RequestLogSeed[]): Promise<void> {
   const byTenant = new Map<string, RequestLogSeed[]>();
@@ -264,21 +267,25 @@ afterEach(async () => {
 describe("the tenant fence on what leaves the platform", () => {
   it("delivers this tenant's rows and NEVER another tenant's or a platform row", async () => {
     await seedRequestLogs(rows("acme", "acme", 3));
-    // globex and the un-attributed PLATFORM row are DECOYS in the control mirror
-    // the pump used to read. The pump now reads acme's own TenantDataObject, so
-    // neither can reach acme's sink — and their presence in the mirror proves
-    // the pump is not reading it. A platform-operator call has NULL tenant, and
+    // globex and the un-attributed PLATFORM row are DECOYS the acme sink must
+    // never deliver. globex's rows live in globex's OWN object; the pump for the
+    // acme-splunk sink reads only acme's object, so they cannot reach acme. The
+    // un-attributed row lives on the PLATFORM_DATA singleton, which the tenant
+    // pump does not read at all. A platform-operator call has NULL tenant, and
     // strict equality means NULL matches nobody.
-    await seedControlRequestLogs(rows("globex", "globex", 3));
-    await seedControlRequestLogs([
-      {
-        requestId: "platform-000",
-        tenant: null,
-        startedAtUnix: OLD,
-        completedAtUnix: OLD,
-        document: { object: "request_log" },
-      },
-    ]);
+    await seedRequestLogs(rows("globex", "globex", 3));
+    await seedRequestLogsInto(
+      [
+        {
+          requestId: "platform-000",
+          tenant: null,
+          startedAtUnix: OLD,
+          completedAtUnix: OLD,
+          document: { object: "request_log" },
+        },
+      ],
+      platformDb(),
+    );
 
     const report = await runSiemExportPass(bindings(), NOW);
 
@@ -600,9 +607,10 @@ describe("the pump is not a second read path over the same tables", () => {
   it("delivers exactly the documents the JSONL export serves that tenant", async () => {
     const acmeRows = rows("acme", "acme", 3);
     await seedRequestLogs(acmeRows);
-    // globex is a decoy in the control mirror: neither the pump nor the export
-    // path reads it, so it must appear in neither side of the equality below.
-    await seedControlRequestLogs(rows("globex", "globex", 2));
+    // globex is a decoy in its OWN object: neither the acme pump nor the acme
+    // export path reads another tenant's object, so it must appear in neither
+    // side of the equality below.
+    await seedRequestLogs(rows("globex", "globex", 2));
 
     await runSiemExportPass(bindings(), NOW);
 

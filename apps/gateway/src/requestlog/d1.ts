@@ -17,13 +17,11 @@ import { requestLogToWire } from "./record.js";
 /** The table `apps/control-plane/src/store/d1.ts::REQUEST_LOG_TABLE` reads. */
 export const REQUEST_LOG_TABLE = "request_logs";
 
-/** The control-D1 table is a derived compatibility projection, never authority. */
-export const REQUEST_LOG_PROJECTION_TABLE = REQUEST_LOG_TABLE;
-
 /**
- * Key the derived projection by its owning tenant and logical id. The length
- * prefix keeps tenant ids containing `:` unambiguous while leaving the
- * human-facing request id unchanged for joins and exports.
+ * Key an id by its owning tenant and logical id. The length prefix keeps tenant
+ * ids containing `:` unambiguous while leaving the human-facing id unchanged for
+ * joins and exports. Track A retired the request-log control projection; this
+ * helper now serves only the asset-audit projection (`../assets/d1.ts`).
  */
 export function evidenceProjectionKey(
   tenantId: string | null | undefined,
@@ -101,19 +99,6 @@ const REQUEST_LOG_UPDATE_SET = `DO UPDATE SET
   request_json = CASE WHEN excluded.request_json = '{}' THEN ${REQUEST_LOG_TABLE}.request_json
                       ELSE excluded.request_json END`;
 
-/** Control-D1 projection write: the tenant-qualified key is authoritative. */
-export const REQUEST_LOG_UPSERT_SQL = `INSERT INTO ${REQUEST_LOG_TABLE} (
-  projection_key, request_id, trace_id, agent_run_id, delegation_chain, delegation_root,
-  experiment_id, experiment_arm, routing_decision,
-  tenant, project, workspace, api_key_id,
-  route, provider, logical_model, provider_model,
-  status_code, error_code, cache_status, latency_ms,
-  prompt_tokens, completion_tokens, total_tokens,
-  guardrail_verdict, guardrail_policy_id, streamed,
-  started_at_unix, completed_at_unix, request_json
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT (projection_key) ${REQUEST_LOG_UPDATE_SET}`;
-
 /** Tenant-object write: one object contains one tenant, so request_id is enough. */
 export const TENANT_REQUEST_LOG_UPSERT_SQL = `INSERT INTO ${REQUEST_LOG_TABLE} (
   request_id, trace_id, agent_run_id, delegation_chain, delegation_root,
@@ -130,14 +115,6 @@ ON CONFLICT (request_id) ${REQUEST_LOG_UPDATE_SET}`;
 /** `undefined` → SQL NULL, so an unknown fact is stored as unknown. */
 function bindOptional(value: string | number | undefined): string | number | null {
   return value === undefined ? null : value;
-}
-
-/** The bound values for one record, in `REQUEST_LOG_UPSERT_SQL`'s column order. */
-export function requestLogBindings(record: RequestLogRecord): (string | number | null)[] {
-  return [
-    evidenceProjectionKey(record.tenantId, record.requestId),
-    ...tenantRequestLogBindings(record),
-  ];
 }
 
 /** Bound values for the tenant-object SQL, which has no projection key column. */
@@ -202,27 +179,6 @@ export function requestLogTenantDatabaseFrom(
     tenantObjectAddressForEnv(env, tenantId),
   );
   return new DurableObjectD1Database(tenantId, stub).asD1Database() as RequestLogDatabase;
-}
-
-/**
- * Persist a batch of records in ONE D1 round trip.
- *
- * `batch` rather than N `run()`s because this is the queue consumer's whole
- * job: a hundred decisions arriving together should cost one round trip, and
- * D1's batch is also the only atomic unit it offers. A batch that fails fails
- * whole, which is what lets the Queue redeliver it safely against the upsert.
- *
- * Rejects on failure — deliberately, and unlike everything else on this path.
- * Here the caller is either a Queue consumer (whose retry ladder needs a
- * rejection to arm) or {@link RequestLogSink}, which swallows it and counts it.
- */
-export async function writeRequestLogs(
-  db: RequestLogDatabase,
-  records: readonly RequestLogRecord[],
-): Promise<void> {
-  if (records.length === 0) return;
-  const statement = db.prepare(REQUEST_LOG_UPSERT_SQL);
-  await db.batch(records.map((record) => statement.bind(...requestLogBindings(record))));
 }
 
 /** Persist tenant-attributed rows through their authoritative object. */

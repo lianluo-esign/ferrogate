@@ -57,6 +57,15 @@ import { ATTACKER_SECRET, SIGNING_SECRET, chain, forge } from "./fixtures.js";
 const BASE = "https://gw.test";
 
 /**
+ * The tenants this suite authenticates as — `tenant_a` (`fg_writer`/`fg_planner`)
+ * and `tenant_c` (`fg_other_tenant`, the cross-tenant case). Every request here
+ * is authenticated, so every request-log row is attributed to one of these and
+ * lands in that tenant's object; the control mirror was DROPPED by control
+ * migration 0045 (Track A), so the reset and read fan out over these objects.
+ */
+const DELEGATION_TENANTS = ["tenant_a", "tenant_c"] as const;
+
+/**
  * `key_writer` is the LEAF agent's credential: it is what authenticates the
  * request, and the chain's leaf link is bound to it.
  *
@@ -208,12 +217,18 @@ function nowUnix(): number {
 async function loggedRow(response: Response): Promise<Record<string, unknown>> {
   const requestId = response.headers.get("x-request-id");
   for (let attempt = 0; attempt < 100; attempt += 1) {
-    const rows = (await storedRequestLogs()) as unknown as Record<string, unknown>[];
+    const rows = (await storedRequestLogs(DELEGATION_TENANTS)) as unknown as Record<
+      string,
+      unknown
+    >[];
     const row = rows.find((candidate) => candidate.request_id === requestId);
     if (row !== undefined) return row;
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
-  const rows = (await storedRequestLogs()) as unknown as Record<string, unknown>[];
+  const rows = (await storedRequestLogs(DELEGATION_TENANTS)) as unknown as Record<
+    string,
+    unknown
+  >[];
   throw new Error(`no request_logs row for ${String(requestId)} (${rows.length} rows present)`);
 }
 
@@ -224,7 +239,7 @@ async function errorCode(response: Response): Promise<string | undefined> {
 
 beforeEach(async () => {
   await applyControlMigrations();
-  await resetRequestLogs();
+  await resetRequestLogs(DELEGATION_TENANTS);
   await resetTenantObjectState(["tenant_a", "tenant_zzz"]);
 });
 

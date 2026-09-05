@@ -99,7 +99,9 @@ beforeEach(async () => {
   // The pool does not roll D1 writes back and the databases persist under
   // `.wrangler/state`, so a passing assertion could otherwise be a leftover row.
   await control().batch([
-    control().prepare("DELETE FROM quota_policies"),
+    // `quota_policies` was DROPPED from control by 0045 (Track A finalisation):
+    // it is tenant-object authoritative now, so there is no control copy to
+    // reset. The tenant `seedQuotaPolicy` below stays.
     control().prepare("DELETE FROM tenant_databases"),
     control().prepare("DELETE FROM api_key_directory"),
     control().prepare("DELETE FROM static_api_keys"),
@@ -175,7 +177,11 @@ interface PolicySeed {
 async function seedQuotaPolicy(caller: Caller, seed: PolicySeed = {}): Promise<void> {
   const scopeType = seed.scopeType ?? "tenant";
   const scopeId = seed.scopeId ?? caller.tenantId;
-  await control()
+  // Track A hard-cut: `quota_policies` is per-tenant data read ONLY from the
+  // caller tenant's OWN object (the shared control mirror was removed), so every
+  // scope row — whatever its scope_type — is seeded into that owning tenant's
+  // object, exactly where the admission ladder now resolves and reads it.
+  await tenantDb(caller.tenantId)
     .prepare(
       `INSERT INTO quota_policies
          (id, scope_type, scope_id, model_allowlist_json, rpm_limit, tpm_limit,

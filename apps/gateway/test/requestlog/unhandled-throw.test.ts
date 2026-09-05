@@ -34,13 +34,13 @@ import {
   RecordingQueue,
   applyControlMigrations,
   resetPlatformRequestLogs,
-  resetRequestLogs,
   storedPlatformRequestLogs,
 } from "./harness.js";
 
 beforeAll(applyControlMigrations);
 beforeEach(async () => {
-  await resetRequestLogs();
+  // 0045 (Track A) DROPPED the control `request_logs` mirror; the platform
+  // object is the sole authoritative home for these unattributed rows.
   await resetPlatformRequestLogs();
 });
 

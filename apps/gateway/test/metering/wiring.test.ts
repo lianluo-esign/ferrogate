@@ -25,7 +25,9 @@
  * 2. A BEHAVIOURAL assertion that drives a full authenticated completion through
  *    `SELF.fetch` — i.e. through `export default app` in `src/index.ts`, exactly
  *    what `wrangler deploy` ships — and reads the resulting row back out of the
- *    real `BILLING_DB` D1. It fails if the drain is unmounted, if the sink is
+ *    real `PLATFORM_DATA` object (Track A hard-cut: an unattributed `fg_root`
+ *    charge now settles there, not into the removed control billing mirror). It
+ *    fails if the drain is unmounted, if the sink is
  *    dropped from `GATEWAY_ROUTE_MODULES`, if `meteringBindingsFromEnv` stops
  *    resolving, or if the ledger SQL stops landing. The structural gate sees
  *    none of those last three.
@@ -53,7 +55,8 @@
  * article: the deployed `contractAuth`, the deployed `GATEWAY_MIDDLEWARE`, the
  * deployed model catalog parser, the deployed dispatcher, the module-scoped
  * `createMeteringUsageSink({ bindings: meteringBindingsFromEnv })`, and the real
- * `env.BILLING_DB` / `env.BILLING` bindings `wrangler.toml` declares.
+ * `env.PLATFORM_DATA` / `env.BILLING` bindings `wrangler.toml` declares (the
+ * unattributed leg's authoritative store after the Track A billing hard-cut).
  */
 
 import { SELF, env } from "cloudflare:test";
@@ -65,7 +68,12 @@ import {
   interceptProviderFetch,
   providerJson,
 } from "../inference/provider-mock.js";
-import { billingDb, resetMeteringTables, rowCount } from "./d1-harness.js";
+import {
+  platformBillingDb,
+  platformRowCount,
+  resetMeteringTables,
+  resetPlatformBilling,
+} from "./d1-harness.js";
 
 /** Runtime names of the handlers `GATEWAY_MIDDLEWARE` is built from. */
 const METERING_DRAIN = "meteringDrainMiddleware";
@@ -164,6 +172,9 @@ beforeAll(() => {
 
 beforeEach(async () => {
   await resetMeteringTables();
+  // Track A hard-cut: the unattributed `fg_root` completion now settles into the
+  // PLATFORM_DATA object, so the behavioural gate reads and resets it.
+  await resetPlatformBilling();
 });
 
 afterEach(() => {
@@ -193,7 +204,7 @@ const COMPLETION = {
 async function awaitLedgerRow(budgetMs = 2000): Promise<number> {
   const deadline = Date.now() + budgetMs;
   for (;;) {
-    const rows = await rowCount("billing_ledger");
+    const rows = await platformRowCount("billing_ledger");
     if (rows > 0) {
       return rows;
     }
@@ -212,7 +223,7 @@ describe("composition root — a completion through SELF lands a billing row in 
 
     // Nothing is asserted about the ledger yet, so a row already present would
     // make the proof vacuous. Start from zero, explicitly.
-    expect(await rowCount("billing_ledger")).toBe(0);
+    expect(await platformRowCount("billing_ledger")).toBe(0);
 
     const response = await SELF.fetch("https://gw.test/v1/chat/completions", {
       method: "POST",
@@ -240,9 +251,9 @@ describe("composition root — a completion through SELF lands a billing row in 
     // The row is a real, priced settlement of THIS request, not an empty
     // placeholder: the billing event row is committed in the same D1 `batch()`
     // (#150) and the outbox intent is reaped once the Queue accepted it.
-    expect(await rowCount("billing_events")).toBe(1);
+    expect(await platformRowCount("billing_events")).toBe(1);
 
-    const ledger = await billingDb()
+    const ledger = await platformBillingDb()
       .prepare(
         "SELECT billing_ledger.id AS id, entry_json, billing_events.request_id AS request_id " +
           "FROM billing_ledger " +
@@ -288,6 +299,6 @@ describe("composition root — a completion through SELF lands a billing row in 
 
     expect(response.status).toBe(400);
     expect(provider.requests).toHaveLength(0);
-    expect(await rowCount("billing_ledger")).toBe(0);
+    expect(await platformRowCount("billing_ledger")).toBe(0);
   });
 });

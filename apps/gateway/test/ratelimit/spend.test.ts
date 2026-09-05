@@ -204,13 +204,17 @@ async function seedRoutedHold(
     .run();
 }
 
-/** A `quota_policies` row in the CONTROL database, which is where they live. */
+/**
+ * A `quota_policies` row in the OWNING tenant's object (Track A hard-cut: the
+ * shared control mirror was removed, so `SELF` reads them from the tenant's own
+ * object). These cases use tenant-scope rows, so `scopeId` is the tenant id.
+ */
 async function seedPolicy(
   scopeType: string,
   scopeId: string,
   monthlyBudgetUsd: number | null,
 ): Promise<void> {
-  await controlDb
+  await tenantWalletDb(scopeId)
     .prepare(
       "INSERT OR REPLACE INTO quota_policies " +
         "(id, scope_type, scope_id, monthly_budget_usd, enabled) VALUES (?, ?, ?, ?, 1)",
@@ -243,7 +247,8 @@ beforeEach(async () => {
   await db.prepare("DELETE FROM usage_monthly_rollups").run();
   await db.prepare("DELETE FROM wallets").run();
   await db.prepare("DELETE FROM wallet_reservations").run();
-  await controlDb.prepare("DELETE FROM quota_policies").run();
+  // Track A / 0045 dropped the control mirror of `quota_policies`; it is now
+  // tenant-object authoritative and reset per-tenant below.
   // The tenants' OBJECTS are truncated explicitly, and they have to be: this
   // pool's per-test isolated storage rolls back D1 and the DO key-value API,
   // but rows a Durable Object holds in `ctx.storage.sql` survive into the next
@@ -254,6 +259,10 @@ beforeEach(async () => {
     await routed.prepare("DELETE FROM wallet_reservations").run();
     await routed.prepare("DELETE FROM wallets").run();
     await routed.prepare("DELETE FROM usage_monthly_rollups").run();
+    // Track A hard-cut: quota_policies is now tenant-object authoritative, and a
+    // DO's `ctx.storage.sql` rows survive into the next test (see above), so a
+    // policy an earlier case seeded must be cleared here too.
+    await routed.prepare("DELETE FROM quota_policies").run();
   }
 });
 
@@ -529,7 +538,8 @@ describe("the deployed app: step 3 — prepaid wallet", () => {
 
 describe("the deployed app: ordering and failure posture", () => {
   test("a DISABLED policy still answers 403, ahead of the budget check", async () => {
-    await controlDb
+    // Track A hard-cut: seeded into the tenant's own object, where `SELF` reads.
+    await tenantWalletDb("tenant_a")
       .prepare(
         "INSERT OR REPLACE INTO quota_policies " +
           "(id, scope_type, scope_id, monthly_budget_usd, enabled) VALUES (?, ?, ?, ?, 0)",

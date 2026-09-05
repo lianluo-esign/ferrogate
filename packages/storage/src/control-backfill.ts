@@ -84,12 +84,13 @@ function table(name: string, keyColumns: readonly string[]): ControlBackfillTabl
  * enforces foreign keys (they are on by default and cannot be disabled inside a
  * transaction), and `INSERT OR IGNORE` suppresses only UNIQUE/PK/NOT NULL/CHECK
  * conflicts — NOT foreign-key failures. So a child row copied before its parent
- * exists aborts the whole backfill with `FOREIGN KEY constraint failed`. The two
- * dependencies in the control schema are therefore ordered by hand:
+ * exists aborts the whole backfill with `FOREIGN KEY constraint failed`. The one
+ * remaining dependency in the control schema is therefore ordered by hand:
  *   - `platform_catalog_offerings` (FK → `platform_catalog_models` and
- *     `platform_provider_channels`, migration 0025) follows both parents;
- *   - `guardrail_check_evaluations` (FK → `guardrail_evaluations(projection_key)`,
- *     migration 0015) follows its parent.
+ *     `platform_provider_channels`, migration 0025) follows both parents.
+ * (The `guardrail_check_evaluations` FK → `guardrail_evaluations(projection_key)`
+ * dependency from migration 0015 is gone: both tables were DROPPED from the
+ * control DO by 0045 — see the guardrail block below.)
  * Every other table is otherwise in `sqlite_master` name order.
  *
  * Derived from the full `sql/d1-ts/control/*.sql` apply — including the
@@ -112,9 +113,14 @@ export const CONTROL_BACKFILL_TABLES: readonly ControlBackfillTable[] = Object.f
   // parity guard would flag it).
   table("api_key_directory", ["key_hash"]),
   table("audit_events", ["projection_key"]),
-  table("billing_events", ["billing_event_id"]),
-  table("billing_ledger", ["id"]),
-  table("billing_report_outbox", ["id"]),
+  // `billing_events`, `billing_ledger` and `billing_report_outbox` were DROPPED
+  // from the control DO by `0045_drop_tenant_billing_requestlog_quota_guardrail.sql`
+  // (Track A finalisation): metering is authoritative on each tenant's object
+  // (attributed) and the PLATFORM_DATA singleton (`platformBillingStatements`,
+  // unattributed) now — the dual-write shadow and the platform-billing backfill
+  // were hard-cut in Tier 4, so the control mirror has no writer or reader. A
+  // table the live schema no longer has must NOT appear in this manifest (the
+  // parity guard would flag it).
   table("budget_alert_notifications_legacy", ["id"]),
   table("control_plane_replay_floors_legacy", ["tenant_id", "deployment_id"]),
   table("control_plane_resources", ["resource_kind", "resource_id"]),
@@ -131,10 +137,16 @@ export const CONTROL_BACKFILL_TABLES: readonly ControlBackfillTable[] = Object.f
   // consumer wrote control from the D1→DO cutover until the G2 stop), unlike the
   // pure-DROP siblings; the sweep copied the window rows into the tenant objects
   // and was retired with this drop.
-  // Parent before child: guardrail_check_evaluations FK → guardrail_evaluations
-  // (projection_key), migration 0015.
-  table("guardrail_evaluations", ["projection_key"]),
-  table("guardrail_check_evaluations", ["projection_key"]),
+  // `guardrail_evaluations` and its FK child `guardrail_check_evaluations`
+  // (`evaluation_id`/`projection_key` REFERENCES the parent, migration 0015)
+  // were DROPPED from the control DO by
+  // `0045_drop_tenant_billing_requestlog_quota_guardrail.sql` (Track A
+  // finalisation, children-first): the guardrail evidence is authoritative on
+  // each tenant's object (attributed) and the PLATFORM_DATA singleton
+  // (unscoped) now — the `projection_key`-keyed control mirror, its writers and
+  // its drain-on-read backfill bridges were hard-cut in Tier 2, so the mirror
+  // has no writer or reader. A table the live schema no longer has must NOT
+  // appear in this manifest (the parity guard would flag it).
   table("guardrail_policy_bindings", ["policy_id"]),
   table("guardrail_policy_revisions", ["policy_id", "revision"]),
   // `managed_worker_isolation_policies`, `managed_worker_isolation_selections`,
@@ -183,8 +195,15 @@ export const CONTROL_BACKFILL_TABLES: readonly ControlBackfillTable[] = Object.f
   table("platform_billing_group_providers", ["group_id", "provider_id"]),
   table("platform_catalog_offerings", ["id"]),
   table("platform_catalog_revisions", ["id"]),
-  table("quota_policies", ["id"]),
-  table("request_logs", ["projection_key"]),
+  // `quota_policies` (0001) and `request_logs` (0001, rebuilt with a
+  // `projection_key` by 0014) were DROPPED from the control DO by
+  // `0045_drop_tenant_billing_requestlog_quota_guardrail.sql` (Track A
+  // finalisation). `quota_policies` is now resolved on each tenant object by the
+  // three admission clones (Tier 1); `request_logs` is written only to the
+  // tenant object (attributed) or the PLATFORM_DATA singleton (unscoped) and had
+  // no control reader (Tier 3). A table the live schema no longer has must NOT
+  // appear in this manifest (the parity guard would flag it). `spend_throttles`
+  // (0010) was dropped by the same migration — see below.
   table("roles", ["id"]),
   // The self-hosted-worker EVIDENCE mirrors (`self_hosted_run_dispatches`,
   // `self_hosted_worker_artifacts`, `self_hosted_worker_checkpoints`,
@@ -210,7 +229,13 @@ export const CONTROL_BACKFILL_TABLES: readonly ControlBackfillTable[] = Object.f
   // the control mirror has no writer or reader. A table the live schema no longer
   // has must NOT appear in this manifest (the parity guard would flag it).
   table("spend_anomaly_runs", ["window_start_unix"]),
-  table("spend_throttles", ["scope_type", "scope_id"]),
+  // `spend_throttles` (0010) was DROPPED from the control DO by
+  // `0045_drop_tenant_billing_requestlog_quota_guardrail.sql` (Track A
+  // finalisation, coupled with `quota_policies` above): the throttle upsert
+  // writes only the tenant object (`finops/pass.ts` → `episodeDb`) and the three
+  // admission clones resolve it on the tenant object now (Tier 1), so the
+  // control mirror has no writer or reader. A table the live schema no longer
+  // has must NOT appear in this manifest (the parity guard would flag it).
   table("sso_pending_flows", ["state"]),
   table("sso_provider_configs_legacy", ["tenant_id"]),
   table("static_api_keys", ["key_hash"]),

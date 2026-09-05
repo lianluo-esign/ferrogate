@@ -62,57 +62,16 @@
  */
 import {
   LOCATION_HINT_HEADER,
-  type TenantJurisdiction,
   type TenantModelCatalogSeedGraph,
   type TenantObjectAddress,
   coerceTenantLocationHint,
   locationHintFromCloudflareSignal,
   placementSignalFromRequest,
   provisionTenantStorage,
-  tenantJurisdictionForResidencyRegions,
 } from "@ferrogate/storage";
 import type { ControlPlaneDeps } from "../ports.js";
 import { PlatformModelCatalogStore } from "./platform-model-catalog.js";
 import { seedSharedConfigForTenant } from "./shared-config.js";
-
-interface ResidencyPolicyRow {
-  readonly residency_regions_json: string | null;
-}
-
-function residencyRegionsFromColumn(value: string | null): string[] {
-  if (value === null || value.trim() === "") return [];
-  try {
-    const parsed: unknown = JSON.parse(value);
-    return Array.isArray(parsed)
-      ? parsed.filter((entry): entry is string => typeof entry === "string")
-      : [];
-  } catch {
-    return [];
-  }
-}
-
-/** Read the jurisdiction implied by the policy already committed for a tenant. */
-export async function tenantJurisdictionFromPolicy(
-  controlDatabase: D1Database,
-  tenantId: string,
-): Promise<TenantJurisdiction | undefined> {
-  try {
-    const row = await controlDatabase
-      .prepare(
-        "SELECT residency_regions_json FROM quota_policies " +
-          "WHERE scope_type = 'tenant' AND scope_id = ?",
-      )
-      .bind(tenantId)
-      .first<ResidencyPolicyRow>();
-    return tenantJurisdictionForResidencyRegions(
-      residencyRegionsFromColumn(row?.residency_regions_json ?? null),
-    );
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    if (/no such (table|column):/i.test(detail)) return undefined;
-    throw error;
-  }
-}
 
 /**
  * Read the managed platform catalog for the provisioning seed, degrading ANY
@@ -179,7 +138,14 @@ export async function provisionTenantStorageFor(
       locationHint = deps.defaultTenantLocationHint;
       locationHintSource = `operator-default;${deps.defaultTenantLocationHint}`;
     }
-    const jurisdiction = await tenantJurisdictionFromPolicy(controlDatabase, tenantId);
+    // Track A hard-cut: the tenant-residency jurisdiction was formerly derived
+    // from a `quota_policies` row in the shared CONTROL mirror. That mirror is
+    // being retired (no tenant data mirrored in the control object), and at FIRST
+    // provisioning the tenant's own object does not exist yet to read residency
+    // from, so placement no longer consults it — the geo/console/operator-default
+    // location hint above is the sole placement signal. A residency-driven
+    // jurisdiction, once its authoritative home is the tenant object, is a
+    // re-placement concern outside this create-time path.
     // The MANAGED platform catalog (#891) is the seed source when this
     // deployment has adopted it. It is read over the CONTROL_DATA facade (the
     // Zero-D1 seam #879) and passed DOWN to `provisionTenantStorage` as plain
@@ -195,7 +161,6 @@ export async function provisionTenantStorageFor(
         locationHint,
         locationHintSource,
         locationHintRecordedAtUnix: Math.floor(Date.now() / 1000),
-        ...(jurisdiction === undefined ? {} : { jurisdiction }),
         catalogGraphLoader: () => exportPlatformCatalogSeed(controlDatabase),
       },
     );
@@ -220,15 +185,12 @@ export async function provisionTenantStorageFor(
     // Seed the shared control-plane config (分组/套餐/公告) DOWN into the new
     // tenant's object so its first authenticated request reads that config
     // LOCALLY, never reaching back into the control DB (#948). Addressed with
-    // the same jurisdiction/locationHint the object was just provisioned at, so
-    // the push lands in exactly the object the tenant reads from. Best-effort:
+    // the same locationHint the object was just provisioned at, so the push
+    // lands in exactly the object the tenant reads from. Best-effort:
     // `seedSharedConfigForTenant` swallows its own failures, and the cron pass
     // re-delivers idempotently, so a seed fault never fails tenant creation.
     if (outcome.status === "ready") {
-      const address: TenantObjectAddress = {
-        locationHint,
-        ...(jurisdiction === undefined ? {} : { jurisdiction }),
-      };
+      const address: TenantObjectAddress = { locationHint };
       await seedSharedConfigForTenant(deps, tenantId, address);
     }
     return outcome.status === "ready";

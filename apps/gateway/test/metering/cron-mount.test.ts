@@ -30,17 +30,25 @@
  * pinning the clock the module-level sink was constructed with, which the
  * composition root deliberately does not expose. The observable that the mutant
  * cannot fake is simpler and sits closer to the seam: the handler must issue the
- * due-list query against `env.BILLING_DB`. An empty body issues nothing.
+ * due-list query against the durable outbox of the swept backend — for an empty
+ * roster, the unattributed `PLATFORM_DATA` object (Track A hard-cut). An empty
+ * body issues nothing.
  *
- * `RecordingDatabase` is a transparent decorator over the REAL `BILLING_DB`
- * binding, so what runs is the real SQL against the real D1 — the recording is
- * only a tap on the way through.
+ * `RecordingDatabase` is a transparent decorator over the REAL `PLATFORM_DATA`
+ * object handle, so what runs is the real SQL against the real object — the
+ * recording is only a tap on the way through.
  */
 import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
 import handler from "../../src/worker.js";
 import { controlNamespaceOverD1 } from "../support/control-namespace.js";
-import { RecordingDatabase, RecordingQueue, applyControlMigration } from "./d1-harness.js";
+import {
+  RecordingDatabase,
+  RecordingQueue,
+  applyControlMigration,
+  platformBillingDb,
+  resetPlatformBilling,
+} from "./d1-harness.js";
 
 /** The table the sweep — and nothing else in a request-free isolate — reads. */
 const OUTBOX_TABLE = /billing_report_outbox/i;
@@ -58,18 +66,24 @@ function scheduledOf(): NonNullable<typeof handler.scheduled> {
 describe("MOUNT: the [triggers] cron handler reaches the durable billing outbox", () => {
   beforeEach(async () => {
     await applyControlMigration();
+    await resetPlatformBilling();
   });
 
-  it("issues the due-list query against env.BILLING_DB", async () => {
-    const db = new RecordingDatabase();
+  it("issues the due-list query against the unattributed PLATFORM_DATA object", async () => {
+    // The roster read goes through CONTROL_DATA; the UNSCOPED billing sweep (an
+    // empty roster) now resolves the PLATFORM_DATA object (Track A hard-cut moved
+    // the unattributed leg there from the removed control mirror). So two taps:
+    // `rosterDb` keeps the roster empty, `platformDb` catches the due-list query.
+    const rosterDb = new RecordingDatabase();
+    const platformDb = new RecordingDatabase(platformBillingDb());
     const queue = new RecordingQueue();
     const ctx = createExecutionContext();
 
     // Post-#863 `gatewayScheduled` enumerates the roster and sweeps each
-    // TENANT OBJECT's outbox; `env.BILLING_DB` is swept only for the unscoped
-    // compatibility posture — i.e. when the roster names no tenants. A tenant
+    // TENANT OBJECT's outbox; the PLATFORM_DATA object is swept only for the
+    // unscoped posture — i.e. when the roster names no tenants. A tenant
     // object's due-list RPC cannot be tapped the way `RecordingDatabase` taps a
-    // D1 binding, so the roster is emptied for this invocation (the pool's
+    // D1-shaped handle, so the roster is emptied for this invocation (the pool's
     // per-test isolated storage restores the fixture rows afterwards). The
     // wave-13 mutant — an emptied `gatewayScheduled` body — still fails this:
     // it issues no due-list query against ANY backend.
@@ -81,7 +95,8 @@ describe("MOUNT: the [triggers] cron handler reaches the durable billing outbox"
       { cron: "* * * * *", scheduledTime: Date.now(), noRetry: () => undefined } as never,
       {
         ...(env as unknown as Record<string, unknown>),
-        CONTROL_DATA: controlNamespaceOverD1(db),
+        CONTROL_DATA: controlNamespaceOverD1(rosterDb),
+        PLATFORM_DATA: controlNamespaceOverD1(platformDb),
         BILLING: queue,
       } as never,
       ctx,
@@ -91,7 +106,7 @@ describe("MOUNT: the [triggers] cron handler reaches the durable billing outbox"
     // The assertion the empty-body mutant fails: it executes no statement at
     // all, so nothing in `executed` can mention the outbox.
     expect(
-      db.executed.map((statement) => statement.sql).filter((sql) => OUTBOX_TABLE.test(sql)),
+      platformDb.executed.map((statement) => statement.sql).filter((sql) => OUTBOX_TABLE.test(sql)),
       "the scheduled handler never touched billing_report_outbox — is `usage.sweep` still wired?",
     ).not.toHaveLength(0);
   });

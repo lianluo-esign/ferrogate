@@ -43,7 +43,7 @@ import {
   sweepPlatformRequestLogRetention,
   sweepRequestLogRetention,
   sweepRequestLogs,
-  writeRequestLogs,
+  writeTenantRequestLogs,
 } from "../../src/requestlog/index.js";
 import type { RequestLogRecord } from "../../src/requestlog/index.js";
 import {
@@ -53,12 +53,9 @@ import {
 } from "../inference/provider-mock.js";
 import {
   applyControlMigrations,
-  controlDb,
   resetPlatformRequestLogs,
-  resetRequestLogs,
   resetTenantRequestLogs,
   storedPlatformRequestLogs,
-  storedRequestLogs,
   storedTenantRequestLogs,
 } from "./harness.js";
 
@@ -144,7 +141,8 @@ beforeAll(async () => {
 });
 
 beforeEach(async () => {
-  await resetRequestLogs();
+  // 0045 (Track A) DROPPED the control `request_logs` mirror; only the tenant
+  // and platform objects remain, so only those are reset here.
   await resetPlatformRequestLogs();
   await resetTenantRequestLogs("tenant_a");
 });
@@ -249,52 +247,67 @@ describe("policy-driven retention", () => {
   const DAY = 86_400;
 
   it("prunes rows past the window and keeps the ones inside it", async () => {
-    await writeRequestLogs(controlDb(), [
-      record("fg-old", NOW - 40 * DAY),
-      record("fg-edge", NOW - 29 * DAY),
-      record("fg-new", NOW - 1 * DAY),
-    ]);
+    // Track A retired the control mirror; the fleet-scope (undefined-tenant)
+    // sweep now runs against the authoritative PLATFORM_DATA object.
+    const platformDb = requestLogPlatformDatabaseFrom(env);
+    if (platformDb === undefined) throw new Error("PLATFORM_DATA binding is required");
+    await platformDb.batch(
+      platformRequestLogStatements(platformDb, [
+        record("fg-old", NOW - 40 * DAY),
+        record("fg-edge", NOW - 29 * DAY),
+        record("fg-new", NOW - 1 * DAY),
+      ]),
+    );
 
     const result = await sweepRequestLogRetention(
-      controlDb(),
+      platformDb,
       { policy: { maxAgeSecs: 30 * DAY, minAgeSecs: 0 } },
       NOW,
     );
     expect(result.pruned).toBe(1);
-    expect((await storedRequestLogs()).map((row) => row.request_id).sort()).toEqual([
+    expect((await storedPlatformRequestLogs()).map((row) => row.request_id).sort()).toEqual([
       "fg-edge",
       "fg-new",
     ]);
   });
 
   it("applies a per-tenant override without narrowing anyone else's window", async () => {
-    await writeRequestLogs(controlDb(), [
+    // Track A retired the shared control mirror; the fence is now the STRICT
+    // `tenant = ?` guard the sweep applies to a single authoritative object.
+    const objectDb = requestLogTenantDatabaseFromEnv(env, "acme");
+    if (objectDb === undefined) throw new Error("TENANT_DATA binding is required");
+    await objectDb.prepare(`DELETE FROM ${REQUEST_LOG_TABLE}`).bind().run();
+    // The tenant `request_logs` table keeps `tenant NOT NULL`, so both rows carry
+    // a tenant; the "other" row stands in for any row the acme override must not
+    // reach — the object isolation the topology already guarantees between tenants.
+    await writeTenantRequestLogs(objectDb, [
       record("fg-acme-old", NOW - 10 * DAY, "acme"),
       record("fg-other-old", NOW - 10 * DAY, "other"),
-      record("fg-platform-old", NOW - 10 * DAY),
     ]);
 
     await sweepRequestLogRetention(
-      controlDb(),
+      objectDb,
       { tenantId: "acme", policy: { maxAgeSecs: 5 * DAY, minAgeSecs: 0 } },
       NOW,
     );
 
-    // STRICT equality on the tenant, so the un-attributed platform row and the
-    // other tenant's row are untouched by one tenant's shorter window.
-    expect((await storedRequestLogs()).map((row) => row.request_id).sort()).toEqual([
+    // STRICT `tenant = ?` equality on the object's own rows, so the other tenant's
+    // row is untouched by acme's shorter window.
+    expect((await storedTenantRequestLogs("acme")).map((row) => row.request_id).sort()).toEqual([
       "fg-other-old",
-      "fg-platform-old",
     ]);
   });
 
   it("KEEPS everything when nothing is configured", async () => {
-    await writeRequestLogs(controlDb(), [record("fg-ancient", 0)]);
+    // Track A retired the control mirror; seed the authoritative platform object.
+    const platformDb = requestLogPlatformDatabaseFrom(env);
+    if (platformDb === undefined) throw new Error("PLATFORM_DATA binding is required");
+    await platformDb.batch(platformRequestLogStatements(platformDb, [record("fg-ancient", 0)]));
     const result = await sweepRequestLogs({}, [], NOW);
     expect(result).toEqual({ scanned: 0, pruned: 0 });
-    // The control projection is never touched by the sweep any more (its leg was
-    // retired ahead of the DROP), so a row written straight into it is untouched.
-    expect(await storedRequestLogs()).toHaveLength(1);
+    // Empty config resolves to zero scopes, so the sweep touches no database at
+    // all — the row seeded straight into the platform object is untouched.
+    expect(await storedPlatformRequestLogs()).toHaveLength(1);
   });
 
   it("keeps the scheduled sweep alive when a tenant object binding is missing", async () => {
@@ -425,9 +438,9 @@ describe("policy-driven retention", () => {
       platformRequestLogStatements(platformDb, [record("fg-platform-fleet-old", NOW - 40 * DAY)]),
     );
     expect(await storedPlatformRequestLogs()).toHaveLength(1);
-    // Control carries no unscoped rows of its own here — the platform leg wired
-    // into `sweepRequestLogs` is the only thing that can prune this row.
-    expect(await storedRequestLogs()).toHaveLength(0);
+    // The platform leg wired into `sweepRequestLogs` is the only thing that can
+    // prune this row. (0045 DROPPED the control `request_logs` mirror, so there
+    // is no control table left to assert carries no unscoped rows.)
 
     const result = await sweepRequestLogs(
       { ...(env as unknown as Record<string, unknown>), [REQUEST_LOG_RETENTION_DAYS_VAR]: "30" },

@@ -117,10 +117,32 @@ describe("tenantDatabase() is mounted on the deployed composition root", () => {
  * The suite above drives `harness/worker.ts`, which composes the REAL
  * `createGatewayApp` with `middleware: [tenantDatabase()]`. That proves the
  * middleware works in the chain — it does NOT prove the DEPLOYED array contains
- * it. This case closes exactly that gap: it imports `GATEWAY_MIDDLEWARE` from
- * `src/index.ts` (the composition root `src/worker.ts` re-exports) and asserts
- * an unprovisioned tenant is refused rather than served from the shared
- * database. Delete the wiring line and this case, and only this case, goes red.
+ * it. This block closes exactly that gap: it imports `GATEWAY_MIDDLEWARE` from
+ * `src/index.ts` (the composition root `src/worker.ts` re-exports).
+ *
+ * WHERE THE "delete the wiring line → red" PROPERTY NOW LIVES. It used to be
+ * the unprovisioned-tenant refusal below: `binding_strict` made
+ * `tenantDatabase()` resolve eagerly, so deleting it turned `fg_ghost`'s
+ * `tenant_database_unavailable` into a silent shared-database 200. Track A
+ * moved that. `residency()` is mounted immediately BEFORE `tenantDatabase()`
+ * and, since `quota_policies` became per-tenant-object authoritative, it now
+ * resolves the tenant through the SAME `resolverForEnv().forTenant()` the mount
+ * uses (`src/tenancy/quota-policy-source.ts`) to seek the residency row. So an
+ * unprovisioned tenant is refused by `residency()` FIRST — `503
+ * residency_policy_unavailable`, still a refusal, still no shared-database serve
+ * — and that refusal no longer depends on `tenantDatabase()` being in the array
+ * at all. Asserting `tenant_database_unavailable` here would assert residency's
+ * absence, not tenantDatabase's presence.
+ *
+ * The wiring fence therefore moves to the sibling "still serves a provisioned,
+ * bound tenant" case: admission step 3b (`rateLimit()`'s wallet guard) calls
+ * `tenantDatabaseOf(c)`, which throws `500` when the accessor was never mounted.
+ * Deleting `tenantDatabase()` from `GATEWAY_MIDDLEWARE` turns `fg_acme` from
+ * `200` into `500` there — the mutation was run and that is the case, and only
+ * that case, that goes red. The refusal case below keeps the security invariant
+ * it always asserted (an unprovisioned tenant is REFUSED, never served the `200
+ * {"data":[]}` a shared-database fallback would produce), which the deployed
+ * chain still upholds regardless of which tenant-object-dependent guard fronts.
  */
 describe("the DEPLOYED composition root mounts tenantDatabase()", () => {
   test("GATEWAY_MIDDLEWARE refuses an unprovisioned tenant", async () => {
@@ -129,15 +151,24 @@ describe("the DEPLOYED composition root mounts tenantDatabase()", () => {
       { headers: { authorization: "Bearer fg_ghost" } },
       env,
     );
+    // Refused, not served from a shared database. Track A: `residency()` — the
+    // tenant-object-dependent guard mounted just before `tenantDatabase()` —
+    // fronts the refusal with `residency_policy_unavailable`; either way it is a
+    // 503 with NO `data` body. The proof that `tenantDatabase()` specifically is
+    // wired is the sibling case below, not the error code here.
     expect(response.status).toBe(503);
-    expect(code((await response.json()) as Record<string, unknown>)).toBe(
-      TENANT_DATABASE_UNAVAILABLE,
-    );
+    const body = (await response.json()) as Record<string, unknown>;
+    // The 200 body a fallback would have produced must NOT be present.
+    expect(body).not.toHaveProperty("data");
   });
 
   test("GATEWAY_MIDDLEWARE still serves a provisioned, bound tenant", async () => {
-    // Guards the inverse mistake: a wiring line that refuses EVERYTHING would
-    // pass the case above while taking the gateway down.
+    // THE wiring fence (see the block comment): admission step 3b inside
+    // `rateLimit()` calls `tenantDatabaseOf(c)`, which throws `500` when the
+    // accessor was never mounted. Delete `tenantDatabase()` from
+    // `GATEWAY_MIDDLEWARE` and this case goes `200 → 500`. It also guards the
+    // inverse mistake — a wiring line that refused EVERYTHING would pass the
+    // refusal case above while taking the gateway down.
     const response = await deployedApp().request(
       MODELS,
       { headers: { authorization: "Bearer fg_acme" } },

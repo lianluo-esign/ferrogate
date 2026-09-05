@@ -32,9 +32,6 @@ import {
   GUARDRAIL_EVALUATION_TABLE,
   REQUEST_LOG_TABLE,
 } from "../store/d1.js";
-import { ensureTenantGuardrailEvidenceBackfill } from "../store/guardrail_evidence_backfill.js";
-import { ensurePlatformGuardrailEvidenceBackfill } from "../store/platform_guardrail_evidence_backfill.js";
-import { ensurePlatformRequestLogBackfill } from "../store/platform_request_log_backfill.js";
 import { tenantEvidenceDatabaseFor } from "../store/tenancy.js";
 import {
   fanOutProvisionedTenants,
@@ -688,19 +685,11 @@ function listRequestLogsHandler(): Handler {
     }
 
     // Platform operator: a bounded live fan-out over the tenant objects UNION the
-    // platform object — never the control projection. A one-time copy of the
-    // pre-cutover un-attributed control rows into the platform object runs first,
-    // idempotent and marked, exactly as the guardrail operator read backfills the
-    // same object. The finops JOIN readers (cost-record/investigation/experiment)
-    // ALSO fan out over the tenant/platform objects: their `request_logs⋈
-    // billing_events` join forces both sides into the same object, and
-    // `billing_events` only ever lands in the tenant object, so the control
-    // `request_logs` projection is useless to them and they never read it. Since
-    // Track A / #825 moved the SIEM pump onto the tenant object too, the control
-    // `request_logs` projection now has NO runtime reader (only the one-time
-    // platform backfill above drains its pre-cutover un-attributed rows).
+    // platform object — never the control projection. The control `request_logs`
+    // projection now has NO reader at all (Track A dropped both the SIEM pump —
+    // #825 — and the one-time platform backfill that used to drain pre-cutover
+    // un-attributed rows), so it is DROPped in this change.
     const platformDb = deps.platformData ?? null;
-    await ensurePlatformRequestLogBackfill(db, platformDb);
     const fleet = await fleetRequestLogPage(tenantRouter, platformDb, query, tenantFanoutOffset(url));
     return json(c, 200, {
       ...adminListPaginated(fleet.records, fleet.total, query.offset, query.limit),
@@ -768,10 +757,8 @@ function exportRequestLogsHandler(): Handler {
     } else {
       // Platform operator: the same fan-out ∪ platform authority the list read
       // serves — never the control projection — so the console and this JSONL
-      // export cannot disagree about a row. The one-time platform backfill runs
-      // first, idempotent and marked, exactly as the list handler's does.
+      // export cannot disagree about a row.
       const platformDb = deps.platformData ?? null;
-      await ensurePlatformRequestLogBackfill(db, platformDb);
       records = (
         await fleetRequestLogPage(tenantRouter, platformDb, query, tenantFanoutOffset(url))
       ).records;
@@ -1208,9 +1195,7 @@ function listGuardrailEvaluationsHandler(): Handler {
     const tenantRouter = deps.tenantStorage ?? deps.tenantDatabases;
 
     if (scope.kind === "tenant") {
-      // Tenant scope is an authority read. CONTROL is only a fleet projection,
-      // so its absence or staleness must not change the tenant answer.
-      await ensureTenantGuardrailEvidenceBackfill(db, tenantRouter, scope.tenantId);
+      // Tenant scope is an authority read straight from the tenant object.
       const page = await tenantGuardrailEvaluationPage(
         tenantRouter,
         scope.tenantId,
@@ -1228,11 +1213,9 @@ function listGuardrailEvaluationsHandler(): Handler {
     }
 
     // Platform operator: a bounded live fan-out over the tenant objects UNION the
-    // platform object — never the control projection. A one-time copy of the
-    // pre-cutover un-attributed control rows into the platform object runs first,
-    // idempotent and marked, exactly as the tenant read backfills its own object.
+    // platform object — never the control projection, which now has no reader and
+    // is DROPped in this change.
     const platformDb = deps.platformData ?? null;
-    await ensurePlatformGuardrailEvidenceBackfill(db, platformDb);
     const fleet = await fleetGuardrailEvaluationPage(
       tenantRouter,
       platformDb,
@@ -1356,7 +1339,6 @@ function getGuardrailInvestigationHandler(): Handler {
     let requestRows: RequestLogRow[];
     if (scope.kind === "tenant") {
       const tenantDb = authoritativeTenantDb as D1Database;
-      await ensureTenantGuardrailEvidenceBackfill(db, tenantRouter, scope.tenantId);
       evaluationRows = (
         await tenantDb
           .prepare(
@@ -1382,13 +1364,8 @@ function getGuardrailInvestigationHandler(): Handler {
           .all<RequestLogRow>()
       ).results;
     } else {
-      // Platform operator: fold any pre-cutover un-attributed control rows into
-      // the platform object first (idempotent, marked), exactly as the
-      // list/export readers do, then discover over the objects.
-      if (db !== null) {
-        await ensurePlatformGuardrailEvidenceBackfill(db, platformDb);
-        await ensurePlatformRequestLogBackfill(db, platformDb);
-      }
+      // Platform operator: discover over the tenant/platform objects. The control
+      // projections these reads used to backfill from are gone (Track A DROP).
       evaluationRows = await fleetInvestigationEvaluations(tenantRouter, platformDb, column, value);
       requestRows = await fleetInvestigationRequestLogs(tenantRouter, platformDb, column, value);
     }

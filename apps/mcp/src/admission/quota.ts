@@ -411,19 +411,18 @@ export function d1QuotaPolicySource(
    */
   nowSeconds: () => number = () => Math.floor(Date.now() / 1000),
   /**
-   * Resolver for the RELOCATED tenant-scoped legs (Track A red line).
+   * Resolver for the RELOCATED tenant-scoped legs (Track A red line, HARD CUT).
    *
    * Per-scope `quota_policies` and `spend_throttles` rows are TENANT data whose
-   * authoritative home is the tenant's OWN object (tenant migrations 0033 /
-   * 0032), not the shared control database. When wired — the
-   * `MCP_QUOTA_POLICY_SOURCE = "tenant_object"` posture, decided in
-   * {@link admissionFromEnv} — AND the subject is tenant-attributed, those two
-   * legs read from the resolved tenant object; the account-global `plans` floor
-   * stays on the control `db`. Absent (the default/OFF posture) or for an
-   * ownerless subject with no `tenantId`, every leg reads `db` exactly as
-   * before, so the switch is inert until an operator BOTH backfills the tenant
-   * objects AND flips the posture — never a window where the limiter reads an
-   * empty tenant object and admits unlimited traffic.
+   * SOLE authoritative home is the tenant's OWN object (tenant migrations 0033 /
+   * 0032) — the shared control mirror was removed. When wired (from
+   * {@link admissionFromEnv}, which resolves the caller tenant's object) AND the
+   * subject is tenant-attributed, those two legs read from the resolved tenant
+   * object; the account-global `plans` floor stays on the control `db`. Absent
+   * (no router bound) or for an ownerless subject with no `tenantId`, there is no
+   * object to read: the legs are SKIPPED and the limiter fails OPEN — safe
+   * because such a subject has no relocated rows to enforce and control no longer
+   * holds a mirror to fall back to.
    */
   tenantPolicyDb?: (tenantId: string) => Promise<D1Database>,
 ): QuotaPolicySource {
@@ -431,11 +430,24 @@ export function d1QuotaPolicySource(
     async policiesFor(subject: QuotaSubject): Promise<QuotaPolicySnapshot> {
       const { tenantId, projectId, workspaceId, keyId } = subject.chain;
 
-      // Where the tenant-scoped legs read from. A failure to RESOLVE the tenant
-      // handle is a 503, never a silent fall-through to control: answering from
-      // the wrong authority would apply the wrong caps to live traffic.
-      let policyDb = db;
-      if (tenantPolicyDb !== undefined && tenantId !== undefined) {
+      const scopes: [QuotaScopeKind, string][] = [];
+      if (tenantId !== undefined) scopes.push(["tenant", tenantId]);
+      if (projectId !== undefined) scopes.push(["project", projectId]);
+      if (workspaceId !== undefined) scopes.push(["workspace", workspaceId]);
+      if (keyId !== undefined) scopes.push(["key", keyId]);
+
+      const index = new Map<string, StoredQuotaPolicy>();
+      let plan: StoredPlan | undefined;
+
+      // The tenant-scoped legs (`quota_policies` + the #697 `spend_throttles`
+      // overlay) read ONLY the tenant's OWN object — never the shared control
+      // `db`, which no longer holds a mirror (Track A hard-cut). Without a
+      // resolver, or for an ownerless subject with no tenant to resolve, there is
+      // no object to read: the legs are skipped and the limiter fails OPEN, which
+      // is safe because such a subject has no relocated rows to enforce anyway. A
+      // failure to RESOLVE the handle is a 503, never a silent fall-through.
+      if (tenantPolicyDb !== undefined && tenantId !== undefined && scopes.length > 0) {
+        let policyDb: D1Database;
         try {
           policyDb = await tenantPolicyDb(tenantId);
         } catch (error) {
@@ -444,123 +456,104 @@ export function d1QuotaPolicySource(
             detail: `cloudflare d1: routed tenant quota database unavailable: ${describe(error)}`,
           };
         }
-      }
-      const routed = policyDb !== db;
 
-      // Probe each database for the tables IT now owns: `quota_policies` +
-      // `spend_throttles` on `policyDb`, `plans` + `tenants` on the control `db`.
-      // When not routed they are the same handle and the same single probe, so
-      // the pre-relocation behavior is preserved byte-for-byte. The probe is
-      // per-handle ({@link quotaTables} keys its cache on the D1 object), so the
-      // two reads never contaminate each other.
-      let policyTables: ReadonlySet<string>;
-      let planTables: ReadonlySet<string>;
-      try {
-        policyTables = await quotaTables(policyDb);
-        planTables = routed ? await quotaTables(db) : policyTables;
-      } catch (error) {
-        return {
-          ok: false,
-          detail: `cloudflare d1: control database probe failed: ${describe(error)}`,
-        };
-      }
-      // Not provisioned: there is no policy table where the policies now live,
-      // therefore no policy.
-      if (!policyTables.has(QUOTA_POLICY_TABLE)) return { ok: true, lookup: () => undefined };
-
-      const scopes: [QuotaScopeKind, string][] = [];
-      if (tenantId !== undefined) scopes.push(["tenant", tenantId]);
-      if (projectId !== undefined) scopes.push(["project", projectId]);
-      if (workspaceId !== undefined) scopes.push(["workspace", workspaceId]);
-      if (keyId !== undefined) scopes.push(["key", keyId]);
-
-      // A credential with no scope chain cannot be governed by any policy row,
-      // so the round trip is skipped rather than issued with an empty predicate
-      // (which would scan the table).
-      if (scopes.length === 0) return { ok: true, lookup: () => undefined };
-
-      const predicate = scopes.map(() => "(scope_type = ? AND scope_id = ?)").join(" OR ");
-      // The tenant-scoped statements: `quota_policies`, and `spend_throttles`
-      // (#697) when provisioned in whichever database now owns it — both on
-      // `policyDb`.
-      const statements = [
-        policyDb
-          .prepare(`SELECT ${QUOTA_POLICY_COLUMNS} FROM quota_policies WHERE ${predicate}`)
-          .bind(...scopes.flat()),
-      ];
-      const throttleIndex = policyTables.has(SPEND_THROTTLE_TABLE) ? statements.length : -1;
-      if (throttleIndex >= 0) {
-        statements.push(
-          policyDb
-            .prepare(
-              `SELECT scope_type, scope_id, rpm_limit
-                 FROM ${SPEND_THROTTLE_TABLE}
-                WHERE expires_at_unix > ? AND (${predicate})`,
-            )
-            .bind(nowSeconds(), ...scopes.flat()),
-        );
-      }
-
-      // The plan FLOOR is only reachable when both of its control tables exist;
-      // a deployment with `quota_policies` but no `plans` simply has no floor.
-      // Indices are COMPUTED rather than written as literals, because this leg is
-      // conditional: a hard-coded `results[2]` would read the PLAN row as a
-      // throttle for a credential with no tenant, and a mis-indexed read there
-      // does not fail — it applies the wrong rpm cap to live traffic. When routed
-      // the plan is its own batch on control, so its index is 0 there.
-      const planStatement =
-        tenantId !== undefined && planTables.has(PLAN_TABLE) && planTables.has(TENANT_TABLE)
-          ? db
-              .prepare("SELECT p.* FROM plans p JOIN tenants t ON t.plan_id = p.id WHERE t.id = ?")
-              .bind(tenantId)
-          : undefined;
-      const planIndex = planStatement === undefined ? -1 : routed ? 0 : statements.length;
-      if (planStatement !== undefined && !routed) {
-        statements.push(planStatement);
-      }
-
-      let results: { results?: unknown[] }[];
-      try {
-        results = (await policyDb.batch(statements)) as unknown as { results?: unknown[] }[];
-      } catch (error) {
-        return {
-          ok: false,
-          detail: `cloudflare d1: quota policy lookup failed: ${describe(error)}`,
-        };
-      }
-
-      // When routed, the plan floor is a second batch against the control `db`.
-      let planResults: { results?: unknown[] }[] = results;
-      if (routed && planStatement !== undefined) {
+        // Probe the tenant object for the tables it owns. The probe is per-handle
+        // ({@link quotaTables} keys its cache on the D1 object).
+        let policyTables: ReadonlySet<string>;
         try {
-          planResults = (await db.batch([planStatement])) as unknown as { results?: unknown[] }[];
+          policyTables = await quotaTables(policyDb);
         } catch (error) {
           return {
             ok: false,
-            detail: `cloudflare d1: quota plan lookup failed: ${describe(error)}`,
+            detail: `cloudflare d1: tenant quota database probe failed: ${describe(error)}`,
           };
+        }
+
+        // Not provisioned: there is no policy table where the policies now live,
+        // therefore no policy — the tenant legs contribute nothing and the limiter
+        // fails open for them.
+        if (policyTables.has(QUOTA_POLICY_TABLE)) {
+          const predicate = scopes.map(() => "(scope_type = ? AND scope_id = ?)").join(" OR ");
+          const statements = [
+            policyDb
+              .prepare(`SELECT ${QUOTA_POLICY_COLUMNS} FROM quota_policies WHERE ${predicate}`)
+              .bind(...scopes.flat()),
+          ];
+          const throttleIndex = policyTables.has(SPEND_THROTTLE_TABLE) ? statements.length : -1;
+          if (throttleIndex >= 0) {
+            statements.push(
+              policyDb
+                .prepare(
+                  `SELECT scope_type, scope_id, rpm_limit
+                     FROM ${SPEND_THROTTLE_TABLE}
+                    WHERE expires_at_unix > ? AND (${predicate})`,
+                )
+                .bind(nowSeconds(), ...scopes.flat()),
+            );
+          }
+
+          let results: { results?: unknown[] }[];
+          try {
+            results = (await policyDb.batch(statements)) as unknown as { results?: unknown[] }[];
+          } catch (error) {
+            return {
+              ok: false,
+              detail: `cloudflare d1: quota policy lookup failed: ${describe(error)}`,
+            };
+          }
+
+          try {
+            for (const row of (results[0]?.results ?? []) as Record<string, unknown>[]) {
+              const policy = rowToStoredPolicy(row);
+              index.set(`${policy.scopeType}:${policy.scopeId}`, policy);
+            }
+            if (throttleIndex >= 0) {
+              applySpendThrottles(index, (results[throttleIndex]?.results ?? []) as ThrottleRow[]);
+            }
+          } catch (error) {
+            if (error instanceof QuotaRowError) return { ok: false, detail: error.message };
+            throw error;
+          }
         }
       }
 
-      const index = new Map<string, StoredQuotaPolicy>();
-      let plan: StoredPlan | undefined;
-      try {
-        for (const row of (results[0]?.results ?? []) as Record<string, unknown>[]) {
-          const policy = rowToStoredPolicy(row);
-          index.set(`${policy.scopeType}:${policy.scopeId}`, policy);
+      // The plan FLOOR joins `tenants.plan_id → plans.id`, both control-owned, so
+      // it stays on the control `db` in its own round trip — only when both of its
+      // tables exist (a deployment with no `plans` simply has no floor).
+      if (tenantId !== undefined) {
+        let planTables: ReadonlySet<string>;
+        try {
+          planTables = await quotaTables(db);
+        } catch (error) {
+          return {
+            ok: false,
+            detail: `cloudflare d1: control database probe failed: ${describe(error)}`,
+          };
         }
-        if (planIndex >= 0) {
-          const planRow = (planResults[planIndex]?.results ?? [])[0] as
-            | Record<string, unknown>
-            | undefined;
-          if (planRow !== undefined) plan = rowToStoredPlan(planRow);
+        if (planTables.has(PLAN_TABLE) && planTables.has(TENANT_TABLE)) {
+          let planResults: { results?: unknown[] }[];
+          try {
+            planResults = (await db.batch([
+              db
+                .prepare("SELECT p.* FROM plans p JOIN tenants t ON t.plan_id = p.id WHERE t.id = ?")
+                .bind(tenantId),
+            ])) as unknown as { results?: unknown[] }[];
+          } catch (error) {
+            return {
+              ok: false,
+              detail: `cloudflare d1: quota plan lookup failed: ${describe(error)}`,
+            };
+          }
+          const planRow = (planResults[0]?.results ?? [])[0] as Record<string, unknown> | undefined;
+          if (planRow !== undefined) {
+            try {
+              plan = rowToStoredPlan(planRow);
+            } catch (error) {
+              if (error instanceof QuotaRowError) return { ok: false, detail: error.message };
+              throw error;
+            }
+          }
         }
-        if (throttleIndex >= 0) {
-          applySpendThrottles(index, (results[throttleIndex]?.results ?? []) as ThrottleRow[]);
-        }
-      } catch (error) {
-        if (error instanceof QuotaRowError) return { ok: false, detail: error.message };
-        throw error;
       }
 
       return {

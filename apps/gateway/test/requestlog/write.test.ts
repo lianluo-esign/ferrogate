@@ -38,7 +38,9 @@ import {
   consumeRequestLogBatch,
   createRequestLogSink,
   requestLogBindingsFromEnv,
+  requestLogTenantDatabaseFromEnv,
   requestLogging,
+  writeTenantRequestLogs,
 } from "../../src/requestlog/index.js";
 import type { RequestLogSink } from "../../src/requestlog/index.js";
 import { createGatewayApp } from "../../src/routes/index.js";
@@ -52,11 +54,10 @@ import {
 import {
   RecordingQueue,
   applyControlMigrations,
-  controlDb,
   resetPlatformRequestLogs,
-  resetRequestLogs,
+  resetTenantRequestLogs,
   storedPlatformRequestLogs,
-  storedRequestLogs,
+  storedTenantRequestLogs,
 } from "./harness.js";
 
 const BASE = "https://gw.test";
@@ -171,8 +172,11 @@ let provider: ProviderInterceptor | undefined;
 beforeAll(applyControlMigrations);
 
 beforeEach(async () => {
-  await resetRequestLogs();
+  // 0045 (Track A) DROPPED the control `request_logs` mirror; only the tenant
+  // and platform objects remain, so only those are reset here.
   await resetPlatformRequestLogs();
+  await resetTenantRequestLogs("tenant_a");
+  await resetTenantRequestLogs("tenant_b");
 });
 
 afterEach(() => {
@@ -186,8 +190,10 @@ afterEach(() => {
 
 describe("a buffered inference request produces one durable row", () => {
   it("records tenant, project, key, both model names, route, provider, status, latency and tokens", async () => {
-    // Empty first, so the row below cannot be a leftover.
-    expect(await storedRequestLogs()).toHaveLength(0);
+    // Empty first, so the row below cannot be a leftover. Track A retired the
+    // control projection: a tenant-attributed row is authoritative in its own
+    // object, so that is where this suite reads it back.
+    expect(await storedTenantRequestLogs("tenant_a")).toHaveLength(0);
 
     provider = interceptProviderFetch(() => providerJson(BUFFERED_COMPLETION));
     const h = gateway({ requestId: "fg-buffered-1" });
@@ -199,7 +205,7 @@ describe("a buffered inference request produces one durable row", () => {
     expect(response.status, await response.clone().text()).toBe(200);
     await h.settle();
 
-    const rows = await storedRequestLogs();
+    const rows = await storedTenantRequestLogs("tenant_a");
     expect(rows).toHaveLength(1);
     const row = rows[0] as NonNullable<(typeof rows)[0]>;
 
@@ -249,7 +255,7 @@ describe("a buffered inference request produces one durable row", () => {
     await h.settle();
     const after = Math.floor(Date.now() / 1000);
 
-    const row = (await storedRequestLogs())[0] as {
+    const row = (await storedTenantRequestLogs("tenant_a"))[0] as {
       started_at_unix: number;
       completed_at_unix: number;
     };
@@ -278,7 +284,7 @@ describe("a STREAMED inference request records the tokens the tap reported", () 
     await response.text();
     await h.settle();
 
-    const rows = await storedRequestLogs();
+    const rows = await storedTenantRequestLogs("tenant_a");
     expect(rows).toHaveLength(1);
     const row = rows[0] as NonNullable<(typeof rows)[0]>;
     expect(row.request_id).toBe("fg-stream-1");
@@ -306,7 +312,7 @@ describe("a REFUSED request is still evidence", () => {
     expect(response.status).toBe(400);
     await h.settle();
 
-    const rows = await storedRequestLogs();
+    const rows = await storedTenantRequestLogs("tenant_a");
     expect(rows).toHaveLength(1);
     const row = rows[0] as NonNullable<(typeof rows)[0]>;
     expect(row.status_code).toBe(400);
@@ -332,7 +338,7 @@ describe("a REFUSED request is still evidence", () => {
     expect(response.status).toBeGreaterThanOrEqual(400);
     await h.settle();
 
-    const rows = await storedRequestLogs();
+    const rows = await storedTenantRequestLogs("tenant_a");
     expect(rows).toHaveLength(1);
     const row = rows[0] as NonNullable<(typeof rows)[0]>;
     // The provider WAS chosen and WAS called: an audit that dropped failed
@@ -344,11 +350,13 @@ describe("a REFUSED request is still evidence", () => {
 
   it("records a NON-INFERENCE operation too", async () => {
     const h = gateway();
+    // An OPERATOR credential carries no tenant → the row is unattributed and its
+    // authoritative home is the PLATFORM_DATA object, not a tenant object.
     const response = await h.call("/v1/models", { headers: OPERATOR });
     expect(response.status).toBe(200);
     await h.settle();
 
-    const rows = await storedRequestLogs();
+    const rows = await storedPlatformRequestLogs();
     expect(rows).toHaveLength(1);
     const row = rows[0] as NonNullable<(typeof rows)[0]>;
     expect(row.status_code).toBe(200);
@@ -372,17 +380,17 @@ describe("the Queue producer/consumer pair", () => {
 
     expect(queue.sent).toHaveLength(1);
     expect(h.sink.stats).toMatchObject({ queued: 1, written: 0, dropped: 0 });
-    // The hot path is off the write, so D1 is still empty at this point.
-    expect(await storedRequestLogs()).toHaveLength(0);
+    // The hot path is off the write, so the tenant object is still empty here.
+    expect(await storedTenantRequestLogs("tenant_a")).toHaveLength(0);
 
-    // …and the consumer is what lands it.
+    // …and the consumer is what lands it in the tenant's authoritative object.
     const result = await consumeRequestLogBatch(
       { messages: queue.sent.map((body) => ({ body })) },
       env,
     );
     expect(result).toMatchObject({ written: 1, malformed: 0, retried: false });
 
-    const rows = await storedRequestLogs();
+    const rows = await storedTenantRequestLogs("tenant_a");
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({
       request_id: "fg-queued-1",
@@ -392,66 +400,35 @@ describe("the Queue producer/consumer pair", () => {
     });
   });
 
-  /**
-   * Track A / G2: each control-projection leg is independently gated. With ONLY
-   * the guardrail leg off (the intermediate posture), the request_logs
-   * compatibility projection is UNCHANGED — this pins that the two flags do not
-   * bleed into each other.
-   */
-  it("still writes the request_logs control projection when only the guardrail leg is gated off", async () => {
-    provider = interceptProviderFetch(() => providerJson(BUFFERED_COMPLETION));
-    const queue = new RecordingQueue();
-    const h = gateway({ requestId: "fg-g2-reqlog", queue });
-    await h.call("/v1/chat/completions", { method: "POST", headers: AUTHED, body: chatBody() });
-    await h.settle();
-
-    expect(await storedRequestLogs()).toHaveLength(0);
-
-    const result = await consumeRequestLogBatch(
-      { messages: queue.sent.map((body) => ({ body })) },
-      env,
-      undefined,
-      undefined,
-      undefined,
-      { projectGuardrailToControl: false },
-    );
-    expect(result).toMatchObject({ written: 1, malformed: 0, retried: false });
-
-    const rows = await storedRequestLogs();
-    expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ request_id: "fg-g2-reqlog", status_code: 200 });
-  });
+  // Track A retired the request_logs control projection and the per-leg
+  // `projectGuardrailToControl`/`projectRequestLogToControl` gates with it, so the
+  // former "only the guardrail leg gated off keeps the request_logs mirror" case
+  // no longer has a control mirror to assert against and was deleted.
 
   /**
-   * Track A / G2 (request_logs): this is the flag pair `src/index.ts` passes on
-   * the live path — BOTH legs off. The tenant object stays authoritative and the
-   * consumer still reports the row written, but the control `request_logs`
-   * projection mirror stops growing (its last runtime reader, the SIEM pump,
-   * moved onto the tenant object in #825; the finops JOIN readers fan out). The
-   * row must still land in the tenant's own object.
+   * Track A (request_logs): the tenant object is the sole authoritative home. The
+   * consumer reports the row written and it lands in the tenant's own object;
+   * there is no control projection mirror to fall back to any more.
    */
-  it("skips the request_logs control projection when its leg is gated off, keeping the tenant object", async () => {
+  it("lands an attributed row in the tenant object and never the control projection", async () => {
     provider = interceptProviderFetch(() => providerJson(BUFFERED_COMPLETION));
     const queue = new RecordingQueue();
     const h = gateway({ requestId: "fg-g2-reqlog-off", queue });
     await h.call("/v1/chat/completions", { method: "POST", headers: AUTHED, body: chatBody() });
     await h.settle();
 
-    expect(await storedRequestLogs()).toHaveLength(0);
+    expect(await storedTenantRequestLogs("tenant_a")).toHaveLength(0);
 
     const result = await consumeRequestLogBatch(
       { messages: queue.sent.map((body) => ({ body })) },
       env,
-      undefined,
-      undefined,
-      undefined,
-      { projectGuardrailToControl: false, projectRequestLogToControl: false },
     );
-    // The row is still WRITTEN — the tenant object is its authoritative home.
+    // The row is WRITTEN — the tenant object is its authoritative home.
     expect(result).toMatchObject({ written: 1, malformed: 0, retried: false });
 
-    // The control projection mirror got nothing: the leg is retired.
-    expect(await storedRequestLogs()).toHaveLength(0);
+    // The control projection mirror is retired: 0045 (Track A) DROPPED the
+    // control `request_logs` table entirely, so there is nothing left to assert
+    // "received nothing" against — the tenant object below is the sole authority.
 
     // …but the tenant's authoritative object has the row.
     const objectRows = await env.TENANT_DATA.get(env.TENANT_DATA.idFromName("tenant_a")).query({
@@ -463,12 +440,11 @@ describe("the Queue producer/consumer pair", () => {
   });
 
   /**
-   * Track A / G2 (request_logs), unscoped leg: an UNATTRIBUTED row has no tenant
-   * object, so its authoritative home is PLATFORM_DATA (Zero-D1 Plan B, G1). With
-   * the control leg gated off, the platform dual-write must still land it while
-   * the control mirror stays empty — nothing is dropped, only the mirror stops.
+   * Track A (request_logs), unscoped leg: an UNATTRIBUTED row has no tenant
+   * object, so its sole authoritative home is PLATFORM_DATA (Zero-D1 Plan B). The
+   * consumer must land it there while the control mirror stays empty.
    */
-  it("keeps the platform object for an unscoped row when the control leg is gated off", async () => {
+  it("lands an unscoped row in the platform object and never the control projection", async () => {
     expect(await storedPlatformRequestLogs()).toHaveLength(0);
     provider = interceptProviderFetch(() => providerJson(BUFFERED_COMPLETION));
     const queue = new RecordingQueue();
@@ -482,15 +458,11 @@ describe("the Queue producer/consumer pair", () => {
     const result = await consumeRequestLogBatch(
       { messages: queue.sent.map((body) => ({ body })) },
       env,
-      undefined,
-      undefined,
-      undefined,
-      { projectGuardrailToControl: false, projectRequestLogToControl: false },
     );
     expect(result).toMatchObject({ malformed: 0, retried: false });
 
-    // Control mirror empty; platform object authoritative and populated.
-    expect(await storedRequestLogs()).toHaveLength(0);
+    // Control mirror retired (0045 DROPPED the control `request_logs` table);
+    // the platform object is authoritative and populated.
     const platform = await storedPlatformRequestLogs();
     expect(platform).toHaveLength(1);
     expect(platform[0]?.request_id).toBe(requestId);
@@ -509,7 +481,7 @@ describe("the Queue producer/consumer pair", () => {
     await consumeRequestLogBatch({ messages }, env);
     await consumeRequestLogBatch({ messages }, env);
 
-    const rows = await storedRequestLogs();
+    const rows = await storedTenantRequestLogs("tenant_a");
     expect(rows).toHaveLength(1);
     expect(rows[0]?.total_tokens).toBe(15);
   });
@@ -563,7 +535,8 @@ describe("the Queue producer/consumer pair", () => {
     expect(result).toMatchObject({ written: 1, malformed: 2, retried: false });
     expect(acked).toBe(2);
     expect(retried).toBe(false);
-    expect((await storedRequestLogs()).map((row) => row.request_id)).toEqual(["fg-good"]);
+    // `fg-good` carries no tenant, so its authoritative home is the platform object.
+    expect((await storedPlatformRequestLogs()).map((row) => row.request_id)).toEqual(["fg-good"]);
   });
 
   /** A queue outage degrades the batching, never the evidence. */
@@ -577,7 +550,9 @@ describe("the Queue producer/consumer pair", () => {
 
     expect(queue.sent).toHaveLength(0);
     expect(h.sink.stats).toMatchObject({ queued: 0, written: 1, failed: 1 });
-    expect((await storedRequestLogs()).map((row) => row.request_id)).toEqual(["fg-queue-down"]);
+    expect((await storedTenantRequestLogs("tenant_a")).map((row) => row.request_id)).toEqual([
+      "fg-queue-down",
+    ]);
   });
 });
 
@@ -617,7 +592,8 @@ describe("the data plane does not depend on the evidence path", () => {
     // The tenant object is authoritative, so removing the fleet projection
     // must not turn a tenant write into a control-D1 fallback or a drop.
     expect(sink.stats).toMatchObject({ dropped: 0, queued: 0, written: 1 });
-    expect(await storedRequestLogs()).toHaveLength(0);
+    // (0045 DROPPED the control `request_logs` mirror; the "no control fallback"
+    // pin is retired — the tenant object below is the sole authority.)
     const requestId = response.headers.get("x-request-id");
     expect(requestId).not.toBeNull();
     const objectRows = await env.TENANT_DATA.get(env.TENANT_DATA.idFromName("tenant_a")).query({
@@ -633,7 +609,9 @@ describe("the data plane does not depend on the evidence path", () => {
     const errors: string[] = [];
     const sink = createRequestLogSink({
       queue: () => undefined,
-      database: () => ({
+      // Track A: an attributed row's authoritative home is its tenant object, so
+      // the failing double is the tenant-database resolver (no control fallback).
+      tenantDatabase: () => ({
         prepare: () => ({
           bind: () => ({
             run: async () => {
@@ -679,11 +657,11 @@ describe("the data plane does not depend on the evidence path", () => {
 // The platform dual-write leg (Zero-D1 Plan B, G1)
 // ---------------------------------------------------------------------------
 
-describe("unscoped request logs dual-write the platform object", () => {
-  it("lands in the PLATFORM_DATA object AND still writes the control projection", async () => {
-    // Empty first, so nothing below can be a leftover.
+describe("unscoped request logs land in the platform object", () => {
+  it("lands in the PLATFORM_DATA object, the sole authoritative home", async () => {
+    // Empty first, so nothing below can be a leftover. (0045 DROPPED the control
+    // `request_logs` mirror, so only the platform object is checked.)
     expect(await storedPlatformRequestLogs()).toHaveLength(0);
-    expect(await storedRequestLogs()).toHaveLength(0);
 
     // An OPERATOR credential carries no tenant, so its row is UNATTRIBUTED — the
     // one class of request with no TenantDataObject to be authoritative for it,
@@ -696,29 +674,25 @@ describe("unscoped request logs dual-write the platform object", () => {
     const requestId = response.headers.get("x-request-id");
     expect(requestId).not.toBeNull();
 
-    // The platform object is the authoritative home this row will be READ from
-    // once the projection is retired: `tenant` NULL, because the whole table IS
-    // the platform domain and nothing in it carries an owner.
+    // The platform object is the SOLE authoritative home now that Track A retired
+    // the control projection: `tenant` NULL, because the whole table IS the
+    // platform domain and nothing in it carries an owner.
     const platform = await storedPlatformRequestLogs();
     expect(platform).toHaveLength(1);
     expect(platform[0]?.request_id).toBe(requestId);
     expect(platform[0]?.tenant).toBeNull();
 
-    // G1 is strictly ADDITIVE: the control projection write is UNCHANGED, so the
-    // same row is still there for every current operator reader.
-    const control = await storedRequestLogs();
-    expect(control).toHaveLength(1);
-    expect(control[0]?.request_id).toBe(requestId);
-    expect(control[0]?.tenant).toBeNull();
+    // Track A: 0045 DROPPED the control `request_logs` mirror; it is never
+    // written and no longer exists to assert emptiness against.
   });
 
-  it("keeps the control projection when the platform leg fails (best-effort, never drops)", async () => {
+  it("counts a platform-object write failure, never a control fallback", async () => {
     expect(await storedPlatformRequestLogs()).toHaveLength(0);
 
-    // Real control DB, no queue, but a platform object that refuses every batch.
-    // The additive leg must swallow this and the control write must still land —
-    // control is the COUNTED authority for these rows in G1, so a platform blip
-    // is a narrower future read, never lost evidence.
+    // No queue, and a platform object that refuses every batch. The platform
+    // object is now the SOLE authoritative home for an unscoped row (Track A
+    // retired the control mirror), so a failure here is a COUNTED `failed`, not a
+    // best-effort blip that a control write papers over.
     const errors: string[] = [];
     const sink = createRequestLogSink({
       ...requestLogBindingsFromEnv,
@@ -746,18 +720,16 @@ describe("unscoped request logs dual-write the platform object", () => {
       },
       ctx,
     );
+    // The data plane still serves 200 — a logging failure is never a request
+    // failure — but nothing landed anywhere and the failure is counted.
     expect(response.status).toBe(200);
     await waitOnExecutionContext(ctx);
 
-    // The REAL platform object got nothing (the failing double intercepted the
-    // write), but the control projection is intact — and the platform blip is
-    // REPORTED through diagnostics, not counted as a sink failure or a drop.
     expect(await storedPlatformRequestLogs()).toHaveLength(0);
-    const control = await storedRequestLogs();
-    expect(control).toHaveLength(1);
-    expect(control[0]?.tenant).toBeNull();
+    // (0045 DROPPED the control `request_logs` mirror; the "no control fallback"
+    // pin is retired.)
     expect(errors).toEqual(["d1"]);
-    expect(sink.stats).toMatchObject({ written: 1, failed: 0, dropped: 0 });
+    expect(sink.stats).toMatchObject({ written: 0, failed: 1, dropped: 0 });
   });
 });
 
@@ -767,11 +739,10 @@ describe("unscoped request logs dual-write the platform object", () => {
 
 describe("a later write MERGES into the row rather than blanking it", () => {
   it("never erases a fact a previous leg established", async () => {
-    await applyControlMigrations();
-    const db = controlDb();
-    const { writeRequestLogs } = await import("../../src/requestlog/index.js");
+    const db = requestLogTenantDatabaseFromEnv(env, "tenant_a");
+    if (db === undefined) throw new Error("TENANT_DATA binding is required");
 
-    await writeRequestLogs(db, [
+    await writeTenantRequestLogs(db, [
       {
         requestId: "fg-merge",
         method: "POST",
@@ -789,7 +760,7 @@ describe("a later write MERGES into the row rather than blanking it", () => {
     ]);
 
     // A second leg that knows only the guardrail verdict.
-    await writeRequestLogs(db, [
+    await writeTenantRequestLogs(db, [
       {
         requestId: "fg-merge",
         method: "POST",
@@ -804,7 +775,7 @@ describe("a later write MERGES into the row rather than blanking it", () => {
       },
     ]);
 
-    const rows = await storedRequestLogs();
+    const rows = await storedTenantRequestLogs("tenant_a");
     expect(rows).toHaveLength(1);
     // The facts only the FIRST write knew are still there.
     expect(rows[0]).toMatchObject({
@@ -814,10 +785,15 @@ describe("a later write MERGES into the row rather than blanking it", () => {
     });
   });
 
-  it("keeps the same logical request id separate across tenant projections", async () => {
-    await applyControlMigrations();
-    const db = controlDb();
-    const { writeRequestLogs } = await import("../../src/requestlog/index.js");
+  it("keeps the same logical request id separate across tenant objects", async () => {
+    // Track A: each tenant's rows live in its OWN object, so the same logical
+    // request id in two tenants is two rows in two objects — not one shared
+    // projection table keyed by a composite projection_key.
+    const dbA = requestLogTenantDatabaseFromEnv(env, "tenant_a");
+    const dbB = requestLogTenantDatabaseFromEnv(env, "tenant_b");
+    if (dbA === undefined || dbB === undefined) {
+      throw new Error("TENANT_DATA binding is required");
+    }
     const base = {
       requestId: "fg-collision",
       method: "POST",
@@ -829,46 +805,21 @@ describe("a later write MERGES into the row rather than blanking it", () => {
       guardrailVerdict: "allowed" as const,
       streamed: false,
     };
-    await writeRequestLogs(db, [
-      { ...base, tenantId: "tenant_a", route: "a" },
-      { ...base, tenantId: "tenant_b", route: "b" },
-    ]);
+    await writeTenantRequestLogs(dbA, [{ ...base, tenantId: "tenant_a", route: "a" }]);
+    await writeTenantRequestLogs(dbB, [{ ...base, tenantId: "tenant_b", route: "b" }]);
 
-    const rows = await storedRequestLogs();
-    expect(rows).toHaveLength(2);
-    expect(rows.map((row) => [row.tenant, row.route])).toEqual([
-      ["tenant_a", "a"],
-      ["tenant_b", "b"],
-    ]);
+    expect((await storedTenantRequestLogs("tenant_a")).map((row) => [row.tenant, row.route])).toEqual(
+      [["tenant_a", "a"]],
+    );
+    expect((await storedTenantRequestLogs("tenant_b")).map((row) => [row.tenant, row.route])).toEqual(
+      [["tenant_b", "b"]],
+    );
   });
 
-  it("uses SQLite code-point length for non-BMP tenant projection keys", async () => {
-    await applyControlMigrations();
-    const db = controlDb();
-    const { writeRequestLogs } = await import("../../src/requestlog/index.js");
-    const tenantId = "tenant-😀";
-
-    await writeRequestLogs(db, [
-      {
-        requestId: "fg-unicode-tenant",
-        method: "POST",
-        path: "/v1/chat/completions",
-        statusCode: 200,
-        startedAtUnix: 1_700_000_002,
-        completedAtUnix: 1_700_000_002,
-        latencyMs: 1,
-        guardrailVerdict: "allowed",
-        streamed: false,
-        tenantId,
-      },
-    ]);
-
-    const rows = await db
-      .prepare("SELECT projection_key FROM request_logs WHERE request_id = ?")
-      .bind("fg-unicode-tenant")
-      .all<{ projection_key: string }>();
-    expect(rows.results).toEqual([{ projection_key: `8:${tenantId}:fg-unicode-tenant` }]);
-  });
+  // Track A retired the control projection and its composite `projection_key`
+  // column (tenant objects are id-keyed by `request_id`), so the former
+  // "SQLite code-point length for non-BMP projection keys" case no longer has a
+  // projection_key to assert against and was deleted.
 });
 
 /**
@@ -888,19 +839,19 @@ describe("a failing consumer batch is logged, not swallowed", () => {
     };
     let retried = false;
     try {
-      const throwingProjection = {
+      const throwingObject = {
         prepare: () => ({ bind: () => ({}) }),
         batch: async () => {
           throw new Error("D1_ERROR: no such table: request_logs: SQLITE_ERROR");
         },
-      } as unknown as Parameters<typeof consumeRequestLogBatch>[2] extends (e: unknown) => infer R
-        ? R
-        : never;
+      };
 
       const result = await consumeRequestLogBatch(
         {
           messages: [
             {
+              // No tenant → the row's authoritative home is the PLATFORM_DATA
+              // object; the failing double is therefore the platform resolver.
               body: {
                 object: "request_log",
                 request_id: "fg-doomed",
@@ -920,7 +871,8 @@ describe("a failing consumer batch is logged, not swallowed", () => {
           },
         },
         env,
-        () => throwingProjection,
+        undefined,
+        () => throwingObject as never,
       );
       expect(result.retried).toBe(true);
     } finally {

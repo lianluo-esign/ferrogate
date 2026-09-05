@@ -46,6 +46,7 @@ import {
 } from "../src/store/quota_registry.js";
 import { applySchema, db, resetD1 } from "./d1.js";
 import { BASE, arm, bearer, jsonRequest, operatorKey } from "./harness.js";
+import { tenantObjectDb } from "./tenant-object.js";
 
 const KEY = operatorKey.secret;
 
@@ -123,12 +124,20 @@ function rowToPlan(row: Record<string, unknown>): StoredPlan {
   };
 }
 
-/** The gateway's policy statement, for one `(scope_type, scope_id)` pair. */
+/**
+ * The gateway's policy statement, for one `(scope_type, scope_id)` pair.
+ *
+ * Track A hard-cut: `quota_policies` is no longer mirrored in the shared control
+ * facade — the projection writes ONLY the owning tenant's OWN object, which is
+ * exactly where the gateway's `d1QuotaPolicySource` now resolves the row (via its
+ * tenant resolver). Every scope in this file is owned by `acme`, so the gateway's
+ * verbatim column read is issued against `acme`'s object.
+ */
 async function gatewayPolicyRow(
   scopeType: string,
   scopeId: string,
 ): Promise<Record<string, unknown> | null> {
-  return await db()
+  return await tenantObjectDb("acme")
     .prepare(
       `SELECT ${GATEWAY_QUOTA_POLICY_COLUMNS} FROM ${QUOTA_POLICIES_TABLE} WHERE (scope_type = ? AND scope_id = ?)`,
     )
@@ -179,10 +188,13 @@ beforeEach(async () => {
   arm({ store: "d1", staticKeys: [operatorKey] });
   await resetD1();
   await db().batch([
-    db().prepare(`DELETE FROM ${QUOTA_POLICIES_TABLE}`),
     db().prepare(`DELETE FROM ${PLANS_TABLE}`),
     db().prepare(`DELETE FROM ${TENANTS_TABLE}`),
   ]);
+  // Track A migration 0045 DROPPED the control `quota_policies` mirror: the typed
+  // enforcement row now lives ONLY in the owning tenant's object (where
+  // `gatewayPolicyRow` reads it), so the clean slate is cleared there.
+  await tenantObjectDb("acme").prepare(`DELETE FROM ${QUOTA_POLICIES_TABLE}`).run();
   await db()
     .prepare(
       `INSERT INTO ${TENANTS_TABLE}
@@ -253,7 +265,7 @@ describe("MOUNT: a quota policy created through the admin API is enforceable", (
       enabled: true,
     });
     expect(
-      await db()
+      await tenantObjectDb("acme")
         .prepare(
           "SELECT residency_regions_json, require_zero_data_retention, log_residency " +
             "FROM quota_policies WHERE scope_type = 'tenant' AND scope_id = ?",

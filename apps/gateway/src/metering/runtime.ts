@@ -32,7 +32,7 @@
  * `wrangler.toml`.
  */
 
-import { controlDatabaseFrom } from "../control-data.js";
+import { platformDatabaseFrom } from "../control-data.js";
 import type { UsageRecordContext } from "../inference/ports.js";
 import type { MeteringDatabase, MeteringQueue } from "./ports.js";
 import { usageDatabaseFrom } from "./usage-ledger.js";
@@ -106,8 +106,11 @@ export function meteringDatabaseFrom(
   if (typeof env !== "object" || env === null) {
     return undefined;
   }
-  const bindings = env as MeteringBindings;
-  const candidate = controlDatabaseFrom(env);
+  // Track A hard-cut: unattributed (`tenant IS NULL`) settlement now lands in the
+  // PLATFORM_DATA singleton — its authoritative home — never the shared control
+  // projection. A single store and a single outbox preserve the single-drain-source
+  // invariant the sweep depends on.
+  const candidate = platformDatabaseFrom(env);
   return isMeteringDatabase(candidate) ? candidate : undefined;
 }
 

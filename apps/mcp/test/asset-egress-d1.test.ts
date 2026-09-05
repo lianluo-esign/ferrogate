@@ -93,12 +93,11 @@ function context(): DispatchContext {
 
 beforeEach(async () => {
   resetInMemoryPorts();
-  const { BILLING_DB, ASSETS, TENANT_DATA } = requireBindings();
-  await BILLING_DB.batch([
-    BILLING_DB.prepare("DELETE FROM billing_report_outbox"),
-    BILLING_DB.prepare("DELETE FROM billing_ledger"),
-    BILLING_DB.prepare("DELETE FROM billing_events"),
-  ]);
+  const { ASSETS, TENANT_DATA } = requireBindings();
+  // Track A 0045 dropped the control billing mirrors (`billing_events` /
+  // `billing_ledger` / `billing_report_outbox`): attributed billing is tenant-
+  // object authoritative now, so there is no control copy to reset — only the
+  // tenant object below.
   const tenant = tenantDatabase(TENANT_DATA, TENANT);
   const rows = await tenant
     .prepare("SELECT storage_uri FROM stored_assets")
@@ -145,8 +144,8 @@ describe("#801 MCP non-dev D1 asset egress", () => {
     expect(JSON.parse(events.results?.[0]?.event_json ?? "{}").tenant.api_key_id).toBe(API_KEY_ID);
     const pull = ports.audit.events().find((event) => event.action === "asset.pull");
     expect(pull?.target).toBe(ASSET_ID);
-    const controlRows = await BILLING_DB.prepare("SELECT id FROM billing_ledger").all();
-    expect(controlRows.results).toEqual([]);
+    // No control-side leakage check: 0045 dropped `billing_ledger` from control
+    // entirely, so there is no mirror table left to read.
   });
 
   it("routes asset billing to the tenant Durable Object when it is bound", async () => {
@@ -167,7 +166,6 @@ describe("#801 MCP non-dev D1 asset egress", () => {
       .prepare("SELECT tenant_id, api_key_id FROM billing_ledger")
       .all<{ tenant_id: string; api_key_id: string | null }>();
     expect(tenantRows.results).toEqual([{ tenant_id: TENANT, api_key_id: API_KEY_ID }]);
-    const controlRows = await BILLING_DB.prepare("SELECT id FROM billing_ledger").all();
-    expect(controlRows.results).toEqual([]);
+    // 0045 dropped control's `billing_ledger`; the tenant object is the sole home.
   });
 });

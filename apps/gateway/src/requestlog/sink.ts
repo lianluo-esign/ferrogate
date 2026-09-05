@@ -9,8 +9,9 @@
  *     └── ctx.waitUntil(sink.write(record, { env, ctx }))
  *            ├── env.REQUEST_LOG bound?  → Queue.send(wire)       ← preferred
  *            │      … later, on the consumer:
- *            │      queue(batch) → object batch → CONTROL_DB projection
- *            └── else bindings bound?   → object batch → projection inline
+ *            │      queue(batch) → tenant object (attributed)
+ *            │                   / PLATFORM_DATA object (un-attributed)
+ *            └── else bindings bound?   → same object writes inline
  * ```
  *
  * The Queue is preferred because it is the shape that survives volume: a
@@ -18,12 +19,18 @@
  * round trips, and a D1 that is briefly unavailable becomes a redelivery with
  * backoff instead of a lost row. The direct-D1 arm is not a stand-in for it —
  * it is the correct behaviour for `wrangler dev --local` and for a deployment
- * that has not provisioned a queue, and it uses the same object/projection
- * writer, so the two arms cannot drift into storing different rows.
+ * that has not provisioned a queue, and it uses the same object writers, so the
+ * two arms cannot drift into storing different rows.
  *
- * With NEITHER bound the sink counts a `dropped` and returns. That is the
- * degradation, and it is deliberately COUNTED rather than silent: a gateway
- * whose evidence is going nowhere must be able to say so
+ * Track A: there is no shared-CONTROL projection any more. An attributed row's
+ * sole home is its tenant's own object; an un-attributed (platform-operator)
+ * row's sole home is the PLATFORM_DATA singleton. The gateway no longer mirrors
+ * either into the shared CONTROL object.
+ *
+ * With NO writer for a row (no tenant object for an attributed row, no
+ * PLATFORM_DATA for an un-attributed one) the sink counts a `dropped`/`failed`
+ * and returns. That is the degradation, and it is deliberately COUNTED rather
+ * than silent: a gateway whose evidence is going nowhere must be able to say so
  * ({@link RequestLogSink.stats}, surfaced on the readiness/metrics surface),
  * because "no rows" and "no writer" look identical from the admin API — which
  * is the whole defect #664 exists to close.
@@ -39,12 +46,11 @@
  * turned a compliance feature into an outage.
  */
 
-import { controlDatabaseFrom, platformDatabaseFrom } from "../control-data.js";
+import { platformDatabaseFrom } from "../control-data.js";
 import {
   type RequestLogDatabase,
   platformRequestLogStatements,
   requestLogTenantDatabaseFrom,
-  writeRequestLogs,
   writeTenantRequestLogs,
 } from "./d1.js";
 import type { RequestLogRecord } from "./record.js";
@@ -66,9 +72,9 @@ export interface RequestLogQueue {
 export interface RequestLogStats {
   /** Records handed to the Queue producer. */
   readonly queued: number;
-  /** Records written straight to the object/projection path (no queue bound). */
+  /** Records written straight to the object path (no queue bound). */
   readonly written: number;
-  /** Records with nowhere to go — no queue AND no control database. */
+  /** Records with nowhere to go — no queue AND no destination object. */
   readonly dropped: number;
   /** Writes that were attempted and rejected. */
   readonly failed: number;
@@ -78,11 +84,6 @@ export interface RequestLogStats {
 export interface RequestLogBindings {
   /** `[[queues.producers]] binding = "REQUEST_LOG"`. */
   readonly REQUEST_LOG?: unknown;
-  /**
-   * `[[d1_databases]] binding = "CONTROL_DB"` — the derived compatibility
-   * projection for fleet joins. It is not authoritative for tenant rows.
-   */
-  readonly CONTROL_DB?: unknown;
   /** `TENANT_DATA` — one authoritative request-log database per tenant. */
   readonly TENANT_DATA?: unknown;
 }
@@ -119,13 +120,6 @@ export function requestLogQueueFrom(env: unknown): RequestLogQueue | undefined {
   return isQueue(candidate) ? candidate : undefined;
 }
 
-/** `env.CONTROL_DB`, when it really is the derived projection D1 binding. */
-export function requestLogDatabaseFrom(env: unknown): RequestLogDatabase | undefined {
-  if (typeof env !== "object" || env === null) return undefined;
-  const candidate = controlDatabaseFrom(env);
-  return isDatabase(candidate) ? candidate : undefined;
-}
-
 /** Resolve the authoritative object-backed database for one tenant. */
 export function requestLogTenantDatabaseFromEnv(
   env: unknown,
@@ -153,7 +147,6 @@ export interface RequestLogDiagnostics {
 
 export interface RequestLogSinkOptions {
   readonly queue?: (env: unknown) => RequestLogQueue | undefined;
-  readonly database?: (env: unknown) => RequestLogDatabase | undefined;
   readonly tenantDatabase?: (env: unknown, tenantId: string) => RequestLogDatabase | undefined;
   /** Zero-D1 Plan B: the PLATFORM_DATA singleton for unattributed rows. */
   readonly platformDatabase?: (env: unknown) => RequestLogDatabase | undefined;
@@ -170,17 +163,15 @@ export interface RequestLogSinkOptions {
  * length, and the same conclusion.
  */
 export const requestLogBindingsFromEnv: Required<
-  Pick<RequestLogSinkOptions, "queue" | "database" | "tenantDatabase" | "platformDatabase">
+  Pick<RequestLogSinkOptions, "queue" | "tenantDatabase" | "platformDatabase">
 > = {
   queue: requestLogQueueFrom,
-  database: requestLogDatabaseFrom,
   tenantDatabase: requestLogTenantDatabaseFromEnv,
   platformDatabase: requestLogPlatformDatabaseFrom,
 };
 
 export class RequestLogSink {
   readonly #queueOf: (env: unknown) => RequestLogQueue | undefined;
-  readonly #databaseOf: (env: unknown) => RequestLogDatabase | undefined;
   readonly #tenantDatabaseOf: (env: unknown, tenantId: string) => RequestLogDatabase | undefined;
   readonly #platformDatabaseOf: (env: unknown) => RequestLogDatabase | undefined;
   readonly #diagnostics: RequestLogDiagnostics | undefined;
@@ -191,7 +182,6 @@ export class RequestLogSink {
 
   constructor(options: RequestLogSinkOptions = {}) {
     this.#queueOf = options.queue ?? requestLogQueueFrom;
-    this.#databaseOf = options.database ?? requestLogDatabaseFrom;
     this.#tenantDatabaseOf = options.tenantDatabase ?? requestLogTenantDatabaseFromEnv;
     this.#platformDatabaseOf = options.platformDatabase ?? requestLogPlatformDatabaseFrom;
     this.#diagnostics = options.diagnostics;
@@ -231,6 +221,8 @@ export class RequestLogSink {
 
     try {
       if (record.tenantId !== undefined && record.tenantId !== "") {
+        // Attributed rows: the tenant's own object is the sole, authoritative
+        // home. Track A removed the shared-CONTROL projection mirror.
         const tenantDb = this.#tenantDatabaseOf(runtime.env, record.tenantId);
         if (tenantDb === undefined) {
           throw new Error(
@@ -238,34 +230,19 @@ export class RequestLogSink {
           );
         }
         await writeTenantRequestLogs(tenantDb, [record]);
-
-        // Projection second: a projection failure is visible, but it cannot
-        // make a successful object write non-authoritative.
-        const projection = this.#databaseOf(runtime.env);
-        if (projection !== undefined) await writeRequestLogs(projection, [record]);
       } else {
-        // Platform/unattributed rows have no tenant object by definition.
-        const projection = this.#databaseOf(runtime.env);
-        if (projection === undefined) {
+        // Un-attributed (platform-operator) rows have no tenant object by
+        // definition; the PLATFORM_DATA singleton is their sole, authoritative
+        // home. A missing PLATFORM_DATA binding leaves the row nowhere to go —
+        // counted as `dropped`, never silently lost.
+        const platformDb = this.#platformDatabaseOf(runtime.env);
+        if (platformDb === undefined) {
           this.#dropped += 1;
           return;
         }
-        await writeRequestLogs(projection, [record]);
-
-        // Zero-D1 Plan B (G1 dual-write): mirror the row into the PLATFORM_DATA
-        // singleton so BOTH write paths — this direct arm and the queue consumer
-        // — keep the platform object's shadow complete for the CP1 read cutover.
-        // Best-effort in its own try/catch: the control projection write above
-        // has already landed, so a platform-object blip must neither fail the
-        // request nor undo that write; it is reported, not counted as a failure.
-        try {
-          const platformDb = this.#platformDatabaseOf(runtime.env);
-          if (platformDb !== undefined) {
-            await platformDb.batch(platformRequestLogStatements(platformDb, [record]));
-          }
-        } catch (error) {
-          this.#diagnostics?.onError?.("d1", error);
-        }
+        // Authoritative now (not a best-effort mirror): a failure propagates to
+        // the catch below and is counted as `failed`, the same as a tenant write.
+        await platformDb.batch(platformRequestLogStatements(platformDb, [record]));
       }
       this.#written += 1;
     } catch (error) {

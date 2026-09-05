@@ -1,19 +1,19 @@
 /**
  * Tenant-authoritative request evidence reads (#859).
  *
- * This suite writes the real TenantDataObject and — for `request_logs`, whose
- * control compatibility projection still exists — the control projection too,
- * then mutates the projection. A read that still treats the control store as
- * authoritative returns the forged values and fails. The control `agent_runs` /
- * `agent_run_events` projections were DROPPED (control migration 0037), so for
- * agent evidence there is no longer a control decoy to forge: the tenant object
- * is the only place a run can live.
+ * This suite writes the real TenantDataObject and reads it back. There is no
+ * longer any control decoy to forge: the control `agent_runs` /
+ * `agent_run_events` projections were DROPPED by control migration 0037, and the
+ * `request_logs` compatibility projection was DROPPED by 0045 (Track A
+ * finalisation). The tenant object is the only place a request log or an agent
+ * run can live, so a read that wrongly targeted a control store would now throw
+ * `no such table` rather than serve a stale value.
  */
 import { SELF, env } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { resolveTenantDatabases } from "../src/adapters.js";
 import type { ControlPlaneBindings } from "../src/ports.js";
-import { applySchema, db, resetD1, seedRequestLogs } from "./d1.js";
+import { applySchema, db, resetD1 } from "./d1.js";
 import { BASE, arm, bearer, operatorKey, tenantKey } from "./harness.js";
 
 const TENANT = "evidence-tenant";
@@ -52,28 +52,11 @@ async function resetTenantEvidence(): Promise<void> {
 }
 
 async function seedAuthoritativeEvidence(): Promise<void> {
+  // The tenant object is the sole authority. No control decoy is seeded or
+  // forged any more: control 0037 dropped the agent-run projections and 0045
+  // dropped the `request_logs` compatibility mirror, so there is no control
+  // table left to write a `forged-control` row into.
   await seedObjectEvidence(TENANT, "tenant-object", "object-route");
-
-  await seedRequestLogs([
-    {
-      requestId: REQUEST_ID,
-      tenant: TENANT,
-      startedAtUnix: 100,
-      statusCode: 500,
-      route: "control-route",
-      document: { source: "control-projection" },
-    },
-  ]);
-
-  // The request-log compatibility mirror is mutable and intentionally forged
-  // after the authoritative object has been populated. (No agent-run decoy is
-  // possible any more: control 0037 dropped those projection tables.)
-  await db()
-    .prepare(
-      "UPDATE request_logs SET route = 'forged-control-route', status_code = 418, request_json = ? WHERE request_id = ?",
-    )
-    .bind(JSON.stringify({ source: "forged-control" }), REQUEST_ID)
-    .run();
 }
 
 async function seedObjectEvidence(tenantId: string, source: string, route: string): Promise<void> {
@@ -137,7 +120,7 @@ beforeEach(async () => {
 });
 
 describe("tenant-authoritative request evidence reads", () => {
-  it("lists request logs from the exact tenant object after the projection is mutated", async () => {
+  it("lists request logs from the exact tenant object, the sole authority", async () => {
     await seedAuthoritativeEvidence();
 
     const response = await SELF.fetch(`${BASE}/admin/v1/request-logs`, {

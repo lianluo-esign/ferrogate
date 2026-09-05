@@ -102,15 +102,11 @@ export {
 export type { GuardrailVerdict, RequestLogRecord, RequestLogWire } from "./record.js";
 
 export {
-  REQUEST_LOG_PROJECTION_TABLE,
   REQUEST_LOG_TABLE,
-  REQUEST_LOG_UPSERT_SQL,
   TENANT_REQUEST_LOG_UPSERT_SQL,
   evidenceProjectionKey,
-  requestLogBindings,
   tenantRequestLogBindings,
   requestLogTenantDatabaseFrom,
-  writeRequestLogs,
   writeTenantRequestLogs,
 } from "./d1.js";
 export type { RequestLogDatabase } from "./d1.js";
@@ -119,7 +115,6 @@ export {
   RequestLogSink,
   createRequestLogSink,
   requestLogBindingsFromEnv,
-  requestLogDatabaseFrom,
   requestLogPlatformDatabaseFrom,
   requestLogQueueFrom,
   requestLogTenantDatabaseFromEnv,

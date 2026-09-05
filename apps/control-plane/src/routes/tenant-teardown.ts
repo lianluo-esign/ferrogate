@@ -31,7 +31,8 @@
  *
  *  - **Financial records** (`billing_events`, `billing_ledger`): revenue
  *    evidence of money that actually moved, retained by design like audit
- *    anchors. `billing_report_outbox` (in-flight delivery state) IS deleted.
+ *    anchors. `billing_report_outbox` (in-flight delivery state) lives only in
+ *    the tenant object after the Track A hard-cut and is wiped with the object.
  *  - **Audit anchors** (R2, per-tenant chain): the tamper-evidence proof that
  *    this very teardown was legitimate. The control `audit_events` PROJECTION
  *    rows for the tenant ARE deleted; the immutable R2 anchor chain is kept.
@@ -107,7 +108,10 @@ const CONTROL_TENANT_ID_TABLES: readonly string[] = [
   "sso_provider_configs",
   "tenant_provider_credentials",
   "tenant_role_bindings",
-  "billing_report_outbox", // in-flight delivery state, distinct from the retained ledger
+  // `billing_report_outbox` is no longer swept here: the Track A hard-cut retired
+  // the shared-control billing mirror, so a tenant's in-flight delivery state
+  // lives ONLY in its own object and is wiped with the object (step 6). No
+  // control row remains to delete.
 ];
 
 /**
@@ -135,14 +139,14 @@ const CONTROL_TENANT_TABLES: readonly string[] = [
  * (no `scope_type`) is exact.
  */
 const CONTROL_SCOPE_TABLES: readonly string[] = [
-  "quota_policies",
+  // `quota_policies` and `spend_throttles` are gone from the control DO as
+  // mirrors (Track A hard-cut: no tenant data mirrored in the shared control
+  // object). Their authoritative rows live in the owning tenant's own object and
+  // are wiped with the object itself, so there is no scoped control row to sweep
+  // here. `spend_anomaly_episodes` was likewise dropped by
+  // `0038_drop_spend_anomaly_episodes.sql`.
   "budget_alert_notifications",
   "semantic_cache_policies",
-  // `spend_anomaly_episodes` is gone from the control DO (dropped by
-  // `0038_drop_spend_anomaly_episodes.sql`); the episode ledger lives in the
-  // tenant object and is wiped by the per-object consumption purge instead. A
-  // `WHERE scope_id IN (…)` against a table the schema no longer has would fail.
-  "spend_throttles",
 ];
 
 interface TeardownBody {

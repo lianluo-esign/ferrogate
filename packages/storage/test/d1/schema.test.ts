@@ -80,33 +80,18 @@ const CONTROL_LEGACY = [
 ] as const;
 
 /**
- * Tenant-scoped config being RELOCATED off control into the tenant object
- * (control-D1 removal). The tenant copy is provisioned SCHEMA-FIRST — ahead of
- * the reader/writer switch — so during this window the table exists in BOTH
- * roles: the control copy is still the live one the admission path and the
- * finops writer use, while the tenant copy sits empty until the coordinated
- * cutover points every reader and writer at it. AFTER the cutover these move to
- * TENANT_ONLY and the control copy is dropped. Kept as its own list (neither
- * CONTROL_ONLY nor TENANT_ONLY) so the contract states the in-flight truth
- * rather than a topology that is momentarily false either way.
+ * Evidence whose authority is tenant-local but whose compatibility projection
+ * remains in CONTROL.
  *
- *  - `spend_throttles`  — 0010 (control) / 0032 (tenant); the finops auto-throttle.
- *  - `quota_policies`   — 0001 (control) / 0033 (tenant); the effective-quota
- *                         chain read by admission plus the gateway attribution /
- *                         online-eval / residency sources and the finops pass.
+ * Only `audit_events` is left here: the tenant DO hash-chain is authoritative
+ * but the control projection is still read by the operational fleet view and a
+ * SIEM reader (`audit-events-d1-sync-disabled`), so the control table stays.
+ * Its six former companions — `request_logs`, `guardrail_evaluations`,
+ * `guardrail_check_evaluations`, `billing_ledger`, `billing_report_outbox` and
+ * `billing_events` — were DROPPED from CONTROL by 0045 (Track A finalisation);
+ * they are now in {@link DROPPED_CONTROL_PROJECTIONS} below.
  */
-const RELOCATING_TO_TENANT = ["spend_throttles", "quota_policies"] as const;
-
-/** Evidence whose authority is tenant-local but whose compatibility projection remains in CONTROL. */
-const DERIVED_EVIDENCE = [
-  "request_logs",
-  "guardrail_evaluations",
-  "guardrail_check_evaluations",
-  "audit_events",
-  "billing_ledger",
-  "billing_report_outbox",
-  "billing_events",
-] as const;
+const DERIVED_EVIDENCE = ["audit_events"] as const;
 
 /**
  * Tenant-authoritative evidence whose CONTROL compatibility projection has been
@@ -136,8 +121,27 @@ const DERIVED_EVIDENCE = [
  *          tenant objects (f11bd842). UNLIKE the pure-DROP siblings above this
  *          family first needed the one-time gated `experiment-eval-backfill`
  *          sweep to copy its D1→DO-cutover-to-G2 window rows into the objects.
+ *  - 0045: the LAST tenant/unattributed evidence & metering mirrors (Track A
+ *          finalisation) — `quota_policies` and `spend_throttles` (admission
+ *          resolves both on the tenant object; the finops throttle upsert writes
+ *          the tenant object), `guardrail_evaluations` and its FK child
+ *          `guardrail_check_evaluations` and `request_logs` (the gateway sink /
+ *          consumer / requestlog write only the tenant object (attributed) or
+ *          the PLATFORM_DATA singleton (unscoped)), and `billing_events`,
+ *          `billing_ledger`, `billing_report_outbox` (metering writes the tenant
+ *          object (attributed) or `platformBillingStatements` (unattributed)).
+ *          Every writer was hard-cut and every reader repointed in Tiers 1–4
+ *          before this DROP, so no control-only rows and no backfill.
  */
 const DROPPED_CONTROL_PROJECTIONS = [
+  "quota_policies",
+  "spend_throttles",
+  "guardrail_evaluations",
+  "guardrail_check_evaluations",
+  "request_logs",
+  "billing_events",
+  "billing_ledger",
+  "billing_report_outbox",
   "usage_aggregate_rollups",
   "usage_monthly_rollups",
   "usage_metadata_rollups",
@@ -227,15 +231,6 @@ describe("control / tenant split", () => {
     for (const table of DROPPED_CONTROL_PROJECTIONS) {
       expect(control, `${table} mirror must be DROPPED from CONTROL`).not.toContain(table);
       expect(tenant, `${table} authority must exist in TENANT`).toContain(table);
-    }
-  });
-
-  test("config relocating off control exists in both roles during the cutover", async () => {
-    const control = await tableNames(env.CONTROL_DB);
-    const tenant = await tableNames(env.TENANT_DB_A);
-    for (const table of RELOCATING_TO_TENANT) {
-      expect(control, `${table} live copy must still exist in CONTROL pre-cutover`).toContain(table);
-      expect(tenant, `${table} relocation target must exist in TENANT`).toContain(table);
     }
   });
 
@@ -411,7 +406,10 @@ describe("column parity with sql/d1/001_init_d1.sql", () => {
   });
 
   test("quota_policies keeps the asset/egress/agent-cost columns", async () => {
-    const columns = await columnNames(env.CONTROL_DB, "quota_policies");
+    // 0045 DROPPED the control `quota_policies` mirror (Track A); the
+    // tenant object (0033) is now the authoritative copy, so the column-parity
+    // contract is pinned against TENANT_DB_A.
+    const columns = await columnNames(env.TENANT_DB_A, "quota_policies");
     for (const column of [
       "model_allowlist_json",
       "rpm_limit",

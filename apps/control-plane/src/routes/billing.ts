@@ -339,10 +339,9 @@ async function tenantBillingEventPage(
     },
   );
   ({ total: sourceTotal, duplicates } = addBillingPage(rowsByKey, narrowLegacy(legacy, url)));
-  const control = await controlBillingEventPage(deps.controlDatabase, limit, tenantId, filters);
-  const controlAdded = addBillingPage(rowsByKey, control);
-  sourceTotal += controlAdded.total;
-  duplicates += controlAdded.duplicates;
+  // Track A hard-cut removed the control billing mirror: a tenant's billing
+  // authority is its own object (below) plus the legacy document store, never a
+  // shared-control `billing_events` projection.
   const db = await tenantBillingDatabaseFor(deps, tenantId);
   if (db !== null) {
     const narrowed = withFilters("WHERE tenant_id = ?", [tenantId], filters);
@@ -372,18 +371,20 @@ async function tenantBillingEventPage(
   };
 }
 
-async function controlBillingEventPage(
+/**
+ * The unattributed (platform-operator) billing-event page, read from the
+ * PLATFORM_DATA object — the authoritative home for `tenant IS NULL` billing
+ * after the Track A hard-cut retired the shared-control `billing_events` mirror.
+ * There is no tenant predicate: attributed events are read from their own tenant
+ * objects by the fan-out above.
+ */
+async function platformBillingEventPage(
   db: D1Database | null,
   limit: number,
-  tenantId?: string,
   filters: readonly BillingEventFilter[] = [],
 ): Promise<{ items: StoreRecord[]; total: number }> {
   if (db === null) return { items: [], total: 0 };
-  const narrowed = withFilters(
-    tenantId === undefined ? "" : "WHERE tenant_id = ?",
-    tenantId === undefined ? [] : [tenantId],
-    filters,
-  );
+  const narrowed = withFilters("", [], filters);
   const result = await db
     .prepare(
       `SELECT billing_event_id, tenant_id, request_id, provider_attempt_index,
@@ -421,10 +422,8 @@ async function tenantBillingOutboxPage(
     },
   );
   ({ total: sourceTotal, duplicates } = addBillingPage(rowsByKey, legacy));
-  const control = await controlBillingOutboxPage(deps.controlDatabase, limit, tenantId);
-  const controlAdded = addBillingPage(rowsByKey, control);
-  sourceTotal += controlAdded.total;
-  duplicates += controlAdded.duplicates;
+  // Track A hard-cut removed the control billing mirror: the tenant outbox lives
+  // in the tenant object (below) plus the legacy document store.
   const db = await tenantBillingDatabaseFor(deps, tenantId);
   if (db !== null) {
     const result = await db
@@ -453,24 +452,26 @@ async function tenantBillingOutboxPage(
   };
 }
 
-async function controlBillingOutboxPage(
+/**
+ * The unattributed (platform-operator) dead-letter page, read from the
+ * PLATFORM_DATA object — the `tenant IS NULL` outbox after the Track A hard-cut
+ * retired the shared-control `billing_report_outbox` mirror.
+ */
+async function platformBillingOutboxPage(
   db: D1Database | null,
   limit: number,
-  tenantId?: string,
 ): Promise<{ items: StoreRecord[]; total: number }> {
   if (db === null) return { items: [], total: 0 };
-  const tenantPredicate = tenantId === undefined ? "" : " AND tenant_id = ?";
-  const params = tenantId === undefined ? [limit] : [tenantId, limit];
   const result = await db
     .prepare(
       `SELECT id, tenant_id, attempts, next_attempt_unix, dead_lettered_at_unix,
               created_at_unix, updated_at_unix, event_json, count(*) OVER() AS total
          FROM ${BILLING_OUTBOX_TABLE}
-        WHERE dead_lettered_at_unix IS NOT NULL${tenantPredicate}
+        WHERE dead_lettered_at_unix IS NOT NULL
         ORDER BY dead_lettered_at_unix DESC, id ASC
         LIMIT ? OFFSET 0`,
     )
-    .bind(...params)
+    .bind(limit)
     .all<BillingOutboxAuthorityRow>();
   return {
     items: result.results.map(billingOutboxDocument),
@@ -545,16 +546,17 @@ async function listBillingAuthority(
   sourceTotal += legacyAdded.total;
   duplicates += legacyAdded.duplicates;
 
-  // The un-attributed control rows are a SOURCE of this feed like any other, so the filters have
-  // to reach them too. Passing them only to the per-tenant reads left these rows in every narrowed
-  // page: `?provider=zzz-nobody` still answered with the fleet's un-attributed events.
-  const control =
+  // The un-attributed rows are a SOURCE of this feed like any other, so the filters have to reach
+  // them too. Passing them only to the per-tenant reads left these rows in every narrowed page:
+  // `?provider=zzz-nobody` still answered with the fleet's un-attributed events. After the Track A
+  // hard-cut these live in the PLATFORM_DATA object (`tenant IS NULL`), never a control mirror.
+  const platform =
     kind === "events"
-      ? await controlBillingEventPage(deps.controlDatabase, fetchLimit, undefined, filters)
-      : await controlBillingOutboxPage(deps.controlDatabase, fetchLimit);
-  const controlAdded = addBillingPage(rowsById, control);
-  sourceTotal += controlAdded.total;
-  duplicates += controlAdded.duplicates;
+      ? await platformBillingEventPage(deps.platformData ?? null, fetchLimit, filters)
+      : await platformBillingOutboxPage(deps.platformData ?? null, fetchLimit);
+  const platformAdded = addBillingPage(rowsById, platform);
+  sourceTotal += platformAdded.total;
+  duplicates += platformAdded.duplicates;
 
   for (const tenantId of tenantPage.tenantIds) {
     const page =
@@ -733,82 +735,8 @@ function listAdminUsageAggregates(): (c: Context<ControlPlaneEnv>) => Promise<Re
   };
 }
 
-/** Billing outbox table in tenant authority and the legacy control projection. */
+/** Billing outbox table, read and re-armed in the tenant object (its authority). */
 export const BILLING_OUTBOX_TABLE = "billing_report_outbox";
-
-/**
- * Whether THIS deployment has the gateway's outbox table at all.
- *
- * The table belongs to the migrations slice, and a control database that has
- * never had the gateway's billing families applied simply does not have it —
- * which is a different thing from a database that has it and cannot be read.
- * The distinction is drawn STRUCTURALLY (a `sqlite_master` lookup) rather than
- * by string-matching a D1 error, because the two states must produce opposite
- * answers below: "not provisioned" degrades to the document-only transition
- * this route has always performed, while "provisioned but unreadable" must
- * REFUSE, so the operator can retry instead of burning the one-shot 409 guard
- * on a replay that re-armed nothing.
- */
-async function outboxTableExists(db: D1Database): Promise<boolean> {
-  const row = await db
-    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
-    .bind(BILLING_OUTBOX_TABLE)
-    .first<{ name: string }>();
-  return row !== null;
-}
-
-/**
- * Put a dead-lettered outbox row back on the sweeper's due list.
- *
- * The three columns are exactly the ones `BILLING_OUTBOX_LIST_DUE_SQL` in
- * `apps/gateway/src/metering/d1.ts` filters and orders on, which is why all
- * three move together: clearing `dead_lettered_at_unix` alone would leave the
- * row's `next_attempt_unix` wherever the backoff ladder had pushed it, and
- * resetting `attempts` alone would not make it selectable at all.
- *
- * Returns whether a row was actually re-armed. `RETURNING` (D1 supports it on a
- * native binding) is what makes that answer real rather than assumed.
- *
- * THROWS a 503 `HttpError` when the table is there and the write fails. Never a
- * silent `false`: "the re-arm did not happen" and "there was nothing to re-arm"
- * are different facts and the caller acts on them differently.
- */
-async function rearmOutboxRow(
-  router: { control(): D1Database },
-  reportId: string,
-  now: number,
-): Promise<boolean> {
-  const db = controlDatabase(router);
-  if (db === null) {
-    // No control database on this deployment — nothing to re-arm, and the
-    // document transition below is still the correct, safe half.
-    return false;
-  }
-  if (!(await outboxProvisioned(db))) return false;
-  return (await casReplayOutboxRow(db, reportId, now)) !== null;
-}
-
-/** The control binding, or `null` on a deployment that has none. */
-function controlDatabase(router: { control(): D1Database }): D1Database | null {
-  try {
-    return router.control();
-  } catch {
-    return null;
-  }
-}
-
-/** {@link outboxTableExists}, with an unreadable database as a fail-closed 503. */
-async function outboxProvisioned(db: D1Database): Promise<boolean> {
-  try {
-    return await outboxTableExists(db);
-  } catch (error) {
-    throw new HttpError(
-      503,
-      "storage_unavailable",
-      `the billing outbox could not be reached: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
-}
 
 /** The re-armed outbox row, as `RETURNING` reports it. */
 interface RearmedRow {
@@ -818,29 +746,37 @@ interface RearmedRow {
 }
 
 /**
- * The compare-and-swap itself: put the row back on the sweeper's due list, but
- * ONLY while it is still dead-lettered.
+ * The compare-and-swap that puts a tenant's dead-lettered outbox row back on the
+ * sweeper's due list — but ONLY while it is still dead-lettered, and ONLY in the
+ * tenant's own Durable Object.
  *
- * `AND dead_lettered_at_unix IS NOT NULL` is the whole at-most-once guard and is
- * not decoration — it refuses to touch a row that is already live in the retry
- * ladder, so a second replay cannot reset the `attempts` counter of a report the
- * sweeper is currently backing off on, and two concurrent replays resolve to a
- * single winner (Rust `billing_outbox_replay_test.rs::
- * concurrent_replays_of_one_row_resolve_to_a_single_winner`).
+ * The three columns are exactly the ones `BILLING_OUTBOX_LIST_DUE_SQL` in
+ * `apps/gateway/src/metering/d1.ts` filters and orders on, which is why all three
+ * move together: clearing `dead_lettered_at_unix` alone would leave the row's
+ * `next_attempt_unix` wherever the backoff ladder had pushed it, and resetting
+ * `attempts` alone would not make it selectable at all.
+ *
+ * `AND dead_lettered_at_unix IS NOT NULL` is the whole at-most-once guard: it
+ * refuses to touch a row already live in the retry ladder, so a second replay
+ * cannot reset the `attempts` counter of a report the sweeper is backing off on,
+ * and two concurrent replays resolve to a single winner (Rust
+ * `billing_outbox_replay_test.rs::concurrent_replays_of_one_row_resolve_to_a_single_winner`).
+ *
+ * The `tenant_id` predicate fences the write to the caller's own object. The
+ * Track A hard-cut removed the shared-control mirror, so a dead letter is only
+ * ever re-armed where it authoritatively lives — its tenant object.
  *
  * `null` ⇒ the CAS did not fire. THROWS a 503 when the write itself failed:
  * "the re-arm did not happen" and "there was nothing to re-arm" are different
  * facts and the caller acts on them differently.
  */
-async function casReplayOutboxRow(
+async function rearmTenantOutboxRow(
   db: D1Database,
   reportId: string,
   now: number,
-  tenantId?: string,
+  tenantId: string,
 ): Promise<RearmedRow | null> {
   try {
-    const tenantPredicate = tenantId === undefined ? "" : " AND tenant_id = ?";
-    const values = tenantId === undefined ? [now, now, reportId] : [now, now, reportId, tenantId];
     return await db
       .prepare(
         `UPDATE ${BILLING_OUTBOX_TABLE}
@@ -848,10 +784,10 @@ async function casReplayOutboxRow(
                 attempts = 0,
                 next_attempt_unix = ?,
                 updated_at_unix = ?
-          WHERE id = ? AND dead_lettered_at_unix IS NOT NULL${tenantPredicate}
+          WHERE id = ? AND dead_lettered_at_unix IS NOT NULL AND tenant_id = ?
           RETURNING id, attempts, next_attempt_unix`,
       )
-      .bind(...values)
+      .bind(now, now, reportId, tenantId)
       .first<RearmedRow>();
   } catch (error) {
     throw new HttpError(
@@ -870,62 +806,6 @@ interface OutboxReportRow {
   readonly tenantId: string;
   readonly db: D1Database;
   readonly tenantAuthoritative: boolean;
-}
-
-/**
- * Read the physical outbox row — the thing a REAL dead letter is.
- *
- * Rust `handle_admin_billing_outbox_dead_letter_replay` reads the row BEFORE the
- * CAS for one reason: it needs the report's owning tenant to authorize against,
- * and the row's owner never changes, so there is no time-of-use gap that matters
- * (the CAS re-checks the only thing that does change — the dead-letter state).
- *
- * `null` means the row is not there, which on this deployment also covers "no
- * control database" and "the billing families were never migrated". Both degrade
- * to the caller's 404, never to a fabricated success.
- */
-async function readControlOutboxReportRow(
-  router: { control(): D1Database },
-  reportId: string,
-): Promise<OutboxReportRow | null> {
-  const db = controlDatabase(router);
-  if (db === null) return null;
-  if (!(await outboxProvisioned(db))) return null;
-
-  let row: {
-    id: string;
-    tenant_id: string | null;
-    dead_lettered_at_unix: number | null;
-    event_json: string;
-  } | null;
-  try {
-    row = await db
-      .prepare(
-        `SELECT id, tenant_id, dead_lettered_at_unix, event_json
-           FROM ${BILLING_OUTBOX_TABLE} WHERE id = ?`,
-      )
-      .bind(reportId)
-      .first<{
-        id: string;
-        tenant_id: string | null;
-        dead_lettered_at_unix: number | null;
-        event_json: string;
-      }>();
-  } catch (error) {
-    throw new HttpError(
-      503,
-      "storage_unavailable",
-      `the billing outbox could not be read: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
-  if (row === null) return null;
-  return {
-    id: row.id,
-    deadLettered: row.dead_lettered_at_unix !== null,
-    tenantId: row.tenant_id?.trim() || reportTenantOf(row.event_json),
-    db,
-    tenantAuthoritative: false,
-  };
 }
 
 /** Read a tenant-authoritative dead-letter row from its own Durable Object. */
@@ -962,98 +842,52 @@ async function readTenantOutboxReportRow(
   }
 }
 
-/** Locate tenant authority first, then the legacy control projection. */
+/**
+ * Locate a dead-letter row in its TENANT AUTHORITY — the tenant object.
+ *
+ * The Track A hard-cut retired the shared-control `billing_report_outbox` mirror,
+ * so there is no longer a control projection to fall back to. A dead letter is
+ * only ever found where it authoritatively lives; a report that lived ONLY in the
+ * removed mirror (e.g. an unattributed one) is now `null` here, and the caller
+ * turns that into a 404.
+ */
 async function locateOutboxReport(
   deps: ControlPlaneDeps,
   scope: CallerScope,
   reportId: string,
 ): Promise<OutboxReportRow | null> {
   if (scope.kind === "tenant") {
-    if (scope.tenantId.trim() === "") {
-      return readControlOutboxReportRow(deps.tenantDatabases, reportId);
-    }
-    const tenantRow = await readTenantOutboxReportRow(deps, scope.tenantId, reportId);
-    if (tenantRow !== null) return tenantRow;
-    // A provisioned Durable Object is the settlement authority even when its
-    // row is absent. Never fall through to a stale control compatibility copy;
-    // the caller must observe not-found and the tenant object's ledger remains
-    // the only source that can be re-armed.
-    if ((await tenantBillingDatabaseFor(deps, scope.tenantId)) !== null) return null;
-  } else {
-    // A control outbox row carries the owning tenant. Route to that tenant's
-    // object before considering any compatibility fallback; invoices and
-    // replay settlement must never be driven from a cached fleet projection.
-    const control = await readControlOutboxReportRow(deps.tenantDatabases, reportId);
-    if (control !== null && control.tenantId !== "") {
-      const authoritativeDb = await tenantBillingDatabaseFor(deps, control.tenantId);
-      if (authoritativeDb !== null) {
-        const tenantRow = await readTenantOutboxReportRow(deps, control.tenantId, reportId);
-        return tenantRow;
-      }
-    }
-
-    // A native-binding or legacy control row has no tenant-object shortcut.
-    // Keep the collision check explicitly bounded; a wider fleet must be
-    // replayed with tenant scope so this money mutation never scans an
-    // unbounded namespace. This also checks a control row whose stale owner
-    // differs from a live tenant row with the same report id.
-    const tenantPage = await provisionedTenantPage(deps.tenantDatabases);
-    if (tenantPage.hasMore) {
-      throw new HttpError(
-        409,
-        "billing_report_tenant_scope_required",
-        `billing report ${reportId} has no tenant directory entry; replay it with a tenant-scoped key because this fleet exceeds the ${tenantPage.limit}-tenant live lookup bound`,
-      );
-    }
-    const matches: OutboxReportRow[] = [];
-    for (const tenantId of tenantPage.tenantIds) {
-      const tenantRow = await readTenantOutboxReportRow(deps, tenantId, reportId);
-      if (tenantRow !== null) matches.push(tenantRow);
-    }
-    if (matches.length > 1) {
-      throw new HttpError(
-        409,
-        "dead_letter_ambiguous",
-        `billing report ${reportId} exists for multiple tenants; replay it with a tenant-scoped key`,
-      );
-    }
-    if (matches.length === 1) {
-      const tenantRow = matches[0];
-      if (tenantRow !== undefined && control !== null && control.tenantId !== tenantRow.tenantId) {
-        throw new HttpError(
-          409,
-          "dead_letter_ambiguous",
-          `billing report ${reportId} exists for multiple tenants; replay it with a tenant-scoped key`,
-        );
-      }
-      return tenantRow ?? null;
-    }
-    return control;
+    // An unclassified/empty tenant scope names no tenant object to read, and
+    // there is no control mirror to reach — nothing to locate.
+    if (scope.tenantId.trim() === "") return null;
+    return readTenantOutboxReportRow(deps, scope.tenantId, reportId);
   }
-  return readControlOutboxReportRow(deps.tenantDatabases, reportId);
-}
 
-/**
- * The owning tenant of an outbox row, read off the `BillingEvent` it carries.
- *
- * Rust: `entry.event.tenant.organization_id.as_deref().unwrap_or("")`. The empty
- * string is the fail-closed answer, and it is fail-closed precisely because it
- * is unforgeable as a real tenant id — a row whose event names no tenant (or
- * whose document will not parse) is therefore reachable by a platform operator
- * and by nobody else, rather than by everybody.
- */
-function reportTenantOf(eventJson: string): string {
-  let document: unknown;
-  try {
-    document = JSON.parse(eventJson);
-  } catch {
-    return "";
+  // A platform operator discovers the owning tenant by a BOUNDED live fan-out
+  // over the provisioned roster — the same bound the fleet reads use, so this
+  // money mutation never scans an unbounded namespace. A wider fleet must be
+  // replayed with a tenant-scoped key.
+  const tenantPage = await provisionedTenantPage(deps.tenantDatabases);
+  if (tenantPage.hasMore) {
+    throw new HttpError(
+      409,
+      "billing_report_tenant_scope_required",
+      `billing report ${reportId} has no tenant directory entry; replay it with a tenant-scoped key because this fleet exceeds the ${tenantPage.limit}-tenant live lookup bound`,
+    );
   }
-  if (typeof document !== "object" || document === null) return "";
-  const tenant = (document as { tenant?: unknown }).tenant;
-  if (typeof tenant !== "object" || tenant === null) return "";
-  const organizationId = (tenant as { organization_id?: unknown }).organization_id;
-  return typeof organizationId === "string" ? organizationId : "";
+  const matches: OutboxReportRow[] = [];
+  for (const tenantId of tenantPage.tenantIds) {
+    const tenantRow = await readTenantOutboxReportRow(deps, tenantId, reportId);
+    if (tenantRow !== null) matches.push(tenantRow);
+  }
+  if (matches.length > 1) {
+    throw new HttpError(
+      409,
+      "dead_letter_ambiguous",
+      `billing report ${reportId} exists for multiple tenants; replay it with a tenant-scoped key`,
+    );
+  }
+  return matches[0] ?? null;
 }
 
 /**
@@ -1105,7 +939,7 @@ function authorizeReportTenant(scope: CallerScope, reportTenantId: string): void
  * routed through a float.
  *
  * The at-most-once property is therefore entirely the CAS in
- * {@link casReplayOutboxRow}, and the 409 above is what an operator sees when it
+ * {@link rearmTenantOutboxRow}, and the 409 above is what an operator sees when it
  * refuses.
  *
  * ## What this does NOT do
@@ -1136,12 +970,9 @@ async function replayOutboxReportRow(
   authorizeReportTenant(scope, row.tenantId);
 
   const now = Math.floor(Date.now() / 1000);
-  const rearmed = await casReplayOutboxRow(
-    row.db,
-    reportId,
-    now,
-    row.tenantAuthoritative ? row.tenantId : undefined,
-  );
+  // `locateOutboxReport` only ever returns a tenant-authoritative row now, so the
+  // CAS runs in that tenant's own object, fenced by its id.
+  const rearmed = await rearmTenantOutboxRow(row.db, reportId, now, row.tenantId);
   if (rearmed === null) {
     if (row.deadLettered) {
       // Dead-lettered at the read, gone at the CAS: either a concurrent replay
@@ -1289,46 +1120,16 @@ export const billingRoutes: GroupModule = crudGroup(
         );
       }
 
-      // MARKER CLOSED — the `inventory-data-billing §2.5 "billing_report_outbox"`
-      // marker that stood here, whose second reason read: "There is no
-      // drainer to hand the row to … the Cron sweep that would drain it is
-      // itself unbuilt … Re-arming a row nothing reads would look like a queued
-      // re-emission and be a no-op, which is the worst of both. It closes when
-      // the sweep lands (this route then re-arms the row in the same call)").
-      //
-      // The sweep landed. `apps/gateway/wrangler.toml` now carries
-      // `[triggers] crons = ["* * * * *"]` on the DEFAULT export, and
-      // `apps/gateway/src/metering/outbox.ts`'s `MeteringUsageSink.sweep`
-      // selects due rows with `BILLING_OUTBOX_LIST_DUE_SQL`
-      // (`dead_lettered_at_unix IS NULL AND next_attempt_unix <= now`). So this
-      // route now does exactly what the marker said it would: it RE-ARMS the
-      // shared row, which lives in the same control database this Worker binds
-      // (`deps.tenantDatabases.control()`; the gateway binds it as
-      // `BILLING_DB`, `database_name = "ferrogate-control"`).
-      //
-      // ORDER IS LOAD-BEARING — re-arm FIRST, mark the document SECOND. A crash
-      // between them then leaves a re-armed row and an unmarked document, so
-      // the operator can replay again and the sweep still delivers (it is
-      // idempotent on the ledger entry id). The other order leaves a report
-      // marked "replayed" that nothing will ever pick up — permanently stuck,
-      // and invisible.
-      //
-      // The `AND dead_lettered_at_unix IS NOT NULL` in the WHERE is a CAS, not
-      // decoration: it refuses to touch a row that is already live in the
-      // retry ladder, so a replay cannot reset the `attempts` counter of a
-      // report the sweeper is currently backing off on.
-      //
-      // WHAT REMAINS TRUE, and why `emitted` is still `false`: this Worker does
-      // not perform the re-emission itself. The billing Queue producer binding
-      // is declared on `apps/gateway/wrangler.toml`
-      // (`[[queues.producers]] binding = "BILLING"`), Queue bindings resolve at
-      // DEPLOY time, and this app's `wrangler.toml` does not name that queue.
-      // The endpoint authorizes and re-arms; the gateway's sweeper emits, on its
-      // next minute. `emitted: true` would be the dangerous lie — an operator
-      // reading it during a billing incident would stop chasing a report that
-      // has not gone anywhere yet.
+      // A LEGACY DOCUMENT with no physical authority row. The physical row a
+      // dead letter authoritatively lives in is its tenant object, and the
+      // `physical !== null` branch above already handled it (re-arming there).
+      // The Track A hard-cut retired the shared-control `billing_report_outbox`
+      // mirror, so reaching this point means there is no physical row to re-arm:
+      // `rearmed` is `false`, and the document is still marked replayed so the
+      // idempotence guard holds on a second call. `emitted` remains `false` for
+      // the same reason it always did — this Worker does not run the sweeper.
       const now = Math.floor(Date.now() / 1000);
-      const rearmed = await rearmOutboxRow(deps.tenantDatabases, reportId, now);
+      const rearmed = false;
 
       const stored = await deps.store.merge(DEAD_LETTERS, scope, reportId, {
         replayed: true,

@@ -1,5 +1,5 @@
 /**
- * The `quota_policies` READ RELOCATION for the gateway's policy sources
+ * The `quota_policies` READ RESOLUTION for the gateway's policy sources
  * (Track A red line: no tenant data mirrored in the shared CONTROL object).
  *
  * ============================================================================
@@ -9,31 +9,18 @@
  * Three admission-adjacent readers — attribution (#678), online-eval (#692) and
  * residency (#681) — each seek ONE row out of `quota_policies` by
  * `scope_type = 'tenant' AND scope_id = ?`. That table's authoritative home is
- * now the per-tenant object, not the shared CONTROL database; the control copy
- * is a mirror on its way out. This helper is the single switch that points those
- * three seeks at the tenant's OWN object instead, and it is shared precisely so
- * the switch is decided ONCE, the same way, for all three — a per-module copy
- * would be three chances to diverge on the one thing that must not: which object
- * a tenant's governance is read from.
+ * the per-tenant object; the shared CONTROL copy has been removed (Track A).
+ * This helper is the single point that points those three seeks at the tenant's
+ * OWN object, and it is shared precisely so the resolution is decided ONCE, the
+ * same way, for all three — a per-module copy would be three chances to diverge
+ * on the one thing that must not: which object a tenant's governance is read
+ * from.
  *
  * It mirrors `ratelimit/middleware.ts`'s `quotaTenantPolicyDb` (the admission
- * quota/throttle reader's version of the same switch), and the two exist as
+ * quota/throttle reader's version of the same resolution), and the two exist as
  * siblings rather than one because that reader has a request `Context` and reads
  * the already-resolved accessor, whereas these three sources are built from
  * `env` alone and must resolve the tenant themselves.
- *
- * ============================================================================
- * THE FLAG IS DEFAULT-OFF, AND OFF IS BYTE-IDENTICAL
- * ============================================================================
- *
- * `GATEWAY_QUOTA_POLICY_SOURCE` defaults to `"control"`. Anything other than the
- * exact string `"tenant_object"` returns `undefined`, and a source handed
- * `undefined` keeps reading the control database it was already reading — the
- * pre-relocation behaviour, unchanged to the byte. The flip to `"tenant_object"`
- * is GATED behind the backfill that makes every tenant object hold its own
- * policy row; reading an un-backfilled object would answer "no policy", which
- * for residency is a silent out-of-region breach. That is why this cannot be
- * always-on and why the closure is not even BUILT until the flag is set.
  *
  * ============================================================================
  * THE RESOLUTION IS THE FENCE
@@ -53,30 +40,27 @@
 import { type TenancyBindings } from "./ports.js";
 import { resolverForEnv } from "./resolver.js";
 
-/** The one var this switch reads. */
-export interface QuotaPolicySourceBindings {
-  /**
-   * `"tenant_object"` relocates the `quota_policies` seek to the tenant's own
-   * object; anything else (the default `"control"`, absent, blank) keeps the
-   * control read. See the module docs on why the flip is GATED.
-   */
-  readonly GATEWAY_QUOTA_POLICY_SOURCE?: string | undefined;
-}
+/**
+ * Base bindings for the three policy sources. The Track A hard-cut removed the
+ * `GATEWAY_QUOTA_POLICY_SOURCE` gate — the tenant object is now the sole
+ * authority — so this carries no fields of its own and exists only as the shared
+ * super-interface the attribution/residency/online-eval bindings extend.
+ */
+// eslint-disable-next-line @typescript-eslint/no-empty-interface
+export interface QuotaPolicySourceBindings {}
 
 /**
- * A per-request resolver for the tenant's OWN `quota_policies` database, or
- * `undefined` to leave the caller reading the control database.
+ * A per-request resolver for the tenant's OWN `quota_policies` database.
  *
- * `undefined` unless `GATEWAY_QUOTA_POLICY_SOURCE === "tenant_object"`, so the
- * default deployment is untouched. When set, the returned function resolves the
+ * Track A hard-cut: the tenant object is the SOLE authority, so this always
+ * returns the resolver (never `undefined`). The returned function resolves the
  * named tenant's object through the authoritative request-path resolver; the
  * caller awaits it inside its own try so a resolver refusal fails in that
- * source's own direction.
+ * source's own direction (503 / sample-nothing), never a silent control read.
  */
 export function tenantQuotaPolicyDbFrom(
   env: QuotaPolicySourceBindings,
-): ((tenantId: string) => Promise<D1Database>) | undefined {
-  if ((env.GATEWAY_QUOTA_POLICY_SOURCE ?? "").trim() !== "tenant_object") return undefined;
+): (tenantId: string) => Promise<D1Database> {
   return async (tenantId: string): Promise<D1Database> => {
     const handle = await resolverForEnv(env as unknown as TenancyBindings).forTenant(tenantId);
     return handle.db;

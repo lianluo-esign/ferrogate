@@ -274,7 +274,14 @@ export function budgetAlertPortsFrom(env: unknown): BudgetAlertPorts | undefined
   };
   return {
     config,
-    policies: quotaPolicySourceFromEnv(env as Parameters<typeof quotaPolicySourceFromEnv>[0]),
+    // Track A hard-cut: `quota_policies` reads route to the tenant's OWN object.
+    // The resolver is this reader's own `tenantDbFor`, so the config-policy
+    // backfill runs BEFORE the seek rather than the generic env resolver, which
+    // would read the object before its policy row exists.
+    policies: quotaPolicySourceFromEnv(
+      env as Parameters<typeof quotaPolicySourceFromEnv>[0],
+      async (tenantId) => (await tenantDbFor(tenantId)).db,
+    ),
     // The base `spend` is always overridden by the tenant-routed `spendForTenant`
     // below (see `runBudgetAlertPass`), and since #821 PR2-delete there is no
     // shared `env.DB` to read a fleet-wide rollup from. `NO_SPEND_SOURCE` is the

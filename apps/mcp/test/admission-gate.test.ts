@@ -470,7 +470,7 @@ describe("counter keys are scope-namespaced, which is a tenant-isolation boundar
   });
 });
 
-describe("a control database with no quota tables is UNPROVISIONED, not an outage", () => {
+describe("a tenant object with no quota tables is UNPROVISIONED, not an outage", () => {
   /** A D1 stub whose `sqlite_master` probe reports `tables` and whose real reads throw. */
   function stubDb(tables: readonly string[]): D1Database {
     return {
@@ -493,10 +493,16 @@ describe("a control database with no quota tables is UNPROVISIONED, not an outag
     } as unknown as D1Database;
   }
 
+  // Track A hard-cut: `quota_policies` now lives ONLY in the tenant's OWN object,
+  // reached through the resolver. So these cases drive the probe/read against the
+  // resolved TENANT handle; the control `db` here holds no quota tables at all
+  // (`stubDb([])`), which is exactly the post-cut topology.
   it("admits when `quota_policies` does not exist — no table, no policy to enforce", async () => {
-    const snapshot = await d1QuotaPolicySource(stubDb([])).policiesFor({
+    const snapshot = await d1QuotaPolicySource(stubDb([]), undefined, async () =>
+      stubDb([]),
+    ).policiesFor({
       apiKeyId: "k1",
-      chain: { tenantId: "t1" },
+      chain: { tenantId: "t1", keyId: "k1" },
     });
     expect(snapshot.ok).toBe(true);
     if (!snapshot.ok) return;
@@ -506,9 +512,13 @@ describe("a control database with no quota tables is UNPROVISIONED, not an outag
   it("503s when the table EXISTS and the read fails — that is an outage, not an absence", async () => {
     // The distinction is the whole point: "no table" cannot drop a limit that
     // was never configurable, but "table present, read broken" absolutely can.
-    const snapshot = await d1QuotaPolicySource(stubDb(["quota_policies"])).policiesFor({
+    // The table is present on the resolved TENANT object, so the failing read is
+    // there — never a control fall-through, which no longer exists.
+    const snapshot = await d1QuotaPolicySource(stubDb([]), undefined, async () =>
+      stubDb(["quota_policies"]),
+    ).policiesFor({
       apiKeyId: "k1",
-      chain: { tenantId: "t1" },
+      chain: { tenantId: "t1", keyId: "k1" },
     });
     expect(snapshot.ok).toBe(false);
   });

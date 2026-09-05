@@ -233,24 +233,22 @@ function refuse(refusal: { status: number; code: string }, message: string): Htt
  * only place that names a binding.
  */
 /**
- * The RELOCATED-quota resolver (Track A red line), or `undefined` to keep the
- * default control read.
+ * The RELOCATED-quota resolver (Track A red line, HARD CUT), or `undefined` when
+ * no router is bound (dev/offline posture, where the tenant legs are skipped and
+ * the limiter fails open).
  *
- * Returns a per-subject accessor for the tenant's OWN object ONLY when the
- * `AGENT_RUNTIME_QUOTA_POLICY_SOURCE = "tenant_object"` posture is set AND a
- * router is bound. {@link quotaPolicySourceFromEnv} hands it to
- * {@link d1QuotaPolicySource}, which reads `quota_policies` + `spend_throttles`
- * from it while the account-global `plans` floor stays on control. The same
- * cross-tenant guard the routed MONEY legs make: resolving one tenant's quota
- * from another tenant's object would apply the wrong caps — a refusal, not a
- * read.
+ * Returns a per-subject accessor for the tenant's OWN object whenever a router is
+ * bound — the tenant object is the SOLE authority now, so there is no posture
+ * gate. {@link quotaPolicySourceFromEnv} hands it to {@link d1QuotaPolicySource},
+ * which reads `quota_policies` + `spend_throttles` from it while the
+ * account-global `plans` floor stays on control. The same cross-tenant guard the
+ * routed MONEY legs make: resolving one tenant's quota from another tenant's
+ * object would apply the wrong caps — a refusal, not a read.
  */
 function quotaTenantPolicyDb(
-  env: AdmissionBindings,
   router: TenantDatabaseRouter | undefined,
 ): ((tenantId: string) => Promise<D1Database>) | undefined {
   if (router === undefined) return undefined;
-  if ((env.AGENT_RUNTIME_QUOTA_POLICY_SOURCE ?? "").trim() !== "tenant_object") return undefined;
   return async (tenantId: string): Promise<D1Database> => {
     const handle = await router.forTenant(tenantId);
     if (handle.tenantId !== tenantId) {
@@ -267,7 +265,7 @@ export function admissionPort(
   deps: AdmissionDeps & { readonly env: AdmissionBindings },
 ): AdmissionPort {
   const router = deps.router;
-  const quotas = deps.quotas ?? quotaPolicySourceFromEnv(deps.env, quotaTenantPolicyDb(deps.env, router));
+  const quotas = deps.quotas ?? quotaPolicySourceFromEnv(deps.env, quotaTenantPolicyDb(router));
   const counter = deps.counter ?? counterFromEnv(deps.env);
   const now = deps.nowUnixSeconds ?? ((): number => Math.floor(Date.now() / 1000));
   // Since #821 PR2-delete the shared `ferrogate-tenant` D1 (`env.DB`) is gone,

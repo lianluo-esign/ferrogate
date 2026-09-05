@@ -27,7 +27,7 @@ import { secretsFromEnv } from "./detectors.js";
 import type { DetectorBuildContext } from "./detectors.js";
 import {
   DurableGuardrailEvidenceSink,
-  guardrailEvidenceDatabaseFrom,
+  guardrailEvidencePlatformDatabaseFrom,
   guardrailEvidenceQueueFrom,
 } from "./evidence-sink.js";
 import { InMemoryGuardrailEvidenceSink } from "./evidence.js";
@@ -183,30 +183,26 @@ export function guardrailDepsFromEnv(
  * The evidence sink for a Worker `env` (#665).
  *
  * DURABLE whenever a destination is bound — the `REQUEST_LOG` queue,
- * `TENANT_DATA`, or the `CONTROL_DB` projection — and in-memory otherwise.
+ * `TENANT_DATA`, or the `PLATFORM_DATA` object — and in-memory otherwise.
  *
  * The fork is on the BINDING rather than on a feature flag, deliberately. A
  * deployment with no evidence destination is `wrangler dev --local`, a unit
- * test, or a self-hosted install that has not provisioned D1; installing a
- * durable sink there would count a `dropped` for every screened request and say
- * nothing more useful than the in-memory sink already does. A deployment that
- * HAS the binding has one because an operator provisioned it, and silently not
- * writing to it would reproduce exactly the defect this issue closes.
+ * test, or a self-hosted install that has not provisioned the objects;
+ * installing a durable sink there would count a `dropped` for every screened
+ * request and say nothing more useful than the in-memory sink already does. A
+ * deployment that HAS the binding has one because an operator provisioned it,
+ * and silently not writing to it would reproduce exactly the defect this issue
+ * closes.
  */
 function guardrailEvidenceSinkFor(env: Record<string, unknown>): GuardrailEvidenceSink {
+  // Track A: the shared-CONTROL guardrail projection was DROPped (0045). Tenant
+  // objects (attributed) and the PLATFORM_DATA singleton (un-attributed) are the
+  // sole authoritative homes; there is no control mirror left to gate.
   const durable =
     guardrailEvidenceQueueFrom(env) !== undefined ||
-    guardrailEvidenceDatabaseFrom(env) !== undefined ||
-    env.TENANT_DATA !== undefined;
-  // Track A / G2: retire the direct-fallback control guardrail mirror write
-  // (red line no-tenant-data-mirror-in-control-d1), symmetric with the queue
-  // consumer's `projectGuardrailToControl: false` (`src/index.ts`). Tenant
-  // objects + PLATFORM_DATA are the sole homes; the control projection now has
-  // zero writers and no steady-state reader (only the drain-on-read backfill
-  // bridges remain). Reversible by flipping this literal.
-  return durable
-    ? new DurableGuardrailEvidenceSink({ projectToControl: false })
-    : new InMemoryGuardrailEvidenceSink();
+    env.TENANT_DATA !== undefined ||
+    guardrailEvidencePlatformDatabaseFrom(env) !== undefined;
+  return durable ? new DurableGuardrailEvidenceSink() : new InMemoryGuardrailEvidenceSink();
 }
 
 function guardrailOptions(

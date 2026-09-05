@@ -85,11 +85,7 @@ import {
   type StoreRecord,
 } from "../ports.js";
 import { adminDeleted, adminItem } from "../responses.js";
-import {
-  deleteQuotaPolicyRow,
-  projectQuotaPolicy,
-  quotaPolicyWritesTenantObjectOnly,
-} from "../store/quota_registry.js";
+import { deleteQuotaPolicyRow, projectQuotaPolicy } from "../store/quota_registry.js";
 import {
   type GroupModule,
   type Handler,
@@ -195,38 +191,14 @@ async function projectPolicy(
 ): Promise<void> {
   const deps = depsOf(c);
   const nowUnix = Math.floor(Date.now() / 1000);
-  const db = deps.controlDatabase;
-  // Authoritative FOR NOW: the gateway / agent-runtime / mcp admission gate and
-  // the three gateway policy sources (attribution / online-eval / residency)
-  // still read the typed `quota_policies` row from CONTROL D1. Until that reader
-  // cutover lands, the control row is exactly what the gateway enforces, so it
-  // must be written or the operator's edit is silently lost. (memory store:
-  // `controlDatabase` is null and the typed row is not projected at all — the
-  // route's contract/auth tests assert only on the document, read back by GET.)
-  //
-  // Track A G2 (stop-control-write): once `CONTROL_QUOTA_POLICY_SOURCE` reads
-  // `"tenant_object"` the control leg is SKIPPED — the tenant-object shadow write
-  // below becomes the sole enforcement authority. DEFAULT-OFF, so the control row
-  // keeps being written until every admission reader has flipped to the object.
-  if (db !== null && !quotaPolicyWritesTenantObjectOnly(c.env)) {
-    await projectQuotaPolicy(
-      db,
-      record as Parameters<typeof projectQuotaPolicy>[1],
-      scopeType,
-      scopeId,
-      nowUnix,
-    );
-  }
-  // SHADOW-write the SAME typed row into the owning tenant's object so its
-  // `quota_policies` table (tenant migration 0033) is populated and CURRENT
-  // before the reader cutover flips admission onto it — the "provisioning
-  // precedes traffic" ordering `0033_quota_policies.sql` establishes. This is
-  // the writer half of the control-D1 removal for `quota-policies`: the document
-  // already lives in the tenant object (`resource-kinds.ts` places it
-  // `tenant_private`, so `deps.store` wrote it there); only this typed
-  // enforcement projection still lands on control, and this shadow write is what
-  // moves it. It reads nothing and narrows nothing yet, so a failure here cannot
-  // affect request serving.
+  // Track A (no-tenant-data-mirror): the typed `quota_policies` enforcement row
+  // is projected ONLY into the owning tenant's object — the shared-CONTROL mirror
+  // was removed and its table DROPped. Every admission reader (gateway /
+  // agent-runtime / mcp) and every policy source now resolves this row from the
+  // tenant object, so the tenant projection below IS the sole enforcement
+  // authority. (memory store: `controlDatabase` is null and no typed row is
+  // projected at all — the route's contract/auth tests assert only on the
+  // document, read back by GET.)
   await shadowProjectQuotaPolicyToTenant(deps, record, scopeType, scopeId, nowUnix);
 }
 
@@ -277,6 +249,14 @@ async function shadowProjectQuotaPolicyToTenant(
       nowUnix,
     );
   } catch (error) {
+    // `projectQuotaPolicy` runs `validateQuotaPolicy` FIRST and raises a 400
+    // `HttpError` for an INVALID policy (e.g. a non-tenant scope carrying a
+    // tenant-only asset ceiling). That is a CLIENT error, not the tenant-object
+    // outage this best-effort projection exists to absorb — the tenant object is
+    // now the SOLE authority for the typed row (Track A hard-cut), so a swallowed
+    // 400 would silently persist a policy the storage layer refused. Re-raise it;
+    // only genuine write faults (outage, not-yet-provisioned) are best-effort.
+    if (error instanceof HttpError) throw error;
     console.warn("control-plane: quota policy tenant-object shadow projection failed", {
       tenantId,
       scopeType,
@@ -336,13 +316,15 @@ const QUOTA_SCOPE_OWNER_COLLECTION: Readonly<Record<QuotaScopeKind, string | nul
 /**
  * Resolve the tenant object that owns a tenant-private quota document.
  *
- * Exported so the one-time `quota-policy-backfill` route resolves an owner with
- * the SAME rule the writer's shadow projection uses — a second copy of this
- * lookup is exactly how the backfill and the live writer would come to disagree
- * about which object a `project`/`workspace`/`key` policy belongs in. The
- * backfill wraps the `400` this throws on an unresolvable owner in a try/catch,
- * the way {@link ownerTenantForShadow} does, and reports the row as a residual
- * rather than failing the whole sweep.
+ * The single owner-resolution rule for a `project`/`workspace`/`key` policy —
+ * the live writer's shadow projection and the route handler both resolve through
+ * here so there is exactly ONE lookup deciding which tenant object a policy
+ * belongs in (a second copy is how two paths would come to disagree). It throws
+ * a `400` on an unresolvable owner; {@link ownerTenantForShadow} wraps that in a
+ * try/catch so a best-effort projection reports the row rather than failing.
+ * (The one-time `quota-policy-backfill` route that also shared this rule was
+ * removed in the Track A hard-cut — the tenant object is now the sole authority,
+ * so there is no shared mirror left to backfill.)
  */
 export async function quotaPolicyTenantId(
   deps: ReturnType<typeof depsOf>,
@@ -601,16 +583,10 @@ export const quotaPolicyRoutes: GroupModule = crudGroup(
       // still bites and that the operator can no longer see, which is the
       // direction a limiter must fail in; the inverse leaves a policy the
       // console lists and the gateway no longer applies.
-      const db = deps.controlDatabase;
-      // Track A G2: skip the control delete once admission reads the object (the
-      // shadow delete below removes the sole remaining typed row). DEFAULT-OFF.
-      if (db !== null && !quotaPolicyWritesTenantObjectOnly(c.env)) {
-        await deleteQuotaPolicyRow(db, scopeType, scopeId);
-      }
-      // Mirror the delete into the owning tenant object (writer dual-write, delete
-      // side) so its typed row does not outlive the document once admission reads
-      // from the object. Best-effort, for the same reason the create-side shadow
-      // is: the authoritative control delete already committed.
+      //
+      // Track A (no-tenant-data-mirror): the typed row is removed ONLY from the
+      // owning tenant object — the shared-CONTROL mirror was DROPped. Admission
+      // reads the object, so this is the sole delete.
       await shadowDeleteQuotaPolicyRowFromTenant(
         deps,
         await ownerTenantForShadow(deps, scopeType, scopeId, existing),

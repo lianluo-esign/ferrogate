@@ -42,7 +42,12 @@ import {
   interceptProviderFetch,
   providerJson,
 } from "../inference/provider-mock.js";
-import { billingDb, resetMeteringTables, rowCount } from "./d1-harness.js";
+import {
+  platformBillingDb,
+  platformRowCount,
+  resetMeteringTables,
+  resetPlatformBilling,
+} from "./d1-harness.js";
 
 /** Logical names the fake registry publishes. */
 const ROW_PRICED_LOGICAL = "unpriced-probe-row-priced";
@@ -118,6 +123,9 @@ beforeAll(() => {
 
 beforeEach(async () => {
   await resetMeteringTables();
+  // Track A hard-cut: the unattributed `fg_root` path now settles into the
+  // PLATFORM_DATA object, so this suite reads and resets the platform tables.
+  await resetPlatformBilling();
 });
 
 afterEach(() => {
@@ -152,7 +160,7 @@ async function awaitRow(
 ): Promise<number> {
   const deadline = Date.now() + budgetMs;
   for (;;) {
-    const rows = await rowCount(table);
+    const rows = await platformRowCount(table);
     if (rows > 0) return rows;
     if (Date.now() >= deadline) return 0;
     await new Promise((resolve) => setTimeout(resolve, 10));
@@ -186,7 +194,7 @@ describe("#663 — an unpriced model is still recorded", () => {
   });
 
   test("a model priced only by its registry row lands a fully priced ledger row", async () => {
-    expect(await rowCount("billing_ledger")).toBe(0);
+    expect(await platformRowCount("billing_ledger")).toBe(0);
 
     const response = await complete(ROW_PRICED_LOGICAL, ROW_PRICED_MODEL);
 
@@ -197,9 +205,9 @@ describe("#663 — an unpriced model is still recorded", () => {
     // THE ASSERTION (#663). Before the fix this is 0: `#price` threw
     // `price_not_found` and returned upstream of every durable write.
     expect(await awaitRow("billing_ledger")).toBe(1);
-    expect(await rowCount("billing_events")).toBe(1);
+    expect(await platformRowCount("billing_events")).toBe(1);
 
-    const result = await billingDb().prepare("SELECT id, entry_json FROM billing_ledger").all();
+    const result = await platformBillingDb().prepare("SELECT id, entry_json FROM billing_ledger").all();
     const row = result.results?.[0] as { id: string; entry_json: string } | undefined;
     const entry = JSON.parse(row?.entry_json ?? "{}") as {
       request_id: string;
@@ -220,7 +228,7 @@ describe("#663 — an unpriced model is still recorded", () => {
   });
 
   test("a model priced NOWHERE still leaves a durable, re-priceable trace", async () => {
-    expect(await rowCount("billing_events")).toBe(0);
+    expect(await platformRowCount("billing_events")).toBe(0);
 
     const response = await complete(NO_PRICE_LOGICAL, NO_PRICE_MODEL);
 
@@ -229,7 +237,7 @@ describe("#663 — an unpriced model is still recorded", () => {
     // whether a `cost_usd` was settled; only the wallet debit was skipped.
     expect(await awaitRow("billing_events")).toBe(1);
 
-    const result = await billingDb()
+    const result = await platformBillingDb()
       .prepare("SELECT billing_event_id, request_id, event_json FROM billing_events")
       .all();
     const row = result.results?.[0] as
@@ -250,7 +258,7 @@ describe("#663 — an unpriced model is still recorded", () => {
     expect(event.cost_usd ?? null).toBeNull();
 
     // And it is NOT a charge: nothing was billed, nothing was reported.
-    expect(await rowCount("billing_ledger")).toBe(0);
-    expect(await rowCount("billing_report_outbox")).toBe(0);
+    expect(await platformRowCount("billing_ledger")).toBe(0);
+    expect(await platformRowCount("billing_report_outbox")).toBe(0);
   });
 });

@@ -42,6 +42,10 @@ import {
   upstreamConfig,
 } from "./fixtures.js";
 import { clearMcpIdentityTables, tenantDataNamespace, tenantDatabase } from "./tenant-storage.js";
+import { registerDurableObjectTenant } from "./tenant-object.js";
+
+/** The cross-tenant session test authenticates as this second tenant. */
+const OTHER_TENANT_ROSTER = "tenant-2";
 
 /** The header the MCP Streamable-HTTP transport carries a session on. */
 const SESSION_HEADER = "mcp-session-id";
@@ -106,8 +110,12 @@ async function frames(res: Response): Promise<Array<{ id?: string; data: string 
   });
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   seed();
+  // `TENANT` is provisioned by the global `setup-d1.ts`; the cross-tenant
+  // session test also authenticates as `tenant-2`, whose admission needs its
+  // own `tenant_databases` roster row (0045 tenant-object quota resolution).
+  await registerDurableObjectTenant(OTHER_TENANT_ROSTER);
 });
 
 afterEach(() => {

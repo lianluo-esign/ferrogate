@@ -203,15 +203,6 @@ TENANCY_LIFECYCLE = "{}"
 TENANT_RBAC_ACTIONS = "{}"
 CONTROL_PLANE_SEED = "{}"
 SIEM_EXPORT_SINKS = "[]"
-# Track A G2 (stop-control-write) for `spend_throttles`. "control" (the DEFAULT)
-# keeps the finops auto-throttle authoritative on the shared CONTROL_DATA object
-# with a best-effort tenant-object shadow. "tenant_object" INVERTS it — the
-# throttle is written ONLY to the owning tenant's own object and the control
-# mirror is not written at all. DEFAULT-OFF and GATED: flip to "tenant_object"
-# only once every admission worker (gateway/agent-runtime/mcp) resolves throttles
-# from the tenant object (`GATEWAY_QUOTA_POLICY_SOURCE = "tenant_object"`), or a
-# control-reading admission path stops seeing new throttles.
-CONTROL_SPEND_THROTTLE_SOURCE = "control"
 # Track A G2 (stop-control-write) for the `tenants.document_json` tenant-account
 # mirror. "control" (the DEFAULT) keeps mirroring the WHOLE admin document into the
 # shared CONTROL object and serves the operator `tenant-accounts` LIST from that
@@ -225,16 +216,6 @@ CONTROL_SPEND_THROTTLE_SOURCE = "control"
 # (id/name/slug/status/plan_id) are the account-global `JOIN plans` registry and are
 # always written regardless of this var.
 CONTROL_TENANT_ACCOUNT_SOURCE = "control"
-# Track A G2 (stop-control-write) for the `quota_policies` typed rows. "control"
-# (the DEFAULT) writes the shared CONTROL row AND a tenant-object shadow on every
-# create/replace/update/delete. "tenant_object" INVERTS it — skips the control leg
-# so the tenant object's own row is the sole authority. DEFAULT-OFF and GATED, with
-# a STRICTER flip order than a plain mirror: quota is a limiter that fails OPEN on a
-# missing row, so this WRITE flip must TRAIL the READ flip — every admission worker
-# ({GATEWAY,AGENT_RUNTIME,MCP}_QUOTA_POLICY_SOURCE = "tenant_object") must read the
-# tenant object AND the shadow backfill must be complete first, or a still-control
-# reader silently loses every limit. A malformed value reads as the safe default.
-CONTROL_QUOTA_POLICY_SOURCE = "control"
 
 # ---------------------------------------------------------------------------
 # Bootstrap model-catalog import (#892) — OPTIONAL fallback bindings

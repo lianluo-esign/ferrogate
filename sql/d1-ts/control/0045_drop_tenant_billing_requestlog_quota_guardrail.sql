@@ -1,0 +1,104 @@
+-- ===========================================================================
+-- Drop the last tenant/unattributed evidence & metering control mirrors
+-- (Track A red-line) — the FINALISATION ("收官") of the whole program.
+--
+-- Eight control-side projection *mirrors* remain, across four families. Each
+-- one's authoritative home is now a per-tenant TenantDataObject (tenant rows)
+-- or the PLATFORM_DATA singleton (unattributed rows); every live producer and
+-- reader targets those objects, so the control copies have NO remaining writer
+-- and NO remaining reader. Cleared in the four preceding slices on
+-- `feat/remove-control-d1-tenant-isolation`, all as HARD CUTS (the control
+-- write legs, the OFF-by-default source flags and their env vars, and the
+-- one-time backfill routes were DELETED, not merely gated off):
+--
+--   * `quota_policies` (0001_init_control), `spend_throttles`
+--     (0010_spend_anomaly) — Tier 1. WRITE: `control-plane` writes only the
+--     tenant object (`shadowProjectQuotaPolicyToTenant`; `finops/pass.ts`
+--     throttle upsert → `episodeDb`); the control write legs and the
+--     `quotaPolicyWritesTenantObjectOnly` / `spendThrottleWritesTenantObjectOnly`
+--     gates are gone. READ: the three admission clones
+--     (`gateway/src/ratelimit/quota.ts`, `agent-runtime/src/admission/quota.ts`,
+--     `mcp/src/admission/quota.ts`) resolve both the quota-policy and the
+--     spend-throttle legs on the tenant object; the control handle carries only
+--     the account-global `plans`/`tenants` floor (a control-owned registry, not
+--     a mirror). The `gateway` policy-source readers
+--     (attribution/evals/residency) are un-gated onto the tenant object. The
+--     `CONTROL_QUOTA_POLICY_SOURCE` / `CONTROL_SPEND_THROTTLE_SOURCE` /
+--     `GATEWAY_QUOTA_POLICY_SOURCE` / `AGENT_RUNTIME_QUOTA_POLICY_SOURCE` /
+--     `MCP_QUOTA_POLICY_SOURCE` env vars and the `quota-policy-backfill` route
+--     were deleted.
+--   * `guardrail_evaluations` (0004_guardrail_evaluations, rebuilt with a
+--     `projection_key` by 0015), `guardrail_check_evaluations` (child, ditto) —
+--     Tier 2. WRITE: the gateway evidence sink and queue consumer write only the
+--     tenant object (attributed) or the PLATFORM_DATA singleton (unscoped); the
+--     `projection_key`-keyed control mirror, its writers and its retention sweep
+--     are gone. READ: the two drain-on-read backfill bridges were deleted; the
+--     admin/investigation surfaces read the tenant objects via fan-out and the
+--     platform object, never the control table.
+--   * `request_logs` (0001_init_control, rebuilt with a `projection_key` by
+--     0014) — Tier 3. WRITE: `apps/gateway/src/requestlog` writes only the
+--     tenant object (attributed) or the PLATFORM_DATA singleton (unscoped); the
+--     control-projection fallback write and its backfill source were deleted.
+--     READ: none remained even before the cut.
+--   * `billing_events`, `billing_ledger`, `billing_report_outbox` (all
+--     0001_init_control) — Tier 4. WRITE: `meteringDatabaseFrom`'s
+--     unattributed branch now resolves the PLATFORM_DATA singleton
+--     (`platformBillingStatements`), tenant-attributed metering writes the
+--     tenant object, and the dual-write shadow, the `platform-billing-flags`,
+--     the `sweepPlatform` gate and the `platform-billing-backfill` were deleted.
+--     READ: `control-plane` billing admin pages read `deps.platformData` for
+--     unattributed rows and the tenant objects for attributed rows; the
+--     control-outbox replay fallback (`readControlOutboxReportRow` /
+--     `casReplayOutboxRow` / the control branch of `locateOutboxReport`) was
+--     deleted, so an unattributed dead-letter replay returns 404.
+--
+-- NO historical backfill is required for ANY of the eight. There are no
+-- customers online and no traffic, and every writer was hard-cut onto its
+-- object destination BEFORE this DROP, so no control-only rows of concern
+-- exist; there is nothing to migrate. (This is the same "no accumulating
+-- control-only window" property the pure-DROP siblings 0036/0041/0042 relied
+-- on, here reached deliberately by removing the writers rather than by prior
+-- history.)
+--
+-- Drop order is children-first for the one inbound foreign key in the set:
+-- `guardrail_check_evaluations.evaluation_id REFERENCES guardrail_evaluations`
+-- (ON DELETE CASCADE), so the child drops first. No other table in the set is
+-- referenced by an inbound foreign key, so the rest of the order is free. Each
+-- table's indexes drop with it:
+--   * quota_policies            — idx_quota_policies_scope
+--   * spend_throttles           — idx_spend_throttles_expiry
+--   * guardrail_evaluations     — idx_guardrail_evaluations_request,
+--       _trace, _agent_run, _policy_time, _tenant_time, _verdict_action
+--   * guardrail_check_evaluations — (indexes drop with the table)
+--   * request_logs              — idx_request_logs_started, _tenant_started,
+--       _trace, _agent_run, _experiment, _delegation_root,
+--       _model_provider_started
+--   * billing_events            — idx_billing_events_occurred,
+--       idx_control_billing_events_tenant
+--   * billing_ledger            — idx_billing_ledger_created, _scope,
+--       idx_control_billing_ledger_tenant
+--   * billing_report_outbox     — idx_billing_report_outbox_due, _dead,
+--       idx_control_billing_report_outbox_tenant
+--
+-- Keeping the empty mirrors implies a second source of truth and lets a future
+-- writer accidentally bypass tenant isolation — the exact red line this program
+-- eliminates. `IF EXISTS` keeps this idempotent for fresh and already-migrated
+-- control databases (0013 / 0036 / 0037 / 0038 / 0039 / 0040 / 0041 / 0042 /
+-- 0043 precedent).
+--
+-- Deploy order: CP → gateway/agent-runtime/mcp. Every reader was switched to
+-- its object and every writer was hard-cut in the four preceding slices on this
+-- branch; the gateway bundle that defines the ControlDataObject carries this
+-- migration and applies it at cold start. An old isolate that somehow still hit
+-- a mirror during rollout skew would see `no such table`, but no such reader or
+-- writer exists.
+-- ===========================================================================
+
+DROP TABLE IF EXISTS guardrail_check_evaluations;
+DROP TABLE IF EXISTS guardrail_evaluations;
+DROP TABLE IF EXISTS request_logs;
+DROP TABLE IF EXISTS quota_policies;
+DROP TABLE IF EXISTS spend_throttles;
+DROP TABLE IF EXISTS billing_report_outbox;
+DROP TABLE IF EXISTS billing_ledger;
+DROP TABLE IF EXISTS billing_events;

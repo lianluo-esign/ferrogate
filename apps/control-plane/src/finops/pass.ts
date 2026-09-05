@@ -87,10 +87,9 @@ export const SPEND_ANOMALY_RUN_TABLE = "spend_anomaly_runs";
 export const SPEND_THROTTLE_TABLE = "spend_throttles";
 
 /**
- * The auto-throttle upsert. Extracted so the authoritative control write and the
- * best-effort tenant-object shadow (below) run the IDENTICAL statement — the two
- * `spend_throttles` schemas are byte-identical by construction
- * (`0032_spend_throttles.sql`), so the same bind list is total against both.
+ * The auto-throttle upsert against the owning tenant's OWN object — the sole
+ * authoritative home for `spend_throttles` (Track A: no tenant data mirrored in
+ * the shared CONTROL object). The control mirror leg has been removed entirely.
  *
  * `ON CONFLICT DO UPDATE` with a `MIN` on the RPM keeps the TIGHTER of two
  * signals firing critical for the same scope; the expiry only moves forward, so
@@ -106,22 +105,6 @@ const SPEND_THROTTLE_UPSERT_SQL = `INSERT INTO ${SPEND_THROTTLE_TABLE}
      expires_at_unix = MAX(expires_at_unix, excluded.expires_at_unix)`;
 /** A dead isolate must not suppress the same closed window forever. */
 export const SPEND_ANOMALY_CLAIM_LEASE_SECS = 15 * 60;
-
-/**
- * Track A G2 (stop-control-write) for `spend_throttles`.
- *
- * DEFAULT (unset/`"control"`): the throttle is authoritative on the shared
- * control object with a best-effort tenant-object shadow — the dual-write the
- * admission readers depend on until `GATEWAY_QUOTA_POLICY_SOURCE` flips. When
- * this reads `"tenant_object"` the auto-throttle writes ONLY the owning tenant's
- * own object and NEVER the shared control mirror, which is the
- * [[no-tenant-data-mirror-in-control-d1]] end state. Any other value reads as
- * the safe default (a config typo must not silently stop the brake). See the
- * `CONTROL_SPEND_THROTTLE_SOURCE` binding docs for the deploy-ordering gate.
- */
-function spendThrottleWritesTenantObjectOnly(env: ControlPlaneBindings): boolean {
-  return (env.CONTROL_SPEND_THROTTLE_SOURCE ?? "").trim() === "tenant_object";
-}
 
 /**
  * What one pass reports back on the tick summary.
@@ -465,25 +448,18 @@ async function evaluateWindow(
         const rpm = evaluation.tuning.autoThrottleRpm;
         if (rpm !== undefined && outcome.severity === "critical" && outcome.shouldNotify) {
           // `episodeDb` is this tenant's own object (resolved just above for the
-          // episode write). G2 (stop-control-write): when routed to the object the
-          // throttle is authoritative THERE and the shared control mirror is not
-          // written at all; until the flip it stays authoritative on control with
-          // the object as a best-effort shadow, so the DO-side row is present when
-          // the admission readers cut over. The winning arg is always a WRITABLE
-          // db (the episode upsert on `episodeDb` just succeeded).
-          const toObjectOnly = spendThrottleWritesTenantObjectOnly(env);
-          throttledRpm = await applyThrottle(
-            toObjectOnly ? episodeDb : db,
-            {
-              scopeId: evaluation.scopeId,
-              rpm,
-              ttlSecs: evaluation.tuning.throttleTtlSecs,
-              episodeId: outcome.episodeId,
-              signal,
-              now,
-            },
-            toObjectOnly ? undefined : episodeDb,
-          );
+          // episode write) and the SOLE authoritative home for the throttle — the
+          // shared control mirror leg is gone (Track A hard-cut). The winning arg
+          // is always a WRITABLE db (the episode upsert on `episodeDb` just
+          // succeeded).
+          throttledRpm = await applyThrottle(episodeDb, {
+            scopeId: evaluation.scopeId,
+            rpm,
+            ttlSecs: evaluation.tuning.throttleTtlSecs,
+            episodeId: outcome.episodeId,
+            signal,
+            now,
+          });
           if (throttledRpm !== null) throttled += 1;
         }
 
@@ -763,20 +739,12 @@ async function closeEpisode(
 /**
  * Write (or extend) the auto-throttle for a scope.
  *
- * `db` is the AUTHORITATIVE target and the caller chooses which object it is
- * (Track A G2, see `spendThrottleWritesTenantObjectOnly`): the shared control
- * object while the admission readers still read it there, or — once flipped —
- * the owning tenant's OWN object, with no `shadow` and so no control mirror at
- * all. When present, `shadow` gets the SAME row on a best-effort basis so the
- * DO-side `spend_throttles` table is already populated when the admission
- * readers are later pointed at it. A shadow outage or a not-yet-provisioned
- * tenant must NEVER fail the authoritative write the gateway enforces, so it is
- * caught and logged, exactly like the quota-policy shadow in
- * `routes/quota_policy.ts`. The scope is always a tenant here (`scope_id` IS the
- * tenant id), so both rows belong wholly to that tenant.
+ * `db` is the owning tenant's OWN object — the sole authoritative home for
+ * `spend_throttles` (Track A: the shared control mirror leg is gone). The scope
+ * is always a tenant here (`scope_id` IS the tenant id), so the row belongs
+ * wholly to that tenant.
  *
- * Returns the applied RPM (from the authoritative write), or `null` when nothing
- * was written there.
+ * Returns the applied RPM, or `null` when nothing was written.
  */
 async function applyThrottle(
   db: D1Database,
@@ -788,7 +756,6 @@ async function applyThrottle(
     signal: SpendAnomalySignal;
     now: number;
   },
-  shadow?: D1Database,
 ): Promise<number | null> {
   const expiresAt = input.now + input.ttlSecs;
   const reason = `spend anomaly ${input.signal} (episode ${input.episodeId})`;
@@ -797,20 +764,6 @@ async function applyThrottle(
     .prepare(SPEND_THROTTLE_UPSERT_SQL)
     .bind(...binds)
     .run();
-  if (shadow !== undefined) {
-    try {
-      await shadow
-        .prepare(SPEND_THROTTLE_UPSERT_SQL)
-        .bind(...binds)
-        .run();
-    } catch (error) {
-      console.warn("control-plane: spend throttle tenant-object shadow write failed", {
-        scopeId: input.scopeId,
-        signal: input.signal,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }
   return (result.meta?.changes ?? 0) > 0 ? input.rpm : null;
 }
 

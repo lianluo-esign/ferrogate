@@ -24,10 +24,9 @@
  * the un-attributed (platform-operator) rows no roster tenant owns. So the
  * authoritative fixture for an attributed row is its tenant's OBJECT (the same
  * place the gateway writer lands it), and for an un-attributed row the PLATFORM
- * object — either seeded directly or copied there from control by the one-time
- * `ensurePlatformRequestLogBackfill` the operator read triggers. The three
- * finops JOIN readers (cost-record/investigation/experiment) still read the
- * control projection, which G1 keeps dual-written, and are proved elsewhere.
+ * object, seeded directly. The control `request_logs` projection now has no
+ * reader at all (Track A dropped both the SIEM pump and the one-time platform
+ * backfill), so it is DROPped in this change.
  *
  * It does NOT prove the WRITER. That is `apps/gateway/src/requestlog/` — a
  * different Worker, a different `wrangler.toml`, unreachable from this suite —
@@ -38,11 +37,8 @@ import { SELF, env } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { resolveTenantDatabases } from "../src/adapters.js";
 import type { ControlPlaneBindings } from "../src/ports.js";
-import { applySchema, db, platformDb, resetD1, seedRequestLogs } from "./d1.js";
+import { applySchema, db, platformDb, resetD1 } from "./d1.js";
 import { BASE, arm, bearer, operatorKey, tenantKey } from "./harness.js";
-
-/** The object-local marker the operator read's one-time control→platform copy stamps. */
-const PLATFORM_REQUEST_LOG_BACKFILL_MARK = "platform_request_log_backfill_v1";
 
 interface ListBody {
   object: string;
@@ -272,49 +268,6 @@ describe("GET /admin/v1/request-logs returns the evidence the objects hold", () 
     expect(page.total).toBe(5);
     expect(page.offset).toBe(1);
     expect(page.limit).toBe(2);
-  });
-
-  it("backfills pre-cutover un-attributed control rows into the platform object", async () => {
-    // Rows written to CONTROL before G1's dual-write existed: no tenant object
-    // owns them and no fan-out can reach them until the one-time copy runs.
-    await seedRequestLogs([
-      { ...FULL_ROW, requestId: "fg-none-1", tenant: null, startedAtUnix: 500 },
-      { ...FULL_ROW, requestId: "fg-none-2", tenant: null, startedAtUnix: 600 },
-    ]);
-    expect(
-      (await platformDb().prepare("SELECT request_id FROM request_logs").all()).results,
-    ).toEqual([]);
-
-    const page = await readLogs(operatorKey.secret);
-    expect(page.data.map((row) => row.request_id)).toEqual(["fg-none-2", "fg-none-1"]);
-
-    // The rows now live in the platform object, `tenant` normalized to NULL.
-    const copied = await platformDb()
-      .prepare("SELECT request_id, tenant FROM request_logs ORDER BY request_id ASC")
-      .all<{ request_id: string; tenant: string | null }>();
-    expect(copied.results).toEqual([
-      { request_id: "fg-none-1", tenant: null },
-      { request_id: "fg-none-2", tenant: null },
-    ]);
-    const mark = await platformDb()
-      .prepare("SELECT detail FROM platform_backfill_marks WHERE mark = ?")
-      .bind(PLATFORM_REQUEST_LOG_BACKFILL_MARK)
-      .first<{ detail: string }>();
-    expect(JSON.parse(mark?.detail ?? "{}")).toMatchObject({ state: "complete", rows: 2 });
-  });
-
-  it("does not pull a post-completion control row into the platform authority", async () => {
-    await seedRequestLogs([{ ...FULL_ROW, requestId: "fg-none-1", tenant: null, startedAtUnix: 500 }]);
-    await readLogs(operatorKey.secret); // completes the one-time copy
-
-    // A later control-only un-attributed row is projection lag, not migration
-    // input: the completed marker makes the copy a no-op, so the operator read
-    // sees only what the authoritative object holds.
-    await seedRequestLogs([
-      { ...FULL_ROW, requestId: "fg-none-late", tenant: null, startedAtUnix: 700 },
-    ]);
-    const page = await readLogs(operatorKey.secret);
-    expect(page.data.map((row) => row.request_id)).toEqual(["fg-none-1"]);
   });
 });
 

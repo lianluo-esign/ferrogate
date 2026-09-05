@@ -81,13 +81,17 @@ async function seedRollup(scopeType: string, scopeId: string, costUsd: number): 
     .run();
 }
 
-/** A `quota_policies` row — they live in the CONTROL database. */
+/**
+ * A `quota_policies` row. Track A hard-cut: the shared control mirror was
+ * removed, so `SELF` reads every scope in the chain from the tenant's OWN
+ * object. All scopes here belong to `ORG`, so all rows go into `ORG`'s object.
+ */
 async function seedBudget(
   scopeType: string,
   scopeId: string,
   monthlyBudgetUsd: number,
 ): Promise<void> {
-  await controlDb
+  await tenantObjectDb(ORG)
     .prepare(
       "INSERT OR REPLACE INTO quota_policies " +
         "(id, scope_type, scope_id, monthly_budget_usd, enabled) VALUES (?, ?, ?, ?, 1)",
@@ -139,7 +143,7 @@ beforeEach(async () => {
   // The object's rows survive this pool's per-test isolated-storage rollback
   // (`ctx.storage.sql` is not part of it), so the truncation is explicit.
   await tenantObjectDb(ORG).prepare("DELETE FROM usage_monthly_rollups").run();
-  await controlDb.prepare("DELETE FROM quota_policies").run();
+  await tenantObjectDb(ORG).prepare("DELETE FROM quota_policies").run();
 });
 
 afterEach(() => {

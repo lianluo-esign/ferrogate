@@ -250,22 +250,35 @@ describe("quota_policy round-trips on D1", () => {
       .first<{ id: string; rpm_limit: number | null }>();
   }
 
-  it("shadow-writes the typed row into BOTH control and the owning tenant object", async () => {
-    // The document already lives in the tenant object (`quota-policies` is
-    // tenant_private). This asserts the OTHER half of the control-D1 removal:
-    // the typed enforcement projection the gateway's admission gate reads is
-    // dual-written — authoritative on control FOR NOW, and shadowed into the
-    // owning tenant's `quota_policies` (migration 0033) so it is current before
-    // the reader cutover flips admission onto the object.
+  /**
+   * After Track A migration 0045 the control facade has no `quota_policies`
+   * table at all — a strictly stronger red line than the row-absence the case
+   * asserted while the table still existed. `sqlite_master` is the honest probe:
+   * a `SELECT` from the table itself would throw `no such table`.
+   */
+  async function controlLacksQuotaPoliciesTable(): Promise<boolean> {
+    const row = await db()
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'quota_policies'")
+      .first<{ name: string }>();
+    return row === null;
+  }
+
+  it("writes the typed row ONLY into the owning tenant object, never the control facade", async () => {
+    // Track A hard-cut: the typed enforcement projection is written ONLY to the
+    // owning tenant's `quota_policies` (migration 0033) — the shared control
+    // mirror leg was removed entirely, and the gateway's admission gate now reads
+    // the row from that object. The control facade holds NO typed row at any
+    // point. (Track A migration 0045 DROPS the control `quota_policies` table
+    // outright, so these assert the facade has NO SUCH TABLE — stronger than the
+    // row-absence they asserted while it still existed.)
     const created = await SELF.fetch(
       `${BASE}/admin/v1/quota-policies`,
       jsonRequest(KEY, "POST", { scope_type: "tenant", scope_id: "tenant_a", rpm_limit: 60 }),
     );
     expect(created.status).toBe(201);
-    expect(await typedQuotaRow(db(), "tenant", "tenant_a")).toMatchObject({
-      id: "tenant:tenant_a",
-      rpm_limit: 60,
-    });
+    // THE RED LINE: nothing on the control facade.
+    expect(await controlLacksQuotaPoliciesTable()).toBe(true);
+    // …and the owning tenant object is the sole authority.
     expect(await typedQuotaRow(tenantObjectDb("tenant_a"), "tenant", "tenant_a")).toMatchObject({
       id: "tenant:tenant_a",
       rpm_limit: 60,
@@ -276,22 +289,22 @@ describe("quota_policy round-trips on D1", () => {
       jsonRequest(KEY, "PATCH", { rpm_limit: 120 }),
     );
     expect(patched.status).toBe(200);
-    // The edit reaches the tenant object too, or the operator's change would be
-    // silently lost the moment admission starts reading the object.
+    // The edit reaches the tenant object (the enforcement authority), and still
+    // nothing lands on the control facade.
     expect(await typedQuotaRow(tenantObjectDb("tenant_a"), "tenant", "tenant_a")).toMatchObject({
       rpm_limit: 120,
     });
+    expect(await controlLacksQuotaPoliciesTable()).toBe(true);
 
     const deleted = await SELF.fetch(`${BASE}/admin/v1/quota-policies/tenant/tenant_a`, {
       method: "DELETE",
       headers: bearer(KEY),
     });
     expect(deleted.status).toBe(200);
-    // Delete-side dual-write: the typed row must not outlive the document in
-    // EITHER store, or a deleted limit would keep biting once admission reads
-    // the object.
-    expect(await typedQuotaRow(db(), "tenant", "tenant_a")).toBeNull();
+    // The typed row must not outlive the document in the tenant object, or a
+    // deleted limit would keep biting once admission reads the object.
     expect(await typedQuotaRow(tenantObjectDb("tenant_a"), "tenant", "tenant_a")).toBeNull();
+    expect(await controlLacksQuotaPoliciesTable()).toBe(true);
   });
 
   it("round-trips the composite-keyed policy", async () => {

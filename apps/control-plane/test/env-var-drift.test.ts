@@ -429,19 +429,11 @@ describe("the env-var drift gate itself", () => {
       "CONTROL_PLANE_NATIVE_API_KEYS",
       "CONTROL_PLANE_SEED",
       "CONTROL_PLANE_STATIC_API_KEYS",
-      // Track A G2: the `quota_policies` write source. `"control"` (default)
-      // dual-writes each quota policy to the shared control object with a
-      // tenant-object shadow; `"tenant_object"` writes ONLY the tenant object and
-      // skips the control mirror. A plain `[vars]` entry — names a topology, holds
-      // no secret. Read by `quotaPolicyWritesTenantObjectOnly` in
-      // `store/quota_registry.ts`.
-      "CONTROL_QUOTA_POLICY_SOURCE",
-      // Track A G2: the `spend_throttles` write source. `"control"` (default)
-      // dual-writes the finops auto-throttle to the shared control object with a
-      // tenant-object shadow; `"tenant_object"` writes ONLY the tenant object and
-      // no control mirror. A plain `[vars]` entry — it names a topology, holds no
-      // secret. Read by `spendThrottleWritesTenantObjectOnly` in `finops/pass.ts`.
-      "CONTROL_SPEND_THROTTLE_SOURCE",
+      // Track A HARD-CUT: `CONTROL_QUOTA_POLICY_SOURCE` and
+      // `CONTROL_SPEND_THROTTLE_SOURCE` were DELETED. `quota_policies` and
+      // `spend_throttles` are no longer mirrored in the shared control object at
+      // all — the tenant's own object is the SOLE authority — so there is no
+      // control write leg left to gate and no env var to name the topology.
       // #683: the SIEM export sinks. A `[vars]` entry rather than a secret
       // because it holds no secret BY CONSTRUCTION — a sink's credential is an
       // `env://` REFERENCE and `src/siem/config.ts` refuses an inline literal,
@@ -662,7 +654,10 @@ describe("which committed [vars] values this runner can actually observe", () =>
     // write/read source) ⇒ 12.
     // Track A G2 added `CONTROL_QUOTA_POLICY_SOURCE` (quota_policies write
     // source) ⇒ 13.
-    expect(rows.length).toBe(13);
+    // Track A HARD-CUT DELETED both `CONTROL_SPEND_THROTTLE_SOURCE` and
+    // `CONTROL_QUOTA_POLICY_SOURCE` (the two mirror tables are now object-only,
+    // so there is no control write leg to gate) ⇒ 11.
+    expect(rows.length).toBe(11);
   });
 
   it("explains every overridden var with an explicit pin in vitest.config.ts", () => {
@@ -691,6 +686,6 @@ describe("which committed [vars] values this runner can actually observe", () =>
     // reads the RUNTIME values, so it also fails if `env` stopped resolving.
     const observable = rows.filter((r) => r.runtime === r.committed).map((r) => r.name);
     expect(observable.sort()).toEqual([...DECLARED.vars.keys()].sort());
-    expect(observable.length).toBe(13);
+    expect(observable.length).toBe(11);
   });
 });

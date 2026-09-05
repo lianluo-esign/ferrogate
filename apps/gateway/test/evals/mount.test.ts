@@ -221,10 +221,10 @@ describe("seam 3 — the cron tick sweeps regressions", () => {
     // The tenant's own thresholds, in the DURABLE place: `quota_policies`, read
     // through the same `0009` columns a deployment writes. The sweep skips a
     // tenant whose policy it cannot read, so this row is what makes the
-    // detection legitimate rather than defaulted — and putting it in D1 rather
-    // than in the var also proves the D1 arm of the source, which is the arm
-    // every real deployment takes.
-    await controlDb()
+    // detection legitimate rather than defaulted. Track A hard-cut: the source
+    // reads this from the tenant's OWN object, so the row is seeded there — the
+    // shared control mirror was removed.
+    await tenantObjectDb("tenant_a")
       .prepare(
         `INSERT INTO quota_policies (id, scope_type, scope_id, online_eval_enabled,
            online_eval_sample_rate, online_eval_judge_model, online_eval_criteria_json,

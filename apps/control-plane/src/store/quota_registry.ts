@@ -418,34 +418,6 @@ export function tenantAccountWritesTenantObjectOnly(env: {
 }
 
 /**
- * Track A G2 (stop-control-write) for the typed `quota_policies` enforcement row
- * ([[no-tenant-data-mirror-in-control-d1]]).
- *
- * DEFAULT (unset/`"control"`): the quota-policy write legs keep writing the typed
- * enforcement row into the shared CONTROL object (via {@link projectQuotaPolicy}
- * / {@link deleteQuotaPolicyRow}) ALONGSIDE the tenant-object shadow write, so the
- * gateway / agent-runtime / mcp admission gate that still reads control stays
- * current. When this reads `"tenant_object"` the control leg is SKIPPED — the
- * typed row lands ONLY in the owning tenant's own object (the shadow write, which
- * always runs, becomes the sole authority). Any other value reads as the safe
- * default (a config typo must not silently stop enforcement writes while a reader
- * still points at control).
- *
- * GATED: flip only once EVERY admission reader resolves the policy from the
- * tenant object (`{GATEWAY,AGENT_RUNTIME,MCP}_QUOTA_POLICY_SOURCE = "tenant_object"`)
- * AND the one-time `quota-policy-backfill` has populated the objects — quota is a
- * limiter, so a reader still on control that finds no row fails OPEN. The reader
- * flip and this writer flip are on SEPARATE vars by design (a coupled pair, but
- * the reader must lead the writer), unlike the tenant-account/`spend_throttles`
- * single-var flips whose reader and writer are the same store.
- */
-export function quotaPolicyWritesTenantObjectOnly(env: {
-  readonly CONTROL_QUOTA_POLICY_SOURCE?: string;
-}): boolean {
-  return (env.CONTROL_QUOTA_POLICY_SOURCE ?? "").trim() === "tenant_object";
-}
-
-/**
  * Project a `tenant-accounts` admin document into the typed `tenants` row.
  *
  * Only two of its columns are load-bearing for the data plane — `id` and

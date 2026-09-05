@@ -894,24 +894,6 @@ export interface ControlPlaneBindings {
   /** The deployed account-level `[cloudflare]` block, for the bootstrap import (#892). See {@link GATEWAY_PROVIDERS}. */
   readonly GATEWAY_CLOUDFLARE?: string;
   /**
-   * The `spend_throttles` WRITE source for the finops auto-throttle pass
-   * (Track A G2, `src/finops/pass.ts`). Absent or `"control"` (the DEFAULT)
-   * keeps the authoritative upsert on the shared CONTROL_DATA object with a
-   * best-effort tenant-object shadow — the topology the admission readers see
-   * until `GATEWAY_QUOTA_POLICY_SOURCE` is flipped fleet-wide. `"tenant_object"`
-   * INVERTS it: the throttle is written ONLY to the owning tenant's own object
-   * and the shared control mirror is not written AT ALL, which is the
-   * no-tenant-data-mirror-in-control end state.
-   *
-   * DEFAULT-OFF and its flip is GATED on deploy ordering: an admission worker
-   * still reading the control mirror would stop seeing throttles the instant
-   * this flips ahead of the read cutover, so `"tenant_object"` is only safe once
-   * every admission worker resolves throttles from the tenant object. A malformed
-   * value reads as the safe default (control-authoritative dual-write), never as
-   * a silent stop.
-   */
-  readonly CONTROL_SPEND_THROTTLE_SOURCE?: string;
-  /**
    * Track A G2 (stop-control-write) for the `tenants.document_json` tenant-account
    * mirror. DEFAULT (unset/`"control"`): every tenant-account write mirrors the
    * WHOLE admin document into the shared CONTROL object's `document_json`, and the
@@ -930,24 +912,6 @@ export interface ControlPlaneBindings {
    * global registry the data plane's `JOIN plans` reads and are ALWAYS written.
    */
   readonly CONTROL_TENANT_ACCOUNT_SOURCE?: string;
-  /**
-   * Track A G2 (stop-control-write) for the `quota_policies` typed rows. DEFAULT
-   * (unset/`"control"`): every quota-policy create/replace/update/delete writes the
-   * shared CONTROL object's `quota_policies` row AND a best-effort tenant-object
-   * shadow. `"tenant_object"` INVERTS it — the control leg is skipped and the
-   * tenant object's own row becomes the sole authority
-   * ([[no-tenant-data-mirror-in-control-d1]]).
-   *
-   * DEFAULT-OFF and GATED, and the flip ordering is STRICTER than a plain mirror:
-   * quota is a LIMITER that fails OPEN when the reader finds no row, so the WRITE
-   * flip (this var) must trail the READ flip — every admission worker
-   * (`{GATEWAY,AGENT_RUNTIME,MCP}_QUOTA_POLICY_SOURCE = "tenant_object"`) must
-   * resolve policies from the tenant object AND the shadow backfill must be
-   * complete before this stops the control write, or a still-control reader would
-   * silently lose every limit. A malformed value reads as the safe default
-   * (control-authoritative dual-write), never as a silent stop.
-   */
-  readonly CONTROL_QUOTA_POLICY_SOURCE?: string;
 }
 
 /** Per-request context values set by the middleware chain. */

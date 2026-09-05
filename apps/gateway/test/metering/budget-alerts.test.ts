@@ -57,9 +57,6 @@ import { RecordingQueue, resetMeteringTables } from "./d1-harness.js";
 import { pricedBook, usageFixture } from "./fixtures.js";
 
 const db = (env as unknown as { DB: D1Database }).DB;
-const controlDb =
-  (env as unknown as { CONTROL_DB?: D1Database; BILLING_DB: D1Database }).CONTROL_DB ??
-  (env as unknown as { BILLING_DB: D1Database }).BILLING_DB;
 
 const BASE = "https://gw.test";
 const WEBHOOK_URL = "https://alerts.test/budget";
@@ -172,7 +169,11 @@ async function seedQuotaPolicy(
   budgetUsd: number,
   thresholdPcts: readonly number[],
 ): Promise<void> {
-  await controlDb
+  // Track A hard-cut: the alert sink resolves the OWNING tenant (`tenant_a`) and
+  // reads every quota scope from that tenant's OWN object — the shared control
+  // mirror was removed. So even a `project`-scope row belongs to `tenant_a`'s
+  // object, never `project_1`'s.
+  await tenantObjectDb("tenant_a")
     .prepare(
       "INSERT OR REPLACE INTO quota_policies " +
         "(id, scope_type, scope_id, monthly_budget_usd, alert_threshold_pcts_json, enabled) " +
@@ -219,7 +220,7 @@ beforeEach(async () => {
   await db.prepare("DELETE FROM usage_aggregate_rollups").run();
   await db.prepare("DELETE FROM usage_monthly_rollups").run();
   await db.prepare("DELETE FROM tenant_contexts").run();
-  await controlDb.prepare("DELETE FROM quota_policies").run();
+  await tenantObjectDb("tenant_a").prepare("DELETE FROM quota_policies").run();
   await resetTenantObjectState(["tenant_a"]);
   // Post-#863 the settle, the rollup and the alert claim are all
   // tenant-object rows, and the object's `ctx.storage.sql` is NOT part of this

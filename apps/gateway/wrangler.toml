@@ -633,13 +633,6 @@ GATEWAY_CACHE_DISABLED_PROFILES = "[]"
 #
 # ---------------------------------------------------------------------------
 GATEWAY_TENANT_DB_ROUTING = "durable_object"
-# Quota-storage posture (Track A red line). "control" (the committed default)
-# reads quota_policies + spend_throttles from the control database; set to
-# "tenant_object" to read the RELOCATED per-tenant rows from each tenant's OWN
-# object. Kept default-OFF and INDEPENDENT of GATEWAY_TENANT_DB_ROUTING: flip it
-# only AFTER the per-tenant quota_policies rows are backfilled, or the limiter
-# would read an empty tenant object and admit unlimited traffic.
-GATEWAY_QUOTA_POLICY_SOURCE = "control"
 # CONTROL_DATA (the singleton control DO) is the default control-plane read
 # backend. Set GATEWAY_CONTROL_STORAGE to "d1" to read control rows from the
 # real CONTROL_D1 database instead — the gateway is a READ-ONLY control consumer,
@@ -677,14 +670,6 @@ GATEWAY_CONTROL_STORAGE = "durable_object"
 # GATEWAY_CONTROL_STORAGE above — it shields the last per-request control read
 # before the singleton DO becomes authoritative.
 GATEWAY_TENANT_STATUS_KV = "off"
-
-# Read by `platformBillingBackfillEnabled` (src/metering/platform-billing-backfill.ts,
-# via the PLATFORM_BILLING_BACKFILL_FLAG constant). `"on"` — and nothing else —
-# lets the scheduled pass drain historical unattributed billing rows from control
-# D1 into the PlatformDataObject leg; defaults OFF so no backfill runs until an
-# operator opts in at deploy time. Never throws and is idempotent (resumable
-# cursor in `platform_backfill_marks`), so an accidental flip is self-limiting.
-GATEWAY_PLATFORM_BILLING_BACKFILL = "off"
 
 # Read by `readiness` (src/routes/readiness.ts). `"true"` — and nothing else —
 # makes `/readyz` answer 503 while `/healthz` stays 200, which is the

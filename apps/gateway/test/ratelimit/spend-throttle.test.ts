@@ -8,9 +8,11 @@
  * is exactly the shape of defect this repository keeps shipping: the writer
  * mounted, the reader absent, both suites green against their own fixtures.
  *
- * So nothing here is mocked. `env.CONTROL_DB` is miniflare's real control
- * database with the DEPLOYED migration applied, `SELF` is `src/worker.ts`, and
- * the assertions are on the status code a real caller receives.
+ * So nothing here is mocked. `SELF` is `src/worker.ts`, and the assertions are
+ * on the status code a real caller receives. Track A hard-cut: `quota_policies`
+ * and `spend_throttles` are per-tenant data, so they are seeded into (and read
+ * from) the tenant's OWN object — the shared control mirror has been removed.
+ * Only the `tenant_databases` roster row stays on the control database.
  *
  * ## The invariant these tests exist to hold
  *
@@ -22,9 +24,10 @@
  * free-traffic hole.
  */
 import { SELF, env } from "cloudflare:test";
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { beforeEach, describe, expect, test } from "vitest";
 import { resetSharedApiKeyCache } from "../../src/keys/index.js";
 import { resetApiKeysTable, seedApiKey, testSecret } from "../keys/seed.js";
+import { tenantObjectDb } from "../tenant-object.js";
 
 const controlDb = (env as unknown as { CONTROL_DB: D1Database }).CONTROL_DB;
 
@@ -49,14 +52,19 @@ interface ErrorEnvelope {
   readonly error: { readonly code: string };
 }
 
-/** A `spend_throttles` row, in the shape the detector's `applyThrottle` writes. */
+/**
+ * A `spend_throttles` row, in the shape the detector's `applyThrottle` writes.
+ *
+ * Track A hard-cut: written to the OWNING tenant's object (these tests use
+ * tenant-scope rows, so `scopeId` is the tenant id), never the control mirror.
+ */
 async function seedThrottle(
   scopeType: string,
   scopeId: string,
   rpmLimit: number,
   expiresAtUnix: number,
 ): Promise<void> {
-  await controlDb
+  await tenantObjectDb(scopeId)
     .prepare(
       `INSERT OR REPLACE INTO spend_throttles
          (scope_type, scope_id, rpm_limit, reason, episode_id, created_at_unix, expires_at_unix)
@@ -72,7 +80,7 @@ async function seedPolicy(
   columns: Record<string, number | null>,
 ): Promise<void> {
   const names = Object.keys(columns);
-  await controlDb
+  await tenantObjectDb(scopeId)
     .prepare(
       `INSERT OR REPLACE INTO quota_policies (id, scope_type, scope_id, enabled${names
         .map((name) => `, ${name}`)
@@ -117,12 +125,10 @@ const PAST = Math.floor(Date.now() / 1000) - 1;
 beforeEach(async () => {
   await resetApiKeysTable();
   resetSharedApiKeyCache();
-  await controlDb.prepare("DELETE FROM quota_policies").run();
-  await controlDb.prepare("DELETE FROM spend_throttles").run();
-});
-
-afterEach(async () => {
-  await controlDb.prepare("DELETE FROM spend_throttles").run();
+  // Track A / 0045: the control mirrors of `quota_policies` and `spend_throttles`
+  // were DROPPED. Per-test isolation is provided by `freshScope()` handing every
+  // test a distinct tenant id, so its OWN object starts empty — no cross-test
+  // control-side reset is needed (or possible).
 });
 
 describe("the deployed gateway reads spend_throttles on the admission path", () => {

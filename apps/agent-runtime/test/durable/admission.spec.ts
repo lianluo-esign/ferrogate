@@ -11,7 +11,9 @@
  * the harness's two bound, MIGRATED databases and the `FG_DEV_*` bundle absent
  * (`harness/wrangler.toml`). So this file exercises:
  *
- *  - `d1QuotaPolicySource` — `quota_policies` + `plans` in `CONTROL_DB`,
+ *  - `d1QuotaPolicySource` — the per-tenant `quota_policies` + `spend_throttles`
+ *    legs in the caller tenant's OWN object (Track A hard-cut: the shared control
+ *    mirror was removed) plus the account-global `plans` floor in `CONTROL_DB`,
  *    the source that WINS over `FG_DEV_QUOTA_POLICIES` whenever the control
  *    database is bound;
  *  - `routedSpendSource` — `usage_monthly_rollups.cost_usd` and
@@ -52,7 +54,7 @@ const KEY_EMPTY_WALLET = "fg_durable_empty_walle";
 const KEY_FUNDED_WALLET = "fg_durable_funded_wall";
 /** `api_keys.request_limit_per_minute = 1`, read straight off the row. */
 const KEY_ROW_RPM = "fg_durable_row_rpm_cap";
-/** A `quota_policies` row in CONTROL_DB with `enabled = 0`. */
+/** A `quota_policies` row in the tenant's OWN object with `enabled = 0`. */
 const KEY_DISABLED_SCOPE = "fg_durable_disabled_sc";
 
 interface AdmissionKey {
@@ -142,15 +144,21 @@ async function seedAdmissionFixtures(): Promise<void> {
       .run();
   }
 
-  // CONTROL_DB: the quota chain. Both budget tenants get the SAME $10 cap, so
-  // the only difference between the two outcomes below is the rollup row.
-  await env.CONTROL_DB.prepare(INSERT_POLICY_SQL)
+  // The tenant OBJECT: the quota chain. Track A hard-cut — `quota_policies` is
+  // per-tenant data read from each tenant's OWN object, never the (removed)
+  // control mirror, so each policy row is seeded into its own tenant's object.
+  // Both budget tenants get the SAME $10 cap, so the only difference between the
+  // two outcomes below is the rollup row.
+  await (await tenantResourceDb("tenant-budget-over"))
+    .prepare(INSERT_POLICY_SQL)
     .bind("qp_budget_over", "tenant-budget-over", null, 10, 1)
     .run();
-  await env.CONTROL_DB.prepare(INSERT_POLICY_SQL)
+  await (await tenantResourceDb("tenant-budget-under"))
+    .prepare(INSERT_POLICY_SQL)
     .bind("qp_budget_under", "tenant-budget-under", null, 10, 1)
     .run();
-  await env.CONTROL_DB.prepare(INSERT_POLICY_SQL)
+  await (await tenantResourceDb("tenant-scope-disabled"))
+    .prepare(INSERT_POLICY_SQL)
     .bind("qp_scope_disabled", "tenant-scope-disabled", null, null, 0)
     .run();
 
@@ -323,7 +331,7 @@ describe("api_keys.request_limit_per_minute — the column the resolver used to 
   });
 });
 
-describe("quota_policies.enabled = 0 in the CONTROL database", () => {
+describe("quota_policies.enabled = 0 in the tenant's OWN object", () => {
   it("REFUSES with 403 quota_scope_disabled, not a 429", async () => {
     const response = await submit(KEY_DISABLED_SCOPE);
     expect(response.status).toBe(403);
@@ -332,15 +340,20 @@ describe("quota_policies.enabled = 0 in the CONTROL database", () => {
 });
 
 describe("the durable sources are the ones in play", () => {
-  it("governs a tenant that appears in NO dev var — CONTROL_DB is the source", async () => {
+  it("governs a tenant that appears in NO dev var — the tenant OBJECT is the source", async () => {
     // `FG_DEV_QUOTA_POLICIES` is not bound in this harness at all, and none of
     // the tenants above appear in `vitest.config.ts`. The refusals therefore
-    // cannot have come from the var source.
+    // cannot have come from the var source. Track A hard-cut: the durable
+    // `quota_policies` rows live in each tenant's OWN object, so the count is
+    // taken there — the control mirror no longer holds them.
     expect((env as unknown as Record<string, unknown>).FG_DEV_QUOTA_POLICIES).toBeUndefined();
-    const rows = await env.CONTROL_DB.prepare(
-      "SELECT COUNT(*) AS n FROM quota_policies WHERE scope_id LIKE 'tenant-%'",
-    ).first<{ n: number }>();
-    expect(Number(rows?.n ?? 0)).toBeGreaterThanOrEqual(3);
+    for (const tenantId of ["tenant-budget-over", "tenant-budget-under", "tenant-scope-disabled"]) {
+      const row = await (await tenantResourceDb(tenantId))
+        .prepare("SELECT COUNT(*) AS n FROM quota_policies WHERE scope_id = ?")
+        .bind(tenantId)
+        .first<{ n: number }>();
+      expect(Number(row?.n ?? 0)).toBe(1);
+    }
   });
 
   it("leaves every ungoverned durable tenant admitted", async () => {

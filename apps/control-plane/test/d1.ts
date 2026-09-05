@@ -151,9 +151,11 @@ export async function applySchema(): Promise<void> {
  * leftover row. Truncating is also honest about what it does not do: it leaves
  * the schema alone, so the migration still only runs once.
  *
- * `request_logs` is truncated here even though this app never writes it (#664:
- * the writer is `apps/gateway`), because the READER is served from this
- * database and a leftover row would make an "empty first" precondition lie.
+ * `request_logs`, `billing_events` and the guardrail evidence are NO LONGER
+ * truncated against control: `0045_drop_tenant_billing_requestlog_quota_guardrail.sql`
+ * (Track A finalisation) DROPPED those control mirrors, so the authority now
+ * lives only on each tenant's own object and the PLATFORM_DATA singleton, which
+ * are cleared in their own sections below.
  */
 export async function resetD1(): Promise<void> {
   // Which tenant OBJECTS are dirty is only recorded in the tables below, so
@@ -163,18 +165,15 @@ export async function resetD1(): Promise<void> {
   await db().batch([
     db().prepare(`DELETE FROM ${RESOURCE_TABLE}`),
     db().prepare(`DELETE FROM ${AUDIT_TABLE}`),
-    db().prepare(`DELETE FROM ${REQUEST_LOG_TABLE}`),
-    // Same argument as `request_logs`: written by `apps/gateway`, READ here
-    // (#677 joins it for the per-request cost), so a leftover row would make an
-    // "empty first" precondition lie and would attach a stale cost to a
-    // freshly seeded request id.
-    db().prepare(`DELETE FROM ${BILLING_EVENT_TABLE}`),
-    // Children first: `guardrail_check_evaluations` has a foreign key onto the
-    // evaluation, so deleting the parents first would fail on a database with
-    // enforcement on. D1 runs a batch in order, so the order here is the
-    // guarantee.
-    db().prepare(`DELETE FROM ${GUARDRAIL_CHECK_TABLE}`),
-    db().prepare(`DELETE FROM ${GUARDRAIL_EVALUATION_TABLE}`),
+    // `request_logs`, `billing_events`, `guardrail_check_evaluations` and
+    // `guardrail_evaluations` were DROPPED from the control DO by
+    // `0045_drop_tenant_billing_requestlog_quota_guardrail.sql` (Track A
+    // finalisation): the request-log, billing and guardrail evidence now lives
+    // only on each tenant's own object (attributed) and the PLATFORM_DATA
+    // singleton (unattributed). Truncating a table the control schema no longer
+    // has would fail the whole reset batch with "no such table", so the control
+    // truncates are gone with the migration — the tenant-object and platform-
+    // object copies are cleared in their own sections below.
     // #683: the SIEM export cursors. A leftover cursor is the one kind of stale
     // row that makes a LATER test see nothing and call it correct — the pump
     // would report `idle` over rows it had never sent, in this run.
@@ -186,7 +185,10 @@ export async function resetD1(): Promise<void> {
     // having run at all. The episode rows are the same trap one layer out: a
     // previous test's alert would satisfy a later test's assertion.
     db().prepare("DELETE FROM spend_anomaly_runs"),
-    db().prepare("DELETE FROM spend_throttles"),
+    // `spend_throttles` was DROPPED from the control DO by 0045 (Track A
+    // finalisation, coupled with `quota_policies` below): the finops
+    // auto-throttle now lives only on the tenant object, so there is no control
+    // copy to truncate here — the tenant-object copy is cleared below.
     // `spend_anomaly_episodes` was DROPPED from the control DO by
     // `0038_drop_spend_anomaly_episodes.sql` — the episode ledger is
     // authoritative in each tenant's own object and read by fleet fan-out, so
@@ -198,9 +200,9 @@ export async function resetD1(): Promise<void> {
     // them to control; every reader now reads the tenant object). Truncating a
     // table the schema no longer has fails the whole reset batch with
     // "no such table", so they are gone from here with the migration.
-    // Tuning rides `quota_policies`, so a policy row left behind would silently
-    // re-tune the next test's detector.
-    db().prepare("DELETE FROM quota_policies"),
+    // `quota_policies` was DROPPED from the control DO by 0045 (Track A
+    // finalisation): the detector's tuning now rides the tenant object's copy,
+    // cleared in the tenant-object section below — no control copy to truncate.
     // THE ROSTER. It decides which BACKEND a tenant routes to
     // (`BackendDispatchingTenantDatabaseRouter`), so a row left behind by a test
     // that created a tenant-account silently re-points every later test's tenant
@@ -367,87 +369,13 @@ export interface GuardrailEvaluationSeed {
   readonly checks?: readonly GuardrailCheckSeed[];
 }
 
-function evidenceProjectionKey(tenantId: string | null | undefined, logicalId: string): string {
-  const tenant = tenantId ?? "";
-  return `${Array.from(tenant).length}:${tenant}:${logicalId}`;
-}
-
-/** Seed the two evidence tables with raw SQL — see {@link GuardrailEvaluationSeed}. */
-export async function seedGuardrailEvaluations(
-  rows: readonly GuardrailEvaluationSeed[],
-): Promise<void> {
-  if (rows.length === 0) return;
-  const statements = [];
-  for (const row of rows) {
-    statements.push(
-      db()
-        .prepare(
-          `INSERT INTO ${GUARDRAIL_EVALUATION_TABLE}
-             (projection_key, id, request_id, trace_id, agent_run_id, subject_id, tenant, scope_type, scope_id,
-              target, protocol, stage, mode, policy_id, policy_revision, verdict, action,
-              enforcement_status, latency_ms, finding_count, input_fingerprint,
-              action_fingerprint, occurred_at_unix, evaluation_json)
-           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
-                   ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)`,
-        )
-        .bind(
-          evidenceProjectionKey(row.tenant, row.id),
-          row.id,
-          row.requestId,
-          row.traceId ?? null,
-          row.agentRunId ?? null,
-          row.subjectId ?? null,
-          row.tenant ?? null,
-          row.scopeType ?? "organization",
-          row.scopeId ?? null,
-          row.target ?? "unspecified",
-          row.protocol ?? "chat_completions",
-          row.stage ?? "request",
-          row.mode ?? "enforce",
-          row.policyId ?? "policy",
-          row.policyRevision ?? 1,
-          row.verdict ?? "fail",
-          row.action ?? "block",
-          row.enforcementStatus ?? "enforced",
-          row.latencyMs ?? 0,
-          row.findingCount ?? 0,
-          row.inputFingerprint ?? "hmac-sha256:unavailable",
-          row.actionFingerprint ?? null,
-          row.occurredAtUnix,
-          JSON.stringify(row.document ?? {}),
-        ),
-    );
-    for (const check of row.checks ?? []) {
-      statements.push(
-        db()
-          .prepare(
-            `INSERT INTO ${GUARDRAIL_CHECK_TABLE}
-               (projection_key, id, evaluation_projection_key, evaluation_id, tenant, check_id,
-                detector_id, detector_version, config_digest,
-                verdict, action, enforcement_status, error_kind, check_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)`,
-          )
-          .bind(
-            evidenceProjectionKey(row.tenant, check.id),
-            check.id,
-            evidenceProjectionKey(row.tenant, row.id),
-            row.id,
-            row.tenant ?? null,
-            check.checkId,
-            check.detectorId,
-            check.detectorVersion,
-            check.configDigest,
-            check.verdict,
-            check.action,
-            check.enforcementStatus,
-            check.errorKind ?? null,
-            JSON.stringify(check.document ?? {}),
-          ),
-      );
-    }
-  }
-  await db().batch(statements);
-}
+// The former `seedGuardrailEvaluations` helper wrote the SHARED control
+// `guardrail_evaluations` / `guardrail_check_evaluations` mirror. Track A
+// migration 0045 DROPPED those control tables, so the helper (and its
+// projection-key builder) is gone: guardrail evidence is seeded on the tenant
+// object or the PLATFORM_DATA singleton by each suite's own `seedExact*` helper.
+// The `GuardrailEvaluationSeed` / `GuardrailCheckSeed` shapes above are retained
+// because those suites still describe their fixtures with them.
 
 /** One `audit_events` row, for the investigation join. */
 export interface AuditEventSeed {

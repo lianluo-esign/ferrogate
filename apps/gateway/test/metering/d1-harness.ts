@@ -150,6 +150,23 @@ export function platformBillingDb(): D1Database {
   return db;
 }
 
+/** `SELECT count(*)` on one of the PLATFORM_DATA billing tables. */
+export async function platformRowCount(table: (typeof METERING_TABLES)[number]): Promise<number> {
+  const result = await platformBillingDb().prepare(`SELECT count(*) AS n FROM ${table}`).all();
+  const row = result.results?.[0] as { n?: unknown } | undefined;
+  return Number(row?.n ?? 0);
+}
+
+/** The raw `entry_json` of a PLATFORM_DATA ledger row, for asserting what landed. */
+export async function platformLedgerEntryJson(id: string): Promise<string | undefined> {
+  const result = await platformBillingDb()
+    .prepare("SELECT entry_json FROM billing_ledger WHERE id = ?")
+    .bind(id)
+    .all();
+  const row = result.results?.[0] as { entry_json?: unknown } | undefined;
+  return typeof row?.entry_json === "string" ? row.entry_json : undefined;
+}
+
 /** One platform `billing_events` row, read straight out of the object. */
 export interface PlatformBillingEventRow {
   readonly billing_event_id: string;

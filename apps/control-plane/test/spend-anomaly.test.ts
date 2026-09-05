@@ -251,11 +251,17 @@ interface ThrottleRow {
   readonly episode_id: string | null;
 }
 
-async function throttles(): Promise<ThrottleRow[]> {
-  const rows = await db()
-    .prepare("SELECT * FROM spend_throttles ORDER BY scope_id")
-    .all<ThrottleRow>();
-  return [...rows.results];
+/**
+ * After Track A migration 0045 the control facade has no `spend_throttles`
+ * table at all — the strongest form of "the mirror is gone". `sqlite_master` is
+ * the honest probe: a `SELECT` from the table itself would throw `no such
+ * table`. The authoritative rows are read with `tenantThrottles()`.
+ */
+async function controlLacksSpendThrottlesTable(): Promise<boolean> {
+  const row = await db()
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'spend_throttles'")
+    .first<{ name: string }>();
+  return row === null;
 }
 
 /**
@@ -698,7 +704,7 @@ describe("auto-throttle", () => {
 
     expect(report.spendAnomaly.opened).toBe(1);
     expect(report.spendAnomaly.throttled).toBe(0);
-    expect(await throttles()).toEqual([]);
+    expect(await tenantThrottles()).toEqual([]);
   });
 
   it("writes an EXPIRING throttle when a critical episode opens", async () => {
@@ -709,7 +715,11 @@ describe("auto-throttle", () => {
     const report = await runScheduledTick(bindings(), NOW);
 
     expect(report.spendAnomaly.throttled).toBe(1);
-    const rows = await throttles();
+    // Track A hard-cut: the auto-throttle is authoritative in the owning tenant's
+    // OWN object and the shared control `spend_throttles` mirror is NOT written at
+    // all — the no-tenant-data-mirror-in-control end state. The row lives ONLY on
+    // the tenant object.
+    const rows = await tenantThrottles();
     expect(rows).toHaveLength(1);
     expect(rows[0]?.scope_id).toBe("brake");
     expect(rows[0]?.rpm_limit).toBe(5);
@@ -719,47 +729,11 @@ describe("auto-throttle", () => {
     expect(rows[0]?.expires_at_unix).toBe(NOW + 3_600);
     expect(delivered[0]?.body.auto_throttled_rpm).toBe(5);
 
-    // The SAME row is shadow-written into the owning tenant's object, so the
-    // DO-side `spend_throttles` table is already populated when the admission
-    // readers are later cut over to it (the deploy-ordering invariant).
-    const shadow = await tenantThrottles();
-    expect(shadow).toHaveLength(1);
-    expect(shadow[0]?.scope_id).toBe("brake");
-    expect(shadow[0]?.rpm_limit).toBe(5);
-    expect(shadow[0]?.expires_at_unix).toBe(NOW + 3_600);
-  });
-
-  it("writes ONLY the tenant object and no control mirror when routed (G2)", async () => {
-    // Track A G2 (stop-control-write): with `CONTROL_SPEND_THROTTLE_SOURCE`
-    // flipped, the auto-throttle is authoritative in the owning tenant's own
-    // object and the shared control `spend_throttles` mirror is NOT written at
-    // all — the no-tenant-data-mirror-in-control end state. The default topology
-    // (control-authoritative + shadow) is the "writes an EXPIRING throttle" case
-    // above, so this is the same scenario with the write inverted.
-    await seedFlatBaseline("brake", 2);
-    await seedHour("brake", 0, 80, 40);
-    await setPolicy("brake", { spend_anomaly_auto_throttle_rpm: 5 });
-
-    const report = await runScheduledTick(
-      bindings({ CONTROL_SPEND_THROTTLE_SOURCE: "tenant_object" }),
-      NOW,
-    );
-
-    // The brake still fired and the operator was still told.
-    expect(report.spendAnomaly.throttled).toBe(1);
-    expect(delivered[0]?.body.auto_throttled_rpm).toBe(5);
-
-    // Authoritative in the tenant's OWN object…
-    const tenant = await tenantThrottles();
-    expect(tenant).toHaveLength(1);
-    expect(tenant[0]?.scope_id).toBe("brake");
-    expect(tenant[0]?.rpm_limit).toBe(5);
-    expect(tenant[0]?.expires_at_unix).toBe(NOW + 3_600);
-
-    // THE RED LINE: the shared control facade holds NO throttle row — the mirror
-    // the dual-write used to keep is gone. (The table itself still exists in this
-    // slice; the DROP is a later, gated step, so this asserts a count of zero.)
-    expect(await throttles()).toEqual([]);
+    // THE RED LINE: Track A migration 0045 DROPPED the shared control
+    // `spend_throttles` table outright — the mirror the dual-write used to keep is
+    // gone unconditionally. `sqlite_master` proves the table itself is absent, a
+    // strictly stronger guarantee than the row-count of zero this once asserted.
+    expect(await controlLacksSpendThrottlesTable()).toBe(true);
   });
 
   it("does not throttle on a warning", async () => {
@@ -774,7 +748,7 @@ describe("auto-throttle", () => {
 
     expect(report.spendAnomaly.opened).toBe(1);
     expect(report.spendAnomaly.throttled).toBe(0);
-    expect(await throttles()).toEqual([]);
+    expect(await tenantThrottles()).toEqual([]);
   });
 
   /**
@@ -805,7 +779,7 @@ describe("auto-throttle", () => {
     // speak; it said "within budget" ($25 + $1/h * 358h = $383 < $400).
     expect(report.spendAnomaly.evaluated).toBe(1);
     // The brake first, because it is the assertion with a customer behind it.
-    expect(await throttles()).toEqual([]);
+    expect(await tenantThrottles()).toEqual([]);
     expect(report.spendAnomaly.throttled).toBe(0);
     expect(await episodes()).toEqual([]);
     expect(delivered).toEqual([]);

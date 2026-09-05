@@ -1,13 +1,19 @@
 /**
- * THE RELOCATED QUOTA READ (Track A red line) — which DATABASE each admission
- * leg reads from, in agent-runtime.
+ * THE RELOCATED QUOTA READ (Track A red line, HARD CUT) — which DATABASE each
+ * admission leg reads from, in agent-runtime.
  *
- * `quota_policies` and `spend_throttles` are per-scope TENANT data whose home is
- * the tenant's OWN object, not the shared control. The
- * `AGENT_RUNTIME_QUOTA_POLICY_SOURCE = "tenant_object"` posture routes those two
- * legs to the tenant object while the account-global `plans` floor stays on
- * control. A split like this passes a per-leg suite while pointing a leg at the
- * wrong database, so each case asserts on the DATABASE that received the SQL.
+ * `quota_policies` and `spend_throttles` are per-scope TENANT data whose SOLE
+ * home is the tenant's OWN object; the shared control mirror has been removed.
+ * The tenant-scoped legs always route to the tenant object; the account-global
+ * `plans` floor alone stays on control. A split like this passes a per-leg suite
+ * while pointing a leg at the wrong database, so each case asserts on the
+ * DATABASE that received the SQL, not merely that a snapshot came back.
+ *
+ * An ownerless subject (no tenantId) or a call with no resolver has no tenant
+ * object to read, so the tenant-scoped legs are SKIPPED and the limiter fails
+ * OPEN — acceptable because such a subject has no relocated rows to enforce. The
+ * control mirror no longer exists to fall through to, so a resolver failure for a
+ * tenant-attributed subject is a 503.
  *
  * The mirror of `apps/gateway`'s quota-tenant-source test — the three admission
  * clones must stay in behavioural lockstep.
@@ -69,7 +75,11 @@ function subject(chain: QuotaSubject["chain"]): QuotaSubject {
 }
 
 describe("d1QuotaPolicySource routes each leg to the right database", () => {
-  it("OFF (no resolver): every leg reads control in ONE batch", async () => {
+  it("no resolver: tenant-scoped legs are skipped (fail-open), only the plan floor reads control", async () => {
+    // Track A hard-cut removed the control mirror. Without a resolver there is no
+    // tenant object to read, so quota_policies + spend_throttles are skipped
+    // entirely (the limiter fails open) and ONLY the account-global plan floor
+    // reaches control.
     const control = fakeD1({ throttleProvisioned: true });
 
     const snapshot = await d1QuotaPolicySource(control.db, NEVER).policiesFor(
@@ -77,11 +87,12 @@ describe("d1QuotaPolicySource routes each leg to the right database", () => {
     );
 
     expect(snapshot.ok).toBe(true);
-    expect(control.batches).toEqual([["quota_policies", "spend_throttles", "plans"]]);
-    expect(control.probes).toBe(1);
+    expect(control.batches).toEqual([["plans"]]);
+    // No tenant-scoped read means no throttle probe against control either.
+    expect(control.probes).toBe(0);
   });
 
-  it("ON (resolver): tenant-scoped legs read the tenant object, plan stays on control", async () => {
+  it("resolver present: tenant-scoped legs read the tenant object, plan stays on control", async () => {
     const control = fakeD1({ throttleProvisioned: false });
     const tenant = fakeD1({ throttleProvisioned: true });
 
@@ -98,7 +109,10 @@ describe("d1QuotaPolicySource routes each leg to the right database", () => {
     expect(control.probes).toBe(0);
   });
 
-  it("ON but ownerless subject (no tenantId): falls back to control", async () => {
+  it("ownerless subject (no tenantId): tenant legs skipped, nothing reads (fail-open)", async () => {
+    // A platform-operator credential has no single tenant object to resolve, so
+    // the tenant-scoped legs are skipped and the limiter fails open. With no
+    // tenant there is no plan floor either, so nothing reads anywhere.
     const control = fakeD1({ throttleProvisioned: true });
     let resolverCalled = false;
 
@@ -109,10 +123,11 @@ describe("d1QuotaPolicySource routes each leg to the right database", () => {
 
     expect(snapshot.ok).toBe(true);
     expect(resolverCalled).toBe(false);
-    expect(control.batches).toEqual([["quota_policies", "spend_throttles"]]);
+    expect(control.batches).toEqual([]);
+    expect(control.probes).toBe(0);
   });
 
-  it("ON and the tenant handle cannot be resolved: 503, never a control read", async () => {
+  it("the tenant handle cannot be resolved: 503, never a control read", async () => {
     const control = fakeD1({ throttleProvisioned: true });
 
     const snapshot = await d1QuotaPolicySource(control.db, NEVER, async () => {

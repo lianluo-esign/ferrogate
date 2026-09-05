@@ -69,7 +69,6 @@ import { HttpError } from "../middleware/errors.js";
 import type { CallerScope, StoreRecord } from "../ports.js";
 import { adminListPaginated, parseListQuery } from "../responses.js";
 import { BILLING_EVENT_TABLE, REQUEST_LOG_TABLE } from "../store/d1.js";
-import { ensurePlatformRequestLogBackfill } from "../store/platform_request_log_backfill.js";
 import { tenantEvidenceDatabaseFor } from "../store/tenancy.js";
 import {
   FLEET_FANOUT_MAX_TENANTS,
@@ -640,10 +639,6 @@ async function fleetCostRecordPage(
   const platformDb = deps.platformData ?? null;
   if (narrowedTenant === undefined && platformDb !== null) {
     try {
-      // The one-time copy of pre-cutover un-attributed control rows into the
-      // platform object, idempotent and marked — the same gate the request-log
-      // operator read runs, so the two surfaces agree on what the platform leg holds.
-      await ensurePlatformRequestLogBackfill(deps.controlDatabase, platformDb);
       const page = await costRecordPage(
         platformDb,
         { kind: "platform_operator" },

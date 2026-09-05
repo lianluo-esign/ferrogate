@@ -36,9 +36,10 @@
  */
 import { applyD1Migrations, env } from "cloudflare:test";
 import { controlDataObjectDatabase } from "@ferrogate/storage";
-import { beforeAll } from "vitest";
+import { beforeAll, beforeEach } from "vitest";
 
 import { forgetControlTableProbe } from "../src/auth.js";
+import { TENANT } from "./fixtures.js";
 
 interface McpTestBindings {
   DB?: D1Database;
@@ -107,4 +108,30 @@ beforeAll(async () => {
   // lands, so a file whose first request preceded the seed does not remember
   // "these tables do not exist" for the whole run.
   forgetControlTableProbe(controlAlias);
+});
+
+// Since Track A's 0045 finalisation the admission gate resolves `quota_policies`
+// (and the #697 `spend_throttles` overlay) from the CALLER TENANT'S OWN object,
+// not the shared control mirror (which was dropped). Under the #820/#824
+// dispatching router a tenant with no `tenant_databases` roster row falls to the
+// native-binding arm whose `not_found` surfaces as a 503 on every authenticated
+// request — so every `seedFixture()`-driven SELF test now needs its default
+// tenant provisioned. The self-managing suites (admission / shared-rate-limit /
+// d1-auth / fleet-*) seed their OWN tenant ids in a later `beforeEach` and are
+// unaffected; this only provisions the shared default `TENANT`, idempotently.
+beforeEach(async () => {
+  await controlAlias
+    .prepare(
+      `INSERT INTO tenant_databases
+         (tenant_id, binding_name, schema_version,
+          storage_backend, provisioning_status, provisioned_at_unix, updated_at_unix)
+       VALUES (?, NULL, 15, 'durable_object', 'ready', 1, 1)
+       ON CONFLICT (tenant_id) DO UPDATE SET
+         binding_name = NULL,
+         storage_backend = 'durable_object',
+         provisioning_status = 'ready',
+         schema_version = 15`,
+    )
+    .bind(TENANT)
+    .run();
 });

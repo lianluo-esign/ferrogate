@@ -179,19 +179,6 @@ export interface RateLimitBindings
    */
   readonly GATEWAY_TENANT_DB_ROUTING?: string | undefined;
   /**
-   * The quota-storage posture (Track A red line). `"tenant_object"` reads the
-   * RELOCATED `quota_policies` + `spend_throttles` legs from the tenant's OWN
-   * object; anything else (the default) keeps them on the control database. Held
-   * separate from {@link GATEWAY_TENANT_DB_ROUTING} on purpose: that posture is
-   * already `"durable_object"` in production, and quota must not follow it into
-   * the tenant object until an operator has backfilled the per-tenant
-   * `quota_policies` rows and flipped THIS flag — otherwise the limiter would
-   * read an empty tenant object and admit unlimited traffic. Default OFF, so the
-   * relocation is code-ready but inert until deliberately enabled. See
-   * {@link quotaTenantPolicyDb}.
-   */
-  readonly GATEWAY_QUOTA_POLICY_SOURCE?: string | undefined;
-  /**
    * The per-tenant Durable Object namespace. Read only to distinguish "routing
    * is on and the storage is bound" from "routing is on and this Worker has no
    * tenant storage at all" — see {@link defaultWalletAdmission}. The namespace
@@ -493,27 +480,43 @@ function defaultWalletAdmission(c: Context<GatewayEnv>, env: RateLimitBindings):
  * move with it.
  */
 /**
- * The RELOCATED-quota resolver (Track A red line), or `undefined` to keep the
- * default control read.
+ * The tenant-scoped quota resolver (Track A red line, HARD CUT), or `undefined`
+ * for a subject that has no single tenant object.
  *
- * Returns a per-request accessor for the tenant's OWN object ONLY when the
- * `GATEWAY_QUOTA_POLICY_SOURCE = "tenant_object"` posture is set AND this
- * request is tenant-attributed. `quotaPolicySourceFromEnv` passes it to
- * {@link d1QuotaPolicySource}, which reads `quota_policies` + `spend_throttles`
- * from it while the account-global `plans` floor stays on the control database.
+ * Returns a per-request accessor for the tenant's OWN object — the sole home of
+ * `quota_policies` + `spend_throttles` now that the control mirror has been
+ * removed. `quotaPolicySourceFromEnv` passes it to {@link d1QuotaPolicySource},
+ * which reads those two legs from it while the account-global `plans` floor
+ * stays on the control database.
  *
  * The same cross-tenant guard {@link defaultSpendSource} makes: the routed
  * handle is for exactly one tenant, and resolving one tenant's quota from
  * another tenant's object would apply the wrong caps — a refusal, not a read.
  * A platform-operator credential (`tenantId === null`) has no single tenant
- * object, so it stays on control, exactly like its wallet/spend legs.
+ * object, so it returns `undefined`; such a subject has no tenant scope in its
+ * chain, so {@link d1QuotaPolicySource} skips the tenant-scoped legs (fail-open)
+ * exactly like its wallet/spend legs.
  */
 function quotaTenantPolicyDb(
   c: Context<GatewayEnv>,
-  env: RateLimitBindings,
 ): ((tenantId: string) => Promise<D1Database>) | undefined {
-  if ((env.GATEWAY_QUOTA_POLICY_SOURCE ?? "").trim() !== "tenant_object") return undefined;
-  const accessor = tenantDatabaseOf(c);
+  // Mirror the lazy wallet/spend legs: touching the tenant accessor must not
+  // PRE-EMPT an earlier guard (e.g. a deny rule that refuses the request
+  // outright) with a 500. When `tenantDatabase()` is not mounted there is no
+  // tenant object to read, so the tenant-scoped `quota_policies`/`spend_throttles`
+  // legs are skipped (fail-open — no policy row means no cap), exactly like a
+  // subject with no tenant object. This never falls through to a shared control
+  // read (Track A removed the mirror; there is nothing to fall through to). A
+  // genuine handle-resolution failure for a subject that DOES have a tenant
+  // object still surfaces as a 503 inside `d1QuotaPolicySource`, because that
+  // read is attempted through the closure below. In production `tenantDatabase()`
+  // is always mounted, so this catch is inert and behaviour is unchanged.
+  let accessor: ReturnType<typeof tenantDatabaseOf>;
+  try {
+    accessor = tenantDatabaseOf(c);
+  } catch {
+    return undefined;
+  }
   if (accessor.tenantId === null) return undefined;
   return async (tenantId: string): Promise<D1Database> => {
     const handle = await accessor.handle();
@@ -631,7 +634,7 @@ export function rateLimit(deps: RateLimitDeps = {}): MiddlewareHandler<GatewayEn
     const quotas =
       typeof deps.quotas === "function"
         ? deps.quotas(env)
-        : (deps.quotas ?? quotaPolicySourceFromEnv(env, quotaTenantPolicyDb(c, env)));
+        : (deps.quotas ?? quotaPolicySourceFromEnv(env, quotaTenantPolicyDb(c)));
     const spend =
       typeof deps.spend === "function"
         ? deps.spend(env)

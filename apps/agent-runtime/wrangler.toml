@@ -90,13 +90,6 @@ new_sqlite_classes = ["AgentRunState", "WorkerPlane"]
 # below. env-var-drift parks CONTROL_D1 in UNDECLARED_BINDINGS until the posture
 # flips to "d1".
 AGENT_RUNTIME_CONTROL_STORAGE = "durable_object"
-# Quota-storage posture (Track A red line). "control" (default) reads
-# quota_policies + spend_throttles from the control database; "tenant_object"
-# reads the RELOCATED per-tenant rows from each tenant's OWN object. Default-OFF
-# and independent of the money-leg routing: flip only AFTER the per-tenant
-# quota_policies are backfilled, or the limiter reads an empty tenant object and
-# admits unlimited traffic.
-AGENT_RUNTIME_QUOTA_POLICY_SOURCE = "control"
 # DEV / TEST ONLY. Installs the in-memory port bundle from `src/ports.ts`.
 # Production MUST NOT set this: without it the Worker fails CLOSED — every
 # authenticated surface answers 503 until real ports are bound.
@@ -336,13 +329,6 @@ script_name = "ferrogate-gateway"
 
 [env.unit.vars]
 AGENT_RUNTIME_CONTROL_STORAGE = "durable_object"
-# Quota-storage posture (Track A red line). "control" (default) reads
-# quota_policies + spend_throttles from the control database; "tenant_object"
-# reads the RELOCATED per-tenant rows from each tenant's OWN object. Default-OFF
-# and independent of the money-leg routing: flip only AFTER the per-tenant
-# quota_policies are backfilled, or the limiter reads an empty tenant object and
-# admits unlimited traffic.
-AGENT_RUNTIME_QUOTA_POLICY_SOURCE = "control"
 FG_DEV_IN_MEMORY_PORTS = "1"
 FG_REQUIRE_PRODUCTION_MTLS = "0"
 CONTAINER_GOVERNED_EGRESS_HOSTS = ""

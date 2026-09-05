@@ -1,21 +1,22 @@
 /**
- * THE RELOCATED QUOTA READ (Track A red line) — which DATABASE each admission
- * leg reads from.
+ * THE RELOCATED QUOTA READ (Track A red line, HARD CUT) — which DATABASE each
+ * admission leg reads from.
  *
  * `quota_policies` and `spend_throttles` are per-scope TENANT data, so their
- * authoritative home is the tenant's OWN object, not the shared control. The
- * `GATEWAY_QUOTA_POLICY_SOURCE = "tenant_object"` posture routes those two legs
- * to the tenant object while the account-global `plans` floor stays on control.
+ * SOLE authoritative home is the tenant's OWN object; the shared control mirror
+ * has been removed. The tenant-scoped legs always route to the tenant object;
+ * the account-global `plans` floor alone stays on control.
  *
  * This is exactly the kind of split that passes a per-leg suite while pointing
  * a leg at the wrong database — the admission path would still look durable and
  * every operator quota would silently stop applying. So each case asserts on the
  * DATABASE that received the SQL, not merely that a snapshot came back.
  *
- * The default/OFF posture (no resolver) and an ownerless subject (no tenantId)
- * both keep every leg on control, byte-for-byte the pre-relocation behavior —
- * the property that lets this ship code-ready and inert until an operator
- * backfills the tenant objects and flips the flag.
+ * An ownerless subject (no tenantId) or a call with no resolver has no tenant
+ * object to read, so the tenant-scoped legs are SKIPPED and the limiter fails
+ * OPEN (no policy row = no cap) — acceptable because such a subject has no
+ * relocated rows to enforce. The control mirror no longer exists to fall through
+ * to, so a resolver failure for a tenant-attributed subject is a 503.
  */
 import { describe, expect, it } from "vitest";
 
@@ -85,9 +86,11 @@ function subject(chain: QuotaSubject["chain"]): QuotaSubject {
 }
 
 describe("d1QuotaPolicySource routes each leg to the right database", () => {
-  it("OFF (no resolver): every leg reads control in ONE batch", async () => {
-    // MUTATION: route quota_policies to a tenant handle without the posture set
-    // and this goes red — the default deployment must not change database.
+  it("no resolver: tenant-scoped legs are skipped (fail-open), only the plan floor reads control", async () => {
+    // Track A hard-cut removed the control mirror. Without a resolver there is no
+    // tenant object to read, so quota_policies + spend_throttles are skipped
+    // entirely (the limiter fails open) and ONLY the account-global plan floor
+    // reaches control.
     const control = fakeD1({ throttleProvisioned: true });
 
     const snapshot = await d1QuotaPolicySource(control.db, NEVER).policiesFor(
@@ -95,13 +98,12 @@ describe("d1QuotaPolicySource routes each leg to the right database", () => {
     );
 
     expect(snapshot.ok).toBe(true);
-    // Exactly one round trip, carrying all three legs — the historical
-    // single-transaction admission read.
-    expect(control.batches).toEqual([["quota_policies", "spend_throttles", "plans"]]);
-    expect(control.probes).toBe(1);
+    expect(control.batches).toEqual([["plans"]]);
+    // No tenant-scoped read means no throttle probe against control either.
+    expect(control.probes).toBe(0);
   });
 
-  it("ON (resolver): tenant-scoped legs read the tenant object, plan stays on control", async () => {
+  it("resolver present: tenant-scoped legs read the tenant object, plan stays on control", async () => {
     // MUTATION: leave quota_policies on control while claiming to route it and
     // this goes red — the relocation is exactly the tenant-scoped legs moving.
     const control = fakeD1({ throttleProvisioned: false });
@@ -123,9 +125,10 @@ describe("d1QuotaPolicySource routes each leg to the right database", () => {
     expect(control.probes).toBe(0);
   });
 
-  it("ON but ownerless subject (no tenantId): falls back to control", async () => {
-    // A platform-operator credential has no single tenant object; its key-scoped
-    // rows were never relocated, so it must stay on control even under the flag.
+  it("ownerless subject (no tenantId): tenant legs skipped, nothing reads (fail-open)", async () => {
+    // A platform-operator credential has no single tenant object to resolve, so
+    // the tenant-scoped legs are skipped and the limiter fails open. With no
+    // tenant there is no plan floor either, so nothing reads anywhere.
     const control = fakeD1({ throttleProvisioned: true });
     let resolverCalled = false;
 
@@ -136,14 +139,15 @@ describe("d1QuotaPolicySource routes each leg to the right database", () => {
 
     expect(snapshot.ok).toBe(true);
     expect(resolverCalled).toBe(false);
-    // No tenant ⇒ no plan leg; just quota_policies + throttle, on control.
-    expect(control.batches).toEqual([["quota_policies", "spend_throttles"]]);
+    expect(control.batches).toEqual([]);
+    expect(control.probes).toBe(0);
   });
 
-  it("ON and the tenant handle cannot be resolved: 503, never a control read", async () => {
+  it("the tenant handle cannot be resolved: 503, never a control read", async () => {
     // MUTATION: fall through to control on a resolver failure and this goes red.
     // Answering from the wrong authority would apply the wrong caps to live
-    // traffic — the failure a limiter must refuse, not paper over.
+    // traffic — the failure a limiter must refuse, not paper over. There is no
+    // control mirror to fall through to anyway (Track A hard-cut).
     const control = fakeD1({ throttleProvisioned: true });
 
     const snapshot = await d1QuotaPolicySource(control.db, NEVER, async () => {
@@ -154,7 +158,8 @@ describe("d1QuotaPolicySource routes each leg to the right database", () => {
     expect(snapshot.ok === false && snapshot.detail).toContain(
       "routed tenant quota database unavailable",
     );
-    // Not one statement reached control.
+    // Not one statement reached control — the resolver failure returns before the
+    // plan floor leg is even reached.
     expect(control.batches).toEqual([]);
     expect(control.probes).toBe(0);
   });

@@ -22,7 +22,6 @@ import {
   sweepAssetRetentionForTenants,
 } from "./assets/index.js";
 import { attributionTags } from "./attribution/index.js";
-import { controlDatabaseFrom, platformDatabaseFrom } from "./control-data.js";
 import {
   batchJobFromWire,
   batchRouteModule,
@@ -51,20 +50,16 @@ import {
   tenantModelCatalogFromD1,
 } from "./inference/index.js";
 import {
-  GATEWAY_PLATFORM_BILLING_DRAIN,
   createMeteringUsageSink,
   meteringBindingsFromEnv,
   meteringDrain,
-  platformBillingFlagEnabled,
   routePriceSettledCostUsd,
-  sweepPlatformBillingBackfill,
 } from "./metering/index.js";
 import { rateLimit } from "./ratelimit/index.js";
 import {
   consumeRequestLogBatch,
   createRequestLogSink,
   requestLogBindingsFromEnv,
-  requestLogDatabaseFrom,
   requestLogging,
   sweepRequestLogs,
 } from "./requestlog/index.js";
@@ -597,35 +592,11 @@ export async function gatewayScheduled(
     await sweepAssetRetentionForTenants(env, tenantRouter, tenantIds);
   }
   await gatewayRequestLogRetention(env, tenantIds ?? []);
-  // Zero-D1 Plan B billing-outbox co-migration: recover crash-stranded PLATFORM
-  // outbox rows. RECOVERY ONLY — the request path publishes each unattributed
-  // platform charge once and reaps its platform outbox row in the same pass, so
-  // this sweep only re-delivers rows an isolate death stranded (money-safe:
-  // downstream dedups on the ledger-entry-id). Gated OFF by default
-  // (`GATEWAY_PLATFORM_BILLING_DRAIN`; that same gate forces the request-path
-  // shadow to WRITE the platform outbox, so the sweep is never fed an empty
-  // store). Placed OUTSIDE the try/catch above and grouped with the other
-  // Zero-D1 Plan B leg, AFTER money recovery (`usage.sweep`), so the degraded
-  // fallback branch still reaches this gate and `sweepPlatform` never throws.
-  if (platformBillingFlagEnabled(env, GATEWAY_PLATFORM_BILLING_DRAIN)) {
-    await usage.sweepPlatform({ env, ctx });
-  }
-  // Zero-D1 Plan B write-migration: back up the control projection's
-  // pre-dual-write UNATTRIBUTED billing rows into the authoritative
-  // PlatformDataObject, resumably. After G1's `#deliverOnce` dual-write there is
-  // still a historical tail in control that no tenant fan-out reader can reach;
-  // this is the one-time copy of it. Gated OFF by default
-  // (`GATEWAY_PLATFORM_BILLING_BACKFILL`), never throws, and once both table
-  // marks are complete it costs two small object reads per tick and zero control
-  // reads. Reader cutover stays deferred (owned by the polaris system later), so
-  // this is purely getting the data INTO the object. It runs AFTER money
-  // recovery (`usage.sweep`, above) so a bulk copy can never delay it.
-  await sweepPlatformBillingBackfill(
-    env,
-    controlDatabaseFrom(env),
-    platformDatabaseFrom(env),
-    Math.floor(Date.now() / 1000),
-  );
+  // Track A hard-cut: unattributed billing now settles directly into the
+  // PLATFORM_DATA object, so its crash-stranded outbox rows are recovered by the
+  // ordinary `usage.sweep` above (the undefined-tenant backend resolves the
+  // platform object). The separate `sweepPlatform` gate and the one-time
+  // control→object billing backfill are gone with the control mirror.
   // #689 — expired `/v1/responses` conversation state, on the SAME tick.
   //
   // It is a SEPARATE call rather than a line inside `gatewayRequestLogRetention`
@@ -685,23 +656,19 @@ async function gatewayRequestLogRetention(
   env: unknown,
   tenants: readonly string[],
 ): Promise<void> {
-  const db = requestLogDatabaseFrom(env);
   const nowUnix = Math.floor(Date.now() / 1000);
-  // Track A / G2: request-log retention no longer touches the control mirror.
+  // Track A: request-log retention no longer touches any shared-CONTROL mirror.
   // It fans the fleet default over the PROVISIONED ROSTER (each tenant's own
-  // object) and the PLATFORM_DATA object; the control projection's discovery
-  // SELECT and mirror-DELETE were retired (see `requestlog/retention.ts`), so a
-  // dropped control `request_logs` cannot fault this sweep.
+  // object) and the PLATFORM_DATA object; the control projection was DROPped, so
+  // there is nothing else to prune.
   await sweepRequestLogs(env, tenants, nowUnix);
-  // Guardrail screening evidence (#665/#860) is swept on the SAME tick with
-  // the SAME policy. Tenant-attributed rows are deleted from their object first
-  // and the CONTROL rows here are removed only as derived mirrors. Deliberately
-  // not a separate retention window: a request log whose screening evidence has
-  // been deleted (or the reverse) makes the investigation view able to
-  // half-answer. With no CONTROL_DB, explicit tenant overrides still run against
-  // TenantDataObject; fleet discovery remains unavailable because DO namespaces
-  // cannot be enumerated. See `guardrails/evidence-retention.ts`.
-  await sweepGuardrailEvidence(db, env, nowUnix);
+  // Guardrail screening evidence (#665/#860) is swept on the SAME tick with the
+  // SAME policy and the SAME roster fan-out. Tenant-attributed rows are pruned
+  // from each provisioned tenant's object, un-attributed rows from PLATFORM_DATA.
+  // Deliberately not a separate retention window: a request log whose screening
+  // evidence has been deleted (or the reverse) makes the investigation view able
+  // to half-answer. See `guardrails/evidence-retention.ts`.
+  await sweepGuardrailEvidence(env, tenants, nowUnix);
 }
 
 /**
@@ -767,21 +734,11 @@ export async function gatewayQueue(batch: RequestLogMessageBatch, env: unknown):
       batchJobFromWire(message.body) === undefined,
   );
   if (rest.length > 0) {
-    // Track A / G2: request_logs AND guardrail evidence are tenant data — each
-    // lands in the owning TenantDataObject (and PLATFORM_DATA for unscoped) and
-    // is NOT mirrored to the shared control store. Both control projections now
-    // have ZERO runtime readers: the SIEM pump reads request_logs from each
-    // tenant object (#825), and the finops JOIN readers fan out. Both legs are
-    // dropped here; each flag is independently reversible (flip back re-arms the
-    // dual write).
-    await consumeRequestLogBatch(
-      view(rest) as RequestLogMessageBatch,
-      env,
-      undefined,
-      undefined,
-      undefined,
-      { projectGuardrailToControl: false, projectRequestLogToControl: false },
-    );
+    // Track A: request_logs AND guardrail evidence are tenant data — each lands
+    // in the owning TenantDataObject (and PLATFORM_DATA for unscoped) and is NOT
+    // mirrored to any shared control store. The control projections were DROPped
+    // (0045), so the consumer is single-source with no projection leg to gate.
+    await consumeRequestLogBatch(view(rest) as RequestLogMessageBatch, env);
   }
 }
 

@@ -32,31 +32,27 @@
  *     └── ctx.waitUntil(evidence.flush({ env, ctx }))
  *            ├── env.REQUEST_LOG bound?  → Queue.send(wire)       ← preferred
  *            │      … later, on the consumer:
- *            │      queue(batch) → object batch → CONTROL_DB projection
- *            └── no queue? → TenantDataObject first, then (UNLESS G2) CONTROL_DB
- *                 projection (unscoped platform evidence ALSO → PLATFORM_DATA
- *                 object, which is its authoritative home once the mirror is off)
+ *            │      queue(batch) → tenant object (attributed)
+ *            │                   / PLATFORM_DATA object (un-attributed)
+ *            └── no queue? → same object writes inline
  * ```
  *
- * The `then CONTROL_DB projection` step is gated by `projectToControl` (Track A
- * G2): the production composition root wires it `false` so the fallback stops
- * mirroring guardrail evidence into the control singleton, symmetric with the
- * queue consumer's `projectGuardrailToControl` leg. See that option.
+ * Track A: there is no shared-CONTROL projection any more. Attributed evidence's
+ * sole home is its tenant's own object; un-attributed (platform-operator)
+ * evidence's sole home is the `PLATFORM_DATA` singleton.
  *
- * ## The platform leg (Zero-D1 Plan B)
+ * ## The platform leg
  *
  * Unscoped/platform evidence (`tenant.organizationId` empty) has no tenant
  * object to be authoritative in, and a pure DO fan-out over the tenant roster
- * cannot reach it. So it ALSO goes to the `PLATFORM_DATA` singleton — the home
- * it will be read from once the control projection is retired. During G1 this
- * is a strictly ADDITIVE dual-write: the CONTROL_DB projection write is
- * unchanged, so no evidence is dropped mid-rollout. The leg is best-effort
- * (`flush` never rejects) and does not requeue on failure — the control write
- * stays the counted authority for these rows until the later cutover.
+ * cannot reach it. So it goes to the `PLATFORM_DATA` singleton — now its SOLE
+ * authoritative home. The write is counted like any other authoritative write:
+ * a success credits `written`, a failure credits `failed` and requeues so the
+ * next flush retries it (bounded by `capacity`).
  *
  * The queue path shares `../requestlog/queue.ts`: one delivery writes each
- * tenant group to its object and then writes the derived CONTROL projection.
- * The direct path uses the same object-first ordering without the queue.
+ * tenant group to its object and the un-attributed rows to PLATFORM_DATA. The
+ * direct path uses the same object writers without the queue.
  *
  * With NEITHER bound the sink counts a `dropped` and returns TRUE from
  * `append`. Refusing instead would take every screened request down on a
@@ -67,11 +63,10 @@
  * defect #665 exists to close.
  */
 
-import { controlDatabaseFrom, platformDatabaseFrom } from "../control-data.js";
+import { platformDatabaseFrom } from "../control-data.js";
 import {
   type GuardrailEvidenceDatabase,
   guardrailTenantDatabaseFromEnv,
-  writeGuardrailEvidence,
   writePlatformGuardrailEvidence,
   writeTenantGuardrailEvidence,
 } from "./evidence-d1.js";
@@ -89,9 +84,9 @@ export interface GuardrailEvidenceQueue {
 export interface GuardrailEvidenceStats {
   /** Evaluations handed to the Queue producer. */
   readonly queued: number;
-  /** Evaluations written straight to D1 (no queue bound). */
+  /** Evaluations written straight to the object path (no queue bound). */
   readonly written: number;
-  /** Evaluations with nowhere to go — no queue AND no control database. */
+  /** Evaluations with nowhere to go — no queue AND no destination object. */
   readonly dropped: number;
   /** Writes that were attempted and rejected. */
   readonly failed: number;
@@ -102,17 +97,12 @@ export interface GuardrailEvidenceStats {
 /** The bindings this slice reads, and nothing else. */
 export interface GuardrailEvidenceBindings {
   readonly REQUEST_LOG?: unknown;
-  /**
-   * `[[d1_databases]] binding = "CONTROL_DB"` — the derived fleet projection.
-   * Tenant-attributed authority is `TENANT_DATA`, not this binding.
-   */
-  readonly CONTROL_DB?: unknown;
   /** `[[durable_objects.bindings]] binding = "TENANT_DATA"`. */
   readonly TENANT_DATA?: unknown;
   /**
-   * `[[durable_objects.bindings]] binding = "PLATFORM_DATA"` (Zero-D1 Plan B).
-   * The authoritative home for unscoped/platform evidence. Optional so a Worker
-   * the stanza has not yet reached simply skips the platform dual-write leg.
+   * `[[durable_objects.bindings]] binding = "PLATFORM_DATA"`. The sole
+   * authoritative home for unscoped/platform evidence. Optional so a Worker the
+   * stanza has not yet reached simply has no durable destination for those rows.
    */
   readonly PLATFORM_DATA?: unknown;
 }
@@ -123,12 +113,11 @@ export interface GuardrailEvidenceDiagnostics {
 
 export interface GuardrailEvidenceSinkOptions {
   readonly queue?: (env: unknown) => GuardrailEvidenceQueue | undefined;
-  readonly database?: (env: unknown) => GuardrailEvidenceDatabase | undefined;
   readonly tenantDatabase?: (
     env: unknown,
     tenantId: string,
   ) => GuardrailEvidenceDatabase | undefined;
-  /** Resolver for the platform singleton (Zero-D1 Plan B); default reads `env.PLATFORM_DATA`. */
+  /** Resolver for the PLATFORM_DATA singleton; default reads `env.PLATFORM_DATA`. */
   readonly platformDatabase?: (env: unknown) => GuardrailEvidenceDatabase | undefined;
   readonly diagnostics?: GuardrailEvidenceDiagnostics | undefined;
   /**
@@ -140,19 +129,6 @@ export interface GuardrailEvidenceSinkOptions {
    * it will never get to write. 1024 is the Rust semaphore's permit count.
    */
   readonly capacity?: number;
-  /**
-   * Track A / G2 (red line {@link ../../ no-tenant-data-mirror-in-control-d1}):
-   * whether the DIRECT (no-queue) fallback still writes the derived CONTROL_DB
-   * guardrail projection. Defaults to `true` so the existing dual-write tests are
-   * unchanged. Wired to `false` at the production composition root
-   * (`../guardrails/config.ts`), which retires that mirror write so the tenant
-   * objects and the `PLATFORM_DATA` singleton are the SOLE homes — symmetric with
-   * the queue consumer's `projectGuardrailToControl` leg
-   * (`../requestlog/queue.ts`), which is already wired `false`. It gates ONLY the
-   * guardrail control mirror; the tenant-object and platform-object writes above
-   * it are untouched. Reversible — flipping back re-arms the mirror write.
-   */
-  readonly projectToControl?: boolean;
 }
 
 function isQueue(value: unknown): value is GuardrailEvidenceQueue {
@@ -187,20 +163,13 @@ export function guardrailEvidenceQueueFrom(env: unknown): GuardrailEvidenceQueue
   return isQueue(candidate) ? candidate : undefined;
 }
 
-/** `env.CONTROL_DB`, when it really is a D1 binding. */
-export function guardrailEvidenceDatabaseFrom(env: unknown): GuardrailEvidenceDatabase | undefined {
-  if (typeof env !== "object" || env === null) return undefined;
-  const candidate = controlDatabaseFrom(env);
-  return isDatabase(candidate) ? candidate : undefined;
-}
-
 /**
- * The `PLATFORM_DATA` facade, when it really is bound (Zero-D1 Plan B).
+ * The `PLATFORM_DATA` facade, when it really is bound.
  *
  * Resolves the platform singleton's `D1Database`-shaped handle. Returns
  * `undefined` when the binding is absent — a unit env, or a Worker the stanza
- * has not yet reached — in which case the caller's platform dual-write leg is
- * skipped and the control projection write it runs alongside is untouched.
+ * has not yet reached — in which case unscoped/platform evidence has no durable
+ * destination and is counted as dropped rather than silently lost.
  */
 export function guardrailEvidencePlatformDatabaseFrom(
   env: unknown,
@@ -228,17 +197,15 @@ export function guardrailEvidenceTenantDatabaseFromEnv(
  * `../requestlog/sink.ts::requestLogBindingsFromEnv`.
  */
 export const guardrailEvidenceBindingsFromEnv: Required<
-  Pick<GuardrailEvidenceSinkOptions, "queue" | "database" | "tenantDatabase" | "platformDatabase">
+  Pick<GuardrailEvidenceSinkOptions, "queue" | "tenantDatabase" | "platformDatabase">
 > = {
   queue: guardrailEvidenceQueueFrom,
-  database: guardrailEvidenceDatabaseFrom,
   tenantDatabase: guardrailEvidenceTenantDatabaseFromEnv,
   platformDatabase: guardrailEvidencePlatformDatabaseFrom,
 };
 
 export class DurableGuardrailEvidenceSink implements GuardrailEvidenceSink {
   readonly #queueOf: (env: unknown) => GuardrailEvidenceQueue | undefined;
-  readonly #databaseOf: (env: unknown) => GuardrailEvidenceDatabase | undefined;
   readonly #tenantDatabaseOf: (
     env: unknown,
     tenantId: string,
@@ -246,8 +213,6 @@ export class DurableGuardrailEvidenceSink implements GuardrailEvidenceSink {
   readonly #platformDatabaseOf: (env: unknown) => GuardrailEvidenceDatabase | undefined;
   readonly #diagnostics: GuardrailEvidenceDiagnostics | undefined;
   readonly #capacity: number;
-  /** G2: false retires the direct-fallback control mirror write (see options). */
-  readonly #projectToControl: boolean;
   /**
    * Buffered by evidence id, so a re-`append` of the same
    * `(request, policy@revision, stage)` REPLACES rather than accumulates.
@@ -266,12 +231,10 @@ export class DurableGuardrailEvidenceSink implements GuardrailEvidenceSink {
 
   constructor(options: GuardrailEvidenceSinkOptions = {}) {
     this.#queueOf = options.queue ?? guardrailEvidenceQueueFrom;
-    this.#databaseOf = options.database ?? guardrailEvidenceDatabaseFrom;
     this.#tenantDatabaseOf = options.tenantDatabase ?? guardrailEvidenceTenantDatabaseFromEnv;
     this.#platformDatabaseOf = options.platformDatabase ?? guardrailEvidencePlatformDatabaseFrom;
     this.#diagnostics = options.diagnostics;
     this.#capacity = options.capacity ?? 1024;
-    this.#projectToControl = options.projectToControl ?? true;
   }
 
   get stats(): GuardrailEvidenceStats {
@@ -394,7 +357,6 @@ export class DurableGuardrailEvidenceSink implements GuardrailEvidenceSink {
 
     // Write tenant-attributed evidence to each exact object first. A missing
     // object is a failed authoritative path, never permission to use CONTROL_DB.
-    const objectWritten: GuardrailEvidenceEnvelope[] = [];
     const unscoped: GuardrailEvidenceEnvelope[] = [];
     const byTenant = new Map<string, GuardrailEvidenceEnvelope[]>();
     for (const envelope of envelopes) {
@@ -418,16 +380,11 @@ export class DurableGuardrailEvidenceSink implements GuardrailEvidenceSink {
         continue;
       }
       if (tenantDb === undefined) {
+        // Track A: the tenant's own object is the SOLE authoritative home; there
+        // is no control mirror to fall back to. With nowhere to write, the
+        // evidence is counted as failed + dropped, never silently lost.
         this.#failed += group.length;
-        let projectionAvailable = false;
-        try {
-          projectionAvailable = this.#databaseOf(runtime.env) !== undefined;
-        } catch {
-          // No usable destination is the same observable outcome as an absent
-          // binding; the diagnostics below still retain the failure signal.
-        }
-        if (projectionAvailable) this.#requeue(group);
-        else this.#dropped += group.length;
+        this.#dropped += group.length;
         this.#diagnostics?.onError?.(
           "d1",
           new Error(`authoritative TenantDataObject is unavailable for tenant ${tenantId}`),
@@ -436,7 +393,6 @@ export class DurableGuardrailEvidenceSink implements GuardrailEvidenceSink {
       }
       try {
         await writeTenantGuardrailEvidence(tenantDb, group);
-        objectWritten.push(...group);
         this.#written += group.length;
       } catch (error) {
         this.#failed += group.length;
@@ -445,16 +401,12 @@ export class DurableGuardrailEvidenceSink implements GuardrailEvidenceSink {
       }
     }
 
-    // Zero-D1 Plan B: unscoped/platform rows have no tenant object, so they ALSO
-    // go to the PLATFORM_DATA singleton — the authoritative home they are READ
-    // from once the control projection is retired. It is best-effort (flush must
-    // not reject) and does NOT requeue on failure — matching the queue
-    // consumer's platform leg (`../requestlog/queue.ts`): requeuing here would
-    // re-drive the whole envelope. In G1 (`#projectToControl` true) it is a
-    // strictly ADDITIVE leg alongside the unchanged control write below, which
-    // stays the counted authority for these rows. In G2 (`#projectToControl`
-    // false) the control write below is skipped, so PLATFORM_DATA IS the counted
-    // authority — credit `#written` here for the unscoped rows that land.
+    // Track A: unscoped/platform rows have no tenant object; the PLATFORM_DATA
+    // singleton is their SOLE authoritative home (there is no control mirror
+    // left). It is written like any object leg — a success credits `#written`, a
+    // failure credits `#failed` and requeues for the next flush (bounded by
+    // capacity), and an absent PLATFORM_DATA binding leaves the rows nowhere to
+    // go, counted as `#dropped`. flush() still never rejects.
     if (unscoped.length > 0) {
       let platformDb: GuardrailEvidenceDatabase | undefined;
       try {
@@ -463,47 +415,18 @@ export class DurableGuardrailEvidenceSink implements GuardrailEvidenceSink {
         platformDb = undefined;
         this.#diagnostics?.onError?.("d1", error);
       }
-      if (platformDb !== undefined) {
+      if (platformDb === undefined) {
+        this.#dropped += unscoped.length;
+      } else {
         try {
           await writePlatformGuardrailEvidence(platformDb, unscoped);
-          if (!this.#projectToControl) this.#written += unscoped.length;
+          this.#written += unscoped.length;
         } catch (error) {
+          this.#failed += unscoped.length;
+          this.#requeue(unscoped);
           this.#diagnostics?.onError?.("d1", error);
         }
       }
-    }
-
-    // G2 (red line: no tenant/unattributed mirror in control): the derived
-    // control projection is retired. The tenant objects and the PLATFORM_DATA
-    // singleton written above are the SOLE, authoritative homes — symmetric with
-    // the queue consumer's `projectGuardrailToControl` leg. Skip the mirror write
-    // entirely; nothing below runs.
-    if (!this.#projectToControl) return;
-
-    // The projection is best-effort compatibility state. It is written only
-    // for object rows that landed, plus unscoped rows which have no object.
-    const projectionEnvelopes = [...objectWritten, ...unscoped];
-    if (projectionEnvelopes.length === 0) return;
-    let db: GuardrailEvidenceDatabase | undefined;
-    try {
-      db = this.#databaseOf(runtime.env);
-    } catch (error) {
-      this.#failed += projectionEnvelopes.length;
-      this.#requeue(projectionEnvelopes);
-      this.#diagnostics?.onError?.("d1", error);
-      return;
-    }
-    if (db === undefined) {
-      this.#dropped += unscoped.length;
-      return;
-    }
-    try {
-      await writeGuardrailEvidence(db, projectionEnvelopes);
-      this.#written += unscoped.length;
-    } catch (error) {
-      this.#failed += projectionEnvelopes.length;
-      this.#requeue(projectionEnvelopes);
-      this.#diagnostics?.onError?.("d1", error);
     }
   }
 }

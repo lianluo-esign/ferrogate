@@ -208,50 +208,21 @@ describe("D1UsageLedger — capture", () => {
 });
 
 /**
- * PLATFORM LIMIT PIN — kept as a PORT-TODO in `src/d1/usage-d1.ts`.
+ * The usage accumulate is ADDITIVE and deliberately NOT idempotent.
  *
- * The Rust/Postgres shape put the `billing_events` exactly-once claim and this
- * usage accumulate in ONE transaction. On D1 they live in two different
- * databases (control vs tenant) and there is no cross-database transaction, no
- * two-phase commit, and no distributed-transaction API. These tests pin BOTH
- * halves of the honest approximation so it cannot silently be described as
- * exactly-once.
+ * The Rust/Postgres shape put the exactly-once billing claim and this usage
+ * accumulate in ONE transaction. Exactly-once de-duplication is the caller's
+ * job in the metering settlement path; this ledger only accumulates, so
+ * replaying a settled call double-counts it. Pinned so the accumulate can never
+ * silently be described as exactly-once.
+ *
+ * (The former cross-database leak pin — a statement prepared on the CONTROL
+ * `billing_events` table, submitted inside a TENANT batch, must never land in
+ * control — is gone: `billing_events` was DROPPED from CONTROL by 0045 (Track A
+ * finalisation) and is now tenant-object / PLATFORM_DATA authoritative, so
+ * there is no control billing table to batch a foreign statement against.)
  */
-describe("D1UsageLedger — the cross-database platform limit", () => {
-  test("a mixed batch never leaks a foreign statement into the CONTROL database", async () => {
-    // The platform limit on a cross-database batch is miniflare-version
-    // dependent: newer workerd REFUSES a foreign-prepared statement (the
-    // tenant-object facade throws), older workerd SILENTLY runs it against the
-    // RECEIVER (the tenant object). This pin does not assert which — it asserts
-    // the safety invariant that holds under BOTH: a statement prepared on
-    // CONTROL_DB, submitted inside a TENANT batch, NEVER lands a row in the
-    // control database. Whether it is refused or mis-executed against the
-    // tenant, control stays clean — one tenant's SQL never writes another's.
-    const marker = "cross-db-batch-pin";
-    const cleanup = "DELETE FROM billing_events WHERE billing_event_id = ?1";
-    await tenantDb(TENANT_A).prepare(cleanup).bind(marker).run();
-    await env.CONTROL_DB.prepare(cleanup).bind(marker).run();
-
-    // Either outcome is acceptable; only the leak is not.
-    await tenantDb(TENANT_A)
-      .batch([
-        tenantDb(TENANT_A).prepare("DELETE FROM usage_monthly_rollups WHERE id = 'x'"),
-        env.CONTROL_DB.prepare(
-          "INSERT INTO billing_events (billing_event_id, tenant_id, request_id, occurred_at_unix, event_json) " +
-            "VALUES (?1, 'tenant_a', 'req-pin', 0, '{}')",
-        ).bind(marker),
-      ])
-      .catch(() => {
-        // A refusal (newer workerd) is a valid outcome; swallow it and assert
-        // the invariant below, which also holds for the mis-execution path.
-      });
-
-    const probe = "SELECT billing_event_id FROM billing_events WHERE billing_event_id = ?1";
-    expect(await env.CONTROL_DB.prepare(probe).bind(marker).first()).toBeNull();
-
-    await tenantDb(TENANT_A).prepare(cleanup).bind(marker).run();
-  });
-
+describe("D1UsageLedger — the additive (non-idempotent) accumulate", () => {
   test("the accumulate is ADDITIVE, so replaying one settled call double-counts it", async () => {
     const ledger = new D1UsageLedger(handleA);
     // Byte-identical write, twice — exactly what an at-least-once delivery does.
@@ -259,7 +230,7 @@ describe("D1UsageLedger — the cross-database platform limit", () => {
     await ledger.persistUsageAggregate(call());
     const rollup = await ledger.getUsageMonthlyRollup(PERIOD, "tenant", TENANT_A);
     // NOT 140. This is the documented non-idempotence: de-duplication is the
-    // caller's job via D1BillingEventLedger's control-database claim.
+    // caller's job in the metering settlement path.
     expect(rollup?.totalTokens).toBe(280);
     expect(rollup?.requestCount).toBe(2);
   });

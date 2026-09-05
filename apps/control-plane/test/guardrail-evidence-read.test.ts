@@ -34,14 +34,9 @@
  * rename breaks both.
  */
 import { SELF, env } from "cloudflare:test";
-import type { TenantDatabaseRouter } from "@ferrogate/storage";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { resolveTenantDatabases } from "../src/adapters.js";
 import type { ControlPlaneBindings } from "../src/ports.js";
-import {
-  GUARDRAIL_EVIDENCE_BACKFILL_MARK,
-  ensureTenantGuardrailEvidenceBackfill,
-} from "../src/store/guardrail_evidence_backfill.js";
 import {
   type GuardrailEvaluationSeed,
   applySchema,
@@ -50,7 +45,6 @@ import {
   resetD1,
   seedAuditEvents,
   seedBillingEvents,
-  seedGuardrailEvaluations,
   seedRequestLogs,
 } from "./d1.js";
 import { BASE, arm, bearer, operatorKey, tenantKey } from "./harness.js";
@@ -107,19 +101,22 @@ async function clearExactTenantEvidence(): Promise<void> {
       tenant.prepare("DELETE FROM agent_runs"),
       tenant.prepare("DELETE FROM request_logs"),
       tenant.prepare("DELETE FROM billing_events"),
-      tenant
-        .prepare("DELETE FROM tenant_provisioning_marks WHERE tenant_id = ? AND mark = ?")
-        .bind(tenantId, GUARDRAIL_EVIDENCE_BACKFILL_MARK),
     ]);
   }
 }
 
-async function seedExactTenantGuardrailEvaluations(
+async function seedExactGuardrailEvaluations(
   rows: readonly GuardrailEvaluationSeed[],
 ): Promise<void> {
   for (const row of rows) {
-    if (row.tenant === undefined || row.tenant === null || row.tenant === "") continue;
-    const tenant = await exactTenantDatabase(row.tenant);
+    // Authority routing: an ATTRIBUTED evaluation lands on its owning tenant's
+    // OWN object; an UNATTRIBUTED one (tenant null/empty — a platform-operator
+    // call that resolved no tenant) lands on the PLATFORM_DATA singleton, the
+    // home the operator fan-out unions in. Track A migration 0045 DROPPED the
+    // shared control mirror, so there is no third destination left.
+    const owner =
+      row.tenant === undefined || row.tenant === null || row.tenant === "" ? null : row.tenant;
+    const tenant = owner === null ? platformDb() : await exactTenantDatabase(owner);
     const statements = [
       tenant
         .prepare(
@@ -137,7 +134,7 @@ async function seedExactTenantGuardrailEvaluations(
           row.traceId ?? null,
           row.agentRunId ?? null,
           row.subjectId ?? null,
-          row.tenant,
+          owner,
           row.scopeType ?? "organization",
           row.scopeId ?? null,
           row.target ?? "unspecified",
@@ -169,7 +166,7 @@ async function seedExactTenantGuardrailEvaluations(
           .bind(
             check.id,
             row.id,
-            row.tenant,
+            owner,
             check.checkId,
             check.detectorId,
             check.detectorVersion,
@@ -286,7 +283,7 @@ describe("GET /admin/v1/guardrail-evaluations returns the evidence the tables ho
     // the tenant OBJECTS (union the platform object), never the control
     // projection, so the authoritative fixture for an attributed row is its
     // tenant's object — the same place the gateway writer lands it.
-    await seedExactTenantGuardrailEvaluations([BLOCKED]);
+    await seedExactGuardrailEvaluations([BLOCKED]);
 
     const page = await readEvaluations(operatorKey.secret);
     expect(page.data).toHaveLength(1);
@@ -342,7 +339,7 @@ describe("GET /admin/v1/guardrail-evaluations returns the evidence the tables ho
   it("orders newest first with id as the tiebreaker", async () => {
     // Object fan-out fixture (all three are tenant t-1's): the fleet merge
     // re-sorts every source by `occurred_at_unix DESC, id ASC`.
-    await seedExactTenantGuardrailEvaluations([
+    await seedExactGuardrailEvaluations([
       { ...BLOCKED, id: "ev-b", requestId: "r-b", occurredAtUnix: 200, checks: [] },
       { ...BLOCKED, id: "ev-a", requestId: "r-a", occurredAtUnix: 200, checks: [] },
       { ...BLOCKED, id: "ev-c", requestId: "r-c", occurredAtUnix: 300, checks: [] },
@@ -355,7 +352,7 @@ describe("GET /admin/v1/guardrail-evaluations returns the evidence the tables ho
     // Five in tenant t-1's object. The fan-out pages each object to
     // `offset+limit` but `count(*) OVER()` reports the object's full depth, so a
     // clipped page still yields the pre-window total of 5.
-    await seedExactTenantGuardrailEvaluations(
+    await seedExactGuardrailEvaluations(
       Array.from({ length: 5 }, (_unused, index) => ({
         ...BLOCKED,
         id: `ev-${index}`,
@@ -367,127 +364,6 @@ describe("GET /admin/v1/guardrail-evaluations returns the evidence the tables ho
     const page = await readEvaluations(operatorKey.secret, "?limit=2&offset=1");
     expect(page.data).toHaveLength(2);
     expect(page.total).toBe(5);
-  });
-
-  it("backfills pre-cutover control evidence before the tenant authority read", async () => {
-    await seedGuardrailEvaluations([BLOCKED]);
-    expect(
-      await (await exactTenantDatabase("t-1"))
-        .prepare("SELECT id FROM guardrail_evaluations")
-        .all(),
-    ).toMatchObject({ results: [] });
-
-    const page = await readEvaluations("k-tenant");
-    expect(page.data.map((row) => row.id)).toEqual([BLOCKED.id]);
-
-    const tenant = await exactTenantDatabase("t-1");
-    expect(
-      await tenant
-        .prepare("SELECT id, tenant FROM guardrail_evaluations WHERE id = ?")
-        .bind(BLOCKED.id)
-        .first(),
-    ).toMatchObject({ id: BLOCKED.id, tenant: "t-1" });
-    expect(
-      await tenant
-        .prepare(
-          "SELECT id, evaluation_id FROM guardrail_check_evaluations WHERE evaluation_id = ?",
-        )
-        .bind(BLOCKED.id)
-        .first(),
-    ).toMatchObject({ id: BLOCKED.checks[0]?.id, evaluation_id: BLOCKED.id });
-    const mark = await tenant
-      .prepare("SELECT detail FROM tenant_provisioning_marks WHERE tenant_id = ? AND mark = ?")
-      .bind("t-1", GUARDRAIL_EVIDENCE_BACKFILL_MARK)
-      .first<{ detail: string }>();
-    expect(JSON.parse(mark?.detail ?? "{}")).toMatchObject({
-      state: "complete",
-      evaluations: 1,
-      checks: 1,
-    });
-  });
-
-  it("does not let a stale concurrent backfill write after completion", async () => {
-    await seedGuardrailEvaluations([BLOCKED]);
-    const realRouter = resolveTenantDatabases(env as unknown as ControlPlaneBindings);
-    const realHandle = await realRouter.forTenant("t-1");
-
-    let releaseFirstEvaluationRead!: () => void;
-    const firstEvaluationReadReleased = new Promise<void>((resolve) => {
-      releaseFirstEvaluationRead = resolve;
-    });
-    let firstEvaluationReadReady!: () => void;
-    const firstEvaluationReadReached = new Promise<void>((resolve) => {
-      firstEvaluationReadReady = resolve;
-    });
-    let evaluationReads = 0;
-    const controlDb = {
-      prepare(sql: string) {
-        const prepared = db().prepare(sql);
-        return {
-          bind(...values: unknown[]) {
-            const bound = prepared.bind(...values);
-            return {
-              async all<T>() {
-                if (
-                  sql.includes("FROM guardrail_evaluations") &&
-                  sql.includes("ORDER BY projection_key ASC")
-                ) {
-                  evaluationReads += 1;
-                  if (evaluationReads === 1) {
-                    firstEvaluationReadReady();
-                    await firstEvaluationReadReleased;
-                  }
-                }
-                return bound.all<T>();
-              },
-            };
-          },
-        };
-      },
-    } as unknown as D1Database;
-
-    let tenantBatches = 0;
-    let secondBatchFinished!: () => void;
-    const secondBatchDone = new Promise<void>((resolve) => {
-      secondBatchFinished = resolve;
-    });
-    const gatedTenantDb = {
-      prepare: realHandle.db.prepare.bind(realHandle.db),
-      async batch(statements: D1PreparedStatement[]) {
-        const result = await realHandle.db.batch(statements);
-        tenantBatches += 1;
-        // The first object batch belongs to the second call because the first
-        // call is still paused before its CONTROL page query executes.
-        if (tenantBatches === 1) secondBatchFinished();
-        return result;
-      },
-    } as unknown as D1Database;
-    const router = {
-      backend: realRouter.backend,
-      control: () => realRouter.control(),
-      provisionedTenants: () => realRouter.provisionedTenants(),
-      forTenant: async () => ({ ...realHandle, db: gatedTenantDb }),
-    } as TenantDatabaseRouter;
-
-    const first = ensureTenantGuardrailEvidenceBackfill(controlDb, router, "t-1");
-    await firstEvaluationReadReached;
-    const second = ensureTenantGuardrailEvidenceBackfill(controlDb, router, "t-1");
-    await secondBatchDone;
-
-    // The second call completed the marker before this late projection row
-    // existed. The first call has already read the page, but its object writes
-    // must be guarded by the completed marker when it is released.
-    await seedGuardrailEvaluations([
-      { ...BLOCKED, id: "ev-late", requestId: "req-late", checks: [] },
-    ]);
-    releaseFirstEvaluationRead();
-    await Promise.all([first, second]);
-
-    const tenant = await exactTenantDatabase("t-1");
-    const rows = await tenant
-      .prepare("SELECT id FROM guardrail_evaluations ORDER BY id ASC")
-      .all<{ id: string }>();
-    expect(rows.results.map((row) => row.id)).toEqual([BLOCKED.id]);
   });
 });
 
@@ -504,8 +380,12 @@ describe("the tenant fence on guardrail evidence", () => {
       // tenant, i.e. a platform-operator call. It is nobody's tenant data.
       { ...BLOCKED, id: "ev-none", requestId: "req-none", tenant: null, checks: [] },
     ] as const;
-    await seedGuardrailEvaluations(rows);
-    await seedExactTenantGuardrailEvaluations(rows);
+    // Authority only: the attributed rows land on t-1 / t-2 objects and the
+    // unattributed one on the platform object (see `seedExactGuardrailEvaluations`).
+    // Track A migration 0045 DROPPED the shared control mirror, so there is no
+    // control decoy left to seed alongside — the reader has no control table to
+    // be tempted by.
+    await seedExactGuardrailEvaluations(rows);
   });
 
   it("shows a tenant only its own evaluations", async () => {
@@ -518,28 +398,11 @@ describe("the tenant fence on guardrail evidence", () => {
     expect(page.data.map((row) => row.id)).toEqual(["ev-t2"]);
   });
 
-  it("does not use a control-only row as a tenant authority fallback", async () => {
-    // The first read completes the one-time pre-cutover copy. A later row that
-    // exists only in CONTROL is projection lag, not migration input.
-    await readEvaluations("k-tenant");
-    await seedGuardrailEvaluations([
-      {
-        ...BLOCKED,
-        id: "projection-only",
-        requestId: "req-projection-only",
-        tenant: "t-1",
-        checks: [],
-      },
-    ]);
-    const page = await readEvaluations("k-tenant");
-    expect(page.data.map((row) => row.id)).toEqual(["ev-t1"]);
-
-    const investigation = await investigate("k-tenant", "?request_id=req-projection-only");
-    expect(investigation.status).toBe(404);
-    expect(investigation.body).toMatchObject({
-      error: { code: "guardrail_investigation_not_found" },
-    });
-  });
+  // Track A migration 0045 DROPPED the shared control `guardrail_evaluations`
+  // mirror. The case that pinned "a row existing ONLY in control is never used
+  // as a tenant authority fallback" is now unrepresentable — there is no control
+  // table to seed such a row into — so it is removed. The tenant/platform object
+  // is the sole authority, proven by the fence cases above and below.
 
   /**
    * STRICT equality, so `NULL` matches nobody — the same narrowing
@@ -587,7 +450,7 @@ describe("GET /admin/v1/investigations joins one request's evidence", () => {
     // Operator discovery is a live fan-out over the tenant OBJECTS, so an
     // attributed evaluation's authoritative fixture is its tenant's object —
     // the control projection this used to seed is no longer read.
-    await seedExactTenantGuardrailEvaluations([BLOCKED]);
+    await seedExactGuardrailEvaluations([BLOCKED]);
     await seedExactTenantRequestLog("fg-block-1", "t-1", 1_700_000_100);
     await seedAuditEvents([
       {
@@ -617,18 +480,21 @@ describe("GET /admin/v1/investigations joins one request's evidence", () => {
   });
 
   it("joins unscoped request ids into the platform-object billing leg", async () => {
-    // The un-attributed request log folds into the platform object via the
-    // operator backfill; its billing row lives on the platform object directly
-    // (relocated with #f11bd842) — never the shared control mirror.
-    await seedRequestLogs([
-      {
-        requestId: "fg-platform-request",
-        tenant: null,
-        startedAtUnix: 1_700_000_200,
-        statusCode: 200,
-        route: "platform.route",
-      },
-    ]);
+    // The un-attributed request log lives on the platform object directly
+    // (relocated with #f11bd842); its billing row lives there too — never the
+    // shared control mirror, which Track A migration 0045 DROPPED outright.
+    await seedRequestLogs(
+      [
+        {
+          requestId: "fg-platform-request",
+          tenant: null,
+          startedAtUnix: 1_700_000_200,
+          statusCode: 200,
+          route: "platform.route",
+        },
+      ],
+      platformDb(),
+    );
     await seedBillingEvents(
       [
         {
@@ -660,7 +526,7 @@ describe("GET /admin/v1/investigations joins one request's evidence", () => {
     // request's billing row lives on the OWNING tenant's object (relocated with
     // #f11bd842), and the operator investigation fans out to read it there —
     // never the shared control mirror.
-    await seedExactTenantGuardrailEvaluations([BLOCKED]);
+    await seedExactGuardrailEvaluations([BLOCKED]);
     await seedExactTenantRequestLog("fg-block-1", "t-1", 1_700_000_100);
     const tenant = await exactTenantDatabase("t-1");
     await seedBillingEvents(
@@ -685,7 +551,7 @@ describe("GET /admin/v1/investigations joins one request's evidence", () => {
   });
 
   it("finds the same request by trace_id", async () => {
-    await seedExactTenantGuardrailEvaluations([BLOCKED]);
+    await seedExactGuardrailEvaluations([BLOCKED]);
     const { status, body } = await investigate(operatorKey.secret, `?trace_id=${BLOCKED.traceId}`);
     expect(status).toBe(200);
     expect((body.guardrail_evaluations as unknown[]).length).toBe(1);

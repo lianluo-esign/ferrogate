@@ -60,10 +60,11 @@ import { resetTenantBillingState, tenantObjectDb } from "../tenant-object.js";
 import {
   RecordingDatabase,
   RecordingQueue,
-  billingDb,
-  ledgerEntryJson,
+  platformBillingDb,
+  platformLedgerEntryJson,
+  platformRowCount,
   resetMeteringTables,
-  rowCount,
+  resetPlatformBilling,
 } from "./d1-harness.js";
 import { FIXTURE_CREDITS, chargeFixture, pricedBook, usageFixture } from "./fixtures.js";
 
@@ -132,8 +133,13 @@ function durableGateway(
   const bindings: Record<string, unknown> = {
     ...(env as unknown as Record<string, unknown>),
     BILLING: queue,
+    // Track A hard-cut: the unattributed gateway path now settles into the
+    // PLATFORM_DATA object, so an injected recording/gated database must stand in
+    // for PLATFORM_DATA (not CONTROL_DATA) to intercept the real ledger batch.
+    // `controlNamespaceOverD1` is a structural namespace double — its idFromName/
+    // get shape satisfies PLATFORM_DATA's namespace just as well as CONTROL's.
     ...(options.database !== undefined
-      ? { CONTROL_DATA: controlNamespaceOverD1(options.database) }
+      ? { PLATFORM_DATA: controlNamespaceOverD1(options.database) }
       : {}),
   };
 
@@ -213,6 +219,7 @@ let provider: ProviderInterceptor | undefined;
 
 beforeEach(async () => {
   await resetMeteringTables();
+  await resetPlatformBilling();
   await resetTenantBillingState(["tenant_a", "tenant_b"]);
 });
 
@@ -223,7 +230,7 @@ afterEach(() => {
 
 /** The `credits_exact` decimal string SQLite is really holding for a row. */
 async function storedCredits(id: string): Promise<string | undefined> {
-  const json = await ledgerEntryJson(id);
+  const json = await platformLedgerEntryJson(id);
   if (json === undefined) {
     return undefined;
   }
@@ -486,7 +493,7 @@ describe("durable metering — both shapes of the widened seam", () => {
     // fallback ledger and then delete the outbox row — a lost charge dressed up
     // as a successful one. The charge waits in the outbox for `meteringDrain()`.
     expect(sink.outbox.size).toBe(1);
-    expect(await rowCount("billing_ledger")).toBe(0);
+    expect(await platformRowCount("billing_ledger")).toBe(0);
     expect(sink.stats.charged).toBe(1);
   });
 });
@@ -513,15 +520,15 @@ describe("durable metering — a completed request", () => {
     // and by the streaming case, where the drain provably cannot have started.)
     await h.settle();
 
-    expect(await rowCount("billing_ledger")).toBe(1);
-    expect(await rowCount("billing_events")).toBe(1);
+    expect(await platformRowCount("billing_ledger")).toBe(1);
+    expect(await platformRowCount("billing_events")).toBe(1);
     // The outbox row was committed in the SAME batch (#150) and then removed by
     // the successful delivery — so a zero here is "delivered", not "never written".
-    expect(await rowCount("billing_report_outbox")).toBe(0);
+    expect(await platformRowCount("billing_report_outbox")).toBe(0);
     expect(h.sink.stats.recorded).toBe(1);
     expect(h.sink.stats.delivered).toBe(1);
 
-    const row = await billingDb()
+    const row = await platformBillingDb()
       .prepare("SELECT id, organization_id, entry_json FROM billing_ledger")
       .first<{ id: string; organization_id: string | null; entry_json: string }>();
     expect(row?.id).toContain(requestId as string);
@@ -556,8 +563,8 @@ describe("durable metering — a completed request", () => {
 
     // ONE row. The second write hit `ON CONFLICT (…) DO NOTHING`, was reloaded,
     // compared, and reported as a duplicate.
-    expect(await rowCount("billing_ledger")).toBe(1);
-    expect(await rowCount("billing_events")).toBe(1);
+    expect(await platformRowCount("billing_ledger")).toBe(1);
+    expect(await platformRowCount("billing_events")).toBe(1);
     // …and — the part a row count alone would NOT catch, because `ON CONFLICT`
     // stops the second INSERT either way — the replay produced no second
     // downstream report. A duplicate report is a double charge wherever the
@@ -581,7 +588,7 @@ describe("durable metering — a completed request", () => {
     const gate = new Promise<void>((resolve) => {
       release = resolve;
     });
-    const inner = new RecordingDatabase();
+    const inner = new RecordingDatabase(platformBillingDb());
     const gated = new RecordingDatabase({
       prepare: (sql: string) => inner.prepare(sql),
       batch: async (statements) => {
@@ -600,11 +607,11 @@ describe("durable metering — a completed request", () => {
     expect(await response.json()).toMatchObject({ id: "chatcmpl-1" });
 
     // The complete response body reached the client with the write still gated.
-    expect(await rowCount("billing_ledger")).toBe(0);
+    expect(await platformRowCount("billing_ledger")).toBe(0);
 
     release?.();
     await h.settle();
-    expect(await rowCount("billing_ledger")).toBe(1);
+    expect(await platformRowCount("billing_ledger")).toBe(1);
     expect(h.queue.sent).toHaveLength(1);
   });
 
@@ -622,10 +629,10 @@ describe("durable metering — a completed request", () => {
     expect(response.status).toBe(500);
     await h.settle();
 
-    expect(await rowCount("billing_ledger")).toBe(1);
+    expect(await platformRowCount("billing_ledger")).toBe(1);
     const entry = JSON.parse(
       (
-        await billingDb()
+        await platformBillingDb()
           .prepare("SELECT entry_json FROM billing_ledger")
           .first<{ entry_json: string }>()
       )?.entry_json ?? "{}",
@@ -676,15 +683,15 @@ describe("durable metering — fail closed (issue #129, corrected by #663)", () 
     // NOTHING IS BILLED: no ledger row, no outbox intent, no queue message.
     // Billing at zero here would be a free-inference bug, and it would be
     // invisible. This is #129 and it is unchanged.
-    expect(await rowCount("billing_ledger")).toBe(0);
-    expect(await rowCount("billing_report_outbox")).toBe(0);
+    expect(await platformRowCount("billing_ledger")).toBe(0);
+    expect(await platformRowCount("billing_report_outbox")).toBe(0);
     expect(h.queue.sent).toHaveLength(0);
 
     // …but the USAGE IS RECORDED (#663). Asserting 0 here — as this file used
     // to — is asserting that a request the customer was served and the provider
     // was paid for leaves no trace at all.
-    expect(await rowCount("billing_events")).toBe(1);
-    const stored = await billingDb()
+    expect(await platformRowCount("billing_events")).toBe(1);
+    const stored = await platformBillingDb()
       .prepare("SELECT request_id, event_json FROM billing_events")
       .first<{ request_id: string; event_json: string }>();
     const event = JSON.parse(stored?.event_json ?? "{}") as {
@@ -726,7 +733,7 @@ describe("durable metering — fail closed (issue #129, corrected by #663)", () 
     );
     await waitOnExecutionContext(context);
 
-    expect(await rowCount("billing_events")).toBe(0);
+    expect(await platformRowCount("billing_events")).toBe(0);
     expect(await tenantRowCount("billing_events")).toBe(1);
     const row = await tenantObjectDb("tenant_a")
       .prepare("SELECT tenant_id, event_json FROM billing_events")
@@ -782,16 +789,16 @@ describe("durable metering — streaming", () => {
     expect(response.headers.get("content-type")).toContain("text/event-stream");
     // Headers are out and nothing is persisted: the usage frame has not been
     // read yet, so metering CANNOT have delayed them.
-    expect(await rowCount("billing_ledger")).toBe(0);
+    expect(await platformRowCount("billing_ledger")).toBe(0);
 
     const body = await readBody(response);
     expect(body).toContain("[DONE]");
     await h.settle();
 
-    expect(await rowCount("billing_ledger")).toBe(1);
+    expect(await platformRowCount("billing_ledger")).toBe(1);
     const entry = JSON.parse(
       (
-        await billingDb()
+        await platformBillingDb()
           .prepare("SELECT entry_json FROM billing_ledger")
           .first<{ entry_json: string }>()
       )?.entry_json ?? "{}",
@@ -840,10 +847,10 @@ describe("durable metering — streaming", () => {
     // The charge SURVIVED the hang-up, in D1, with the consumed tokens — not
     // the trailing frame (billing tokens nobody received) and not nothing (the
     // cost leak the tap's `cancel()` exists to close).
-    expect(await rowCount("billing_ledger")).toBe(1);
+    expect(await platformRowCount("billing_ledger")).toBe(1);
     const entry = JSON.parse(
       (
-        await billingDb()
+        await platformBillingDb()
           .prepare("SELECT entry_json FROM billing_ledger")
           .first<{ entry_json: string }>()
       )?.entry_json ?? "{}",
@@ -887,11 +894,11 @@ describe("durable metering — the Cron sweep recovers a stranded charge", () =>
     });
     await h.settle();
 
-    const row = await billingDb()
+    const row = await platformBillingDb()
       .prepare("SELECT id, attempts, next_attempt_unix FROM billing_report_outbox")
       .first<{ id: string; attempts: number; next_attempt_unix: number }>();
     expect(row, "the strand step must leave a durable outbox row").toBeTruthy();
-    expect(await rowCount("billing_ledger")).toBe(1);
+    expect(await platformRowCount("billing_ledger")).toBe(1);
     return {
       id: row?.id ?? "",
       nextAttemptUnix: row?.next_attempt_unix ?? 0,
@@ -926,12 +933,12 @@ describe("durable metering — the Cron sweep recovers a stranded charge", () =>
     expect(queue.sent).toHaveLength(1);
     expect(queue.sent[0]?.id).toBe(stranded.id);
     expect(queue.sent[0]?.credits).toBe(FIXTURE_CREDITS.toString());
-    expect(await rowCount("billing_report_outbox")).toBe(0);
+    expect(await platformRowCount("billing_report_outbox")).toBe(0);
     expect(sink.stats.delivered).toBe(1);
     // …and it did NOT re-run the ledger write: one row before, one row after,
     // and no `duplicate` (which would have dropped the row UNDELIVERED — the
     // exact failure `OutboxRecord.settled` exists to prevent).
-    expect(await rowCount("billing_ledger")).toBe(1);
+    expect(await platformRowCount("billing_ledger")).toBe(1);
     expect(sink.stats.duplicates).toBe(0);
     expect(sink.stats.recorded).toBe(0);
   });
@@ -945,7 +952,7 @@ describe("durable metering — the Cron sweep recovers a stranded charge", () =>
     await sink.sweep(rc, stranded.nextAttemptUnix + OUTBOX_SWEEP_GRACE_SECONDS - 1);
 
     expect(queue.sent).toHaveLength(0);
-    expect(await rowCount("billing_report_outbox")).toBe(1);
+    expect(await platformRowCount("billing_report_outbox")).toBe(1);
   });
 
   it("arms the durable backoff ladder when the re-publish also fails", async () => {
@@ -963,7 +970,7 @@ describe("durable metering — the Cron sweep recovers a stranded charge", () =>
     await sink.sweep(rc, now);
 
     expect(sink.stats.deliveryFailures).toBe(1);
-    const row = await billingDb()
+    const row = await platformBillingDb()
       .prepare(
         "SELECT attempts, next_attempt_unix, dead_lettered_at_unix FROM billing_report_outbox",
       )
@@ -979,7 +986,7 @@ describe("durable metering — the Cron sweep recovers a stranded charge", () =>
     expect(row?.next_attempt_unix).toBe(now + 2);
     expect(row?.dead_lettered_at_unix).toBeNull();
     // …and the charge is still there to retry, not silently dropped.
-    expect(await rowCount("billing_report_outbox")).toBe(1);
+    expect(await platformRowCount("billing_report_outbox")).toBe(1);
   });
 
   it("dead-letters past MAX_BILLING_OUTBOX_ATTEMPTS and never sweeps it again", async () => {
@@ -990,7 +997,7 @@ describe("durable metering — the Cron sweep recovers a stranded charge", () =>
     const now = stranded.nextAttemptUnix + OUTBOX_SWEEP_GRACE_SECONDS + 1;
 
     // One rung short of the cutoff.
-    await billingDb()
+    await platformBillingDb()
       .prepare("UPDATE billing_report_outbox SET attempts = ? WHERE id = ?")
       .bind(MAX_BILLING_OUTBOX_ATTEMPTS - 1, stranded.id)
       .run();
@@ -998,7 +1005,7 @@ describe("durable metering — the Cron sweep recovers a stranded charge", () =>
     await sink.sweep(rc, now);
 
     expect(sink.stats.deadLettered).toBe(1);
-    const row = await billingDb()
+    const row = await platformBillingDb()
       .prepare("SELECT dead_lettered_at_unix FROM billing_report_outbox")
       .first<{ dead_lettered_at_unix: number | null }>();
     expect(row?.dead_lettered_at_unix).toBe(now);
@@ -1008,7 +1015,7 @@ describe("durable metering — the Cron sweep recovers a stranded charge", () =>
     queue.failure = undefined;
     await sink.sweep(rc, now + 100_000);
     expect(queue.sent).toHaveLength(1); // only the failed attempt, no new one
-    expect(await rowCount("billing_report_outbox")).toBe(1);
+    expect(await platformRowCount("billing_report_outbox")).toBe(1);
   });
 
   it("is a no-op against a backend with no durable outbox", async () => {
@@ -1038,8 +1045,8 @@ describe("durable metering — an outage keeps the charge", () => {
 
     // The ledger row landed — the batch committed before the publish — and the
     // durable outbox row is still there, which is what a Cron sweep recovers.
-    expect(await rowCount("billing_ledger")).toBe(1);
-    expect(await rowCount("billing_report_outbox")).toBe(1);
+    expect(await platformRowCount("billing_ledger")).toBe(1);
+    expect(await platformRowCount("billing_report_outbox")).toBe(1);
     expect(h.sink.stats.recorded).toBe(1);
     expect(h.sink.stats.delivered).toBe(0);
     expect(h.sink.stats.deliveryFailures).toBe(1);
@@ -1057,7 +1064,7 @@ describe("durable metering — an outage keeps the charge", () => {
     // statement of the ledger batch, so the fault surfaces as a real D1 batch
     // rejection the drain already swallows — never a synthetic throw that leaks
     // past `waitUntil`.
-    const database = new RecordingDatabase();
+    const database = new RecordingDatabase(platformBillingDb());
     database.failBatchIndex = 0;
     const h = durableGateway({ database });
 
@@ -1070,7 +1077,7 @@ describe("durable metering — an outage keeps the charge", () => {
     expect(response.status).toBe(200);
     await h.settle();
 
-    expect(await rowCount("billing_ledger")).toBe(0);
+    expect(await platformRowCount("billing_ledger")).toBe(0);
     expect(h.sink.stats.deliveryFailures).toBe(1);
     expect(h.queue.sent).toHaveLength(0);
   });

@@ -7,36 +7,35 @@
  * `[[queues.producers]] BILLING` is producer-only on this Worker, and its
  * stanza says why: the consumer belongs to whoever settles wallets downstream.
  * Request logs are the opposite case. A message is written to the tenant's
- * authoritative object and then to the CONTROL database compatibility
- * projection; this Worker already binds both because the guardrail policy
- * source reads from the control database. Routing the message to a second
- * Worker would add a deploy unit, a second `wrangler.toml` and a second set of
- * credentials to be able to do exactly the same writes.
+ * authoritative object (attributed rows) or the PLATFORM_DATA singleton
+ * (un-attributed rows); this Worker already binds both. Routing the message to a
+ * second Worker would add a deploy unit, a second `wrangler.toml` and a second
+ * set of credentials to be able to do exactly the same writes.
  *
  * A Worker consuming a queue it produces is a supported Cloudflare topology; it
  * is a separate invocation with its own `env`, not a re-entrant call.
  *
+ * Track A: there is no shared-CONTROL projection any more. Attributed rows live
+ * only in their tenant object, un-attributed rows only in PLATFORM_DATA.
+ *
  * ## The batch contract, and why a bad message does not poison a good one
  *
- * Queues are AT LEAST ONCE. The tenant-object write is keyed on `request_id`,
- * while the control projection is keyed on its tenant-qualified
- * `projection_key` (`d1.ts`). A redelivered message therefore re-applies the
- * same row instead of failing on the primary key, which is what makes
- * `retryAll()` on a partial failure safe rather than a loop.
+ * Queues are AT LEAST ONCE. Every object write is keyed on `request_id` (an
+ * upsert), so a redelivered message re-applies the same row instead of failing
+ * on the primary key, which is what makes `retryAll()` on a partial failure safe
+ * rather than a loop.
  *
  * A message whose body does not decode is `ack()`ed and counted, NOT retried:
  * it cannot become valid on redelivery, and retrying it would keep a
  * permanently-bad message in front of good evidence until it dead-lettered.
  * `requestLogFromWire` is total and returns `undefined` for exactly that case.
  *
- * Each tenant group is written in ONE object batch, and the compatibility rows
- * plus the derived guardrail projection are written in ONE CONTROL batch.
- * On failure the delivery is retried whole — with the upsert, rows that had
- * already landed are simply re-applied.
+ * Each tenant group is written in ONE object batch and the un-attributed rows in
+ * ONE PLATFORM_DATA batch. On failure the delivery is retried whole — with the
+ * upsert, rows that had already landed are simply re-applied.
  */
 import {
   type GuardrailEvidenceDatabase,
-  guardrailEvidenceStatements,
   platformGuardrailEvidenceStatements,
   tenantGuardrailEvidenceStatements,
 } from "../guardrails/evidence-d1.js";
@@ -47,15 +46,13 @@ import {
   guardrailEvidenceFromWire,
 } from "../guardrails/evidence-wire.js";
 import {
-  REQUEST_LOG_UPSERT_SQL,
   type RequestLogDatabase,
   TENANT_REQUEST_LOG_UPSERT_SQL,
   platformRequestLogStatements,
-  requestLogBindings,
   tenantRequestLogBindings,
 } from "./d1.js";
 import { requestLogFromWire } from "./record.js";
-import { requestLogDatabaseFrom, requestLogTenantDatabaseFromEnv } from "./sink.js";
+import { requestLogTenantDatabaseFromEnv } from "./sink.js";
 
 /** The `MessageBatch` slice this consumer uses, structurally. */
 export interface RequestLogMessageBatch {
@@ -83,8 +80,8 @@ function isGuardrailEvidenceBody(body: unknown): boolean {
 }
 
 /**
- * Apply one queue delivery to tenant-authoritative `request_logs` and its
- * derived control projection.
+ * Apply one queue delivery to its authoritative homes: attributed rows to each
+ * tenant's own object, un-attributed rows to the PLATFORM_DATA singleton.
  *
  * NEVER throws: a consumer that throws gets its batch redelivered by the
  * platform anyway, so throwing would only lose the ability to say what
@@ -94,35 +91,17 @@ function isGuardrailEvidenceBody(body: unknown): boolean {
 export async function consumeRequestLogBatch(
   batch: RequestLogMessageBatch,
   env: unknown,
-  databaseOf: (env: unknown) => RequestLogDatabase | undefined = requestLogDatabaseFrom,
   tenantDatabaseOf: (
     env: unknown,
     tenantId: string,
   ) => RequestLogDatabase | undefined = requestLogTenantDatabaseFromEnv,
-  // Zero-D1 Plan B: resolver for the PLATFORM_DATA singleton. Default reads
-  // `env.PLATFORM_DATA`; a unit env or a not-yet-migrated Worker returns
-  // undefined and the platform dual-write leg is skipped.
+  // Track A: resolver for the PLATFORM_DATA singleton — the sole authoritative
+  // home of un-attributed request logs and guardrail evidence. Default reads
+  // `env.PLATFORM_DATA`.
   platformDatabaseOf: (
     env: unknown,
   ) => GuardrailEvidenceDatabase | undefined = guardrailEvidencePlatformDatabaseFrom,
-  // Track A / G2: each control-projection leg is independently gated so it can be
-  // retired the moment its last reader moves off the control mirror. Both default
-  // to true so the dual-write tests are unchanged; production wires them false.
-  //
-  //  - `projectGuardrailToControl` false drops the derived guardrail projection
-  //    (tenant object + PLATFORM_DATA are its sole homes).
-  //  - `projectRequestLogToControl` false drops the request_logs compatibility
-  //    projection. Safe since #825 moved the SIEM pump onto the tenant object and
-  //    the finops JOIN readers (request_logs⋈billing_events) fan out over the
-  //    tenant/platform objects — the control projection now has ZERO runtime
-  //    readers. Un-attributed rows keep their PLATFORM_DATA home (the dual-write
-  //    leg below), so nothing is dropped; only the shared-DO mirror stops growing.
-  //
-  // Both are reversible — flipping back re-arms the dual write.
-  options: { projectGuardrailToControl?: boolean; projectRequestLogToControl?: boolean } = {},
 ): Promise<RequestLogConsumeResult> {
-  const projectGuardrailToControl = options.projectGuardrailToControl ?? true;
-  const projectRequestLogToControl = options.projectRequestLogToControl ?? true;
   const records = [];
   const evidence: GuardrailEvidenceEnvelope[] = [];
   let malformed = 0;
@@ -167,10 +146,8 @@ export async function consumeRequestLogBatch(
       string,
       { records: typeof records; evidence: GuardrailEvidenceEnvelope[] }
     >();
-    // Unscoped/platform request logs (empty tenant) have no tenant object; they
-    // land in the control projection below and — Zero-D1 Plan B — also in
-    // PLATFORM_DATA, the authoritative home the operator list is READ from once
-    // the control projection is retired.
+    // Unscoped/platform request logs (empty tenant) have no tenant object; their
+    // sole authoritative home is the PLATFORM_DATA singleton, written below.
     const unscopedRecords: typeof records = [];
     for (const record of records) {
       if (record.tenantId === undefined || record.tenantId === "") {
@@ -181,8 +158,8 @@ export async function consumeRequestLogBatch(
       group.records.push(record);
       byTenant.set(record.tenantId, group);
     }
-    // Unscoped/platform evidence (empty tenant) has no tenant object; it goes to
-    // the control projection below and — Zero-D1 Plan B — also to PLATFORM_DATA.
+    // Unscoped/platform evidence (empty tenant) has no tenant object; its sole
+    // authoritative home is the PLATFORM_DATA singleton, written below.
     const unscoped: GuardrailEvidenceEnvelope[] = [];
     for (const envelope of evidence) {
       const tenantId = envelope.evaluation.tenant.organizationId;
@@ -210,72 +187,24 @@ export async function consumeRequestLogBatch(
       await tenantDb.batch(statements);
     }
 
-    const projection = databaseOf(env);
-    if (projection === undefined) throw new Error("derived request-log projection is unavailable");
-
-    // The control batch is the request-log compatibility projection and the
-    // derived guardrail projection, each UNLESS gated off by its G2 flag. It is
-    // not the source of truth for the tenant rows above. With both flags false
-    // the batch is empty and skipped entirely; with either preserved only that
-    // leg is written.
-    const statements: unknown[] = [];
-    if (projectRequestLogToControl && records.length > 0) {
-      const requestLogStatement = projection.prepare(REQUEST_LOG_UPSERT_SQL);
-      statements.push(
-        ...records.map((record) => requestLogStatement.bind(...requestLogBindings(record))),
-      );
-    }
-    if (projectGuardrailToControl) {
-      statements.push(...guardrailEvidenceStatements(projection, evidence));
-    }
-    if (statements.length > 0) {
-      await projection.batch(statements);
-    }
-
-    // Zero-D1 Plan B (G1 dual-write): unscoped/platform request logs ALSO land in
-    // the PLATFORM_DATA singleton — the authoritative home the operator list is
-    // READ from once the control projection is retired. Same contract as the
-    // guardrail platform leg below: OUTSIDE `retryAll()`, in its own try/catch,
-    // because the tenant, request-log and control writes above have already
-    // committed and a platform-object blip must not re-drive committed evidence.
-    // The one-time CP1 backfill plus this ongoing dual-write reconcile any gap,
-    // so a swallowed failure here is at most a briefly-stale platform read.
-    if (unscopedRecords.length > 0) {
-      try {
-        const platformDb = platformDatabaseOf(env);
-        if (platformDb !== undefined) {
-          await platformDb.batch(platformRequestLogStatements(platformDb, unscopedRecords));
-        }
-      } catch (error) {
-        console.warn(
-          `[ferrogate] platform request-log dual-write failed for ${unscopedRecords.length} row(s); control projection is unaffected: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
+    // Un-attributed (platform-operator) request logs and guardrail evidence have
+    // no tenant object; the PLATFORM_DATA singleton is their SOLE authoritative
+    // home. Track A removed the shared-CONTROL projection, so these are the only
+    // writes for unscoped rows — and therefore INSIDE the retry contract: a
+    // platform-object failure must re-drive the batch, exactly like a tenant
+    // write, because every row is an idempotent upsert and losing it would lose
+    // evidence. A missing PLATFORM_DATA binding with unscoped rows to write is a
+    // misconfiguration; throwing arms `retryAll()` rather than dropping evidence.
+    if (unscopedRecords.length > 0 || unscoped.length > 0) {
+      const platformDb = platformDatabaseOf(env);
+      if (platformDb === undefined) {
+        throw new Error("authoritative PlatformDataObject is unavailable for un-attributed rows");
       }
-    }
-
-    // Zero-D1 Plan B (G1 dual-write): unscoped/platform evidence ALSO lands in
-    // the PLATFORM_DATA singleton — the authoritative home it will be READ from
-    // once the control projection is retired. Deliberately OUTSIDE the retry
-    // contract, in its own try/catch: the tenant, request-log and control
-    // projection writes above have already committed, so a platform-object blip
-    // must NOT arm `retryAll()` and re-drive (or dead-letter) that committed
-    // evidence. The one-time CP1 backfill plus this ongoing dual-write reconcile
-    // any gap, so a swallowed failure here is at most a briefly-stale platform
-    // read, never lost evidence.
-    if (unscoped.length > 0) {
-      try {
-        const platformDb = platformDatabaseOf(env);
-        if (platformDb !== undefined) {
-          await platformDb.batch(platformGuardrailEvidenceStatements(platformDb, unscoped));
-        }
-      } catch (error) {
-        console.warn(
-          `[ferrogate] platform guardrail evidence dual-write failed for ${unscoped.length} row(s); control projection is unaffected: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
+      if (unscopedRecords.length > 0) {
+        await platformDb.batch(platformRequestLogStatements(platformDb, unscopedRecords));
+      }
+      if (unscoped.length > 0) {
+        await platformDb.batch(platformGuardrailEvidenceStatements(platformDb, unscoped));
       }
     }
 

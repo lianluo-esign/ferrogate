@@ -506,9 +506,16 @@ describe("the env-var drift gate itself", () => {
     // incremented — same parallel-branch hazard as every line above.
     // Track A quota_policies slice added `GATEWAY_QUOTA_POLICY_SOURCE` (the
     // relocate-the-quota_policies-read posture, committed OFF as "control" and
-    // flipped to "tenant_object" only after the per-tenant backfill lands) ⇒ 70,
-    // re-counted off the merged file with the same grep rather than incremented.
-    expect(DECLARED.vars.size).toBe(70);
+    // flipped to "tenant_object" only after the per-tenant backfill lands) ⇒ 70.
+    // The Track A hard-cut then REMOVED `GATEWAY_QUOTA_POLICY_SOURCE`: the tenant
+    // object is the sole authority for quota_policies + spend_throttles, so the
+    // posture gate is gone (the control mirror it toggled no longer exists) ⇒ 69,
+    // re-counted off the merged file with the same grep rather than decremented.
+    // The Track A billing hard-cut then REMOVED `GATEWAY_PLATFORM_BILLING_BACKFILL`:
+    // unattributed billing settles directly into the PLATFORM_DATA object, so the
+    // one-time control→object backfill (and its gate) are gone ⇒ 68, re-counted
+    // off the merged file with the same grep rather than decremented.
+    expect(DECLARED.vars.size).toBe(68);
     expect(DECLARED.bindings.size).toBeGreaterThanOrEqual(9);
     expect(READS.named.size).toBeGreaterThanOrEqual(60);
 
@@ -807,8 +814,11 @@ describe("which committed [vars] values this runner can actually observe", () =>
     // `GATEWAY_PLATFORM_BILLING_BACKFILL` (both committed OFF) ⇒ 69, re-counted
     // off the merged file with the same grep.
     // Track A quota_policies slice: + `GATEWAY_QUOTA_POLICY_SOURCE` (committed
-    // OFF as "control") ⇒ 70, re-counted off the merged file with the same grep.
-    expect(rows.length).toBe(70);
+    // OFF as "control") ⇒ 70; the Track A hard-cut then REMOVED it (tenant object
+    // is the sole quota authority) ⇒ 69, re-counted off the merged file.
+    // Track A billing hard-cut: REMOVED `GATEWAY_PLATFORM_BILLING_BACKFILL`
+    // (unattributed billing settles directly into PLATFORM_DATA; no backfill) ⇒ 68.
+    expect(rows.length).toBe(68);
   });
 
   it("explains every overridden var with an explicit pin in vitest.config.ts", () => {
@@ -922,12 +932,14 @@ describe("which committed [vars] values this runner can actually observe", () =>
     // "on", so the suite behaves as if the gates were absent.
     //
     // Track A quota_policies slice: 64 -> 65, overridden stays 5.
-    // `GATEWAY_QUOTA_POLICY_SOURCE` is committed "control" and NOT pinned in
-    // vitest.config.ts, so it reaches the runner unchanged and is observable.
-    // "control" is INERT: the relocation arms only on exactly "tenant_object",
-    // so the suite reads `quota_policies` off control exactly as before.
+    // `GATEWAY_QUOTA_POLICY_SOURCE` was committed "control", observable and not
+    // overridden. The Track A hard-cut then REMOVED it (the tenant object is the
+    // sole quota authority, so there is no posture to toggle) ⇒ 65 -> 64,
+    // overridden stays 5.
+    // Track A billing hard-cut: REMOVED `GATEWAY_PLATFORM_BILLING_BACKFILL` (was
+    // committed "off", observable, not overridden) ⇒ 64 -> 63, overridden stays 5.
     const observable = rows.filter((r) => r.runtime === r.committed);
-    expect(observable.length).toBe(65);
+    expect(observable.length).toBe(63);
     expect(rows.length - observable.length).toBe(5);
   });
 });
