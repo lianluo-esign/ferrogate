@@ -109,11 +109,18 @@ function keyedCaller(apiKeyId: string): InferenceDeps["caller"] {
 
 describe("the retry predicate comes from @ferrogate/providers", () => {
   it("delegates to the provider family's isRetryableStatus", () => {
-    // `BaseProviderAdapter.isRetryableStatus`: 429 and the whole 5xx band.
+    // `BaseProviderAdapter.isRetryableStatus`: 429, the whole 5xx band, and the
+    // upstream auth/billing rejections 401/402/403.
     expect(isRetryableUpstreamStatus("openai", 429)).toBe(true);
     expect(isRetryableUpstreamStatus("anthropic", 503)).toBe(true);
     expect(isRetryableUpstreamStatus("gemini", 500)).toBe(true);
-    // Client errors are the provider's own answer and are never retried.
+    // An upstream provider whose own credential/balance is rejected fails over
+    // to a sibling — the caller's key is already validated before dispatch.
+    expect(isRetryableUpstreamStatus("openai", 401)).toBe(true);
+    expect(isRetryableUpstreamStatus("openai", 402)).toBe(true);
+    expect(isRetryableUpstreamStatus("openai", 403)).toBe(true);
+    // A malformed request / missing model is the provider's own answer and
+    // fails identically everywhere, so it is never retried or failed over.
     expect(isRetryableUpstreamStatus("openai", 400)).toBe(false);
     expect(isRetryableUpstreamStatus("openai", 404)).toBe(false);
     expect(isRetryableUpstreamStatus("anthropic", 422)).toBe(false);
@@ -268,6 +275,36 @@ describe("failover ladder", () => {
       expect(app.usage.last?.provider).toBe("backup");
     } finally {
       provider.restore();
+    }
+  });
+
+  it("fails over when the first provider's balance/credential is rejected (402/403)", async () => {
+    // Reproduces the mmc-gpt-pro incident: the primary answers an upstream
+    // billing/auth rejection ("insufficient balance" / "could not authenticate
+    // the gateway request"). Pre-fix this was non-retryable and the caller got
+    // the 402/403 verbatim with no failover; now the ladder tries the sibling.
+    for (const rejectStatus of [402, 403] as const) {
+      const provider = interceptProviderFetch((request) =>
+        providerOf(request.url) === "primary"
+          ? providerJson({ error: { message: "insufficient balance" } }, rejectStatus)
+          : providerJson(CHAT_OK),
+      );
+      try {
+        const app = harness({}, [
+          route({ provider: "primary", priority: 0 }),
+          route({ provider: "backup", priority: 1 }),
+        ]);
+        const res = await app.post("/v1/chat/completions", CHAT_BODY);
+
+        expect(res.status).toBe(200);
+        expect(provider.requests.map((request) => providerOf(request.url))).toEqual([
+          "primary",
+          "backup",
+        ]);
+        expect(app.usage.last?.provider).toBe("backup");
+      } finally {
+        provider.restore();
+      }
     }
   });
 

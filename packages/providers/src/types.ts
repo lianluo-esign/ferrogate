@@ -516,6 +516,22 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
   }
 
   isRetryableStatus(status: number): boolean {
-    return status === 429 || (status >= 500 && status <= 599);
+    // Fail over on 429 + the whole 5xx band, PLUS the upstream auth/billing
+    // rejections 401/402/403. In this multi-provider aggregator each provider
+    // channel carries its OWN upstream credential, and the CALLER's virtual key
+    // is already validated before dispatch — so an upstream 401/402/403 is never
+    // the caller's fault, it means THIS provider's credential is invalid/expired
+    // or its balance is exhausted (e.g. a reseller answering "insufficient
+    // balance" / "could not authenticate the gateway request"). Retrying a
+    // sibling provider that has a different credential is exactly the right
+    // response, so these join the failover set. 400/404/422 stay non-retryable:
+    // a malformed request or missing model fails identically on every provider.
+    return (
+      status === 429 ||
+      status === 401 ||
+      status === 402 ||
+      status === 403 ||
+      (status >= 500 && status <= 599)
+    );
   }
 }

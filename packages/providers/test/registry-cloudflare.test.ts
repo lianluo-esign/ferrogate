@@ -103,6 +103,12 @@ describe("ProviderAdapterRegistry", () => {
     expect((normalized.body as any).error.provider_type).toBe("rate_limit_error");
     expect(registry.isRetryableStatus("openai", 429)).toBe(true);
     expect(registry.isRetryableStatus("gemini", 503)).toBe(true);
+    // Upstream auth/billing rejections fail over to a sibling provider (each
+    // channel carries its own credential; the caller is auth'd pre-dispatch).
+    expect(registry.isRetryableStatus("openai", 401)).toBe(true);
+    expect(registry.isRetryableStatus("openai", 402)).toBe(true);
+    expect(registry.isRetryableStatus("openai", 403)).toBe(true);
+    // A malformed request fails identically everywhere — never failed over.
     expect(registry.isRetryableStatus("anthropic", 400)).toBe(false);
   });
 });

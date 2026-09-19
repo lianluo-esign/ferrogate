@@ -534,7 +534,11 @@ GATEWAY_BATCH_SWEEP_LIMIT = ""
 # below is bound; without it `providerCircuitFor` falls back to a per-isolate
 # map, which counts failures per isolate and is not a correct breaker.
 # ---------------------------------------------------------------------------
-GATEWAY_RELIABILITY = "{}"
+GATEWAY_RELIABILITY = '''
+{"provider_circuit_breaker_failure_threshold": 3,
+ "provider_circuit_breaker_cooldown_secs": 60,
+ "provider_dispatch_max_retries": 0}
+'''
 
 # ---------------------------------------------------------------------------
 # [vars] — the exact-match AI response cache (`src/cache/`)
