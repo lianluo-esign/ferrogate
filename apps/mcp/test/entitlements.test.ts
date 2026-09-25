@@ -153,16 +153,20 @@ async function seedCredential(): Promise<void> {
 
 /** THE OPERATOR'S ONE ACTION — `POST/PUT /admin/v1/plans` writes this column. */
 async function setPlanMcpEnabled(enabled: 0 | 1): Promise<void> {
-  const result = await control()
+  await control()
     .prepare(
-      `INSERT INTO plans (id, name, slug, mcp_enabled) VALUES (?1, 'S5', 's5-plan', ?2)
-       ON CONFLICT (id) DO UPDATE SET mcp_enabled = ?2`,
+      `INSERT OR REPLACE INTO plans (id, name, slug, mcp_enabled) VALUES (?1, 'S5', 's5-plan', ?2)`,
     )
     .bind(PLAN, enabled)
     .run();
   // Without this the refusals below could pass against a plan row that was
   // never written — the vacuous shape this repository keeps finding.
-  expect(result.meta.changes, "the plan write touched no row").toBe(1);
+  expect(
+    await control()
+      .prepare("SELECT mcp_enabled FROM plans WHERE id=?")
+      .bind(PLAN)
+      .first<{ mcp_enabled: number }>(),
+  ).toEqual({ mcp_enabled: enabled });
 }
 
 /** Bind a role holding `mcp.execute`. `declare` controls step 1 of the walk. */

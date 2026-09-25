@@ -156,6 +156,10 @@ export const providerRecordSchema = z
     upstream_protocol: z.enum(["openai.chat.completions", "openai.responses"]).optional(),
     /** Supplier cost as a scalar over the model's official prices. */
     cost_multiplier: z.number().nonnegative().optional(),
+    /** Currency the supplier cost multiplier is denominated in. */
+    cost_currency: z.enum(["CNY", "USD"]).optional(),
+    /** CNY per 1 USD used to normalize a CNY supplier cost. USD suppliers pin this to 1. */
+    cost_fx_rate: z.number().positive().optional(),
     /**
      * Where the provider's credential comes from: a Worker SECRET binding NAME
      * (`OPENAI_API_KEY`, the legacy form), or a secret REFERENCE resolved
@@ -917,6 +921,10 @@ export function buildModelCatalog(
         ...(provider.cost_multiplier !== undefined
           ? { providerCostMultiplier: provider.cost_multiplier }
           : {}),
+        ...(provider.cost_currency === undefined
+          ? {}
+          : { providerCostCurrency: provider.cost_currency }),
+        ...(provider.cost_fx_rate === undefined ? {} : { providerCostFxRate: provider.cost_fx_rate }),
         ...(leg.input_price_per_1m !== undefined
           ? { inputPricePer1m: leg.input_price_per_1m }
           : {}),

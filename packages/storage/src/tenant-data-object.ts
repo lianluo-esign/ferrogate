@@ -55,7 +55,6 @@ import { AUDIT_CHAIN_GENESIS_HASH, auditChainKey, auditRowHash } from "./audit-c
 import {
   type TenantScheduleAlarmMessage,
   decodeTenantScheduleAlarm,
-  encodeTenantScheduleAlarm,
   tenantScheduleAlarmMessage,
 } from "./tenant-schedule-alarm.js";
 import {
@@ -399,18 +398,6 @@ export const TENANT_AGGREGATE_FLUSH_INTERVAL_SECONDS = 60;
  */
 const PROJECT_TENANT_AGGREGATES_TO_CONTROL: boolean = false;
 
-interface TenantScheduleAlarmQueue {
-  send(body: unknown): Promise<unknown>;
-}
-
-function scheduleAlarmQueueFrom(env: unknown): TenantScheduleAlarmQueue | null {
-  if (typeof env !== "object" || env === null) return null;
-  const queue = (env as { SCHEDULE_ALARMS?: unknown }).SCHEDULE_ALARMS;
-  if (typeof queue !== "object" || queue === null) return null;
-  const send = (queue as { send?: unknown }).send;
-  return typeof send === "function" ? (queue as TenantScheduleAlarmQueue) : null;
-}
-
 /**
  * Symbol-keyed so it is a testable/internal seam without becoming a string RPC
  * method. Cloudflare RPC only addresses string properties; the alarm entrypoint
@@ -481,25 +468,14 @@ const WITNESS_TABLE = "projects";
 const REFUSAL = "tenant_data_object";
 
 /**
- * Role bindings and their local catalog are an operator projection. Letting a
+ * Role bindings are operator-managed grants. Letting a
  * tenant-facing SQL caller write either half would allow it to manufacture its
  * own permission grant, so those writes require the separate privileged RPC.
  *
- * The shared-config mirror (#948) joins them for the same reason: those rows are
- * a one-way projection PUSHED down from the control plane (billing groups,
- * announcements, and the sync cursor that stamps them), read-only inside the
- * tenant. A tenant that could write `shared_billing_groups` could mint its own
- * billing multiplier, and one that could write `shared_announcements` could
- * forge platform notices, so only the privileged push RPC may write them;
- * ordinary `query`/`batch` traffic may SELECT them and nothing more.
+ * Retired platform-config mirrors are absent after migration 0035. Platform
+ * announcements and billing groups remain in the platform configuration DO.
  */
-const PRIVILEGED_WRITE_TABLES = [
-  "tenant_role_bindings",
-  "tenant_role_catalog",
-  "shared_config_cursor",
-  "shared_billing_groups",
-  "shared_announcements",
-] as const;
+const PRIVILEGED_WRITE_TABLES = ["tenant_role_bindings"] as const;
 
 function stripSqlCommentsAndStrings(sql: string): string {
   let output = "";
@@ -973,8 +949,8 @@ function decodeTenantMigrationState(value: unknown): PersistedTenantMigrationSta
  * future trigger body:
  *
  *  * **Comment stripping must come first.** `0001_init_tenant.sql` has 18
- *    comment lines containing a `;` mid-prose, and the thirty-three files have
- *    45 between them. The test below pins the per-file breakdown; 45 is the
+ *    comment lines containing a `;` mid-prose, and the forty files have
+ *    49 between them. The test below pins the per-file breakdown; 49 is the
  *    number that bounds this function's exposure. Splitting before stripping
  *    cuts statements in half at every one of them.
  *
@@ -1051,14 +1027,8 @@ export class TenantDataObject extends DurableObject {
   #appliedThisWake: string[] = [];
   #failure: string | null = null;
   #migrationState: PersistedTenantMigrationState = DEFAULT_TENANT_MIGRATION_STATE;
-  readonly #scheduleAlarmQueue: TenantScheduleAlarmQueue | null;
+
   readonly #controlDatabase: D1Database | null;
-  readonly [TENANT_SCHEDULE_ALARM_CALLBACK]: TenantScheduleAlarmCallback = async (message) => {
-    if (this.#scheduleAlarmQueue === null) {
-      throw new Error(`${REFUSAL}: SCHEDULE_ALARMS is not bound; retaining the alarm for retry`);
-    }
-    await this.#scheduleAlarmQueue.send(encodeTenantScheduleAlarm(message));
-  };
   readonly [TENANT_AGGREGATE_FLUSH_CALLBACK]: TenantAggregateFlushAlarmCallback = async () => {
     await this.#flushAggregates(Math.floor(Date.now() / 1000));
   };
@@ -1066,12 +1036,11 @@ export class TenantDataObject extends DurableObject {
   constructor(ctx: DurableObjectState, env: unknown) {
     super(ctx as never, env as never);
     this.#state = ctx;
-    this.#scheduleAlarmQueue = scheduleAlarmQueueFrom(env);
     this.#controlDatabase = controlDatabaseFromEnv(env);
     // `blockConcurrencyWhile` is the lock, and it is the whole reason a request
     // cannot observe a half-migrated database: no RPC is delivered until this
     // settles. An EVICTED instance re-runs it on the next wake, so the version
-    // gate inside `#migrate` is what keeps that from re-applying 441 statements
+    // gate inside `#migrate` is what keeps that from re-applying 497 statements
     // on every cold start of every tenant.
     ctx.blockConcurrencyWhile(async () => {
       this.#tenantId = (await ctx.storage.get<string>(TENANT_ID_KEY)) ?? null;
@@ -1689,16 +1658,11 @@ export class TenantDataObject extends DurableObject {
    * arms the earlier deadline and preserves the later one.
    */
   async setScheduleAlarm(request: TenantScheduleAlarmRequest): Promise<void> {
-    const message = tenantScheduleAlarmMessage(request.tenantId, request.scheduledAtUnix);
-    await this.#admit(message.tenant_id);
+    await this.#admit(
+      tenantScheduleAlarmMessage(request.tenantId, request.scheduledAtUnix).tenant_id,
+    );
     this.#refuseMigrationStorageWrite("set schedule alarm");
-    this.#recordWriteAttempt(true);
-    await this.#state.blockConcurrencyWhile(async () => {
-      // Keep the payload durable before arming the deadline. If the alarm
-      // write fails, a retry still has a complete message to deliver.
-      await this.#state.storage.put(SCHEDULE_ALARM_KEY, message);
-      await this.#rearmNativeAlarm();
-    });
+    throw new Error(`${REFUSAL}: agent scheduling has been retired`);
   }
 
   /** Clear the current schedule alarm and its tenant-local callback payload. */
@@ -1731,41 +1695,14 @@ export class TenantDataObject extends DurableObject {
    * rearm cannot clear or replace an alarm written by a newer schedule update.
    */
   async rearmScheduleAlarm(request: TenantScheduleAlarmClearRequest): Promise<void> {
-    const tenantId = tenantScheduleAlarmMessage(request.tenantId, 0).tenant_id;
-    await this.#admit(tenantId);
-    this.#refuseMigrationStorageWrite("rearm schedule alarm");
-    this.#recordWriteAttempt(true);
-    await this.#state.blockConcurrencyWhile(async () => {
-      let earliest: number | undefined;
-      const rows = this.#state.storage.sql
-        .exec<{ enabled: number; next_fire_at_unix: number | null }>(
-          "SELECT enabled, next_fire_at_unix FROM agent_schedules WHERE enabled = 1 AND next_fire_at_unix IS NOT NULL ORDER BY next_fire_at_unix ASC LIMIT 1",
-        )
-        .toArray();
-      const candidate = rows[0]?.next_fire_at_unix;
-      if (typeof candidate === "number" && Number.isSafeInteger(candidate)) {
-        earliest = candidate;
-      }
-
-      if (earliest === undefined) {
-        await this.#state.storage.delete(SCHEDULE_ALARM_KEY);
-      } else {
-        const message = tenantScheduleAlarmMessage(tenantId, earliest);
-        // Retain the payload before arming the native alarm. If setAlarm fails,
-        // the caller receives the failure and can retry without losing intent.
-        await this.#state.storage.put(SCHEDULE_ALARM_KEY, message);
-      }
-      await this.#rearmNativeAlarm();
-    });
+    await this.clearScheduleAlarm(request);
   }
 
   /**
    * Native Durable Object alarm entrypoint.
    *
-   * The callback is symbol-keyed rather than a public string method, so a
-   * binding caller cannot invoke a queue-like operation with caller-supplied
-   * tenant data. Production sends the validated payload to `SCHEDULE_ALARMS`;
-   * a missing binding throws and leaves the payload retained for retry.
+   * Legacy schedule wakeups only clear their retained payload. No Queue
+   * producer remains, so retirement cannot cause missing-binding retries.
    */
   override async alarm(): Promise<void> {
     await this.#state.blockConcurrencyWhile(async () => {
@@ -1795,7 +1732,6 @@ export class TenantDataObject extends DurableObject {
         schedule !== null &&
         (schedule.scheduled_at_unix <= nowUnix || schedule.scheduled_at_unix === earliest)
       ) {
-        await this[TENANT_SCHEDULE_ALARM_CALLBACK](schedule);
         await this.#state.storage.delete(SCHEDULE_ALARM_KEY);
       }
       if (
@@ -2119,11 +2055,10 @@ export class TenantDataObject extends DurableObject {
    * The version gate is the first thing that happens, because this runs on every
    * cold start of every tenant object: an already-current tenant pays one
    * `sqlite_master` probe and one `MAX(version)` read and returns, instead of
-   * re-running the 454 statements of the thirty-three files — 82 `CREATE TABLE IF
-   * NOT EXISTS`, 104 `CREATE INDEX`, 6 `CREATE UNIQUE INDEX`, 26 `ALTER TABLE … ADD
-   * COLUMN`, 6 ledger `INSERT` statements, 229 `CREATE TRIGGER` and one
-   * `DROP TABLE`. (Counted,
-   * not estimated — and counted by a
+   * re-running 497 statements across forty migration files, including 84
+   * `CREATE TABLE IF NOT EXISTS`, 108 `CREATE INDEX`, 9 `CREATE UNIQUE INDEX`,
+   * 26 `ALTER TABLE` and 13 top-level `INSERT` statements. The census is
+   * checked by a
    * TEST since #831's review: an earlier draft said "26 `CREATE INDEX`", and the
    * whole census then went stale again the moment `0013_guardrail_evaluations.sql`
    * landed. `test/do/tenant-data-object.test.ts` re-derives these numbers

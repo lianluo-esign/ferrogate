@@ -102,6 +102,52 @@ describe("the first wake", () => {
   });
 });
 
+describe("tenant account mirror removal", () => {
+  test("removes a legacy full document and preserves the narrow tenant registry", async () => {
+    const stub = controlStub();
+    await stub.schemaStatus({ tenantId: CONTROL_DATA_ADDRESS });
+    const migration = CONTROL_MIGRATIONS.find(
+      (m) => m.name === "0048_drop_tenant_account_document_mirror",
+    );
+    expect(migration).toBeDefined();
+    await runInDurableObject(stub, (_instance, state) => {
+      // Recreate the pre-upgrade column and seed a full account document.
+      state.storage.sql.exec("ALTER TABLE tenants ADD COLUMN document_json TEXT");
+      state.storage.sql.exec(
+        "INSERT INTO tenants (id, name, slug, status, plan_id, document_json) VALUES (?, ?, ?, ?, ?, ?)",
+        "mirror-upgrade",
+        "Account",
+        "mirror-upgrade",
+        "active",
+        "pro",
+        JSON.stringify({ id: "mirror-upgrade", contact_email: "private@example.test" }),
+      );
+      state.storage.transactionSync(() => state.storage.sql.exec(migration!.sql));
+    });
+    const columns = await stub.query(QUERY("PRAGMA table_info(tenants)"));
+    expect(columns.results.map((row) => row.name)).not.toContain("document_json");
+    expect(
+      (
+        await stub.query(
+          QUERY("SELECT id, status, plan_id FROM tenants WHERE id = ?", ["mirror-upgrade"]),
+        )
+      ).results,
+    ).toEqual([{ id: "mirror-upgrade", status: "active", plan_id: "pro" }]);
+    // A legacy writer cannot restore the removed document, even with an old env flag.
+    expect(
+      await refusal(
+        stub.query(
+          QUERY("UPDATE tenants SET document_json = '{}' WHERE id = ?", ["mirror-upgrade"]),
+        ),
+      ),
+    ).toMatch(/document_json/);
+    await stub.schemaStatus({ tenantId: CONTROL_DATA_ADDRESS });
+    expect(
+      (await stub.query(QUERY("PRAGMA table_info(tenants)"))).results.map((row) => row.name),
+    ).not.toContain("document_json");
+  });
+});
+
 describe("atomicity", () => {
   test("a failing batch rolls back every statement before it", async () => {
     const stub = controlStub();

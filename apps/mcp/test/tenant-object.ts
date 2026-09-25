@@ -86,22 +86,13 @@ export function tenantObjectNamespaceWithQueryFailure(
 export async function seedTenantRoleProjection(
   tenantId: string,
   roleId: string,
-  permissionKeys: readonly string[],
+  _permissionKeys: readonly string[],
 ): Promise<void> {
   const router = tenantObjectRouter();
   if (router.privilegedBatch === undefined) {
     throw new Error("MCP role fixtures require the privileged tenant RPC");
   }
   await router.privilegedBatch(tenantId, [
-    {
-      sql:
-        "INSERT INTO tenant_role_catalog " +
-        "(role_id, name, slug, description, permission_keys_json, created_at_unix, updated_at_unix) " +
-        "VALUES (?, ?, ?, '', ?, 1, 1) " +
-        "ON CONFLICT(role_id) DO UPDATE SET permission_keys_json = excluded.permission_keys_json, " +
-        "updated_at_unix = excluded.updated_at_unix",
-      params: [roleId, roleId, roleId, JSON.stringify(permissionKeys)],
-    },
     {
       sql:
         "INSERT INTO tenant_role_bindings (id, tenant_id, role_id, created_at_unix) " +
@@ -120,7 +111,6 @@ export async function resetTenantObjectState(tenantIds: readonly string[]): Prom
     const tenant = tenantObjectDb(tenantId);
     await router.privilegedBatch(tenantId, [
       { sql: "DELETE FROM tenant_role_bindings", params: [] },
-      { sql: "DELETE FROM tenant_role_catalog", params: [] },
     ]);
     await tenant.batch([
       tenant.prepare("DELETE FROM api_keys"),

@@ -37,6 +37,9 @@ async function columnNames(db: D1Database, table: string): Promise<string[]> {
 
 /** Families that must live ONLY in the control database. */
 const CONTROL_ONLY = [
+  "admin_passkeys",
+  "admin_passkey_challenges",
+  "admin_passkey_rate_limits",
   "tenants",
   "tenant_databases",
   "plans",
@@ -198,7 +201,6 @@ const TENANT_ONLY = [
   "tenant_provisioning_marks",
   "tenant_provider_credentials",
   "sso_provider_configs",
-  "tenant_role_catalog",
   "tenant_role_bindings",
   "semantic_cache_policies",
   "delegation_revocations",

@@ -289,7 +289,6 @@ export const TENANT_BACKFILL_TABLES: readonly TenantBackfillTable[] = Object.fre
   ),
   table("tenant_provider_credentials", ["tenant_id", "alias"], DIRECT_TENANT_ID),
   table("sso_provider_configs", ["tenant_id"], DIRECT_TENANT_ID),
-  table("tenant_role_catalog", ["role_id"], unresolved("role catalog has no tenant key")),
   table("tenant_role_bindings", ["id"], DIRECT_TENANT_ID),
   table("semantic_cache_policies", ["scope_type", "scope_id"], TENANT_ONLY_SCOPE_OWNERSHIP),
   table("delegation_revocations", ["tenant", "subject"], DIRECT_TENANT),

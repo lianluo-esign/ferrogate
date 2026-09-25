@@ -36,6 +36,10 @@ import {
   resolveEffectiveQuota,
 } from "@ferrogate/policy";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import {
+  PLATFORM_PLAN_SNAPSHOT_KEY,
+  platformPlanSnapshotSchema,
+} from "../../gateway/src/ratelimit/plan-source.js";
 import { resolveTenantStorage } from "../src/adapters.js";
 import type { ControlPlaneBindings } from "../src/ports.js";
 import {
@@ -511,5 +515,31 @@ describe("the enforced quota and the reported quota are the SAME quota", () => {
     // The tenant-only view agrees too (the project leg is not folded in
     // unasked): 60 from the tenant policy, not 20 from the project's.
     expect((reported.effective_quota as Record<string, unknown>).rpm_limit).toBe(60);
+  });
+});
+
+// Mutation mount gate: these are the deployed HTTP routes, not only projectors.
+describe("plan KV publication is mounted on plan and assignment routes", () => {
+  it("publishes creates, updates and plan assignment after their typed writes", async () => {
+    const kv = (env as unknown as { PLATFORM_CONFIG: KVNamespace }).PLATFORM_CONFIG;
+    expect((await post("/admin/v1/plans", { id: "speed-pro", default_rpm_limit: 40 })).status).toBe(
+      201,
+    );
+    expect((await post("/admin/v1/tenant-accounts", { id: "acme" })).status).toBe(201);
+    expect(
+      (await send("PUT", "/admin/v1/tenant-accounts/acme/plan", { plan_id: "speed-pro" })).status,
+    ).toBe(200);
+    let snapshot = platformPlanSnapshotSchema.parse(
+      JSON.parse((await kv.get(PLATFORM_PLAN_SNAPSHOT_KEY)) as string),
+    );
+    expect(snapshot.tenants.find((tenant) => tenant.id === "acme")?.plan_id).toBe("speed-pro");
+    expect(snapshot.plans.find((plan) => plan.id === "speed-pro")?.defaultRpmLimit).toBe(40);
+    expect(
+      (await send("PATCH", "/admin/v1/plans/speed-pro", { default_rpm_limit: 3 })).status,
+    ).toBe(200);
+    snapshot = platformPlanSnapshotSchema.parse(
+      JSON.parse((await kv.get(PLATFORM_PLAN_SNAPSHOT_KEY)) as string),
+    );
+    expect(snapshot.plans.find((plan) => plan.id === "speed-pro")?.defaultRpmLimit).toBe(3);
   });
 });

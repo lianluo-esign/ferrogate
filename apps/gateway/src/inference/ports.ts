@@ -270,6 +270,10 @@ export interface PhysicalRoute {
    * analytics. Absent means the provider did not declare a cost basis.
    */
   readonly providerCostMultiplier?: number | undefined;
+  /** Currency of {@link providerCostMultiplier}. Absent means the snapshot was not recorded. */
+  readonly providerCostCurrency?: "CNY" | "USD" | undefined;
+  /** CNY per 1 USD. Present only with {@link providerCostCurrency}. */
+  readonly providerCostFxRate?: number | undefined;
   /**
    * `ModelRoute.input_price_per_1m` — USD per 1,000,000 PROMPT tokens.
    *
@@ -754,6 +758,8 @@ export interface UpstreamDispatcher {
  * logs through the same Queue/Analytics-Engine sink.
  */
 export interface Usage {
+  /** First generated text, reasoning, or tool delta. Absent for non-streaming and empty streams. */
+  readonly timeToFirstTokenMs?: number | undefined;
   readonly requestId: string;
   /** Rust route label, e.g. `openai.chat.completions`, `anthropic.messages`. */
   readonly route: string;
@@ -898,6 +904,8 @@ export interface Usage {
    * scalar to the tenant wallet debit.
    */
   readonly providerCostMultiplier?: number | undefined;
+  readonly providerCostCurrency?: "CNY" | "USD" | undefined;
+  readonly providerCostFxRate?: number | undefined;
   /**
    * #945 — the billing GROUP this request's key belongs to, when any, carried
    * so the settled cost record and its billing event can attribute the applied

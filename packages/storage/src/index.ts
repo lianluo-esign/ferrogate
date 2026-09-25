@@ -282,3 +282,5 @@ export * from "./d1/index.js";
  * `test/mount-inventory.test.ts` re-derives it from `apps/` on every run, so
  * deleting the `src/worker.ts` re-export reddens this package.
  */
+
+export { readTenantWorkerIdentity } from "./worker-identity.js";

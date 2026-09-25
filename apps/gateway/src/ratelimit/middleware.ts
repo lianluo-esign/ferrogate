@@ -90,6 +90,7 @@
 import type { Context, MiddlewareHandler } from "hono";
 import { HttpError } from "../middleware/errors.js";
 import type { AuthContext, GatewayEnv } from "../ports.js";
+import { tenantObjectAddressFor } from "../residency/carrier.js";
 import type { GatewayRouter, RouteModule } from "../routes/index.js";
 import { parseTenantDatabaseRoutingMode, tenantDatabaseOf } from "../tenancy/index.js";
 import { DurableObjectRateLimiter } from "./do-limiter.js";
@@ -111,6 +112,7 @@ import {
   type RateLimiter,
   type TokenAdmission,
 } from "./ports.js";
+import type { KeyTokenBudget } from "./quota.js";
 import {
   type BudgetHoldBindings,
   NO_SPEND_SOURCE,
@@ -585,7 +587,11 @@ function defaultSpendSource(c: Context<GatewayEnv>, env: RateLimitBindings): Spe
   };
 }
 
-function defaultTokenBudget(c: Context<GatewayEnv>, env: RateLimitBindings): TokenBudgetSource {
+function defaultTokenBudget(
+  c: Context<GatewayEnv>,
+  env: RateLimitBindings,
+  configured?: KeyTokenBudget,
+): TokenBudgetSource {
   const mode = parseTenantDatabaseRoutingMode(env.GATEWAY_TENANT_DB_ROUTING);
   if (mode === "durable_object" && env.TENANT_DATA === undefined) return NO_TOKEN_BUDGET;
   const accessor = tenantDatabaseOf(c);
@@ -600,7 +606,7 @@ function defaultTokenBudget(c: Context<GatewayEnv>, env: RateLimitBindings): Tok
             detail: `the routed tenant database is ${handle.tenantId}, but token budget lookup requested ${tenantId}`,
           };
         }
-        return d1TokenBudgetSource(handle.db).forApiKey(apiKeyId, tenantId);
+        return d1TokenBudgetSource(handle.db, configured).forApiKey(apiKeyId, tenantId);
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
         return { ok: false, detail: `routed tenant token budget unavailable: ${detail}` };
@@ -634,7 +640,15 @@ export function rateLimit(deps: RateLimitDeps = {}): MiddlewareHandler<GatewayEn
     const quotas =
       typeof deps.quotas === "function"
         ? deps.quotas(env)
-        : (deps.quotas ?? quotaPolicySourceFromEnv(env, quotaTenantPolicyDb(c)));
+        : (deps.quotas ??
+          quotaPolicySourceFromEnv(
+            env,
+            quotaTenantPolicyDb(c),
+            JSON.stringify([
+              env.GATEWAY_TENANT_DB_ROUTING ?? "durable_object",
+              tenantObjectAddressFor(c.req.raw)?.jurisdiction ?? "",
+            ]),
+          ));
     const spend =
       typeof deps.spend === "function"
         ? deps.spend(env)
@@ -643,7 +657,7 @@ export function rateLimit(deps: RateLimitDeps = {}): MiddlewareHandler<GatewayEn
       typeof deps.wallet === "function"
         ? deps.wallet(env)
         : (deps.wallet ?? defaultWalletAdmission(c, env));
-    const tokenBudget =
+    let tokenBudget =
       typeof deps.tokenBudget === "function"
         ? deps.tokenBudget(env)
         : (deps.tokenBudget ?? defaultTokenBudget(c, env));
@@ -701,6 +715,10 @@ export function rateLimit(deps: RateLimitDeps = {}): MiddlewareHandler<GatewayEn
         "quota_resolution_unavailable",
         `quota policy lookup failed: ${resolution.detail}`,
       );
+    }
+
+    if (deps.tokenBudget === undefined && resolution.keyTokenBudget !== undefined) {
+      tokenBudget = defaultTokenBudget(c, env, resolution.keyTokenBudget);
     }
 
     // 1. A disabled policy anywhere in the chain is a hard deny — 403, not 429.
@@ -897,9 +915,7 @@ export function rateLimit(deps: RateLimitDeps = {}): MiddlewareHandler<GatewayEn
       // this is the release. `release()` never throws (see `./wallet.ts` and
       // `do-limiter.ts::releaseOnce`), so a settlement problem cannot turn an
       // already-served response into a 500.
-      for (const hold of holds) {
-        await hold.release();
-      }
+      await Promise.all(holds.map((hold) => hold.release()));
     }
   };
 }

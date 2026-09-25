@@ -95,29 +95,21 @@ interface ProofOptions {
 async function proveDomain(
   hostname: string,
   tenantId: string,
-  site: string,
+  _site: string,
   options: ProofOptions = {},
 ): Promise<void> {
   const state = options.state ?? "verified";
   await CONTROL_DB.prepare(
-    "INSERT OR REPLACE INTO site_domain_verifications (tenant_id, hostname, site, state, challenge_token, issued_at_unix, token_expires_at_unix, verified_at_unix, verification_expires_at_unix, last_checked_at_unix, last_failure_reason, attempt_count, updated_at_unix) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    "INSERT OR REPLACE INTO site_domain_verifications (tenant_id, hostname, state, token_expires_at_unix, verification_expires_at_unix) VALUES (?, ?, ?, ?, ?)",
   )
     .bind(
       tenantId,
       hostname,
-      site,
       state,
-      "token-not-readable-from-the-serve-path",
-      NOW - DAY,
       options.tokenExpiresAtUnix ?? NOW + 7 * DAY,
-      state === "verified" ? NOW - DAY : null,
       options.verificationExpiresAtUnix === null
         ? null
         : (options.verificationExpiresAtUnix ?? NOW + 90 * DAY),
-      NOW - DAY,
-      null,
-      1,
-      NOW - DAY,
     )
     .run();
 }

@@ -23,8 +23,14 @@
  *  4. **The two entry points cannot diverge**: `POST /admin/v1/status` is the
  *     same registration and provisions the same way.
  */
-import { SELF } from "cloudflare:test";
+import { SELF, env } from "cloudflare:test";
+import { DurableObjectD1Database } from "@ferrogate/storage";
+import type { TenantDataNamespace } from "@ferrogate/storage/durable-objects";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+function tenantDataDatabase(tenantId: string): D1Database {
+  const ns = (env as unknown as { TENANT_DATA: TenantDataNamespace }).TENANT_DATA;
+  return new DurableObjectD1Database(tenantId, ns.get(ns.idFromName(tenantId))).asD1Database();
+}
 import { WORKER_REGISTRATION_TABLE } from "../src/store/worker_registry.js";
 import { applySchema, db, resetD1 } from "./d1.js";
 import { BASE, arm, bearer, jsonRequest, operatorKey } from "./harness.js";
@@ -50,7 +56,24 @@ async function registryRow(workerId: string): Promise<RegistryDocument | null> {
     .prepare(`SELECT registration_json FROM ${WORKER_REGISTRATION_TABLE} WHERE id = ?`)
     .bind(workerId)
     .first<{ registration_json: string }>();
-  return row === null ? null : (JSON.parse(row.registration_json) as RegistryDocument);
+  if (row === null) return null;
+  const directory = JSON.parse(row.registration_json);
+  expect(Object.keys(directory).sort()).toEqual(["tenant_id", "worker_id", "workspace_id"]);
+  const identity = await tenantDataDatabase(directory.tenant_id)
+    .prepare(
+      "SELECT identity_json,token_id,token_secret,status FROM self_hosted_worker_identities WHERE worker_id=?",
+    )
+    .bind(workerId)
+    .first<{ identity_json: string; token_id: string; token_secret: string; status: string }>();
+  if (identity === null) return null;
+  return {
+    framework_adapter: "native",
+    ...JSON.parse(identity.identity_json),
+    ...directory,
+    token_id: identity.token_id,
+    token_secret: identity.token_secret,
+    active: identity.status === "active",
+  };
 }
 
 interface RegisterBody {
@@ -82,6 +105,16 @@ beforeEach(async () => {
   arm({ store: "d1", staticKeys: [operatorKey] });
   await resetD1();
   await db().prepare(`DELETE FROM ${WORKER_REGISTRATION_TABLE}`).run();
+  await db()
+    .prepare(`INSERT OR REPLACE INTO tenant_databases
+    (tenant_id,storage_backend,provisioning_status,schema_version,binding_name,migration_state,provisioned_at_unix,updated_at_unix)
+    VALUES ('tenant-a','durable_object','ready',38,NULL,'done',1,1)`)
+    .run();
+  const tenantDb = tenantDataDatabase("tenant-a");
+  await tenantDb
+    .prepare("DELETE FROM tenant_resources WHERE resource_kind='self-hosted-workers'")
+    .run();
+  await tenantDb.prepare("DELETE FROM self_hosted_worker_identities").run();
 });
 
 describe("MOUNT: registering a self-hosted worker provisions the typed registry row", () => {
@@ -273,4 +306,20 @@ describe("without a control database the registration REFUSES", () => {
       error: { code: "control_database_unavailable" },
     });
   });
+});
+
+it("keeps worker ownership reserved when its tenant identity is missing", async () => {
+  expect((await register("reserved-worker")).status).toBe(201);
+  await tenantDataDatabase("tenant-a")
+    .prepare("DELETE FROM self_hosted_worker_identities WHERE worker_id=?")
+    .bind("reserved-worker")
+    .run();
+  expect(
+    (await register("reserved-worker", { tenant_id: "tenant-b", workspace_id: "ws-b" })).status,
+  ).toBe(409);
+  const row = await db()
+    .prepare("SELECT registration_json FROM self_hosted_worker_registrations WHERE id=?")
+    .bind("reserved-worker")
+    .first<{ registration_json: string }>();
+  expect(JSON.parse(row!.registration_json).tenant_id).toBe("tenant-a");
 });

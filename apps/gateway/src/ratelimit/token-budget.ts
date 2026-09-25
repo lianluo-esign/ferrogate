@@ -36,6 +36,7 @@
  * interchangeable and are deliberately not merged here.
  */
 import { D1UsageLedger } from "@ferrogate/storage";
+import type { KeyTokenBudget } from "./quota.js";
 import { gatewayTenantHandle } from "./wallet.js";
 
 /** Bindings this module reads. */
@@ -100,17 +101,24 @@ const MONTHLY_TOKEN_BUDGET_SQL = "SELECT monthly_token_budget FROM api_keys WHER
  * unbounded rollup history on the hot path of requests that can never be
  * refused by it.
  */
-export function d1TokenBudgetSource(db: D1Database): TokenBudgetSource {
+export function d1TokenBudgetSource(
+  db: D1Database,
+  configured?: KeyTokenBudget,
+): TokenBudgetSource {
   return {
     async forApiKey(apiKeyId: string, tenantId: string | undefined): Promise<TokenBudgetReading> {
       let budget: number | undefined;
       try {
-        const row = await db
-          .prepare(MONTHLY_TOKEN_BUDGET_SQL)
-          .bind(apiKeyId)
-          .first<{ monthly_token_budget: number | null }>();
-        const value = row?.monthly_token_budget;
-        budget = value === null || value === undefined ? undefined : Number(value);
+        if (configured !== undefined && configured.apiKeyId === apiKeyId) {
+          budget = configured.limit;
+        } else {
+          const row = await db
+            .prepare(MONTHLY_TOKEN_BUDGET_SQL)
+            .bind(apiKeyId)
+            .first<{ monthly_token_budget: number | null }>();
+          const value = row?.monthly_token_budget;
+          budget = value === null || value === undefined ? undefined : Number(value);
+        }
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
         return { ok: false, detail: `cloudflare d1: token budget lookup failed: ${detail}` };

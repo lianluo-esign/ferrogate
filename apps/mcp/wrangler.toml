@@ -1,6 +1,11 @@
 name = "ferrogate-mcp"
 main = "src/worker.ts"
 
+# Production service is suspended. Re-enabling ingress requires an explicit decision.
+workers_dev = false
+preview_urls = false
+routes = []
+
 # Nothing declared below needs a newer runtime. `nodejs_compat` is what `hono`
 # and the WebCrypto code in `src/ports.ts` (`webCryptoIdentityCipher`) expect.
 # Raise the date only for a binding that demands it — this Worker uses no

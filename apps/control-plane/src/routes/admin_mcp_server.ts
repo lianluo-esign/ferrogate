@@ -7,11 +7,8 @@
  * across the tool namespace. `idField: "name"` makes the create body's `name`
  * the store key so `POST` then `GET /{name}` round-trips.
  *
- * The control document remains lossless and auditable, while the tenant
- * object's `mcp_servers` row is the runtime authority. Mutations project the
- * decoded document into that object, and tenant-scoped reads run the bounded
- * legacy backfill before serving the control document. `apps/mcp` never opens
- * this Worker's `DB` for its catalog.
+ * The tenant document is the single runtime authority. The platform retains
+ * only an id-to-tenant directory; reads never backfill from a control copy.
  *
  * ## Two things this file's SCHEMA still under-declares, deliberately
  *
@@ -35,23 +32,11 @@
  */
 import { z } from "zod";
 import {
-  ensureTenantMcpServerCatalogBackfill,
   projectMcpServer,
   removeMcpServerControlProjection,
   unprojectMcpServer,
 } from "../store/mcp_server_catalog.js";
-import {
-  type CollectionSpec,
-  type GroupModule,
-  type Handler,
-  adminRecordSchema,
-  crudGroup,
-  depsOf,
-  listHandler,
-  readHandler,
-  resolveSpec,
-  scopeOf,
-} from "./resource.js";
+import { type CollectionSpec, type GroupModule, adminRecordSchema, crudGroup } from "./resource.js";
 
 export const mcpServerSchema = adminRecordSchema.extend({
   name: z.string().trim().min(1),
@@ -74,28 +59,4 @@ const mcpServerSpec: CollectionSpec = {
   tenantUnprojectAfter: removeMcpServerControlProjection,
 };
 
-const resolvedMcpServerSpec = resolveSpec(mcpServerSpec);
-
-async function backfillTenantRead(c: Parameters<Handler>[0]): Promise<void> {
-  const scope = scopeOf(c);
-  if (scope.kind === "tenant") {
-    await ensureTenantMcpServerCatalogBackfill(depsOf(c), scope.tenantId);
-  }
-}
-
-const readOverrides: Readonly<Record<string, Handler>> = {
-  listAdminMcpServers: async (c) => {
-    await backfillTenantRead(c);
-    return listHandler(resolvedMcpServerSpec)(c);
-  },
-  getAdminMcpServer: async (c) => {
-    await backfillTenantRead(c);
-    return readHandler(resolvedMcpServerSpec, "name")(c);
-  },
-};
-
-export const adminMcpServerRoutes: GroupModule = crudGroup(
-  "admin_mcp_server",
-  [mcpServerSpec],
-  readOverrides,
-);
+export const adminMcpServerRoutes: GroupModule = crudGroup("admin_mcp_server", [mcpServerSpec]);

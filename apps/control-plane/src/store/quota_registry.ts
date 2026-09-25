@@ -87,6 +87,8 @@ import type { QuotaScopeKind, StoredPlan, StoredQuotaPolicy } from "@ferrogate/p
 import { StorageError, validateQuotaPolicy } from "@ferrogate/storage";
 import { HttpError } from "../middleware/errors.js";
 import type { StoreRecord } from "../ports.js";
+import { writeCanonicalResourceIfView } from "./canonical-resource.js";
+import { refreshPlatformPlanCache } from "./platform-plan-cache.js";
 
 /** The three typed tables in `sql/d1-ts/control/0001_init_control.sql`. */
 export const PLANS_TABLE = "plans";
@@ -334,7 +336,12 @@ export async function projectPlan(
   db: D1Database,
   record: StoreRecord,
   nowUnix: number,
+  env?: { readonly PLATFORM_CONFIG?: KVNamespace },
 ): Promise<void> {
+  if (await writeCanonicalResourceIfView(db, "plans", "plans", record, nowUnix)) {
+    await refreshPlatformPlanCache(db, env?.PLATFORM_CONFIG);
+    return;
+  }
   const plan = storedPlan(record);
   const id = String(record.id);
   try {
@@ -393,78 +400,30 @@ export async function projectPlan(
   } catch (error) {
     projectionConflict("plan", id, error);
   }
+  await refreshPlatformPlanCache(db, env?.PLATFORM_CONFIG);
 }
 
-/**
- * Track A G2 (stop-control-write) for the `tenants.document_json` tenant-account
- * mirror ([[no-tenant-data-mirror-in-control-d1]]).
- *
- * DEFAULT (unset/`"control"`): {@link projectTenantAccount} keeps writing the
- * WHOLE tenant-account admin document into the shared CONTROL object's
- * `document_json` column, and the operator LIST is served from that one-query
- * mirror ({@link SplitControlPlaneStore} `#listTenantAccountsMirror`). When this
- * reads `"tenant_object"` the projection stops mirroring the document (writes
- * `document_json = NULL`, retiring the tenant-data copy from control) and the
- * LIST fans out across each tenant's own object instead — the pre-#75 authority
- * path. Any other value reads as the safe default (a config typo must not blank
- * the mirror the reader still points at). See the `CONTROL_TENANT_ACCOUNT_SOURCE`
- * binding docs: the reader and writer flip TOGETHER on one var, because a mirror
- * that stops being written while the LIST still reads it would list nothing.
- */
-export function tenantAccountWritesTenantObjectOnly(env: {
-  readonly CONTROL_TENANT_ACCOUNT_SOURCE?: string;
-}): boolean {
-  return (env.CONTROL_TENANT_ACCOUNT_SOURCE ?? "").trim() === "tenant_object";
-}
-
-/**
- * Project a `tenant-accounts` admin document into the typed `tenants` row.
- *
- * Only two of its columns are load-bearing for the data plane — `id` and
- * `plan_id`, the two the gateway's `JOIN plans p ON t.plan_id = p.id` traverses
- * — but `name`/`slug`/`status` are `NOT NULL`, so they are carried faithfully
- * rather than stubbed. These typed columns are the account-global control
- * REGISTRY (roster + plan join) and are ALWAYS written; only `document_json`
- * (the whole-document tenant-data mirror) is Track-A-gated by `env`.
- *
- * `env` omitted (the one-time backfill, tests) keeps the mirror ON — its job is
- * to fill the mirror, so it must never be the leg that blanks it.
- */
+/** Maintain the narrow platform tenant registry; account documents stay in tenant objects. */
 export async function projectTenantAccount(
   db: D1Database,
   record: StoreRecord,
   nowUnix: number,
-  env?: { readonly CONTROL_TENANT_ACCOUNT_SOURCE?: string },
+  env?: { readonly PLATFORM_CONFIG?: KVNamespace },
 ): Promise<void> {
   const id = String(record.id);
   const planId = record.plan_id;
-  // `null` retires the tenant-data copy from the shared control object; the
-  // reader ({@link SplitControlPlaneStore.list}) flips to the tenant-object
-  // fan-out under the SAME var, so a NULL mirror is never read.
-  const mirrorDocument =
-    env === undefined || !tenantAccountWritesTenantObjectOnly(env) ? JSON.stringify(record) : null;
   try {
     await db
       .prepare(
-        // `document_json` carries the WHOLE admin document verbatim so the
-        // operator LIST (`GET /admin/v1/tenant-accounts`) is served from ONE
-        // control-DO query instead of a per-tenant Durable Object fan-out (#75).
-        // The typed columns above stay authoritative for the data plane's
-        // `JOIN plans`; the reader (`split.ts` `#listTenantAccountsMirror`) reads
-        // this column back with a plain `JSON.parse`, so the listed row is
-        // byte-identical to what the tenant object returns. `record` is the same
-        // stored object the tenant DO persisted at every sync site, so no field
-        // is lost (incl. `plan_effective_at` from `assignTenantPlan`).
         `INSERT INTO ${TENANTS_TABLE}
-           (id, name, slug, status, plan_id, created_at_unix, updated_at_unix, document_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+           (id, name, slug, status, plan_id, created_at_unix, updated_at_unix)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (id) DO UPDATE SET
            name = excluded.name,
            slug = excluded.slug,
            status = excluded.status,
            plan_id = excluded.plan_id,
-           updated_at_unix = excluded.updated_at_unix,
-           document_json = excluded.document_json`,
+           updated_at_unix = excluded.updated_at_unix`,
       )
       .bind(
         id,
@@ -474,12 +433,12 @@ export async function projectTenantAccount(
         typeof planId === "string" && planId.trim() !== "" ? planId.trim() : NO_PLAN_ID,
         nowUnix,
         nowUnix,
-        mirrorDocument,
       )
       .run();
   } catch (error) {
     projectionConflict("tenant_account", id, error);
   }
+  await refreshPlatformPlanCache(db, env?.PLATFORM_CONFIG);
 }
 
 /**

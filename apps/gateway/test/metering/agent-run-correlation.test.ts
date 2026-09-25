@@ -52,6 +52,7 @@ import {
   resetMeteringTables,
   resetPlatformBilling,
 } from "./d1-harness.js";
+import { recordingPublisher } from "./fixtures.js";
 import { chargeFixture, pricedBook, usageFixture } from "./fixtures.js";
 
 declare global {
@@ -102,6 +103,7 @@ async function meteredRequest(headers: Record<string, string>): Promise<{
   const sink = createMeteringUsageSink({
     priceBook: pricedBook(),
     bindings: meteringBindingsFromEnv,
+    publisher: recordingPublisher(queue),
   });
   const { app } = createGatewayApp({
     modules: [

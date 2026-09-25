@@ -53,7 +53,7 @@ import type {
   SsoPendingFlow,
 } from "@ferrogate/sso";
 import { webCryptoRandomHex } from "@ferrogate/sso";
-import { StorageError, backfillTenantConfigurationPolicy } from "@ferrogate/storage";
+import { StorageError } from "@ferrogate/storage";
 import type { Context } from "hono";
 import type { ApiOperation } from "../contract.js";
 import { HttpError } from "../middleware/errors.js";
@@ -319,7 +319,6 @@ export class ControlPlaneIdentityRepository implements IdentityRepository {
 
   async #tenantDb(tenantId: string): Promise<D1Database> {
     const control = this.#db();
-    await backfillTenantConfigurationPolicy(control, this.#deps.tenantDatabases, tenantId);
     return (await this.#deps.tenantDatabases.forTenant(tenantId)).db;
   }
 

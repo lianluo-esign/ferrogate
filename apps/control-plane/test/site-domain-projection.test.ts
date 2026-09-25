@@ -65,9 +65,7 @@ async function verificationRow(
   tenantId: string,
 ): Promise<{ state: string; attempt_count: number } | null> {
   return await db()
-    .prepare(
-      "SELECT state, attempt_count FROM site_domain_verifications WHERE tenant_id = ? AND hostname = ?",
-    )
+    .prepare("SELECT state FROM site_domain_verifications WHERE tenant_id = ? AND hostname = ?")
     .bind(tenantId, HOST)
     .first<{ state: string; attempt_count: number }>();
 }

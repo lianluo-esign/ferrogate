@@ -66,7 +66,13 @@ import {
   resetMeteringTables,
   resetPlatformBilling,
 } from "./d1-harness.js";
-import { FIXTURE_CREDITS, chargeFixture, pricedBook, usageFixture } from "./fixtures.js";
+import {
+  FIXTURE_CREDITS,
+  chargeFixture,
+  pricedBook,
+  recordingPublisher,
+  usageFixture,
+} from "./fixtures.js";
 
 const BASE = "https://gw.test";
 const AUTHED = { authorization: "Bearer fg_root", "content-type": "application/json" };
@@ -146,6 +152,7 @@ function durableGateway(
   const sink = createMeteringUsageSink({
     priceBook: pricedBook(),
     bindings: meteringBindingsFromEnv,
+    publisher: recordingPublisher(queue),
   });
 
   const { app } = createGatewayApp({
@@ -469,6 +476,7 @@ describe("durable metering — both shapes of the widened seam", () => {
     const sink = createMeteringUsageSink({
       priceBook: pricedBook(),
       bindings: meteringBindingsFromEnv,
+      publisher: recordingPublisher(queue),
     });
     const ctx = createExecutionContext();
 
@@ -758,6 +766,7 @@ describe("durable metering — integer credits past 2^53", () => {
       priceBook: pricedBook(),
       outbox,
       bindings: meteringBindingsFromEnv,
+      publisher: recordingPublisher(queue),
     });
     await sink.flush({
       env: { ...(env as unknown as Record<string, unknown>), BILLING: queue },
@@ -915,6 +924,7 @@ describe("durable metering — the Cron sweep recovers a stranded charge", () =>
       sink: createMeteringUsageSink({
         priceBook: pricedBook(),
         bindings: meteringBindingsFromEnv,
+        publisher: recordingPublisher(queue),
       }),
       rc: { env: { ...(env as unknown as Record<string, unknown>), BILLING: queue } },
     };

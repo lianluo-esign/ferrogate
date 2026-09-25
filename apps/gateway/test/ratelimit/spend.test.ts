@@ -59,6 +59,7 @@ import {
   d1SpendSource,
   monthlyBudgetScope,
 } from "../../src/ratelimit/index.js";
+import { resetSharedQuotaPolicyCache } from "../../src/ratelimit/quota.js";
 
 const db = (env as unknown as { DB: D1Database }).DB;
 const controlDb = (env as unknown as { CONTROL_DB: D1Database }).CONTROL_DB;
@@ -244,6 +245,8 @@ beforeAll(async () => {
 });
 
 beforeEach(async () => {
+  // Each test replaces policies directly; model an isolate recycle between fixtures.
+  resetSharedQuotaPolicyCache(env);
   await db.prepare("DELETE FROM usage_monthly_rollups").run();
   await db.prepare("DELETE FROM wallets").run();
   await db.prepare("DELETE FROM wallet_reservations").run();

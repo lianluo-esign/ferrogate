@@ -12,7 +12,6 @@ import type { TenantDataNamespace } from "@ferrogate/storage/durable-objects";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { resolveDeps } from "../src/adapters.js";
 import type { ControlPlaneBindings } from "../src/ports.js";
-import { ensureTenantMcpServerCatalogBackfill } from "../src/store/mcp_server_catalog.js";
 import { applySchema, db, resetD1 } from "./d1.js";
 import { BASE, arm, bearer, jsonRequest, operatorKey, tenantKey } from "./harness.js";
 
@@ -186,51 +185,29 @@ describe("MCP admin writes project into the tenant object", () => {
   });
 });
 
-describe("MCP catalog backfill", () => {
-  it("copies a legacy control document on a tenant-scoped read and then stops", async () => {
-    const tenantId = freshTenant("backfill");
-    const document = serverBody(tenantId, "legacy");
-    await db()
-      .prepare(
-        `INSERT INTO control_plane_resources
-           (resource_kind, resource_id, document_json, revision, created_at_unix, updated_at_unix)
-         VALUES ('mcp-servers', ?, ?, 1, 1, 1)`,
-      )
-      .bind("legacy", JSON.stringify(document))
-      .run();
-
-    arm({ store: "d1", nativeKeys: [tenantKey("mcp-tenant-read", tenantId)] });
-    const read = await SELF.fetch(`${BASE}/admin/v1/mcp-servers/legacy`, {
-      headers: bearer("mcp-tenant-read"),
-    });
-    expect(read.status, await read.clone().text()).toBe(200);
-
-    const object = tenantDb(tenantId);
-    const row = await object
-      .prepare("SELECT url FROM mcp_servers WHERE name = ?")
-      .bind("legacy")
-      .first<{
-        url: string;
-      }>();
-    expect(row?.url).toBe(document.url);
-    const mark = await object
-      .prepare("SELECT detail FROM tenant_provisioning_marks WHERE tenant_id = ? AND mark = ?")
-      .bind(tenantId, "mcp_server_catalog_backfill_v1")
-      .first<{ detail: string }>();
-    expect(JSON.parse(mark?.detail ?? "{}").state).toBe("complete");
-
-    await object
-      .prepare("UPDATE mcp_servers SET url = ? WHERE tenant_id = ? AND name = ?")
-      .bind("https://object-authority.example.test", tenantId, "legacy")
-      .run();
-    await ensureTenantMcpServerCatalogBackfill(
-      resolveDeps(env as unknown as ControlPlaneBindings),
-      tenantId,
+describe("MCP control directory", () => {
+  it("stores only the destination and cannot restore a deleted resource", async () => {
+    const tenantId = freshTenant("directory");
+    const created = await SELF.fetch(
+      `${BASE}/admin/v1/mcp-servers`,
+      jsonRequest(operatorKey.secret, "POST", serverBody(tenantId, "directory")),
     );
-    const authoritative = await object
-      .prepare("SELECT url FROM mcp_servers WHERE tenant_id = ? AND name = ?")
-      .bind(tenantId, "legacy")
-      .first<{ url: string }>();
-    expect(authoritative?.url).toBe("https://object-authority.example.test");
+    expect(created.status).toBe(201);
+    const row = await db()
+      .prepare(
+        "SELECT document_json FROM control_plane_resources WHERE resource_kind='mcp-servers' AND resource_id='directory'",
+      )
+      .first<{ document_json: string }>();
+    expect(JSON.parse(row!.document_json)).toEqual({ id: "directory", tenant_id: tenantId });
+    await tenantDb(tenantId)
+      .prepare(
+        "DELETE FROM tenant_resources WHERE resource_kind='mcp-servers' AND resource_id='directory'",
+      )
+      .run();
+    arm({ store: "d1", nativeKeys: [tenantKey("mcp-directory-read", tenantId)] });
+    const response = await SELF.fetch(`${BASE}/admin/v1/mcp-servers/directory`, {
+      headers: bearer("mcp-directory-read"),
+    });
+    expect(response.status).toBe(404);
   });
 });

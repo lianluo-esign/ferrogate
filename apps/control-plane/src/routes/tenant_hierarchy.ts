@@ -403,8 +403,7 @@ export const tenantHierarchyRoutes: GroupModule = crudGroup(
       // moves a tenant between plans.
       const db = deps.controlDatabase;
       if (db !== null) {
-        // `c.env` carries `CONTROL_TENANT_ACCOUNT_SOURCE` so this override honours
-        // the same document-mirror gate as the spec `project` hook (Track A G2).
+        // Publish the updated plan assignment through the shared KV binding.
         await projectTenantAccount(db, stored, Math.floor(Date.now() / 1000), c.env);
       }
       // #820, and for the same "this route is an OVERRIDE, so the spec hooks do

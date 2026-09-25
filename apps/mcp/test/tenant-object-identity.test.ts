@@ -84,7 +84,7 @@ describe("MCP identity state in TenantDataObject", () => {
 
     const tables = await databaseFor(TENANT_A)
       .prepare(
-        "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (?, ?, ?) ORDER BY name",
+        "SELECT name FROM sqlite_master WHERE type IN ('table','view') AND name IN (?, ?, ?) ORDER BY name",
       )
       .bind("mcp_servers", "mcp_oauth_credentials", "mcp_identity_generations")
       .all<{ name: string }>();

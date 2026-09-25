@@ -117,7 +117,11 @@ export interface SiteDomainRecord {
 /** The seam the request path resolves an authority through. */
 export interface SiteDomainDirectory {
   /** `null` hostname or an unknown one must answer `{ kind: "unbound" }`. */
-  resolve(hostname: string, nowUnix: number): Promise<SiteDomainDecision>;
+  resolve(
+    hostname: string,
+    nowUnix: number,
+    defer?: (work: Promise<unknown>) => void,
+  ): Promise<SiteDomainDecision>;
 }
 
 /**
@@ -361,30 +365,98 @@ interface SiteDomainRouteRow {
 export class D1SiteDomainDirectory implements SiteDomainDirectory {
   readonly #db: SiteDomainDatabase;
   readonly #ttlSeconds: number;
+  readonly #kv: KVNamespace | undefined;
+  readonly #pending = new Map<string, Promise<CacheEntry>>();
   readonly #cache = new Map<string, CacheEntry>();
 
-  constructor(db: SiteDomainDatabase, ttlSeconds: number = SITE_DOMAIN_CACHE_TTL_SECONDS) {
+  constructor(
+    db: SiteDomainDatabase,
+    ttlSeconds: number = SITE_DOMAIN_CACHE_TTL_SECONDS,
+    kv?: KVNamespace,
+  ) {
     this.#db = db;
+    this.#kv = kv;
     this.#ttlSeconds = ttlSeconds;
   }
 
-  async resolve(hostname: string, nowUnix: number): Promise<SiteDomainDecision> {
+  async resolve(
+    hostname: string,
+    nowUnix: number,
+    defer?: (work: Promise<unknown>) => void,
+  ): Promise<SiteDomainDecision> {
     const key = normalizeSiteHostname(hostname);
     if (key === "") return { kind: "unbound" };
     const cached = this.#cache.get(key);
     if (cached !== undefined && cached.expiresAtUnix > nowUnix) {
       return decideSiteDomain(cached.record, nowUnix);
     }
-    let record: SiteDomainRecord | null;
-    try {
-      record = await this.#read(key);
-    } catch {
-      // See the class docblock: an unreadable directory means "no custom
-      // domains", never "every hostname is a custom domain".
-      return { kind: "unbound" };
+    let pending = this.#pending.get(key);
+    if (pending === undefined) {
+      pending = this.#load(key, nowUnix, defer);
+      this.#pending.set(key, pending);
     }
-    this.#cache.set(key, { record, expiresAtUnix: nowUnix + this.#ttlSeconds });
-    return decideSiteDomain(record, nowUnix);
+    try {
+      const entry = await pending;
+      this.#cache.set(key, entry);
+      return decideSiteDomain(entry.record, nowUnix);
+    } catch {
+      return { kind: "unbound" };
+    } finally {
+      if (this.#pending.get(key) === pending) this.#pending.delete(key);
+    }
+  }
+
+  async #load(
+    hostname: string,
+    nowUnix: number,
+    defer?: (work: Promise<unknown>) => void,
+  ): Promise<CacheEntry> {
+    const cacheKey = `platform:site-domain:v1:${hostname}`;
+    if (this.#kv !== undefined) {
+      try {
+        const value = (await this.#kv.get(cacheKey, "json")) as {
+          expiresAtUnix?: number;
+          record?: SiteDomainRecord;
+        } | null;
+        const record = value?.record;
+        if (
+          value !== null &&
+          Number.isSafeInteger(value.expiresAtUnix) &&
+          value.expiresAtUnix! > nowUnix &&
+          value.expiresAtUnix! <= nowUnix + this.#ttlSeconds &&
+          record !== undefined &&
+          record !== null &&
+          record.hostname === hostname &&
+          typeof record.tenantId === "string" &&
+          record.tenantId !== "" &&
+          typeof record.site === "string" &&
+          (record.verification === null ||
+            (record.verification !== undefined &&
+              siteDomainVerificationStateFromString(record.verification.state) !== undefined &&
+              Number.isSafeInteger(record.verification.tokenExpiresAtUnix) &&
+              (record.verification.verificationExpiresAtUnix === undefined ||
+                Number.isSafeInteger(record.verification.verificationExpiresAtUnix))))
+        ) {
+          return { record, expiresAtUnix: value.expiresAtUnix! };
+        }
+      } catch {
+        /* A missing or corrupt cache falls back to the platform authority. */
+      }
+    }
+    const entry: CacheEntry = {
+      record: await this.#read(hostname),
+      expiresAtUnix: nowUnix + this.#ttlSeconds,
+    };
+    // Unknown hostnames never generate KV writes. Only configured hot routes
+    // get shared caching; publishing does not delay a gateway request.
+    if (entry.record !== null && this.#kv !== undefined) {
+      const publish = this.#kv
+        .put(cacheKey, JSON.stringify(entry), { expirationTtl: Math.max(60, this.#ttlSeconds) })
+        .catch(() => {});
+      if (defer === undefined) await publish;
+      else defer(publish);
+    }
+    return entry;
   }
 
   async #read(hostname: string): Promise<SiteDomainRecord | null> {

@@ -1,102 +1,17 @@
 /**
- * Provisioning a tenant's STORAGE at the moment the tenant is created (#820).
- *
- * ## What was missing
- *
- * `tenant_databases` is the fleet roster — `provisionedTenants()` reads it, and
- * `store/asset_fleet.ts` fans out over that list — and a Durable Object
- * namespace cannot be enumerated in production, so it is the ONLY roster there
- * is. Nothing in production wrote it. Every `registry.upsert(` in the tree was a
- * test. So a tenant created through the admin API or through console signup was
- * invisible to every fleet view, and had an empty model catalog. (This sentence
- * used to end "which is `400 model_not_found` on its first inference request".
- * It is not: nothing in `apps/<app>/src` reads the tenant catalog tables yet, and
- * the gateway resolves models from `GATEWAY_MODELS` / `GATEWAY_PROVIDERS`. The
- * roster half was the real defect; see `@ferrogate/storage`\'s
- * `tenant-model-catalog.ts` for what the seed is actually for.)
- *
- * ## Every creation entry point, and how each one reaches this
- *
- * There are four, and the one that gets forgotten is the second:
- *
- *  1. `POST /admin/v1/tenant-accounts` — the generic `createHandler`, through
- *     the `provision` hook on the collection spec (`routes/resource.ts`).
- *  2. `POST /v1/admin/register`, console self-service (`session/routes.ts`). It
- *     bypasses `crudGroup` entirely and writes the `tenant-accounts` DOCUMENT
- *     directly, so no spec hook of any kind runs for it. It calls this module —
- *     and `projectTenantAccount` — explicitly. Before this slice a
- *     self-registered tenant had no `tenants` row either, so the gateway's
- *     lifecycle read and its plan join both missed.
- *  3. `PUT /admin/v1/tenant-accounts/{id}/plan` — an override that does not run
- *     the spec hooks, so it calls this explicitly too. It cannot CREATE a
- *     tenant (the merge 404s on a missing one), but it is the route that
- *     retroactively materialises a self-registered tenant's typed row, so it is
- *     a repair point and repairing storage there is free.
- *  4. `PUT` / `PATCH /admin/v1/tenant-accounts/{id}` — `replaceHandler` /
- *     `mergeHandler`, also through the spec hook. Neither can create; both are
- *     repair points for a tenant whose provisioning failed.
- *
- * ## Why a failure here does NOT fail the request
- *
- * Recording the roster row and seeding the object span the control database and
- * a Durable Object, and there is no cross-store transaction on this platform. So
- * the requirement cannot be "atomic" — it has to be "a half-provisioned tenant
- * is DETECTABLE and resumable", which is what `provisionTenantStorage` delivers:
- * it writes `pending` before touching anything and `failed` with the refusal's
- * own message if a step throws, so the state an operator finds names the cause,
- * and `listUnfinished()` is the worklist.
- *
- * Given that, re-raising here would turn a recoverable storage fault into a
- * failed tenant CREATION — and the tenant document is already committed by the
- * time this runs, so the caller would get a 500 for a tenant that exists. The
- * caller's retry is the same PUT/PATCH that repairs it anyway. So the outcome is
- * recorded and swallowed, and the honest cost is stated here: nothing surfaces
- * the failure to the operator SYNCHRONOUSLY. The roster row is where it surfaces,
- * and wiring a sweep of `listUnfinished()` into a scheduled trigger is the
- * follow-up this comment exists to name rather than to imply is already done.
- *
- * A tenant with no `tenants` row is a different case and it is refused hard,
- * inside `provisionTenantStorage`, BEFORE any object is addressed: an object is
- * created by being addressed, a namespace cannot be enumerated to find the junk
- * ones, and every one of them bills for storage forever.
+ * Provision tenant storage from account creation and account repair hooks.
+ * Provisioning verifies the tenant schema and records resumable roster state;
+ * platform configuration stays in CONTROL_DATA / PLATFORM_CONFIG KV.
+ * Failures are recorded on the roster without undoing the committed account.
  */
 import {
   LOCATION_HINT_HEADER,
-  type TenantModelCatalogSeedGraph,
-  type TenantObjectAddress,
   coerceTenantLocationHint,
   locationHintFromCloudflareSignal,
   placementSignalFromRequest,
   provisionTenantStorage,
 } from "@ferrogate/storage";
 import type { ControlPlaneDeps } from "../ports.js";
-import { PlatformModelCatalogStore } from "./platform-model-catalog.js";
-import { seedSharedConfigForTenant } from "./shared-config.js";
-
-/**
- * Read the managed platform catalog for the provisioning seed, degrading ANY
- * read fault to the card fallback (#891).
- *
- * `exportForSeed` already treats an ABSENT catalog — the `d1_compat` migration
- * window where the Worker is new and migration `0025`'s tables are not applied
- * yet — as an empty graph. This widens that tolerance to EVERY read fault: the
- * same "new Worker, old DB" window can also raise `no such column` when a future
- * migration adds a column the new `PROVIDER_SELECT` references, and a platform
- * catalog read fault must never fail tenant onboarding, which did not depend on
- * it at all before this slice. Returning `undefined` makes `provisionTenantStorage`
- * seed the compiled-in card and STILL run — writing its roster row and reporting
- * its own outcome — instead of the caller's outer catch swallowing the throw and
- * returning `false` before provisioning was ever attempted.
- */
-async function exportPlatformCatalogSeed(
-  controlDatabase: D1Database,
-): Promise<TenantModelCatalogSeedGraph | undefined> {
-  try {
-    return await new PlatformModelCatalogStore({ db: controlDatabase }).exportForSeed();
-  } catch {
-    return undefined;
-  }
-}
 
 /**
  * Provision (or resume) one tenant's storage, best-effort.
@@ -146,14 +61,6 @@ export async function provisionTenantStorageFor(
     // location hint above is the sole placement signal. A residency-driven
     // jurisdiction, once its authoritative home is the tenant object, is a
     // re-placement concern outside this create-time path.
-    // The MANAGED platform catalog (#891) is the seed source when this
-    // deployment has adopted it. It is read over the CONTROL_DATA facade (the
-    // Zero-D1 seam #879) and passed DOWN to `provisionTenantStorage` as plain
-    // data, so `@ferrogate/storage` never names a `platform_*` table. The read is
-    // a LAZY loader: `provisionTenantStorage` only invokes it when a seed will
-    // actually run, so an already-seeded tenant (every PUT/PATCH repair point)
-    // never pays for the export, and a failed read degrades to the card rather
-    // than failing onboarding — see `exportPlatformCatalogSeed`.
     const outcome = await provisionTenantStorage(
       deps.tenantStorage ?? deps.tenantDatabases,
       tenantId,
@@ -161,7 +68,6 @@ export async function provisionTenantStorageFor(
         locationHint,
         locationHintSource,
         locationHintRecordedAtUnix: Math.floor(Date.now() / 1000),
-        catalogGraphLoader: () => exportPlatformCatalogSeed(controlDatabase),
       },
     );
     // One structured line per provisioning attempt. The module docblock notes
@@ -182,17 +88,6 @@ export async function provisionTenantStorageFor(
         placementOrigin: origin,
       }),
     );
-    // Seed the shared control-plane config (分组/套餐/公告) DOWN into the new
-    // tenant's object so its first authenticated request reads that config
-    // LOCALLY, never reaching back into the control DB (#948). Addressed with
-    // the same locationHint the object was just provisioned at, so the push
-    // lands in exactly the object the tenant reads from. Best-effort:
-    // `seedSharedConfigForTenant` swallows its own failures, and the cron pass
-    // re-delivers idempotently, so a seed fault never fails tenant creation.
-    if (outcome.status === "ready") {
-      const address: TenantObjectAddress = { locationHint };
-      await seedSharedConfigForTenant(deps, tenantId, address);
-    }
     return outcome.status === "ready";
   } catch {
     // `provisionTenantStorage` has already written `failed` and the refusal's

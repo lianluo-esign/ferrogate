@@ -1,46 +1,4 @@
-/**
- * #894 — CANDIDATE COVERAGE: a score lands on a candidate that never served.
- *
- * ## The gap this file closes
- *
- * `online_eval_scores` only ever held rows for legs that SERVED, plus the shadow
- * arm an EXPERIMENT declared (#693). A cheap candidate sitting behind a healthy
- * primary is never routed to, so it accumulates no scores, so the per-leg
- * aggregate in `evals/leg-quality.ts` reports `no_signal` for it for ever — and
- * a router asked to promote it has nothing to go on. This drives the whole
- * DEPLOYED chain and asserts a score row for a leg the client was never served
- * by, and then that the per-leg aggregate can see both legs.
- *
- * ## What is real
- *
- * The deployed middleware chain (`GATEWAY_MIDDLEWARE`), the real sampler, the
- * real mirror dispatch, the real queue wire, the DEPLOYED queue entry point
- * (`gatewayQueue`), the real judge dispatch with only the outbound `fetch`
- * intercepted, and the real `CONTROL_DB` with the committed migrations. Nothing
- * here seeds a score row.
- *
- * ## MUTATION LOG
- *
- * Every row below was applied to the tree, run, and reverted.
- *
- * | mutation (in `src/`)                                                       | red |
- * |-------------------------------------------------------------------------------|-----|
- * | `handlers.ts::dispatchCandidates`: never spawn the coverage mirror              | `scores a candidate the client was never served by` |
- * | `middleware.ts`: `requestCoverageEval(raw, policy.coveragePercent)` → `(raw, 0)` | `scores a candidate the client was never served by` |
- * | `shadow.ts::coverageMirrorFor`: `candidates.slice(1)` → `slice(0)` (cover the PRIMARY) | `scores a candidate the client was never served by` |
- * | `shadow.ts::coverageMirrorFor`: BOTH the `coveragePercent > 0` guard removed AND `shadowSampled(…, 100)` | `spends nothing for a tenant that did not ask for coverage` |
- *
- * The last row is deliberate: the money guarantee is held by TWO independent
- * guards (the explicit zero check and the per-request sampler, which never
- * selects at 0%), so removing either one alone leaves the test green. That is
- * belt and braces on the one behaviour in this slice that spends the tenant's
- * money, not a vacuous assertion — removing both together turns it red.
- *
- * The selector's own refusals — the credential's provider allowlist, the
- * residency re-check, the budget key and the rotation — are held by
- * `test/inference/coverage-mirror.test.ts`, which can build the ladders this
- * end-to-end harness cannot.
- */
+// Optional evaluation library coverage. These fixtures explicitly mount the retired sampler.
 import { createExecutionContext, env as poolEnv, waitOnExecutionContext } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { OnlineEvalSample } from "../../src/evals/index.js";
@@ -50,7 +8,6 @@ import {
   readOnlineEvalLegQuality,
   shadowArmSampleFrom,
 } from "../../src/evals/index.js";
-import { GATEWAY_MIDDLEWARE, gatewayQueue } from "../../src/index.js";
 import type { PhysicalRoute, RequestIdFactory } from "../../src/inference/index.js";
 import { InMemoryModelResolver, inferenceRouteModule } from "../../src/inference/index.js";
 import { createGatewayApp } from "../../src/routes/index.js";
@@ -62,6 +19,7 @@ import {
 import { controlNamespace } from "../support/control-namespace.js";
 import { tenantObjectDb } from "../tenant-object.js";
 import { controlDb, resetOnlineEvalTables, storedTenantScores } from "./harness.js";
+import { GATEWAY_MIDDLEWARE, gatewayQueue } from "./optional-chain.js";
 
 const BASE = "https://gw.test";
 const CRITERIA = [{ id: "grounded", definition: "Is it supported by the context?" }];
@@ -360,7 +318,10 @@ describe("candidate coverage buys a score for a leg that never served", () => {
     // with a green suite — so this reads the PROJECTION, not the recompute. The
     // projection is single-source now: written to the tenant object that owns
     // the scores it derives from, never a control mirror.
-    const projected = await readOnlineEvalLegQuality(tenantObjectDb("tenant_optin"), "tenant_optin");
+    const projected = await readOnlineEvalLegQuality(
+      tenantObjectDb("tenant_optin"),
+      "tenant_optin",
+    );
     expect(projected.map((row) => row.provider).sort()).toEqual(["azure-eu", "openai-main"]);
     expect(projected.every((row) => row.scoreCount > 0)).toBe(true);
   });

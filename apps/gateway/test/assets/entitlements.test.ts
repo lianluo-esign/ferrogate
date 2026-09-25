@@ -119,7 +119,6 @@ async function reset(): Promise<void> {
   for (const tenantId of ROLE_TENANTS) {
     await tenantObjectPrivilegedBatch(tenantId, [
       { sql: "DELETE FROM tenant_role_bindings", params: [] },
-      { sql: "DELETE FROM tenant_role_catalog", params: [] },
       { sql: "DELETE FROM tenant_provisioning_marks", params: [] },
     ]);
   }

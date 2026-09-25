@@ -1,71 +1,9 @@
-/**
- * The WRITE half of the self-hosted worker registry.
- *
- * ## What this closes
- *
- * `apps/agent-runtime/src/durable/adapters.ts` carried
- * `PORT_TODO(inventory-edge-control §agent-worker §8.1)`: `d1WorkerIdentityPort`
- * READS `self_hosted_worker_registrations` in the CONTROL database, and **no TS
- * code wrote that table**. So the six `auth.kind: "internal"`
- * `/v1/self-hosted-workers/*` callbacks admitted NOBODY on any deployment, and
- * the ten `/admin/v1/self-hosted-workers` operations here stored a
- * `control_plane_resources` document that reached nothing. Same defect class as
- * the MCP server catalog: the reader mounted, the data path into it absent.
- *
- * The write belongs HERE — `apps/control-plane` owns `env.DB`, which IS the
- * control database `apps/agent-runtime` binds as `CONTROL_DB` — so this module
- * projects the admin document into the typed row that app reads, exactly as
- * `store/tenancy.ts` projects `projects`/`workspaces` into a tenant database.
- *
- * ## The credential, and Rust's rule about it
- *
- * Rust `AgentRuntimeState::register_self_hosted_worker` provisions a transport
- * secret with `generate_transport_token_secret()` — 256 bits of CSPRNG, hex —
- * and its doc comment is explicit about WHY it must not be derived from
- * anything public:
- *
- * > the `identity_fingerprint` / `token_id` are non-secret lookup keys returned
- * > in admin listings and carried in cleartext in every frame, so reusing them
- * > (as the pre-fix wiring did) makes the AEAD/bearer secret public and lets
- * > anyone forge and decrypt frames.
- *
- * {@link mintTransportCredential} reproduces that: `token_id` is a UUID (a
- * lookup key, freely visible) and `token_secret` is 32 independent CSPRNG bytes,
- * hex-encoded. Neither is derived from the other or from the worker id.
- *
- * `rotate_self_hosted_worker_identity` mints a FRESH secret on every rotation,
- * so a leaked one stops working — that is what makes rotation a remediation and
- * not just a relabelling.
- *
- * ## Where the secret lives, and where it must never live
- *
- * Rust returns the secret to the caller **exactly once** (at registration and at
- * rotation) and never includes it in the record `GET`/`list` surfaces. Two
- * consequences are enforced here and by the routes:
- *
- *  * the secret is written ONLY into `self_hosted_worker_registrations.registration_json`
- *    — the row a `token_id`+`token_secret` presentation is compared against —
- *    and NEVER into the `control_plane_resources` document, which every
- *    `admin.read` caller can list;
- *  * {@link stripCredentialFields} removes `token_secret` from an operator-supplied
- *    body before the document is stored, because `adminRecordSchema` is
- *    `passthrough()` and an operator who pastes one in would otherwise publish
- *    it to every reader of the collection.
- *
- * ## Ordering, and what a crash between the two writes leaves
- *
- * The document (control database, `control_plane_resources`) and the typed
- * registry row (control database, `self_hosted_worker_registrations`) are two
- * statements. They are in the SAME database, but the document goes through
- * `ControlPlaneStore` (which may be the in-memory store) while the row is raw
- * D1, so they are not one commit in every posture. The document is written
- * FIRST and the registry row second, deliberately:
- *
- * | crash point | residue | why it is the safe direction |
- * |---|---|---|
- * | after the document, before the row | a worker visible to the operator that authenticates nobody | fail-CLOSED — the internal callbacks refuse, and re-POSTing/rotating repairs it |
- * | (the inverse) | a registry row that authenticates a worker no operator can see or rotate | an invisible live credential — never acceptable |
- */
+import { type TenantDatabaseRouter, readTenantWorkerIdentity } from "@ferrogate/storage";
+/** Self-hosted worker transport credentials live only in the tenant object.
+ * The platform registry contains worker, tenant and workspace identifiers for
+ * discovery. Runtime authentication always resolves the tenant identity.
+ * Secrets are returned once on registration/rotation and stripped from admin
+ * documents. A missing tenant identity is never restored from a platform copy. */
 import type { StoreRecord } from "../ports.js";
 
 /** The typed registry table `apps/agent-runtime`'s `d1WorkerIdentityPort` reads. */
@@ -232,28 +170,60 @@ export async function projectWorkerRegistration(
       `INSERT INTO ${WORKER_REGISTRATION_TABLE} (id, registered_at_unix, registration_json)
        VALUES (?, ?, ?)
        ON CONFLICT (id) DO UPDATE SET
-         registered_at_unix = excluded.registered_at_unix,
-         registration_json = excluded.registration_json`,
+         registration_json = excluded.registration_json
+       WHERE ${WORKER_REGISTRATION_TABLE}.registration_json <> excluded.registration_json`,
     )
-    .bind(document.worker_id, document.registered_at_unix, JSON.stringify(document))
+    .bind(
+      document.worker_id,
+      document.registered_at_unix,
+      JSON.stringify({
+        worker_id: document.worker_id,
+        tenant_id: document.tenant_id,
+        workspace_id: document.workspace_id,
+      }),
+    )
     .run();
 }
 
-/** Read the stored registry document back, for rotation and for tests. */
-export async function readWorkerRegistration(
+/** Resolve ownership without opening the tenant object or reading credentials. */
+export async function readWorkerDirectory(
   db: D1Database,
   workerId: string,
-): Promise<WorkerRegistrationDocument | null> {
+): Promise<{ tenant_id: string; workspace_id: string } | null> {
   const row = await db
     .prepare(`SELECT registration_json FROM ${WORKER_REGISTRATION_TABLE} WHERE id = ?`)
     .bind(workerId)
     .first<{ registration_json: string | null }>();
-  if (row === null || row.registration_json === null) return null;
+  if (row?.registration_json === null || row === null) return null;
+  let parsed: unknown;
   try {
-    const parsed: unknown = JSON.parse(row.registration_json);
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
-    return parsed as WorkerRegistrationDocument;
+    parsed = JSON.parse(row.registration_json);
   } catch {
     return null;
   }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
+  const directory = parsed as { tenant_id?: unknown; workspace_id?: unknown };
+  if (
+    typeof directory.tenant_id !== "string" ||
+    directory.tenant_id.trim() === "" ||
+    typeof directory.workspace_id !== "string"
+  )
+    return null;
+  return { tenant_id: directory.tenant_id, workspace_id: directory.workspace_id };
+}
+
+/** Read credentials only from their authoritative tenant identity. */
+export async function readWorkerRegistration(
+  db: D1Database,
+  workerId: string,
+  router?: TenantDatabaseRouter,
+): Promise<WorkerRegistrationDocument | null> {
+  if (router === undefined) return null;
+  const directory = await readWorkerDirectory(db, workerId);
+  if (directory === null) return null;
+  return (await readTenantWorkerIdentity(
+    router,
+    directory.tenant_id,
+    workerId,
+  )) as WorkerRegistrationDocument | null;
 }

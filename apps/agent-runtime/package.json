@@ -4,7 +4,6 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
     "typecheck": "tsc --noEmit",
     "test": "vitest run && vitest run --config test/durable/harness/vitest.config.ts"
   },

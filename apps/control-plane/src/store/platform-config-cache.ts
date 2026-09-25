@@ -2,14 +2,16 @@ import {
   PLATFORM_CATALOG_REVISION_SQL,
   PLATFORM_CATALOG_ROWS_SQL,
   PLATFORM_CATALOG_SNAPSHOT_KEY,
+  attachProviderCostSettlement,
   type PlatformCatalogSnapshot,
 } from "../../../gateway/src/inference/platform-catalog.js";
 import type { CatalogJoinRow } from "../../../gateway/src/inference/tenant-catalog.js";
+import { publishSnapshotIfChanged } from "./cache-publish.js";
 
 export type PlatformConfigCachePublishResult =
   | { readonly status: "unconfigured" }
   | {
-      readonly status: "published";
+      readonly status: "published" | "unchanged";
       readonly revision: number;
       readonly rows: number;
     };
@@ -40,8 +42,10 @@ export async function publishPlatformCatalogCache(options: {
     schema_version: 2,
     revision,
     published_at_unix: options.nowUnix ?? Math.floor(Date.now() / 1000),
-    rows: rows.results,
+    rows: await attachProviderCostSettlement(options.db, rows.results),
   };
-  await options.kv.put(PLATFORM_CATALOG_SNAPSHOT_KEY, JSON.stringify(snapshot));
-  return { status: "published", revision, rows: rows.results.length };
+  const published = await publishSnapshotIfChanged(options.kv, PLATFORM_CATALOG_SNAPSHOT_KEY, {
+    ...snapshot,
+  });
+  return { status: published ? "published" : "unchanged", revision, rows: rows.results.length };
 }

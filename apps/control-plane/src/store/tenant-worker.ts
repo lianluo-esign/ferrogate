@@ -24,6 +24,7 @@ export interface TenantWorkerIdentity {
 
 export interface TenantWorkerRepository {
   readonly tenantId: string;
+  assertIdentity(workerId: string): Promise<void>;
   upsertIdentity(identity: TenantWorkerIdentity): Promise<void>;
   recordHeartbeat(
     workerId: string,
@@ -116,6 +117,8 @@ function repositoryFor(tenantId: string, db: D1Database): TenantWorkerRepository
 
   return {
     tenantId,
+
+    assertIdentity: ensureIdentity,
 
     async upsertIdentity(identity): Promise<void> {
       const workerId = requireWorkerId(identity.workerId);

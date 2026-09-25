@@ -346,9 +346,10 @@ describe("D1TenantModelCatalogSource", () => {
     expect(loaded.models.resolve("current-model")).toBeNull();
   });
 
-  it("reuses a same-revision catalog and reloads after a revision bump", async () => {
+  it("avoids tenant DO reads while warm and observes edits after the TTL", async () => {
     const db = fakeDb([routeRow("provider-a", 0)]);
-    const source = new D1TenantModelCatalogSource();
+    let now = 0;
+    const source = new D1TenantModelCatalogSource({ now: () => now, ttlMs: 100 });
     const env = ENV;
 
     const first = await source.load({
@@ -365,8 +366,9 @@ describe("D1TenantModelCatalogSource", () => {
     });
     expect(first.ok && second.ok).toBe(true);
     expect(db.catalogReads).toBe(1);
-    expect(db.revisionReads).toBe(2);
+    expect(db.revisionReads).toBe(1);
 
+    now = 101;
     db.revision = 2;
     db.rows = [routeRow("provider-b", 0)];
     const third = await source.load({
@@ -380,6 +382,28 @@ describe("D1TenantModelCatalogSource", () => {
     expect(third.revision).toBe(2);
     expect(third.models.resolve("tenant-model")?.provider).toBe("provider-b");
     expect(db.catalogReads).toBe(2);
+  });
+
+  it("uses the shared resolver for an unconfigured tenant without loading catalog rows", async () => {
+    const db = fakeDb([], 0);
+    const source = new D1TenantModelCatalogSource();
+    const fallback = emptyFallback();
+    const input = {
+      tenantId: "tenant-default",
+      db: db.db,
+      env: ENV,
+      fallback,
+      platformRevision: 1,
+    };
+    expect(await source.load(input)).toMatchObject({ ok: true, models: fallback });
+    expect(await source.load(input)).toMatchObject({ ok: true, models: fallback });
+    expect(db.catalogReads).toBe(0);
+    expect(db.revisionReads).toBe(1);
+    // A changed platform snapshot cannot be held back by the tenant cache.
+    const refreshed = emptyFallback();
+    expect(await source.load({ ...input, fallback: refreshed, platformRevision: 2 })).toMatchObject(
+      { ok: true, models: refreshed },
+    );
   });
 
   it("keeps cache entries and D1 bindings isolated by tenant", async () => {

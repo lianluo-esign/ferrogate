@@ -549,3 +549,34 @@ describe("POST /admin/v1/wallets requires the tenant it belongs to", () => {
     });
   });
 });
+
+describe("wallet balances have one authority", () => {
+  it("list, detail and balance filters follow settlement without persisting a balance copy", async () => {
+    await seedExhaustedWallet(tenantDbA(), TENANT_A, "1000000");
+    expect((await createWalletDocument(TENANT_A, 999)).status).toBe(201);
+    await tenantDbA()
+      .prepare("UPDATE wallets SET balance_credits=1230000 WHERE tenant_id=?")
+      .bind(TENANT_A)
+      .run();
+    const detail = await SELF.fetch(`${BASE}/admin/v1/wallets/${TENANT_A}`, {
+      headers: bearer(OPERATOR),
+    });
+    const wallet = ((await detail.json()) as { wallet: Record<string, unknown> }).wallet;
+    const list = await SELF.fetch(`${BASE}/admin/v1/wallets?balance_cents=123`, {
+      headers: bearer(OPERATOR),
+    });
+    const data = ((await list.json()) as { data: Record<string, unknown>[] }).data;
+    expect(wallet.balance_credits).toBe("1230000");
+    expect(data).toHaveLength(1);
+    expect(data[0]?.balance_credits).toBe(wallet.balance_credits);
+    const row = await tenantObjectDb(TENANT_A)
+      .prepare(
+        "SELECT document_json FROM tenant_resources WHERE resource_kind='wallets' AND resource_id=?",
+      )
+      .bind(TENANT_A)
+      .first<{ document_json: string }>();
+    expect(row).not.toBeNull();
+    expect(JSON.parse(row!.document_json)).not.toHaveProperty("balance_cents");
+    expect(JSON.parse(row!.document_json)).not.toHaveProperty("balance_credits");
+  });
+});

@@ -144,6 +144,9 @@ export interface BillingEventContext {
   readonly offerCostUsd?: number | undefined;
   /** Supplier cost (official offer price x provider cost multiplier). */
   readonly providerCostUsd?: number | undefined;
+  readonly providerCostCurrency?: "CNY" | "USD" | undefined;
+  readonly providerCostFxRate?: number | undefined;
+  readonly providerCostOriginal?: number | undefined;
   /** `cluster_identity.cluster_id` — a Worker's colo/deployment identity. */
   readonly clusterId?: string | undefined;
   /** `cluster_identity.node_id`. */
@@ -236,6 +239,11 @@ export function billingEventFromUsage(
     offer_cost_usd: _untrustedOfferCostUsd,
     provider_cost_multiplier: _untrustedProviderCostMultiplier,
     provider_cost_usd: _untrustedProviderCostUsd,
+    provider_cost_currency: _untrustedProviderCostCurrency,
+    provider_cost_fx_rate: _untrustedProviderCostFxRate,
+    provider_cost_original: _untrustedProviderCostOriginal,
+    provider_cost_version: _untrustedProviderCostVersion,
+    time_to_first_token_ms: _untrustedTimeToFirstTokenMs,
     ...metadata
   }: Record<string, string> = usage.metadata ?? {};
   // #945 — record the applied billing group and multiplier ON the event, so a
@@ -258,6 +266,23 @@ export function billingEventFromUsage(
     if (context.providerCostUsd !== undefined) {
       metadata.provider_cost_usd = String(context.providerCostUsd);
     }
+  }
+  if (usage.providerCostCurrency === "CNY" || usage.providerCostCurrency === "USD") {
+    metadata.provider_cost_version = "2";
+    metadata.provider_cost_currency = usage.providerCostCurrency;
+    metadata.provider_cost_fx_rate = String(
+      usage.providerCostCurrency === "USD" ? 1 : (usage.providerCostFxRate ?? 7.2),
+    );
+    if (context.providerCostOriginal !== undefined && Number.isFinite(context.providerCostOriginal)) {
+      metadata.provider_cost_original = String(context.providerCostOriginal);
+    }
+  }
+  if (
+    usage.timeToFirstTokenMs !== undefined &&
+    Number.isFinite(usage.timeToFirstTokenMs) &&
+    usage.timeToFirstTokenMs >= 0
+  ) {
+    metadata.time_to_first_token_ms = String(Math.round(usage.timeToFirstTokenMs));
   }
   if (usage.metadata !== undefined) {
     // Defence in depth only: `Usage.metadata` is documented as already

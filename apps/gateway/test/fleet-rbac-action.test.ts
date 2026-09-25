@@ -166,10 +166,7 @@ async function resetGraph(): Promise<void> {
   // The shared catalog stays in CONTROL; the bindings live in each tenant's object.
   await db.batch([db.prepare("DELETE FROM roles"), db.prepare("DELETE FROM permissions")]);
   for (const tenantId of [TENANT, OTHER_TENANT]) {
-    await tenantObjectPrivilegedBatch(tenantId, [
-      { sql: "DELETE FROM tenant_role_bindings" },
-      { sql: "DELETE FROM tenant_role_catalog" },
-    ]);
+    await tenantObjectPrivilegedBatch(tenantId, [{ sql: "DELETE FROM tenant_role_bindings" }]);
   }
 }
 

@@ -93,13 +93,15 @@ async function seedAdminMcpServerDocument(
     tools_to_execute: ["echo"],
     ...overrides,
   });
-  await DB.prepare(
-    `INSERT OR REPLACE INTO ${RESOURCE_TABLE}
+  if (tenantId === null) {
+    await DB.prepare(
+      `INSERT OR REPLACE INTO ${RESOURCE_TABLE}
        (resource_kind, resource_id, document_json, revision, created_at_unix, updated_at_unix)
      VALUES ('mcp-servers', ?, ?, 1, ?, ?)`,
-  )
-    .bind(name, document, now, now)
-    .run();
+    )
+      .bind(name, document, now, now)
+      .run();
+  }
   if (tenantId !== null) {
     await (await tenantDb(tenantId))
       .prepare(
@@ -200,7 +202,7 @@ describe("MOUNT: an /admin/v1/mcp-servers document feeds the durable catalog", (
     expect(tenantPorts.upstreams.getServer("srv")).toBeUndefined();
   });
 
-  it("a typed row WINS over a document of the same name", async () => {
+  it("an admin edit immediately changes the single runtime record", async () => {
     await seedTypedServerRow(TENANT, "dup");
     await seedAdminMcpServerDocument(TENANT, "dup", { url: "https://document.test/mcp" });
     // A second, non-colliding document is the CONTROL: it proves the admin
@@ -209,7 +211,7 @@ describe("MOUNT: an /admin/v1/mcp-servers document feeds the durable catalog", (
     await seedAdminMcpServerDocument(TENANT, "docOnly");
     const configs = await loadCatalog(TENANT);
     expect(configs.map((config) => config.name).sort()).toEqual(["docOnly", "dup"]);
-    expect(configs.find((config) => config.name === "dup")?.url).toBe("https://upstream.test/mcp");
+    expect(configs.find((config) => config.name === "dup")?.url).toBe("https://document.test/mcp");
   });
 });
 

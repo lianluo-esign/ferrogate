@@ -130,7 +130,6 @@ async function wipeBillingGroups(): Promise<void> {
     db().prepare("DELETE FROM platform_billing_group_providers"),
     db().prepare("DELETE FROM platform_billing_groups"),
     db().prepare("DELETE FROM platform_billing_group_revisions"),
-    db().prepare("DELETE FROM shared_config_push_state"),
   ]);
   await platformConfig.delete(PLATFORM_BILLING_GROUP_SNAPSHOT_KEY);
 }

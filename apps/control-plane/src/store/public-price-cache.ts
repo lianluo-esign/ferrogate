@@ -6,11 +6,12 @@ import {
   type PublicModelPriceRow,
   type PublicPriceSnapshot,
 } from "../../../gateway/src/inference/public-price-snapshot.js";
+import { publishSnapshotIfChanged } from "./cache-publish.js";
 
 export type PublicPriceCachePublishResult =
   | { readonly status: "unconfigured" }
   | {
-      readonly status: "published";
+      readonly status: "published" | "unchanged";
       readonly prices: number;
       readonly providerCosts: number;
     };
@@ -53,9 +54,11 @@ export async function publishPublicPriceCache(options: {
     prices: priceRows.results,
     provider_costs: providerRows.results,
   };
-  await options.kv.put(PUBLIC_PRICE_SNAPSHOT_KEY, JSON.stringify(snapshot));
+  const published = await publishSnapshotIfChanged(options.kv, PUBLIC_PRICE_SNAPSHOT_KEY, {
+    ...snapshot,
+  });
   return {
-    status: "published",
+    status: published ? "published" : "unchanged",
     prices: priceRows.results.length,
     providerCosts: providerRows.results.length,
   };

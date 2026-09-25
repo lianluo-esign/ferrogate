@@ -2,8 +2,7 @@
  * Kind-routed control-plane document store (#861).
  *
  * The control D1 store remains the implementation for platform and derived
- * kinds. Tenant-private kinds resolve one `TenantDatabaseHandle`, backfill the
- * legacy compatibility rows into that database, and use an object-local
+ * kinds. Tenant-private kinds resolve one `TenantDatabaseHandle` and use an object-local
  * `D1ControlPlaneStore` whose only isolation boundary is the object identity.
  */
 import {
@@ -29,7 +28,6 @@ import {
   TENANT_RESOURCE_TOMBSTONE_MARK_PREFIX,
 } from "./d1.js";
 import { pageOf } from "./query.js";
-import { backfillTenantResourceKinds } from "./resource-backfill.js";
 import { resourceKindPlacement } from "./resource-kinds.js";
 import { getCachedTenantAddress, setCachedTenantAddress } from "./tenant-address-cache.js";
 
@@ -67,16 +65,6 @@ export interface SplitControlPlaneStoreOptions {
    * deferral across the whole split. Absent for every non-login path/test.
    */
   readonly auditSink?: AuditSink | null;
-  /**
-   * Track A G2 for the `tenants.document_json` mirror. `"tenant_object"` serves
-   * the operator `tenant-accounts` LIST from the per-tenant object fan-out
-   * ({@link SplitControlPlaneStore.#listTenantResources}) instead of the control
-   * mirror, flipping in lockstep with the writer's `CONTROL_TENANT_ACCOUNT_SOURCE`
-   * (see `store/quota_registry.ts::tenantAccountWritesTenantObjectOnly`). Unset/
-   * `"control"` keeps the one-query mirror read (#75). Resolved once in
-   * `adapters.ts::resolveStore` from the same var the writer reads.
-   */
-  readonly tenantAccountSource?: string;
 }
 
 export class SplitControlPlaneStore implements ControlPlaneStore {
@@ -85,9 +73,6 @@ export class SplitControlPlaneStore implements ControlPlaneStore {
   readonly #tenantRouter: TenantDatabaseRouter;
   readonly #registry: ControlDatabaseTenantRegistry;
   readonly #options: SplitControlPlaneStoreOptions;
-  // Track A G2: when true, operator `tenant-accounts` LIST fans out across the
-  // tenant objects instead of reading the control `document_json` mirror.
-  readonly #tenantAccountFanOut: boolean;
   // Per-request memo (this store is constructed per request — `#options.requestId`).
   readonly #tenantStores = new Map<string, Promise<D1ControlPlaneStore>>();
 
@@ -100,7 +85,6 @@ export class SplitControlPlaneStore implements ControlPlaneStore {
     this.#tenantRouter = tenantRouter;
     this.#registry = new ControlDatabaseTenantRegistry(controlDb);
     this.#options = options;
-    this.#tenantAccountFanOut = options.tenantAccountSource === "tenant_object";
     this.#control = new D1ControlPlaneStore(controlDb, options);
   }
 
@@ -118,8 +102,7 @@ export class SplitControlPlaneStore implements ControlPlaneStore {
       throw new Error("tenant-private resource requires a non-empty tenant_id");
     // One admit resolves the SAME declaredTenant up to three times (workspace,
     // project, tenant-account reads), and the roster fan-out re-touches tenants;
-    // without this memo each resolution re-ran `registry.get` + the
-    // `backfillTenantResourceKinds` probe against the same object. The resolved
+    // without this memo each resolution re-ran `registry.get`. The resolved
     // store is stateless and this instance is per request, so caching the Promise
     // (which also collapses concurrent callers onto one build) is safe. A rejected
     // build is evicted so it never poisons a later reader in the same request.
@@ -154,7 +137,6 @@ export class SplitControlPlaneStore implements ControlPlaneStore {
       }
     }
     const handle = await this.#tenantRouter.forTenant(normalized, address);
-    await backfillTenantResourceKinds(this.#controlDb, handle.db, normalized);
     const options: D1ControlPlaneStoreOptions = {
       ...this.#options,
       resourceTable: TENANT_RESOURCE_TABLE,
@@ -339,75 +321,42 @@ export class SplitControlPlaneStore implements ControlPlaneStore {
     if (!this.#isTenantPrivate(collection))
       return this.#controlStore().list(collection, scope, query);
     if (scope.kind === "tenant") {
-      // Full tenant/control isolation (#948): a tenant reads a tenant-private
-      // kind from its OWN object only. Shared config no longer merges in at
-      // read time — it is pushed one-way into the tenant's read-only mirror
-      // tables (`shared_*`) through the async channel, so this hot path never
-      // takes a synchronous round trip to the single control object. A tenant
-      // credential with no destination has its own (empty) object to read.
+      // Tenant-private records are read only from their owning object.
+      // Platform configuration has its own authority and shared KV cache.
       if (!this.#hasTenantDestination(scope)) return pageOf([], query);
       return (await this.#tenantStore(scope.tenantId)).list(collection, scope, query);
     }
-    // Operator `tenant-accounts` LIST is served from the control-DO full-document
-    // mirror in ONE query — no per-tenant fan-out (#75). Every other tenant-private
-    // kind still fans out via `#listTenantResources`. Track A G2: once
-    // `CONTROL_TENANT_ACCOUNT_SOURCE = "tenant_object"` retires the mirror write,
-    // this kind fans out too (the pre-#75 authority path) so the retired mirror is
-    // never read.
-    if (collection === "tenant-accounts" && !this.#tenantAccountFanOut) {
-      return this.#listTenantAccountsMirror(query);
-    }
+    if (collection === "tenant-accounts") return this.#listTenantAccounts(query);
     return this.#listTenantResources(collection, query);
   }
 
-  /**
-   * Serve the operator `tenant-accounts` LIST from the control-DO `tenants`
-   * mirror (`document_json`, written by `projectTenantAccount`) instead of the
-   * N-tenant Durable Object fan-out `#listTenantResources` does. One control-DO
-   * query replaces the wave, so wall-clock collapses to a single round trip.
-   *
-   * Correctness — reproduces the fan-out exactly, in ONE control-DO query:
-   *  - MEMBERSHIP + ORDER: an INNER JOIN of `tenants` against the `tenant_databases`
-   *    ROSTER is the SQL form of "keep only ids that are provisioned". That roster
-   *    is exactly what `provisionedTenants()` reads (`ControlDatabaseTenantRegistry.list`
-   *    = `SELECT … FROM tenant_databases ORDER BY tenant_id`), so `ORDER BY
-   *    td.tenant_id` reproduces roster order and — `tenant-accounts` being id-keyed
-   *    (the doc id IS the tenant id) — the fan-out's one-doc-per-roster-entry order.
-   *    Folding the roster into the JOIN both drops the second round trip AND hides
-   *    an out-of-band deprovisioned tenant (its `tenant_databases` row deleted, its
-   *    `tenants` row RETAINED) that a bare `SELECT * FROM tenants` would resurrect.
-   *  - SEARCH/FILTER/PAGINATE/TOTAL: the SAME `pageOf(records, query)` the
-   *    fan-out ends with, over the SAME parsed records (`JSON.parse` matches
-   *    `parseDocument` + object-store `#objectRecord`, which is identity here).
-   *  - NO platform-row union: `tenant-accounts` never has un-attributed control
-   *    rows (`#ownerForRecord` falls back to the doc id, so `#isPlatformRow` is
-   *    always false), so `#platformRows` contributes nothing for this kind.
-   *  - A NULL `document_json` (pre-backfill) is excluded by the `WHERE`, so a
-   *    not-yet-mirrored tenant is simply absent until backfill/next write-through.
-   */
-  async #listTenantAccountsMirror(query: ListQuery): Promise<ListPage> {
-    const rows = await this.#controlDb
-      .prepare(
-        `SELECT t.id AS id, t.document_json AS document_json
-           FROM tenant_databases td
-           JOIN tenants t ON t.id = td.tenant_id
-          WHERE t.document_json IS NOT NULL
-          ORDER BY td.tenant_id`,
-      )
-      .all<{ id: string; document_json: string }>();
-    const records: StoreRecord[] = rows.results.map(
-      (row) => JSON.parse(row.document_json) as StoreRecord,
-    );
+  /** Read account documents only from their owner, with bounded concurrent RPCs. */
+  async #listTenantAccounts(query: ListQuery): Promise<ListPage> {
+    const tenantIds = await this.#tenantRouter.provisionedTenants();
+    const records: StoreRecord[] = [];
+    // Preserve arbitrary document filters and Unicode search without a platform copy.
+    // Tenant-scoped reads and GET-by-id still resolve only one object.
+    for (let offset = 0; offset < tenantIds.length; offset += 6) {
+      const page = await Promise.all(
+        tenantIds
+          .slice(offset, offset + 6)
+          .map(async (id) =>
+            (await this.#tenantStore(id)).get(
+              "tenant-accounts",
+              { kind: "tenant", tenantId: id },
+              id,
+            ),
+          ),
+      );
+      records.push(...page.filter((record): record is StoreRecord => record !== null));
+    }
     return pageOf(records, query);
   }
 
   async get(collection: string, scope: CallerScope, id: string): Promise<StoreRecord | null> {
     if (!this.#isTenantPrivate(collection)) return this.#controlStore().get(collection, scope, id);
     if (scope.kind === "tenant") {
-      // Full isolation (#948): a tenant resolves a tenant-private kind from its
-      // OWN object, never from control D1. Shared config reaches the tenant
-      // through the async mirror push, not a read-time fence, so a get miss is
-      // a genuine miss — no synchronous control-object hop on the hot path.
+      // Tenant-private misses do not fall back to platform configuration.
       if (!this.#hasTenantDestination(scope)) return null;
       return (await this.#tenantStore(scope.tenantId)).get(collection, scope, id);
     }

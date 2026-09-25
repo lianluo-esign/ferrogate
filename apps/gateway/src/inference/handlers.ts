@@ -234,6 +234,8 @@ export interface InferenceEnv {
      * would silently disable client-disconnect propagation).
      */
     inferenceClientSignal: AbortSignal | undefined;
+    /** Gateway clock when this inference request entered the router. */
+    inferenceStartedAtMs: number;
     /**
      * Rust step 5, the tokens-per-minute window, bound to the OUTER request
      * (see `./identity.ts`). Inert when the inner router is driven directly.
@@ -1696,6 +1698,12 @@ function routePricing(route: PhysicalRoute): {
     ...(route.providerCostMultiplier !== undefined
       ? { providerCostMultiplier: route.providerCostMultiplier }
       : {}),
+    ...(route.providerCostCurrency === undefined
+      ? {}
+      : { providerCostCurrency: route.providerCostCurrency }),
+    ...(route.providerCostFxRate === undefined
+      ? {}
+      : { providerCostFxRate: route.providerCostFxRate }),
     ...(route.inputPricePer1m !== undefined ? { inputPricePer1m: route.inputPricePer1m } : {}),
     ...(route.outputPricePer1m !== undefined ? { outputPricePer1m: route.outputPricePer1m } : {}),
     // #667 — the cached/reasoning rates travel with the other two, for the same
@@ -1831,6 +1839,7 @@ function recordUsage(
   providerKind: string,
   usage: ProviderUsage | undefined,
   usageSource?: BillingUsageSource,
+  firstTokenAtMs?: number,
 ): void {
   // #669 — the TOKEN half of the observation, from the same provider usage
   // frame the charge is built from, so a span and its charge can never disagree
@@ -1847,6 +1856,9 @@ function recordUsage(
   try {
     deps.usage.record({
       ...base,
+      ...(firstTokenAtMs === undefined
+        ? {}
+        : { timeToFirstTokenMs: Math.max(0, firstTokenAtMs - c.get("inferenceStartedAtMs")) }),
       ...(usage?.promptTokens !== undefined ? { promptTokens: usage.promptTokens } : {}),
       ...(usage?.completionTokens !== undefined
         ? { completionTokens: usage.completionTokens }
@@ -1969,7 +1981,7 @@ function streamResponse(
   usageDialect: UsageDialect,
   route: PhysicalRoute,
   requestId: string,
-  onUsage: (usage: ProviderUsage | undefined) => void,
+  onUsage: (usage: ProviderUsage | undefined, firstTokenAtMs?: number) => void,
   upstream?: UpstreamRelay,
   /**
    * #689 — the conversation headers this stream carries.
@@ -2079,6 +2091,7 @@ export function createInferenceRouter(deps: InferenceDeps = {}): Hono<InferenceE
   // step 1). The ports come first because the body reader below reads the
   // request-size cap off them.
   app.use("*", async (c, next) => {
+    c.set("inferenceStartedAtMs", Date.now());
     const resolved = depsFor(c.env);
     // Read BEFORE `readInferenceBody()` swaps `c.req.raw` for a re-presented
     // Request — the scope is keyed by the object `route-module.ts` published.
@@ -2641,8 +2654,8 @@ async function handleOpenAiInference(
       usageDialect,
       servedRoute,
       requestId,
-      (usage) => {
-        recordUsage(c, deps, meterBase, servedRoute.providerKind, usage);
+      (usage, firstTokenAtMs) => {
+        recordUsage(c, deps, meterBase, servedRoute.providerKind, usage, undefined, firstTokenAtMs);
         settleTokensDetached(c, admission, usage?.totalTokens);
         settleWorkflowStep(c, deps, gate, true, usage?.totalTokens);
       },
@@ -3305,8 +3318,8 @@ async function handleMessages(c: InferenceContext, deps: ResolvedInferenceDeps):
       usageDialect,
       servedRoute,
       requestId,
-      (usage) => {
-        recordUsage(c, deps, meterBase, servedRoute.providerKind, usage);
+      (usage, firstTokenAtMs) => {
+        recordUsage(c, deps, meterBase, servedRoute.providerKind, usage, undefined, firstTokenAtMs);
         settleTokensDetached(c, admission, usage?.totalTokens);
         settleWorkflowStep(c, deps, gate, true, usage?.totalTokens);
       },
@@ -3530,8 +3543,8 @@ async function handleGeminiGenerateContent(
       usageDialect,
       servedRoute,
       requestId,
-      (usage) => {
-        recordUsage(c, deps, meterBase, servedRoute.providerKind, usage);
+      (usage, firstTokenAtMs) => {
+        recordUsage(c, deps, meterBase, servedRoute.providerKind, usage, undefined, firstTokenAtMs);
         settleTokensDetached(c, admission, usage?.totalTokens);
         settleWorkflowStep(c, deps, gate, true, usage?.totalTokens);
       },

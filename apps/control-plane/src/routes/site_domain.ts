@@ -42,7 +42,6 @@
  * cannot block the tenant that actually owns the domain.
  */
 import {
-  D1SiteDomainVerificationStore,
   SITE_DOMAIN_VERIFICATION_ATTEMPT_COOLDOWN_SECONDS,
   type StoredSiteDomainVerification,
   effectiveSiteDomainVerificationState,
@@ -62,6 +61,7 @@ import {
   newChallengeToken,
   resolveChallenge,
 } from "../site_domain_txt.js";
+import { publishSiteDomainRouteState } from "../store/site_domain.js";
 import {
   SITE_DOMAIN_CLAIM_CONFLICT_MESSAGE,
   SITE_DOMAIN_TABLE,
@@ -465,7 +465,7 @@ export const siteDomainRoutes: GroupModule = crudGroup(
         // and `attempt_count` / `last_failure_reason` are what an operator
         // triages from. `upsertVerification` writes `last_checked_at_unix` from
         // the record, which is the reservation this request already took.
-        await new D1SiteDomainVerificationStore(control).upsertVerification(verification);
+        await publishSiteDomainRouteState(control, verification);
         // The CLAIM second, and only on a LIVE DNS proof —
         // `hasLiveDnsOwnershipProof` is narrower than "serves" on purpose: the
         // `grandfathered` migration state may keep an existing binding alive,

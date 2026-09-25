@@ -114,3 +114,24 @@ export function chargeFixture(
     occurredAtUnix: 1_700_000_000,
   };
 }
+
+/** Explicit failure-injection/report observer for recovery tests only. */
+export function recordingPublisher(queue: {
+  send(body: import("../../src/metering/ports.js").MeteringQueueMessage): Promise<unknown>;
+}) {
+  return {
+    async deliver(charge: MeteredCharge): Promise<void> {
+      const { billingEventToWire, ledgerEntryToWireDocument } = await import(
+        "../../src/metering/wire.js"
+      );
+      await queue.send({
+        id: charge.id,
+        request_id: charge.requestId,
+        credits: charge.credits.toString(),
+        occurred_at_unix: charge.occurredAtUnix,
+        event: billingEventToWire(charge.event),
+        entry: ledgerEntryToWireDocument(charge.entry),
+      });
+    },
+  };
+}

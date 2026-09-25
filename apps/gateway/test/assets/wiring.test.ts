@@ -37,7 +37,7 @@ import {
   type StoredRetentionPolicy,
   retentionPolicyId,
 } from "@ferrogate/storage";
-import { beforeEach, describe, expect, test } from "vitest";
+import { beforeEach, describe, expect, test, vi } from "vitest";
 import tenantRegistryMigrationSql from "../../../../sql/d1-ts/control/0012_tenant_storage_provisioning.sql?raw";
 import tenantBackfillMigrationSql from "../../../../sql/d1-ts/control/0021_tenant_backfill.sql?raw";
 import tenantRegistryCleanupSql from "../../../../sql/d1-ts/control/0022_retire_legacy_d1_registry_columns.sql?raw";
@@ -419,7 +419,8 @@ describe("the deployed Worker persists the asset audit trail to the tenant objec
     expect((await push("cli", "7.0.0", eicar)).status).toBe(202);
 
     const audit = assetDepsFromEnv(env as unknown as Record<string, unknown>).audit;
-    if (audit?.screeningEvidence === undefined) throw new Error("expected the env-wired audit sink");
+    if (audit?.screeningEvidence === undefined)
+      throw new Error("expected the env-wired audit sink");
     const evidence = await audit.screeningEvidence(TENANT);
     expect(evidence.get(`${TENANT}:binaries:cli:7.0.0`)).toContain("scan=");
 
@@ -437,13 +438,13 @@ describe("the deployed Worker persists the asset audit trail to the tenant objec
   });
 });
 
-describe("the scheduled asset lifecycle sweeper", () => {
+describe("scheduled maintenance does not scan or prune assets", () => {
   beforeEach(async () => {
     await applyControlMigrations();
     await provision();
   });
 
-  test("retains the newest version, deletes its row and object, emits metrics, and audits", async () => {
+  test("keeps old versions and objects even when a retention policy is configured", async () => {
     expect((await push("cli", "1.0.0", "old")).status).toBe(200);
     expect((await push("cli", "2.0.0", "newer")).status).toBe(200);
 
@@ -473,8 +474,8 @@ describe("the scheduled asset lifecycle sweeper", () => {
       .prepare("SELECT id FROM stored_assets WHERE version = ?1")
       .bind("1.0.0")
       .all<{ id: string }>();
-    expect(oldRows.results).toEqual([]);
-    expect(await bindings().assets.head(before?.storage_uri as string)).toBeNull();
+    expect(oldRows.results).toEqual([{ id: `${TENANT}:binaries:cli:1.0.0` }]);
+    expect(await bindings().assets.head(before?.storage_uri as string)).not.toBeNull();
     const newestRows = await tenantObjectDb(TENANT)
       .prepare("SELECT id FROM stored_assets WHERE version = ?1")
       .bind("2.0.0")
@@ -489,30 +490,38 @@ describe("the scheduled asset lifecycle sweeper", () => {
       auditRows.results.some(
         (row) => JSON.parse(row.audit_json).action === "asset.retention_prune",
       ),
-    ).toBe(true);
+    ).toBe(false);
 
     const afterMetrics = gatewayMetricsSnapshot();
     expect(afterMetrics.assetLifecycleScannedTotal - beforeMetrics.assetLifecycleScannedTotal).toBe(
-      1,
+      0,
     );
     expect(afterMetrics.assetLifecyclePrunedTotal - beforeMetrics.assetLifecyclePrunedTotal).toBe(
-      2,
+      0,
     );
     expect(afterMetrics.assetLifecycleFailedTotal - beforeMetrics.assetLifecycleFailedTotal).toBe(
       0,
     );
   });
 
-  test("reclaims an unreferenced object under the tenant prefix", async () => {
+  test("does not list R2 or reclaim unreferenced objects", async () => {
     const orphan = `${tenantKeyPrefix(TENANT)}orphan/old-object`;
     await bindings().assets.put(orphan, "orphan-bytes");
     expect(await bindings().assets.head(orphan)).not.toBeNull();
 
-    await gatewayScheduled({}, scheduledEnv({ ASSET_RETENTION_ORPHAN_GRACE_SECS: "0" }), {
+    const list = vi.fn(() => {
+      throw new Error("scheduled R2 listing is forbidden");
+    });
+    const remove = vi.fn(() => {
+      throw new Error("scheduled R2 deletion is forbidden");
+    });
+    await gatewayScheduled({}, scheduledEnv({ ASSETS: { list, delete: remove } }), {
       waitUntil: () => {},
     });
 
-    expect(await bindings().assets.head(orphan)).toBeNull();
+    expect(list).not.toHaveBeenCalled();
+    expect(remove).not.toHaveBeenCalled();
+    expect(await bindings().assets.head(orphan)).not.toBeNull();
   });
 });
 

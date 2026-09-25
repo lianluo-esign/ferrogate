@@ -1,41 +1,11 @@
-/**
- * THE ARM REACHES THE SCORE (#693, on top of #692).
- *
- * ## Why this file exists separately from `attribution.test.ts`
- *
- * That file proves the arm reaches `request_logs`, which is the OPERATIONAL
- * half — cost, latency, error rate. This one proves it reaches
- * `online_eval_scores`, which is the QUALITY half, and quality is the half the
- * issue is actually about: an operator can already see that a canary is cheaper
- * or faster, and cannot see whether it is WORSE.
- *
- * The comparison the score table supports is narrow and the narrowness is the
- * whole value (`apps/gateway/src/evals/policy.ts` states it in full): a score
- * row means "judge X, shown this exchange and asked criterion Y, answered Z",
- * which licenses a RELATIVE comparison between two populations scored by the
- * SAME judge under the SAME criterion and nothing else. `experiment_arm` is the
- * third grouping key that turns one tenant's scores into "this arm's against
- * that arm's" — and without it landing on the row, the comparison in
- * `@ferrogate/routing::compareExperimentQuality` has nothing to group.
- *
- * ## What is real
- *
- * The deployed middleware chain (`GATEWAY_MIDDLEWARE`), the real sampler, the
- * real queue wire, the DEPLOYED queue entry point (`gatewayQueue`), the real
- * judge dispatch through `dispatcherFromEnv` with only the outbound `fetch`
- * intercepted, and the real `CONTROL_DB` with the committed migrations. The
- * score rows are read straight back out of the table.
- *
- * Nothing here seeds a score. The row an assertion reads was written by the
- * real consumer from the bytes the real producer emitted.
- */
+// Optional evaluation library coverage. These fixtures explicitly mount the retired sampler.
 import { env as poolEnv } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { GATEWAY_MIDDLEWARE, gatewayQueue } from "../../src/index.js";
 import type { PhysicalRoute } from "../../src/inference/index.js";
 import { InMemoryModelResolver, inferenceRouteModule } from "../../src/inference/index.js";
 import { createGatewayApp } from "../../src/routes/index.js";
 import { controlDb, resetOnlineEvalTables, storedTenantScores } from "../evals/harness.js";
+import { GATEWAY_MIDDLEWARE, gatewayQueue } from "../evals/optional-chain.js";
 import {
   type ProviderInterceptor,
   interceptProviderFetch,

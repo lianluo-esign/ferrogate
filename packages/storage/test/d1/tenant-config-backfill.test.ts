@@ -36,19 +36,13 @@ beforeEach(async () => {
   for (const tenantId of [TENANT_A, TENANT_B]) {
     const db = tenantDb(tenantId);
     if (router.privilegedBatch !== undefined) {
-      await router.privilegedBatch(tenantId, [
-        { sql: "DELETE FROM tenant_role_bindings" },
-        { sql: "DELETE FROM tenant_role_catalog" },
-      ]);
+      await router.privilegedBatch(tenantId, [{ sql: "DELETE FROM tenant_role_bindings" }]);
     }
     await db.batch([
       db.prepare("DELETE FROM tenant_provider_credentials"),
       db.prepare("DELETE FROM sso_provider_configs"),
       ...(router.privilegedBatch === undefined
-        ? [
-            db.prepare("DELETE FROM tenant_role_bindings"),
-            db.prepare("DELETE FROM tenant_role_catalog"),
-          ]
+        ? [db.prepare("DELETE FROM tenant_role_bindings")]
         : []),
       db.prepare("DELETE FROM semantic_cache_policies"),
       db.prepare("DELETE FROM delegation_revocations"),
@@ -62,7 +56,7 @@ beforeEach(async () => {
 });
 
 describe("tenant configuration policy backfill", () => {
-  test("copies only the addressed tenant's seven families and is idempotent", async () => {
+  test("does not copy any of the seven legacy configuration families or write a cursor", async () => {
     await env.CONTROL_DB.batch([
       env.CONTROL_DB.prepare(
         "INSERT INTO roles (id, name, slug, description, permission_keys_json, created_at_unix, updated_at_unix) " +
@@ -102,21 +96,25 @@ describe("tenant configuration policy backfill", () => {
     await backfillTenantConfigurationPolicy(env.CONTROL_DB, router, TENANT_A, NOW);
     const objectDb = tenantDb(TENANT_A);
 
-    expect(await count(objectDb, "tenant_provider_credentials")).toBe(1);
-    expect(await count(objectDb, "sso_provider_configs")).toBe(1);
-    expect(await count(objectDb, "tenant_role_catalog")).toBe(1);
-    expect(await count(objectDb, "tenant_role_bindings")).toBe(1);
-    expect(await count(objectDb, "semantic_cache_policies")).toBe(1);
-    expect(await count(objectDb, "delegation_revocations")).toBe(1);
-    expect(await count(objectDb, "control_plane_replay_floors")).toBe(1);
-    expect(await count(objectDb, "budget_alert_notifications")).toBe(1);
+    expect(await count(objectDb, "tenant_provider_credentials")).toBe(0);
+    expect(await count(objectDb, "sso_provider_configs")).toBe(0);
+    expect(
+      await objectDb
+        .prepare("SELECT name FROM sqlite_master WHERE name = 'tenant_role_catalog'")
+        .first(),
+    ).toBeNull();
+    expect(await count(objectDb, "tenant_role_bindings")).toBe(0);
+    expect(await count(objectDb, "semantic_cache_policies")).toBe(0);
+    expect(await count(objectDb, "delegation_revocations")).toBe(0);
+    expect(await count(objectDb, "control_plane_replay_floors")).toBe(0);
+    expect(await count(objectDb, "budget_alert_notifications")).toBe(0);
     expect(await count(tenantDb(TENANT_B), "tenant_provider_credentials")).toBe(0);
 
     const marker = await objectDb
       .prepare("SELECT mark FROM tenant_provisioning_marks WHERE tenant_id = ? AND mark = ?")
       .bind(TENANT_A, TENANT_CONFIGURATION_BACKFILL_MARK)
       .first<{ mark: string }>();
-    expect(marker?.mark).toBe(TENANT_CONFIGURATION_BACKFILL_MARK);
+    expect(marker).toBeNull();
 
     await env.CONTROL_DB.prepare(
       "INSERT INTO tenant_provider_credentials_legacy " +
@@ -126,7 +124,7 @@ describe("tenant configuration policy backfill", () => {
       .bind(TENANT_A, NOW, NOW)
       .run();
     await backfillTenantConfigurationPolicy(env.CONTROL_DB, router, TENANT_A, NOW + 1);
-    expect(await count(objectDb, "tenant_provider_credentials")).toBe(1);
+    expect(await count(objectDb, "tenant_provider_credentials")).toBe(0);
   });
 
   test("drops a binding whose shared role is missing instead of authorizing it", async () => {
@@ -138,7 +136,6 @@ describe("tenant configuration policy backfill", () => {
 
     const router = await setupTenantRouter();
     await backfillTenantConfigurationPolicy(env.CONTROL_DB, router, TENANT_A, NOW);
-    expect(await count(tenantDb(TENANT_A), "tenant_role_catalog")).toBe(0);
     expect(await count(tenantDb(TENANT_A), "tenant_role_bindings")).toBe(0);
   });
 });

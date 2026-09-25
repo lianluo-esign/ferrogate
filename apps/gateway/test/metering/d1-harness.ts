@@ -72,17 +72,6 @@ export function billingDb(): D1Database {
   return binding;
 }
 
-/** The live `env.BILLING` Queue producer binding. */
-export function billingQueue(): Queue {
-  const binding = (env as unknown as { BILLING?: Queue }).BILLING;
-  if (binding === undefined) {
-    throw new Error(
-      "metering tests expect the `BILLING` Queue producer binding (apps/gateway/wrangler.toml).",
-    );
-  }
-  return binding;
-}
-
 let applied = false;
 
 /** Apply the deployed control migration once per isolate. */
@@ -371,13 +360,13 @@ export class RecordingDatabase implements MeteringDatabase {
  * captured on its way through. Nothing is substituted for the binding.
  */
 export class RecordingQueue implements MeteringQueue {
-  readonly #inner: MeteringQueue;
+  readonly #inner: MeteringQueue | undefined;
   readonly #sent: MeteringQueueMessage[] = [];
 
   /** Set to make every subsequent send reject, as an unavailable queue would. */
   failure: Error | undefined;
 
-  constructor(inner: MeteringQueue = billingQueue() as unknown as MeteringQueue) {
+  constructor(inner?: MeteringQueue) {
     this.#inner = inner;
   }
 
@@ -386,7 +375,7 @@ export class RecordingQueue implements MeteringQueue {
     if (this.failure !== undefined) {
       throw this.failure;
     }
-    return this.#inner.send(message);
+    return this.#inner?.send(message);
   }
 
   async sendBatch(messages: Iterable<{ body: MeteringQueueMessage }>): Promise<unknown> {
@@ -397,7 +386,7 @@ export class RecordingQueue implements MeteringQueue {
     if (this.failure !== undefined) {
       throw this.failure;
     }
-    return this.#inner.sendBatch(batch);
+    return this.#inner?.sendBatch(batch);
   }
 
   /** Every message the queue accepted, in order. */

@@ -92,7 +92,7 @@
  * taxonomy from a deleted file. `toolExecutionDenial` accepts only the
  * backends this Worker can actually reach.
  */
-import { type TenantDatabaseRouter, backfillTenantConfigurationPolicy } from "@ferrogate/storage";
+import type { TenantDatabaseRouter } from "@ferrogate/storage";
 import type { AuthContext, EntitlementPort, ToolExecuteBackend } from "./ports.js";
 
 /** Rust permission key for the MCP arm (`local.rs:155`). */
@@ -287,7 +287,6 @@ export class D1ToolEntitlements implements EntitlementPort {
   ): Promise<{ results: { permission_keys_json: string | null }[] }> {
     const router = this.#tenantDatabases;
     if (router === undefined) throw new Error("tenant object router is not configured");
-    await backfillTenantConfigurationPolicy(this.#db, router, tenantId);
     const handle = await router.forTenant(tenantId);
     const local = await handle.db
       .prepare(

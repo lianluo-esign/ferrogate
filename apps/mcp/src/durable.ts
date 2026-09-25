@@ -30,7 +30,7 @@
 import { DurableObjectD1Database } from "@ferrogate/storage";
 import type { TenantDatabaseRouter } from "@ferrogate/storage";
 import type { TenantDataNamespace } from "@ferrogate/storage/durable-objects";
-import { loadAdminServerCatalog } from "./catalog.js";
+import { decodeServerDocument } from "./catalog.js";
 import {
   type IdentityCipherPort,
   type McpAuthType,
@@ -652,46 +652,33 @@ function decodeExcludeColumn(
  * because a tenant must never see another tenant's upstreams, and the filter is
  * a bound parameter rather than a caller-supplied SQL fragment.
  *
- * The catalog is authoritative in the tenant object. The control plane writes
- * the same row when an admin resource changes and the cutover helper copies
- * legacy control documents once, so request-time reads never consult the flat
- * control database. Typed rows remain fail-closed: malformed transport, auth,
- * allowlist or JSON values are skipped rather than coerced.
+ * Read the tenant document once and validate it with the shared decoder.
+ * Invalid configuration is refused; no control copy or typed-table merge can
+ * restore a removed or disabled upstream.
  */
 export async function loadServerCatalog(
   namespace: TenantDataNamespace,
   tenantId: string,
-  controlDb?: D1Database,
-  tenantRouter?: TenantDatabaseRouter,
+  _controlDb?: D1Database,
+  _tenantRouter?: TenantDatabaseRouter,
 ): Promise<McpServerConfig[]> {
   const db = tenantDatabase(namespace, tenantId);
   const rows = await db
-    .prepare(
-      `SELECT name, transport, url, auth_type, tools_to_execute, tools_to_auto_execute,
-              tools_to_exclude, headers, oauth, signed_jwt_audience, timeout_ms
-         FROM mcp_servers WHERE tenant_id = ? ORDER BY name`,
-    )
+    .prepare(`SELECT document_json FROM tenant_resources
+    WHERE resource_kind='mcp-servers' AND json_extract(document_json,'$.tenant_id')=?
+    ORDER BY resource_id`)
     .bind(tenantId)
-    .all<ServerRow>();
+    .all<{ document_json: string }>();
   const configs: McpServerConfig[] = [];
-  const seen = new Set<string>();
   for (const row of rows.results) {
-    const config = decodeServerRow(row);
-    if (config === undefined) continue;
-    configs.push(config);
-    seen.add(config.name);
-  }
-  if (controlDb !== undefined) {
-    // The object-local document table is authoritative whenever the object
-    // router is present. A control-table read remains only for an explicitly
-    // un-routed compatibility/projection posture.
-    for (const config of await loadAdminServerCatalog(controlDb, tenantId, tenantRouter)) {
-      if (seen.has(config.name)) continue;
-      configs.push(config);
-      seen.add(config.name);
+    try {
+      const config = decodeServerDocument(JSON.parse(row.document_json));
+      if (config !== undefined) configs.push(config);
+    } catch {
+      /* Malformed configuration never grants access. */
     }
   }
-  return configs;
+  return configs.sort((a, b) => a.name.localeCompare(b.name));
 }
 
 // ---------------------------------------------------------------------------

@@ -20,10 +20,6 @@ import {
   scheduleFireOutcomeFromString,
 } from "@ferrogate/storage";
 import type { CallerScope, StoreRecord } from "../ports.js";
-import {
-  RESOURCE_BACKFILL_BATCH_SIZE,
-  backfillTenantResourceKinds,
-} from "../store/resource-backfill.js";
 import { scheduleSpecFromRecord } from "./model.js";
 
 export const DEFAULT_SCHEDULE_WORKSPACE = "default";
@@ -44,7 +40,7 @@ export async function openTenantScheduleRepository(
   if (handle.source !== "durable_object") return null;
   const store = new D1AgentScheduleStore(handle);
   if (controlDatabase !== null && controlDatabase !== undefined) {
-    await migrateLegacySchedules(controlDatabase, handle, store, tenantId);
+    await migrateLegacySchedules(handle, store, tenantId);
   }
   return { handle, store };
 }
@@ -106,22 +102,14 @@ function legacyFireFromRecord(
 }
 
 /**
- * Copy legacy generic schedule documents before the alarm path can observe an
- * empty typed table. The generic backfill is paged, so drain it fully before
- * taking the typed migration mark; otherwise a large tenant would be marked
- * complete after only the first 200 compatibility rows.
+ * Upgrade schedules already owned by this tenant object. No legacy control
+ * document is read or copied into the tenant during this local migration.
  */
 async function migrateLegacySchedules(
-  controlDatabase: D1Database,
   handle: TenantDatabaseHandle,
   store: D1AgentScheduleStore,
   tenantId: string,
 ): Promise<void> {
-  let page: { scanned: number };
-  do {
-    page = await backfillTenantResourceKinds(controlDatabase, handle.db, tenantId);
-  } while (page.scanned === RESOURCE_BACKFILL_BATCH_SIZE);
-
   const mark = await handle.db
     .prepare("SELECT 1 AS applied FROM tenant_provisioning_marks WHERE tenant_id = ? AND mark = ?")
     .bind(tenantId, TYPED_SCHEDULE_MIGRATION_MARK)

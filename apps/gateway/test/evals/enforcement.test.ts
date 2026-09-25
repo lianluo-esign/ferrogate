@@ -1,48 +1,9 @@
-/**
- * ONLINE-EVALUATION SAMPLING (#692), driven through the DEPLOYED middleware
- * chain.
- *
- * ## Why this file composes `GATEWAY_MIDDLEWARE`
- *
- * The same reason `test/attribution/enforcement.test.ts` gives: the property
- * being claimed — "a sampled request is captured and queued, and an unsampled
- * one is not" — belongs to the chain the Worker actually runs, not to a
- * middleware that exists in `src/` and is mounted nowhere. Deleting
- * `onlineEvaluation(onlineEvals)` from the composition root must be RED here,
- * and it is (see the mutation log below).
- *
- * Only the route module (an in-memory model resolver + a deterministic
- * request-id factory), the outbound provider `fetch`, and the `ONLINE_EVAL`
- * Queue binding are doubles. The policy source, the sampler, the capture and
- * the sink are the shipped ones.
- *
- * ## MUTATION LOG — what was broken, and what went red
- *
- * | mutation (in `src/`)                                              | red |
- * |--------------------------------------------------------------------|-----|
- * | `index.ts`: `onlineEvaluation(onlineEvals)` unmounted               | 4 of the cases here + 2 in `mount.test.ts` |
- * | `policy.ts`: BOTH ZDR arms deleted (the plan's and the decision's)   | `never samples a zero-data-retention tenant, even one that opted in` |
- * | `policy.ts`: `policy === null` defaults to an enabled policy         | `queues nothing for a tenant with no policy` + `queues nothing when NO tenant has a policy at all` |
- * | `middleware.ts`: the capture is `await`ed instead of deferred        | `serves normally when the queue never settles` (timed out) + `answers the client before the sample is enqueued` |
- *
- * One recorded NON-result, because it is the kind of thing this repository
- * insists be said out loud: deleting ONE of the two ZDR arms leaves this file
- * green, because `onlineEvalCapturePlan` delegates its final answer to
- * `onlineEvalSamplingDecision`, which checks ZDR again. The exclusion is held
- * twice on purpose; the mutation that proves the property therefore has to
- * remove both, and it does.
- *
- * Likewise, dropping the `evaluableResponse` guard alone does NOT turn this
- * file red — a streamed body is not JSON, so the capture fails one step later
- * and nothing is queued either way. The guard is held instead by
- * `test/evals/skip-reasons.test.ts`, which asserts the REASON, and that file
- * does go red.
- */
+// Optional evaluation library coverage. These fixtures explicitly mount the retired sampler.
 import { env as poolEnv } from "cloudflare:test";
 import { afterEach, describe, expect, it } from "vitest";
+import { GATEWAY_MIDDLEWARE as productionMiddleware } from "../../src/index.js";
 
 import { ONLINE_EVAL_SAMPLE_OBJECT, onlineEvalSampleFromWire } from "../../src/evals/index.js";
-import { GATEWAY_MIDDLEWARE } from "../../src/index.js";
 import { InMemoryModelResolver, inferenceRouteModule } from "../../src/inference/index.js";
 import type { PhysicalRoute, RequestIdFactory } from "../../src/inference/index.js";
 import { createGatewayApp } from "../../src/routes/index.js";
@@ -53,6 +14,7 @@ import {
   providerJson,
   providerSse,
 } from "../inference/provider-mock.js";
+import { GATEWAY_MIDDLEWARE } from "./optional-chain.js";
 
 const BASE = "https://gw.test";
 
@@ -140,6 +102,7 @@ function gateway(
     readonly route?: PhysicalRoute;
     readonly hang?: boolean;
     readonly withQueue?: boolean;
+    readonly production?: boolean;
   } = {},
 ): Harness {
   const queue = recordingQueue({ hang: options.hang === true });
@@ -165,7 +128,7 @@ function gateway(
       }),
     ],
     // THE LINE UNDER TEST: the deployed chain, in the deployed order.
-    middleware: GATEWAY_MIDDLEWARE,
+    middleware: options.production ? productionMiddleware : GATEWAY_MIDDLEWARE,
   });
 
   return {
@@ -418,4 +381,13 @@ describe("the caller's latency is untouched", () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ object: "chat.completion" });
   });
+});
+
+it("production never samples even when an old policy and Queue binding remain", async () => {
+  provider = interceptProviderFetch(() =>
+    providerJson({ choices: [{ message: { role: "assistant", content: "Paris." } }] }),
+  );
+  const h = gateway({ policies: [OPT_IN], production: true });
+  expect((await h.call("fg_optin", chat())).status).toBe(200);
+  expect(h.queue.bodies).toEqual([]);
 });

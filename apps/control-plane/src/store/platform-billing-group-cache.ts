@@ -2,12 +2,13 @@ import {
   PLATFORM_BILLING_GROUP_SNAPSHOT_KEY,
   type PlatformBillingGroupSnapshot,
 } from "../../../gateway/src/inference/billing-group-source.js";
+import { publishSnapshotIfChanged } from "./cache-publish.js";
 import { PlatformBillingGroupStore } from "./platform-billing-group.js";
 
 export type PlatformBillingGroupCachePublishResult =
   | { readonly status: "unconfigured" }
   | {
-      readonly status: "published";
+      readonly status: "published" | "unchanged";
       readonly revision: number;
       readonly groups: number;
     };
@@ -51,6 +52,10 @@ export async function publishPlatformBillingGroupsCache(options: {
       provider_ids: group.provider_ids,
     })),
   };
-  await options.kv.put(PLATFORM_BILLING_GROUP_SNAPSHOT_KEY, JSON.stringify(snapshot));
-  return { status: "published", revision, groups: groups.length };
+  const published = await publishSnapshotIfChanged(
+    options.kv,
+    PLATFORM_BILLING_GROUP_SNAPSHOT_KEY,
+    { ...snapshot },
+  );
+  return { status: published ? "published" : "unchanged", revision, groups: groups.length };
 }

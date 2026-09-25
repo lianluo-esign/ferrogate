@@ -198,43 +198,14 @@ export async function projectTenantRoleBinding(
   nowUnix: number,
 ): Promise<void> {
   const role = await db
-    .prepare(
-      "SELECT id, name, slug, description, permission_keys_json, created_at_unix, updated_at_unix " +
-        "FROM roles WHERE id = ?",
-    )
+    .prepare("SELECT id FROM roles WHERE id = ?")
     .bind(roleId)
-    .first<{
-      id: string;
-      name: string;
-      slug: string;
-      description: string;
-      permission_keys_json: string;
-      created_at_unix: number;
-      updated_at_unix: number;
-    }>();
+    .first<{ id: string }>();
   if (role === null) throw new Error(`shared role ${roleId} does not exist`);
   if (tenantDatabases.privilegedBatch === undefined) {
     throw new Error("tenant role projection requires the privileged tenant object RPC");
   }
   await tenantDatabases.privilegedBatch(tenantId, [
-    {
-      sql:
-        "INSERT INTO tenant_role_catalog " +
-        "(role_id, name, slug, description, permission_keys_json, created_at_unix, updated_at_unix) " +
-        "VALUES (?, ?, ?, ?, ?, ?, ?) " +
-        "ON CONFLICT(role_id) DO UPDATE SET name = excluded.name, slug = excluded.slug, " +
-        "description = excluded.description, permission_keys_json = excluded.permission_keys_json, " +
-        "updated_at_unix = excluded.updated_at_unix",
-      params: [
-        role.id,
-        role.name,
-        role.slug,
-        role.description,
-        role.permission_keys_json,
-        role.created_at_unix,
-        role.updated_at_unix,
-      ],
-    },
     {
       sql: `INSERT INTO ${TENANT_ROLE_BINDINGS_TABLE} (id, tenant_id, role_id, created_at_unix)
          VALUES (?, ?, ?, ?)

@@ -46,7 +46,6 @@
  * every cache key is a function of it, so a bumped epoch IS the purge.
  */
 
-import { backfillTenantConfigurationPolicy } from "@ferrogate/storage";
 import { z } from "zod";
 import { HttpError } from "../middleware/errors.js";
 import { type CallerScope, type ControlPlaneStore, StoreConflictError } from "../ports.js";
@@ -175,7 +174,6 @@ async function project(
       "semantic cache policy persistence requires CONTROL_DB and tenant object storage",
     );
   }
-  await backfillTenantConfigurationPolicy(control, deps.tenantDatabases, scopeId);
   const db = (await deps.tenantDatabases.forTenant(scopeId)).db;
   await projectSemanticCachePolicy(
     db,
@@ -275,7 +273,6 @@ export const semanticCachePolicyRoutes: GroupModule = crudGroup(
           "semantic cache policy deletion requires CONTROL_DB and tenant object storage",
         );
       }
-      await backfillTenantConfigurationPolicy(control, deps.tenantDatabases, scopeId);
       const db = (await deps.tenantDatabases.forTenant(scopeId)).db;
       await deleteSemanticCachePolicyRow(db, scopeType, scopeId);
       return json(c, 200, adminDeleted("semantic_cache_policy", id));
@@ -300,7 +297,6 @@ export const semanticCachePolicyRoutes: GroupModule = crudGroup(
           "semantic cache invalidation requires CONTROL_DB and tenant object storage",
         );
       }
-      await backfillTenantConfigurationPolicy(control, deps.tenantDatabases, scopeId);
       const db = (await deps.tenantDatabases.forTenant(scopeId)).db;
       const epoch = await bumpSemanticCacheEpoch(
         db,

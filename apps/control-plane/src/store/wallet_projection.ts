@@ -79,6 +79,7 @@ import {
   centsToCredits,
   creditsToCents,
 } from "@ferrogate/storage";
+import { writeCanonicalResourceIfView } from "./canonical-resource.js";
 
 /**
  * The `wallet_settlements.id` a movement claims — equal to the CONTROL ledger
@@ -234,6 +235,16 @@ export async function projectPaymentMethod(
   record: Record<string, unknown>,
   nowUnix: number,
 ): Promise<void> {
+  if (
+    await writeCanonicalResourceIfView(
+      handle.db,
+      "payment_methods",
+      "payment-methods",
+      { ...record, id: String(record.id), tenant_id: handle.tenantId },
+      nowUnix,
+    )
+  )
+    return;
   await handle.db
     .prepare(
       `INSERT INTO payment_methods

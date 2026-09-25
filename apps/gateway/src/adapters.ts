@@ -36,7 +36,6 @@ import {
   DurableObjectTenantDatabaseRouter,
   type LifecycleStatus as LifecycleStatusValue,
   type TenantDatabaseRouter,
-  backfillTenantConfigurationPolicy,
   lifecycleStatusAllowsRecovery,
   lifecycleStatusAllowsRequests,
   parseLifecycleStatus,
@@ -935,11 +934,15 @@ export function lifecycleRowSourceFactoryFromEnv(
         return null;
       }
     };
+    // A workspace and its actual parent are read atomically in one tenant RPC.
+    // This map belongs to one authentication attempt, never an isolate cache.
+    const parents = new Map<string, LifecycleRow | null>();
     return {
       async tenantRow(id: string): Promise<LifecycleRow | null> {
         return resolveTenantLifecycleRow(controlDb, tenantStatusKv, id);
       },
       async projectRow(id: string): Promise<LifecycleRow | null> {
+        if (parents.has(id)) return parents.get(id) ?? null;
         const db = await routedDb();
         if (db === null) return sharedFallback.projectRow(id);
         return asLifecycleRow(await db.prepare(LIFECYCLE_PROJECT_SQL).bind(id).first());
@@ -947,7 +950,29 @@ export function lifecycleRowSourceFactoryFromEnv(
       async workspaceRow(id: string): Promise<LifecycleRow | null> {
         const db = await routedDb();
         if (db === null) return sharedFallback.workspaceRow(id);
-        return asLifecycleRow(await db.prepare(LIFECYCLE_WORKSPACE_SQL).bind(id).first());
+        const row = await db
+          .prepare(
+            `SELECT w.id, w.status, w.tenant_id, w.project_id,
+                  p.id AS parent_id, p.status AS parent_status, p.tenant_id AS parent_tenant_id
+             FROM workspaces w LEFT JOIN projects p ON p.id = w.project_id WHERE w.id = ?1`,
+          )
+          .bind(id)
+          .first<Record<string, unknown>>();
+        const workspace = asLifecycleRow(row);
+        const parentId = presentId(workspace?.project_id);
+        if (parentId !== undefined) {
+          parents.set(
+            parentId,
+            row?.parent_id === null || row?.parent_id === undefined
+              ? null
+              : asLifecycleRow({
+                  id: row.parent_id,
+                  status: row.parent_status,
+                  tenant_id: row.parent_tenant_id,
+                }),
+          );
+        }
+        return workspace;
       },
     };
   };
@@ -1200,7 +1225,6 @@ export class D1RbacAuthorizer implements RbacAuthorizerPort {
   async #tenantRoleGrants(tenantId: string): Promise<{ results: unknown[] }> {
     const router = this.#tenantDatabases;
     if (router === undefined) throw new Error("tenant object router is not configured");
-    await backfillTenantConfigurationPolicy(this.#db as unknown as D1Database, router, tenantId);
     const handle = await router.forTenant(tenantId);
     const local = await handle.db
       .prepare(

@@ -51,7 +51,7 @@ export const PUBLIC_MODEL_PRICE_SQL = `
 
 /** The provider cost multipliers, verbatim from `platform_provider_channels`. */
 export const PLATFORM_PROVIDER_COST_SQL = `
-  SELECT id, cost_multiplier FROM platform_provider_channels`;
+  SELECT id, cost_multiplier, cost_currency, cost_fx_rate FROM platform_provider_channels`;
 
 /** A `platform_model_prices` row as the publisher reads it and the gateway folds it. */
 export interface PublicModelPriceRow {
@@ -72,6 +72,8 @@ export interface PublicModelPriceRow {
 export interface PlatformProviderCostRow {
   readonly id: string;
   readonly cost_multiplier: number | string | null;
+  readonly cost_currency?: "CNY" | "USD" | null;
+  readonly cost_fx_rate?: number | string | null;
 }
 
 export interface PublicPriceSnapshot {

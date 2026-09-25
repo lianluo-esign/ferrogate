@@ -37,6 +37,7 @@ import {
   counterKeyForScope,
   limiterForEnv,
 } from "../../src/ratelimit/index.js";
+import { resetSharedQuotaPolicyCache } from "../../src/ratelimit/quota.js";
 import { resetApiKeysTable, seedApiKey, testSecret } from "../keys/seed.js";
 import { tenantObjectDb } from "../tenant-object.js";
 
@@ -137,6 +138,7 @@ beforeAll(async () => {
 });
 
 beforeEach(async () => {
+  resetSharedQuotaPolicyCache(env);
   SAVED_VARS.set("GATEWAY_BUDGET_HOLD_USD", vars.GATEWAY_BUDGET_HOLD_USD);
   await resetApiKeysTable();
   resetSharedApiKeyCache();

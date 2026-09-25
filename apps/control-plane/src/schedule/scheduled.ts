@@ -12,6 +12,10 @@
  * declared, while `test/worker-entry.test.ts` checks that the default export
  * exposes the handler shape workerd invokes.
  */
+import {
+  type PlatformPlanCachePublishResult,
+  publishPlatformPlanCache,
+} from "../store/platform-plan-cache.js";
 
 import { resolveAuditAnchorBucket, resolveControlDatabase, resolveDeps } from "../adapters.js";
 import { anchorAuditChains } from "../audit/anchor.js";
@@ -30,11 +34,6 @@ import {
   type PublicPriceCachePublishResult,
   publishPublicPriceCache,
 } from "../store/public-price-cache.js";
-import { type SharedConfigPassReport, fanOutSharedConfig } from "../store/shared-config.js";
-import {
-  type TenantAccountMirrorBackfillReport,
-  backfillTenantAccountMirror,
-} from "../store/tenant-account-mirror-backfill.js";
 import {
   type TenantCatalogAuditSweepReport,
   reconcileProvisionedTenantCatalogAudits,
@@ -79,14 +78,6 @@ export interface ScheduledTickReport extends ScheduleTickSummary {
   readonly spendAnomaly: SpendAnomalyReport;
   /** What the scheduled tenant-catalog audit pass delivered or retained for retry. */
   readonly tenantCatalogAudit: TenantCatalogAuditSweepReport;
-  /**
-   * What the shared-config push pass (#948) delivered: `skipped: "unchanged"`
-   * on every tick where the platform config revision has not moved past the
-   * fleet watermark — the ordinary answer, since config is edited rarely and an
-   * idle fleet must do zero tenant-object work — and a `pushed`/`failed` count
-   * on the tick after an operator edits a plan/group/announcement.
-   */
-  readonly sharedConfig: SharedConfigPassReport;
   /** The global provider/model snapshot refreshed into shared KV on this tick. */
   readonly platformConfigCache: PlatformConfigCachePublishResult | { readonly status: "failed" };
   /**
@@ -115,14 +106,7 @@ export interface ScheduledTickReport extends ScheduleTickSummary {
    * authoritative; this is a self-healing projection.
    */
   readonly publicPriceCache: PublicPriceCachePublishResult | { readonly status: "failed" };
-  /**
-   * What the one-time tenant-account mirror backfill (#75) did: `skipped:
-   * "complete"` on every tick once the fleet's pre-migration `tenants` rows have
-   * had their `document_json` filled from each object — the steady-state answer,
-   * a single indexed control-DO SELECT that opens no objects — and a
-   * `mirrored`/`failed` count on the few ticks after deploy while it converges.
-   */
-  readonly tenantAccountMirror: TenantAccountMirrorBackfillReport;
+  readonly platformPlanCache: PlatformPlanCachePublishResult | { readonly status: "failed" };
 }
 
 /**
@@ -167,12 +151,11 @@ export async function runScheduledTick(
     // report, so it cannot make the platform retry this maintenance pass.
     spendAnomaly: await runSpendAnomalyPass(env, now),
     tenantCatalogAudit,
-    sharedConfig: await sharedConfigPass(deps, now),
     platformConfigCache: await platformConfigCachePass(env, deps, now),
     platformBillingGroupCache: await platformBillingGroupCachePass(env, deps, now),
     tenantStatusCache: await tenantStatusCachePass(env, deps, now),
+    platformPlanCache: await platformPlanCachePass(env, deps, now),
     publicPriceCache: await publicPriceCachePass(env, deps, now),
-    tenantAccountMirror: await tenantAccountMirrorPass(deps, now),
   };
 }
 
@@ -273,68 +256,6 @@ async function publicPriceCachePass(
     });
     return { status: "failed" };
   }
-}
-
-/**
- * How often (in minutes) the one-time tenant-account mirror backfill is allowed
- * to open objects.
- *
- * It shares the catalog sweep's contention profile — up to a batch of tenant
- * objects opened, each feeding the SINGLE control DO — so it rides the SAME
- * coarse cadence rather than every minute. It is convergent: once every
- * pre-migration `tenants` row has a `document_json`, the pass opens zero objects
- * and returns `"complete"`, so this cadence only bounds how fast the fleet is
- * back-filled right after deploy, then costs one indexed SELECT per window.
- */
-export const TENANT_ACCOUNT_MIRROR_BACKFILL_PERIOD_MIN = 15;
-
-async function tenantAccountMirrorPass(
-  deps: Pick<ControlPlaneDeps, "controlDatabase" | "tenantDatabases">,
-  now: number,
-): Promise<TenantAccountMirrorBackfillReport> {
-  if (deps.controlDatabase === null) {
-    return { scanned: 0, mirrored: 0, failed: 0, skipped: "control_database_unavailable" };
-  }
-  // Gate on the minute count like the catalog sweep; a missed tick is harmless
-  // because the NULL-filter makes the next eligible window resume from scratch.
-  if (Math.floor(now / 60) % TENANT_ACCOUNT_MIRROR_BACKFILL_PERIOD_MIN !== 0) {
-    return { scanned: 0, mirrored: 0, failed: 0, skipped: "complete" };
-  }
-  return backfillTenantAccountMirror(deps.tenantDatabases, deps.controlDatabase, now);
-}
-
-/**
- * How often (in minutes) the shared-config push pass is allowed to fan out.
- *
- * The pass first checks the fleet watermark (`shared_config_push_state`) against
- * the platform config revision and does NOTHING when they match — the common
- * case — so this cadence only bounds how fast a config EDIT reaches the fleet,
- * not how often idle ticks cost anything. A few minutes of staleness on
- * plans/groups/announcements is the eventual-consistency contract the mirror is
- * built on. Kept coarser than a minute so a burst of edits coalesces into one
- * fan-out rather than one per edit.
- */
-export const SHARED_CONFIG_PUSH_PERIOD_MIN = 5;
-
-async function sharedConfigPass(
-  deps: Pick<ControlPlaneDeps, "controlDatabase" | "tenantDatabases" | "tenantStorage">,
-  now: number,
-): Promise<SharedConfigPassReport> {
-  if (deps.controlDatabase === null) {
-    return {
-      revision: 0,
-      scanned: 0,
-      pushed: 0,
-      failed: 0,
-      skipped: "control_database_unavailable",
-    };
-  }
-  // Gate on the minute count like the catalog sweep; a missed tick is harmless
-  // because the watermark makes the next eligible window re-decide from scratch.
-  if (Math.floor(now / 60) % SHARED_CONFIG_PUSH_PERIOD_MIN !== 0) {
-    return { revision: 0, scanned: 0, pushed: 0, failed: 0, skipped: "unchanged" };
-  }
-  return fanOutSharedConfig(deps, now);
 }
 
 /**
@@ -448,3 +369,21 @@ export const scheduled: ExportedHandlerScheduledHandler<ControlPlaneBindings> = 
 ) => {
   await runScheduledTick(env, Math.floor(controller.scheduledTime / 1000));
 };
+
+async function platformPlanCachePass(
+  env: ControlPlaneBindings,
+  deps: Pick<ControlPlaneDeps, "controlDatabase">,
+  now: number,
+): Promise<PlatformPlanCachePublishResult | { status: "failed" }> {
+  if (deps.controlDatabase === null) return { status: "unconfigured" };
+  try {
+    return await publishPlatformPlanCache({
+      db: deps.controlDatabase,
+      kv: env.PLATFORM_CONFIG,
+      nowMs: now * 1000,
+    });
+  } catch {
+    console.warn("control-plane: scheduled quota-plan cache publish failed");
+    return { status: "failed" };
+  }
+}

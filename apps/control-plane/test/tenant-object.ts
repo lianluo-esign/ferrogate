@@ -175,7 +175,7 @@ export async function registerObjectTenants(tenantIds: readonly string[]): Promi
 export async function seedTenantRoleProjection(
   tenantId: string,
   roleId: string,
-  permissionKeys: readonly string[] | string,
+  _permissionKeys: readonly string[] | string,
   nowUnix = 1,
 ): Promise<void> {
   const router = tenantObjectRouter();
@@ -183,15 +183,6 @@ export async function seedTenantRoleProjection(
     throw new Error("control-plane role fixtures require the privileged tenant RPC");
   }
   const statements: TenantDataStatement[] = [
-    {
-      sql:
-        "INSERT INTO tenant_role_catalog " +
-        "(role_id, name, slug, description, permission_keys_json, created_at_unix, updated_at_unix) " +
-        "VALUES (?, ?, ?, '', ?, ?, ?) " +
-        "ON CONFLICT(role_id) DO UPDATE SET permission_keys_json = excluded.permission_keys_json, " +
-        "updated_at_unix = excluded.updated_at_unix",
-      params: [roleId, roleId, roleId, JSON.stringify(permissionKeys), nowUnix, nowUnix],
-    },
     {
       sql:
         "INSERT INTO tenant_role_bindings (id, tenant_id, role_id, created_at_unix) " +
@@ -211,7 +202,6 @@ export async function resetTenantObjectState(tenantIds: readonly string[]): Prom
     const tenant = tenantObjectDb(tenantId);
     await router.privilegedBatch(tenantId, [
       { sql: "DELETE FROM tenant_role_bindings", params: [] },
-      { sql: "DELETE FROM tenant_role_catalog", params: [] },
     ]);
     await tenant.batch([
       tenant.prepare("DELETE FROM tenant_provider_credentials"),

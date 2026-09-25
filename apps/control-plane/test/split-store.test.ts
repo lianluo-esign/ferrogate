@@ -2,6 +2,7 @@ import { env } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { resolveTenantStorage } from "../src/adapters.js";
 import type { ControlPlaneBindings, ListQuery, StoreRecord } from "../src/ports.js";
+import { runScheduledTick } from "../src/schedule/scheduled.js";
 import {
   D1ControlPlaneStore,
   RESOURCE_TABLE,
@@ -16,7 +17,6 @@ import {
   backfillTenantResourceKinds,
 } from "../src/store/resource-backfill.js";
 import { SplitControlPlaneStore } from "../src/store/split.js";
-import { backfillTenantAccountMirror } from "../src/store/tenant-account-mirror-backfill.js";
 import { applySchema, db, resetD1 } from "./d1.js";
 import {
   TENANT_A,
@@ -107,7 +107,7 @@ describe("SplitControlPlaneStore", () => {
     ).resolves.toBeNull();
   });
 
-  it("backfills a legacy tenant document into the object before serving reads", async () => {
+  it("does not restore tenant documents from legacy control rows", async () => {
     await db()
       .prepare(
         `INSERT INTO ${RESOURCE_TABLE}
@@ -124,7 +124,7 @@ describe("SplitControlPlaneStore", () => {
     const split = store();
     await expect(
       split.get("agent-workflows", { kind: "tenant", tenantId: TENANT_A }, "legacy-workflow"),
-    ).resolves.toMatchObject({ id: "legacy-workflow", tenant_id: TENANT_A });
+    ).resolves.toBeNull();
 
     const objectRow = await (await router().forTenant(TENANT_A)).db
       .prepare(
@@ -133,10 +133,10 @@ describe("SplitControlPlaneStore", () => {
       )
       .bind("agent-workflows", "legacy-workflow")
       .first<{ revision: number; created_at_unix: number; updated_at_unix: number }>();
-    expect(objectRow).toEqual({ revision: 3, created_at_unix: 10, updated_at_unix: 20 });
+    expect(objectRow).toBeNull();
   });
 
-  it("bounds each legacy backfill call and resumes from copied rows", async () => {
+  it("retired compatibility calls never scan or copy legacy rows", async () => {
     const rows = Array.from(
       { length: RESOURCE_BACKFILL_BATCH_SIZE + 1 },
       (_, index) =>
@@ -164,20 +164,20 @@ describe("SplitControlPlaneStore", () => {
 
     const objectDb = (await router().forTenant(TENANT_A)).db;
     const first = await backfillTenantResourceKinds(db(), objectDb, TENANT_A);
-    expect(first.scanned).toBe(RESOURCE_BACKFILL_BATCH_SIZE);
+    expect(first).toEqual({ scanned: 0, copied: 0 });
     expect(
       await objectDb
         .prepare(`SELECT COUNT(*) AS total FROM ${TENANT_RESOURCE_TABLE}`)
         .first<{ total: number }>(),
-    ).toEqual({ total: RESOURCE_BACKFILL_BATCH_SIZE });
+    ).toEqual({ total: 0 });
 
     const second = await backfillTenantResourceKinds(db(), objectDb, TENANT_A);
-    expect(second.scanned).toBe(1);
+    expect(second).toEqual({ scanned: 0, copied: 0 });
     expect(
       await objectDb
         .prepare(`SELECT COUNT(*) AS total FROM ${TENANT_RESOURCE_TABLE}`)
         .first<{ total: number }>(),
-    ).toEqual({ total: RESOURCE_BACKFILL_BATCH_SIZE + 1 });
+    ).toEqual({ total: 0 });
   });
 
   it("does not return a legacy control row as a platform resource", async () => {
@@ -233,7 +233,7 @@ describe("SplitControlPlaneStore", () => {
     expect(tombstone).not.toBeNull();
 
     const backfill = await backfillTenantResourceKinds(db(), objectDb, TENANT_A);
-    expect(backfill.scanned).toBe(1);
+    expect(backfill.scanned).toBe(0);
     expect(backfill.copied).toBe(0);
     await expect(
       objectDb
@@ -254,10 +254,14 @@ describe("SplitControlPlaneStore", () => {
     ).resolves.toMatchObject({ id: TENANT_A, tenant_id: TENANT_A });
   });
 
-  describe("operator tenant-accounts LIST (served from the control mirror)", () => {
-    // Seed a tenant-account into its OBJECT (via the split store) AND into the
-    // control `tenants` mirror (via `projectTenantAccount`, the route-layer sync
-    // hook), exactly as a real create does. Returns the stored document.
+  describe("operator tenant-accounts LIST without a control mirror", () => {
+    // The default path always reads account documents from their owner.
+    function fanOutStore() {
+      return new SplitControlPlaneStore(db(), router(), {
+        requestId: "split-store-test",
+      });
+    }
+
     async function seed(
       split: SplitControlPlaneStore,
       id: string,
@@ -265,165 +269,6 @@ describe("SplitControlPlaneStore", () => {
     ): Promise<StoreRecord> {
       const stored = await split.create("tenant-accounts", PLATFORM, { id, ...extra });
       await projectTenantAccount(db(), stored, 1000);
-      return stored;
-    }
-
-    // The fan-out's observable result is `pageOf(docs, query)` over one document
-    // per provisioned tenant in roster order. Build that reference from the
-    // captured stored docs (byte-equal to each object's row via JSON round-trip)
-    // so an equality assertion pins mirror-read == fan-out-read.
-    async function fanoutReference(seededById: Map<string, StoreRecord>, query: ListQuery) {
-      const roster = await router().provisionedTenants();
-      const docs = roster
-        .map((id) => seededById.get(id))
-        .filter((doc): doc is StoreRecord => doc !== undefined);
-      return pageOf(docs, query);
-    }
-
-    it("matches the fan-out across search, filter and pagination", async () => {
-      const split = store();
-      const a = await seed(split, TENANT_A, {
-        name: "Ärzte Klinik",
-        status: "active",
-        plan_id: "pro",
-        // A field the typed projection columns DROP — proves the reader returns
-        // the raw document, not a reconstruction from `id/name/slug/status/plan_id`.
-        plan_effective_at: 1234567890,
-        contact_email: "ops@aerzte.example",
-      });
-      const b = await seed(split, TENANT_B, {
-        name: "Beta Corp",
-        status: "suspended",
-        plan_id: "free",
-      });
-      const seeded = new Map([
-        [TENANT_A, a],
-        [TENANT_B, b],
-      ]);
-
-      // Write-through fidelity: the mirror row is the document, verbatim.
-      const mirrorRow = await db()
-        .prepare("SELECT document_json FROM tenants WHERE id = ?")
-        .bind(TENANT_A)
-        .first<{ document_json: string }>();
-      expect(JSON.parse(mirrorRow?.document_json ?? "null")).toEqual(a);
-
-      // Unicode case-fold search — a SQLite `LIKE` prefilter would DROP this.
-      const search: ListQuery = {
-        offset: 0,
-        limit: 100,
-        paginate: true,
-        search: "ärzte",
-        filters: {},
-      };
-      const cases: ListQuery[] = [
-        { offset: 0, limit: 100, paginate: false, search: null, filters: {} },
-        search,
-        { offset: 0, limit: 100, paginate: true, search: null, filters: { status: "active" } },
-        { offset: 1, limit: 1, paginate: true, search: null, filters: {} },
-      ];
-      for (const query of cases) {
-        const page = await split.list("tenant-accounts", PLATFORM, query);
-        expect(page).toEqual(await fanoutReference(seeded, query));
-      }
-
-      // Concretely: the raw field survives and search matched the right tenant.
-      const searchPage = await split.list("tenant-accounts", PLATFORM, search);
-      expect(searchPage.items.map((i) => i.id)).toEqual([TENANT_A]);
-      expect(searchPage.items[0]).toMatchObject({ plan_effective_at: 1234567890 });
-
-      // Idempotent re-projection (the ON CONFLICT DO UPDATE branch, not INSERT):
-      // a later mutation's document replaces the mirror in place, verbatim.
-      const updated = { ...a, status: "suspended", plan_effective_at: 999 };
-      await projectTenantAccount(db(), updated, 2000);
-      const reread = await split.list("tenant-accounts", PLATFORM, QUERY);
-      expect(reread.items.find((i) => i.id === TENANT_A)).toEqual(updated);
-    });
-
-    it("hides an out-of-band deprovisioned tenant whose mirror row is retained", async () => {
-      const split = store();
-      await seed(split, TENANT_A, { name: "A", status: "active" });
-      await seed(split, TENANT_B, { name: "B", status: "active" });
-
-      // Deprovision drops the roster row but RETAINS object/mirror data.
-      await db().prepare("DELETE FROM tenant_databases WHERE tenant_id = ?").bind(TENANT_B).run();
-
-      const page = await split.list("tenant-accounts", PLATFORM, QUERY);
-      expect(page.items.map((i) => i.id)).toEqual([TENANT_A]);
-      expect(page.total).toBe(1);
-    });
-
-    it("skips a tenant row whose document_json is not yet mirrored, then lists it after backfill", async () => {
-      const split = store();
-      await seed(split, TENANT_A, { name: "A", status: "active" });
-      // TENANT_B: object has the doc, but its mirror row is pre-migration NULL.
-      const b = await split.create("tenant-accounts", PLATFORM, {
-        id: TENANT_B,
-        name: "B",
-        status: "active",
-      });
-      await db()
-        .prepare(
-          `INSERT INTO tenants (id, name, slug, status, plan_id, created_at_unix, updated_at_unix)
-           VALUES (?, 'B', 'b', 'active', 'free', 1, 1)`,
-        )
-        .bind(TENANT_B)
-        .run();
-
-      const before = await split.list("tenant-accounts", PLATFORM, QUERY);
-      expect(before.items.map((i) => i.id)).toEqual([TENANT_A]);
-
-      // The one-time backfill fills the NULL row from TENANT_B's object.
-      const report = await backfillTenantAccountMirror(router(), db(), 2000);
-      expect(report).toMatchObject({ mirrored: 1, failed: 0 });
-
-      const after = await split.list("tenant-accounts", PLATFORM, QUERY);
-      expect(after.items.map((i) => i.id).sort()).toEqual([TENANT_A, TENANT_B]);
-      expect(after.items.find((i) => i.id === TENANT_B)).toEqual(b);
-
-      // Idempotent + convergent: a second pass opens nothing and reports complete.
-      expect(await backfillTenantAccountMirror(router(), db(), 3000)).toMatchObject({
-        scanned: 0,
-        skipped: "complete",
-      });
-    });
-
-    it("keeps GET-by-id on the tenant object, unaffected by the mirror", async () => {
-      const split = store();
-      const a = await seed(split, TENANT_A, { name: "A", status: "active" });
-
-      // Operator GET-by-id reads the object, not the mirror.
-      await expect(split.get("tenant-accounts", PLATFORM, TENANT_A)).resolves.toEqual(a);
-
-      // A stale mirror row for a tenant whose object doc is gone must NOT surface
-      // on GET-by-id (it reads the object → null), even though the row lingers.
-      await (await router().forTenant(TENANT_A)).db
-        .prepare(`DELETE FROM ${TENANT_RESOURCE_TABLE} WHERE resource_kind = 'tenant-accounts'`)
-        .run();
-      await expect(split.get("tenant-accounts", PLATFORM, TENANT_A)).resolves.toBeNull();
-    });
-  });
-
-  describe("operator tenant-accounts LIST with CONTROL_TENANT_ACCOUNT_SOURCE=tenant_object (Track A G2)", () => {
-    const FLAG_ON = { CONTROL_TENANT_ACCOUNT_SOURCE: "tenant_object" } as const;
-
-    // The flipped writer STOPS mirroring: it writes the typed registry columns
-    // but leaves `document_json = NULL`. The flipped reader IGNORES the (now
-    // empty) mirror and fans out across each tenant's own object.
-    function fanOutStore() {
-      return new SplitControlPlaneStore(db(), router(), {
-        requestId: "split-store-test",
-        tenantAccountSource: "tenant_object",
-      });
-    }
-
-    async function seed(
-      split: SplitControlPlaneStore,
-      id: string,
-      extra: Record<string, unknown>,
-    ): Promise<StoreRecord> {
-      const stored = await split.create("tenant-accounts", PLATFORM, { id, ...extra });
-      await projectTenantAccount(db(), stored, 1000, FLAG_ON);
       return stored;
     }
 
@@ -454,17 +299,15 @@ describe("SplitControlPlaneStore", () => {
         [TENANT_B, b],
       ]);
 
-      // Red line: the WHOLE-document mirror is retired — the typed registry row
-      // exists (roster/JOIN needs it) but its `document_json` is NULL.
-      const mirrorRow = await db()
-        .prepare("SELECT status, document_json FROM tenants WHERE id = ?")
+      const registry = await db()
+        .prepare("SELECT status FROM tenants WHERE id = ?")
         .bind(TENANT_A)
-        .first<{ status: string; document_json: string | null }>();
-      expect(mirrorRow?.status).toBe("active");
-      expect(mirrorRow?.document_json).toBeNull();
+        .first<{ status: string }>();
+      expect(registry?.status).toBe("active");
+      const columns = await db().prepare("PRAGMA table_info(tenants)").all<{ name: string }>();
+      expect(columns.results.map((column) => column.name)).not.toContain("document_json");
 
-      // The reader ignores the empty mirror and reproduces the object fan-out
-      // exactly — same search/filter/pagination surface as the mirror path.
+      // Preserve the search/filter/pagination surface while reading the authority.
       const search: ListQuery = {
         offset: 0,
         limit: 100,
@@ -489,6 +332,32 @@ describe("SplitControlPlaneStore", () => {
       expect(searchPage.items.map((i) => i.id)).toEqual([TENANT_A]);
       expect(searchPage.items[0]).toMatchObject({ plan_effective_at: 1234567890 });
     });
+  });
+  it("does not restore account mirrors on the former backfill tick with legacy configuration", async () => {
+    const split = store();
+    const account = await split.create("tenant-accounts", PLATFORM, {
+      id: TENANT_A,
+      name: "No mirror",
+    });
+    const legacyEnv = {
+      ...env,
+      CONTROL_TENANT_ACCOUNT_SOURCE: "control",
+    } as unknown as ControlPlaneBindings;
+    await projectTenantAccount(db(), account, 1800000000, legacyEnv);
+    const report = await runScheduledTick(legacyEnv, 1800000000);
+    expect(report).not.toHaveProperty("tenantAccountMirror");
+    const columns = await db().prepare("PRAGMA table_info(tenants)").all<{ name: string }>();
+    expect(columns.results.map((column) => column.name)).not.toContain("document_json");
+    expect(await split.get("tenant-accounts", PLATFORM, TENANT_A)).toEqual(account);
+  });
+
+  it("lists an account even when the narrow platform registry has no document", async () => {
+    const split = store();
+    const record = await split.create("tenant-accounts", PLATFORM, { id: TENANT_A, name: "Owner" });
+    await projectTenantAccount(db(), record, 1000);
+    expect((await split.list("tenant-accounts", PLATFORM, QUERY)).items).toContainEqual(record);
+    await db().prepare("DELETE FROM tenant_databases WHERE tenant_id = ?").bind(TENANT_A).run();
+    expect((await split.list("tenant-accounts", PLATFORM, QUERY)).items).not.toContainEqual(record);
   });
 
   it("fans out platform reads across provisioned tenants without weakening object isolation", async () => {

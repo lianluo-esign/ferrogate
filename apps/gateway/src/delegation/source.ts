@@ -41,10 +41,7 @@ import {
   d1DelegationRevocationSource,
   importDelegationKey,
 } from "@ferrogate/identity";
-import {
-  DurableObjectTenantDatabaseRouter,
-  backfillTenantConfigurationPolicy,
-} from "@ferrogate/storage";
+import { DurableObjectTenantDatabaseRouter } from "@ferrogate/storage";
 import type { TenantDataNamespace } from "@ferrogate/storage/durable-objects";
 import { controlDatabaseFrom } from "../control-data.js";
 
@@ -121,7 +118,6 @@ async function resolveVerifier(env: DelegationBindings): Promise<DelegationVerif
   const router = new DurableObjectTenantDatabaseRouter(namespace, db);
   const revocations = cachedDelegationRevocationSource({
     async revoked(tenant, subjects) {
-      await backfillTenantConfigurationPolicy(db, router, tenant);
       const handle = await router.forTenant(tenant);
       return d1DelegationRevocationSource(handle.db).revoked(tenant, subjects);
     },

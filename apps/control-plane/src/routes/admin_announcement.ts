@@ -1,24 +1,8 @@
 /**
- * Contract group `admin_announcement` (5 operations) — platform announcements
- * (公告), the operator surface of the #948 shared-config channel's second domain.
- *
- * ```
- *   GET/POST  /admin/v1/announcements
- *   GET/PATCH/DELETE  /admin/v1/announcements/{id}
- * ```
- *
- * An operator authors a notice once here, on the control database; the
- * shared-config fan-out mirrors it read-only into every tenant's own Durable
- * Object (`shared_announcements`), so a tenant renders notices from its own
- * object with no control-plane hop.
- *
- * A PLATFORM-ONLY surface, modelled exactly on `admin_billing_group.ts`: the
- * store lives in the CONTROL database via {@link PlatformAnnouncementStore} over
- * `deps.controlDatabase`, so a deployment without a control database answers
- * `503 control_database_unavailable`, and a tenant-scoped caller is fenced with
- * a leak-proof `404`. Announcements are NOT `control_plane_resources` documents,
- * so this group declares NO CRUD collections: all five operations are explicit
- * `overrides` that talk to the platform store directly.
+ * Platform announcement CRUD. Notices are stored and read once in the platform
+ * configuration authority, CONTROL_DATA. No tenant database participates in
+ * announcement reads or writes. The operator-only authorization fence applies
+ * to every operation; tenant-facing publication is a separate API concern.
  */
 import { z } from "zod";
 import { HttpError } from "../middleware/errors.js";
@@ -31,7 +15,6 @@ import {
 } from "../store/platform-announcement.js";
 import { isMissingPlatformCatalogError } from "../store/platform-model-catalog.js";
 import { matchesSearch } from "../store/query.js";
-import { propagateSharedConfigAfterMutation } from "../store/shared-config.js";
 import {
   TenantCatalogConflictError,
   TenantCatalogNotFoundError,
@@ -73,12 +56,7 @@ const announcementPatchSchema = z
   })
   .strict();
 
-/**
- * The platform announcement store, over the CONTROL_DATA facade. MIRRORS
- * `admin_billing_group.ts::billingGroupStore`: `deps.controlDatabase` IS the
- * facade, and `null` is a refusal, not a downgrade — an announcement written
- * only to the document store never reaches the shared-config channel.
- */
+/** The platform configuration singleton is the sole announcement authority. */
 function announcementStore(c: Parameters<Handler>[0]): PlatformAnnouncementStore {
   const deps = depsOf(c);
   if (deps.controlDatabase === null) {
@@ -104,10 +82,6 @@ function platformScope(c: Parameters<Handler>[0]): CallerScope {
     throw new HttpError(404, "not_found", "announcement not found");
   }
   return scope;
-}
-
-async function propagateAnnouncements(c: Parameters<Handler>[0]): Promise<void> {
-  await propagateSharedConfigAfterMutation(depsOf(c), c.get("requestId") ?? "admin-announcement");
 }
 
 /** Map the store's typed errors onto HTTP, exactly as the billing-group handler does. */
@@ -162,7 +136,6 @@ async function createAnnouncement(c: Parameters<Handler>[0]): Promise<Response> 
     endsAtUnix: body.ends_at_unix ?? null,
   };
   const record = await announcementStore(c).createAnnouncement(scope, input);
-  await propagateAnnouncements(c);
   return json(c, 201, adminItem("announcement", record));
 }
 
@@ -190,7 +163,6 @@ async function patchAnnouncement(c: Parameters<Handler>[0]): Promise<Response> {
     ...("ends_at_unix" in body ? { endsAtUnix: body.ends_at_unix ?? null } : {}),
   };
   const record = await announcementStore(c).updateAnnouncement(scope, id, patch);
-  await propagateAnnouncements(c);
   return json(c, 200, adminItem("announcement", record));
 }
 
@@ -199,7 +171,6 @@ async function deleteAnnouncement(c: Parameters<Handler>[0]): Promise<Response> 
   const id = pathParam(c, "id");
   const deleted = await announcementStore(c).deleteAnnouncement(scope, id);
   if (!deleted) throw new HttpError(404, "not_found", `announcement ${id} not found`);
-  await propagateAnnouncements(c);
   return json(c, 200, adminDeleted("announcement", id));
 }
 

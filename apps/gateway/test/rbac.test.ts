@@ -21,6 +21,7 @@
 import { SELF, env } from "cloudflare:test";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
+import { CONTROL_DATA_ADDRESS } from "@ferrogate/storage";
 import {
   ConfiguredRbacAuthorizer,
   D1RbacAuthorizer,
@@ -28,7 +29,6 @@ import {
   type RbacDatabase,
   depsFromEnv,
 } from "../src/adapters.js";
-import { CONTROL_DATA_ADDRESS } from "@ferrogate/storage";
 import { CONTROL_STORAGE_MISCONFIGURED, controlDatabaseFrom } from "../src/control-data.js";
 import type { AuthContext, RbacDecision } from "../src/ports.js";
 import {
@@ -124,10 +124,7 @@ async function resetRbacTables(): Promise<void> {
   // The shared catalog stays in CONTROL; the bindings are tenant-object rows.
   await db.batch([db.prepare("DELETE FROM roles"), db.prepare("DELETE FROM permissions")]);
   for (const tenantId of BOUND_TENANTS) {
-    await tenantObjectPrivilegedBatch(tenantId, [
-      { sql: "DELETE FROM tenant_role_bindings" },
-      { sql: "DELETE FROM tenant_role_catalog" },
-    ]);
+    await tenantObjectPrivilegedBatch(tenantId, [{ sql: "DELETE FROM tenant_role_bindings" }]);
   }
 }
 

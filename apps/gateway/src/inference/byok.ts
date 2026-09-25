@@ -61,7 +61,6 @@ import {
 } from "@ferrogate/secrets";
 import {
   DurableObjectTenantDatabaseRouter,
-  backfillTenantConfigurationPolicy,
   tenantProviderCredentialStoreFor,
 } from "@ferrogate/storage";
 import type { TenantDataNamespace } from "@ferrogate/storage/durable-objects";
@@ -141,10 +140,8 @@ export function byokPortsFromEnv(env: InferenceBindings): ByokPorts | null {
   const router = new DurableObjectTenantDatabaseRouter(namespace, db);
   const store: TenantCredentialStore = {
     async lookup(tenantId, alias) {
-      // The legacy table is migration input only. Once the object is available,
-      // all credential reads stay in that object's database and an object error
-      // is surfaced to the caller rather than falling back to CONTROL.
-      await backfillTenantConfigurationPolicy(db, router, tenantId);
+      // Credentials are read only from the tenant object. An object error is
+      // surfaced without importing or reading a legacy control credential.
       const handle = await router.forTenant(tenantId);
       return tenantProviderCredentialStoreFor(handle).lookup(tenantId, alias);
     },

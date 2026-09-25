@@ -131,7 +131,6 @@ import {
   DurableObjectTenantDatabaseRouter,
   type QuotaScopeKind,
   type TenantDatabaseHandle,
-  backfillTenantConfigurationPolicy,
   budgetAlertStoreForTenant,
 } from "@ferrogate/storage";
 import type { TenantDataNamespace } from "@ferrogate/storage/durable-objects";
@@ -264,10 +263,7 @@ export function budgetAlertPortsFrom(env: unknown): BudgetAlertPorts | undefined
   const tenantDbFor = (tenantId: string): Promise<TenantDatabaseHandle> => {
     let tenantDb = tenantDbs.get(tenantId);
     if (tenantDb === undefined) {
-      tenantDb = (async () => {
-        await backfillTenantConfigurationPolicy(controlDb, router, tenantId);
-        return router.forTenant(tenantId);
-      })();
+      tenantDb = router.forTenant(tenantId);
       tenantDbs.set(tenantId, tenantDb);
     }
     return tenantDb;

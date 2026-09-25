@@ -5,11 +5,12 @@ import {
   type TenantStatusSnapshot,
   tenantStatusMapFromRows,
 } from "../../../gateway/src/tenant-status-snapshot.js";
+import { publishSnapshotIfChanged } from "./cache-publish.js";
 
 export type TenantStatusCachePublishResult =
   | { readonly status: "unconfigured" }
   | {
-      readonly status: "published";
+      readonly status: "published" | "unchanged";
       readonly rows: number;
     };
 
@@ -39,6 +40,8 @@ export async function publishTenantStatusCache(options: {
     published_at_unix: options.nowUnix ?? Math.floor(Date.now() / 1000),
     statuses,
   };
-  await options.kv.put(TENANT_STATUS_SNAPSHOT_KEY, JSON.stringify(snapshot));
-  return { status: "published", rows: Object.keys(statuses).length };
+  const published = await publishSnapshotIfChanged(options.kv, TENANT_STATUS_SNAPSHOT_KEY, {
+    ...snapshot,
+  });
+  return { status: published ? "published" : "unchanged", rows: Object.keys(statuses).length };
 }

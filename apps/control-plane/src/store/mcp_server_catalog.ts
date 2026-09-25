@@ -1,12 +1,5 @@
-/**
- * The control-plane bridge for the tenant-owned MCP server catalog (#862).
- *
- * `control_plane_resources` remains the lossless admin document store. The
- * tenant object's `mcp_servers` table is the data-plane authority, so writes
- * project there and historical documents are copied through a resumable mark
- * stored in that same object. The object is never replaced by a flat CONTROL
- * D1 read at request time.
- */
+/** Tenant-owned MCP configuration with a minimal platform id-to-tenant directory.
+ * No control document is used to backfill missing tenant configuration. */
 import {
   type TenantDatabaseRouter,
   type TenantMcpServerConfig,
@@ -15,51 +8,6 @@ import {
 import { HttpError } from "../middleware/errors.js";
 import type { ControlPlaneDeps, StoreRecord } from "../ports.js";
 import { tenantDatabaseFor } from "./tenancy.js";
-
-/** The object-local ledger mark for the pre-#862 MCP catalog copy. */
-export const MCP_SERVER_CATALOG_BACKFILL_MARK = "mcp_server_catalog_backfill_v1";
-
-const PAGE_SIZE = 100;
-const MAX_PAGES_PER_READ = 16;
-
-interface ControlCatalogRow {
-  readonly resource_id: string;
-  readonly document_json: string;
-}
-
-interface BackfillMark {
-  readonly state: "in_progress" | "complete";
-  readonly cursor: string | null;
-  readonly resources: number;
-}
-
-function parseMark(detail: string | null | undefined): BackfillMark | undefined {
-  if (detail === undefined || detail === null || detail.trim() === "") return undefined;
-  try {
-    const value: unknown = JSON.parse(detail);
-    if (typeof value !== "object" || value === null) return undefined;
-    const candidate = value as Record<string, unknown>;
-    if (candidate.state !== "in_progress" && candidate.state !== "complete") return undefined;
-    return {
-      state: candidate.state,
-      cursor: typeof candidate.cursor === "string" ? candidate.cursor : null,
-      resources:
-        typeof candidate.resources === "number" && Number.isSafeInteger(candidate.resources)
-          ? Math.max(0, candidate.resources)
-          : 0,
-    };
-  } catch {
-    return undefined;
-  }
-}
-
-function markDetail(
-  state: BackfillMark["state"],
-  cursor: string | null,
-  resources: number,
-): string {
-  return JSON.stringify({ version: 1, state, cursor, resources });
-}
 
 function tenantIdOf(record: StoreRecord): string | null {
   if (typeof record.tenant_id !== "string") return null;
@@ -94,13 +42,11 @@ function insertCatalogStatement(
   db: D1Database,
   tenantId: string,
   config: TenantMcpServerConfig,
-  guarded: boolean,
 ): D1PreparedStatement {
   const values = catalogValues(tenantId, config);
-  if (!guarded) {
-    return db
-      .prepare(
-        `INSERT INTO mcp_servers
+  return db
+    .prepare(
+      `INSERT INTO mcp_servers
            (tenant_id, name, transport, url, auth_type, tools_to_execute,
             tools_to_auto_execute, tools_to_exclude, headers, oauth,
             signed_jwt_audience, timeout_ms)
@@ -116,24 +62,8 @@ function insertCatalogStatement(
            oauth = excluded.oauth,
            signed_jwt_audience = excluded.signed_jwt_audience,
            timeout_ms = excluded.timeout_ms`,
-      )
-      .bind(...values);
-  }
-
-  return db
-    .prepare(
-      `INSERT OR IGNORE INTO mcp_servers
-         (tenant_id, name, transport, url, auth_type, tools_to_execute,
-          tools_to_auto_execute, tools_to_exclude, headers, oauth,
-          signed_jwt_audience, timeout_ms)
-       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-        WHERE EXISTS (
-          SELECT 1 FROM tenant_provisioning_marks
-           WHERE tenant_id = ? AND mark = ?
-             AND detail NOT LIKE '%"state":"complete"%'
-        )`,
     )
-    .bind(...values, tenantId, MCP_SERVER_CATALOG_BACKFILL_MARK);
+    .bind(...values);
 }
 
 async function catalogDatabaseFor(deps: ControlPlaneDeps, tenantId: string): Promise<D1Database> {
@@ -150,12 +80,12 @@ async function catalogDatabaseFor(deps: ControlPlaneDeps, tenantId: string): Pro
 }
 
 /**
- * Keep a bounded control-D1 compatibility projection for platform-operator
+ * Keep only an id → tenant directory for platform-operator
  * lookup. The tenant object remains authoritative; this row is only the
  * directory that lets an operator address a newly-created object resource by
  * its id before the tenant appears in the roster fan-out.
  */
-async function upsertControlProjection(
+async function upsertControlDirectory(
   controlDb: D1Database,
   record: StoreRecord,
   nowUnix: number,
@@ -168,9 +98,15 @@ async function upsertControlProjection(
        ON CONFLICT (resource_kind, resource_id) DO UPDATE SET
          document_json = excluded.document_json,
          revision = control_plane_resources.revision + 1,
-         updated_at_unix = excluded.updated_at_unix`,
+         updated_at_unix = excluded.updated_at_unix
+       WHERE control_plane_resources.document_json <> excluded.document_json`,
     )
-    .bind(record.id, JSON.stringify(record), nowUnix, nowUnix)
+    .bind(
+      record.id,
+      JSON.stringify({ id: record.id, tenant_id: record.tenant_id }),
+      nowUnix,
+      nowUnix,
+    )
     .run();
 }
 
@@ -201,124 +137,6 @@ export async function removeMcpServerControlProjection(
   }
 }
 
-async function readMark(db: D1Database, tenantId: string): Promise<BackfillMark | undefined> {
-  const row = await db
-    .prepare("SELECT detail FROM tenant_provisioning_marks WHERE tenant_id = ? AND mark = ?")
-    .bind(tenantId, MCP_SERVER_CATALOG_BACKFILL_MARK)
-    .first<{ detail: string | null }>();
-  return parseMark(row?.detail);
-}
-
-async function controlPage(
-  controlDb: D1Database,
-  tenantId: string,
-  cursor: string | null,
-): Promise<ControlCatalogRow[]> {
-  const predicate =
-    cursor === null
-      ? "json_extract(document_json, '$.tenant_id') = ?"
-      : "json_extract(document_json, '$.tenant_id') = ? AND resource_id > ?";
-  const values = cursor === null ? [tenantId, PAGE_SIZE] : [tenantId, cursor, PAGE_SIZE];
-  const rows = await controlDb
-    .prepare(
-      `SELECT resource_id, document_json
-         FROM control_plane_resources
-        WHERE resource_kind = 'mcp-servers' AND ${predicate}
-        ORDER BY resource_id ASC
-        LIMIT ?`,
-    )
-    .bind(...values)
-    .all<ControlCatalogRow>();
-  return rows.results;
-}
-
-/**
- * Copy a tenant's legacy MCP documents into its object, bounded and resumable.
- *
- * `INSERT OR IGNORE` is intentional: a live object projection wins over a
- * stale control document. The marker and every guarded insert share one object
- * batch, so a stale concurrent backfill cannot write after another call marks
- * the tenant complete.
- */
-export async function ensureTenantMcpServerCatalogBackfill(
-  deps: ControlPlaneDeps,
-  tenantId: string,
-): Promise<void> {
-  const controlDb = deps.controlDatabase;
-  if (controlDb === null) return;
-  const normalizedTenantId = tenantId.trim();
-  if (normalizedTenantId === "") return;
-
-  const tenantDb = await catalogDatabaseFor(deps, normalizedTenantId);
-  const existing = await readMark(tenantDb, normalizedTenantId);
-  if (existing?.state === "complete") return;
-
-  let cursor = existing?.cursor ?? null;
-  let resources = existing?.resources ?? 0;
-
-  for (let pageNumber = 0; pageNumber < MAX_PAGES_PER_READ; pageNumber += 1) {
-    const rows = await controlPage(controlDb, normalizedTenantId, cursor);
-    const nextCursor = rows.at(-1)?.resource_id ?? cursor;
-    resources += rows.length;
-    const complete = rows.length < PAGE_SIZE;
-    const statements: D1PreparedStatement[] = [
-      tenantDb
-        .prepare(
-          `INSERT OR IGNORE INTO tenant_provisioning_marks
-             (tenant_id, mark, detail, applied_at_unix)
-           VALUES (?, ?, ?, ?)`,
-        )
-        .bind(
-          normalizedTenantId,
-          MCP_SERVER_CATALOG_BACKFILL_MARK,
-          markDetail("in_progress", cursor, resources),
-          Math.floor(Date.now() / 1000),
-        ),
-    ];
-
-    for (const row of rows) {
-      let document: unknown;
-      try {
-        document = JSON.parse(row.document_json);
-      } catch {
-        continue;
-      }
-      const config = decodeTenantMcpServerDocument(document);
-      if (config === undefined) continue;
-      statements.push(insertCatalogStatement(tenantDb, normalizedTenantId, config, true));
-    }
-
-    statements.push(
-      tenantDb
-        .prepare(
-          `INSERT INTO tenant_provisioning_marks
-             (tenant_id, mark, detail, applied_at_unix)
-           VALUES (?, ?, ?, ?)
-           ON CONFLICT (tenant_id, mark) DO UPDATE SET
-             detail = excluded.detail,
-             applied_at_unix = excluded.applied_at_unix
-           WHERE tenant_provisioning_marks.detail NOT LIKE '%"state":"complete"%'`,
-        )
-        .bind(
-          normalizedTenantId,
-          MCP_SERVER_CATALOG_BACKFILL_MARK,
-          markDetail(complete ? "complete" : "in_progress", nextCursor, resources),
-          Math.floor(Date.now() / 1000),
-        ),
-    );
-    await tenantDb.batch(statements);
-
-    if (complete) return;
-    cursor = nextCursor;
-  }
-
-  throw new HttpError(
-    503,
-    "mcp_catalog_backfill_incomplete",
-    `tenant ${normalizedTenantId} MCP catalog backfill is still in progress; retry`,
-  );
-}
-
 /** Project a committed admin MCP document into the tenant object. */
 export async function projectMcpServer(
   deps: ControlPlaneDeps,
@@ -330,6 +148,13 @@ export async function projectMcpServer(
   if (tenantId === null) return;
 
   const tenantDb = await catalogDatabaseFor(deps, tenantId);
+  const schema = await tenantDb
+    .prepare("SELECT type FROM sqlite_master WHERE name='mcp_servers'")
+    .first<{ type: string }>();
+  if (schema?.type === "view") {
+    await upsertControlDirectory(deps.controlDatabase, record, nowUnix);
+    return;
+  }
   const config = decodeTenantMcpServerDocument(record);
   const oldName = resourceName(record);
   const statements: D1PreparedStatement[] = [];
@@ -352,15 +177,11 @@ export async function projectMcpServer(
           .bind(tenantId, oldName),
       );
     }
-    statements.push(insertCatalogStatement(tenantDb, tenantId, config, false));
+    statements.push(insertCatalogStatement(tenantDb, tenantId, config));
   }
   await tenantDb.batch(statements);
 
-  await upsertControlProjection(deps.controlDatabase, record, nowUnix);
-
-  // The current projection is already authoritative. Backfill only fills rows
-  // that are absent, and its marker makes this repair path one-shot per tenant.
-  await ensureTenantMcpServerCatalogBackfill(deps, tenantId);
+  await upsertControlDirectory(deps.controlDatabase, record, nowUnix);
 }
 
 /** Remove the tenant authority row before its control document is deleted. */
@@ -373,8 +194,11 @@ export async function unprojectMcpServer(
   const tenantId = tenantIdOf(record);
   if (tenantId === null) return;
   const tenantDb = await catalogDatabaseFor(deps, tenantId);
-  await ensureTenantMcpServerCatalogBackfill(deps, tenantId);
 
+  const schema = await tenantDb
+    .prepare("SELECT type FROM sqlite_master WHERE name='mcp_servers'")
+    .first<{ type: string }>();
+  if (schema?.type === "view") return;
   const names = new Set<string>([id.trim(), resourceName(record)]);
   const statements = [...names]
     .filter((name) => name !== "")

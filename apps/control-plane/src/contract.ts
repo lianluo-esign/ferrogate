@@ -126,7 +126,7 @@ export const SUPPORTED_CONTRACT_VERSION = 1;
  * the platform-catalog bootstrap import. 322 -> 327 with #948's five
  * `admin_announcement` operations, all under `/admin/v1/announcements`.
  * 327 -> 328 with the tenant-scoped `GET /admin/v1/shared-billing-groups`
- * (`billing` group): the calling tenant's own `shared_billing_groups` DO mirror,
+ * (`billing` group): the account-global platform configuration authority,
  * so a tenant console can offer the real multiplier-bearing group list.
  * 328 -> 329 with the control-plane-D1 migration's `POST /admin/v1/control-backfill`
  * (`admin_config_ops` group): the operator-only one-shot DO→D1 control backfill

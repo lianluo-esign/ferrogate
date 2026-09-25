@@ -455,8 +455,8 @@ GATEWAY_RESPONSES_RETENTION = "24"
 # measuring instrument, and a default would make the meaning of their scores
 # depend on a choice they never made.
 #
-# Nothing is evaluated without the `ONLINE_EVAL` queue binding below: the judge
-# runs in the queue consumer, never in the request's own `waitUntil`.
+# Online evaluation is retired in production: no ONLINE_EVAL binding,
+# sampler, queue consumer, or regression Cron is deployed.
 # ---------------------------------------------------------------------------
 GATEWAY_ONLINE_EVAL_POLICIES = "[]"
 
@@ -1169,42 +1169,6 @@ id = "PLATFORM_CONFIG_KV_ID_SET_BY_WORKFLOW"
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
-# Queues — the billing report fan-out
-#
-# Read as `env.BILLING` by `meteringBindingsFromEnv` (src/metering/runtime.ts),
-# wrapped by `QueueBillingReportPublisher` (src/metering/publisher.ts). It is
-# the port of the Rust `BillingReporter::deliver_once` HTTP POST, and
-# `docs/legacy/inventory-data-billing.md` §2.5 names it directly: "**Cloudflare
-# Queues** is the natural fit (replace the DB-polled sweeper with a Queue
-# consumer + dead-letter queue)".
-#
-# PRODUCER ONLY. This Worker never consumes the queue — `[[queues.consumers]]`
-# belongs to whichever Worker settles wallets/invoices downstream, together
-# with its `dead_letter_queue`. Declaring a consumer here would make this
-# Worker deliver messages to itself.
-#
-# The body is `MeteringQueueMessage` (src/metering/ports.ts): `credits` travels
-# as a DECIMAL STRING because a Queue body is JSON/structured-clone encoded and
-# a `bigint` past 2^53 would round-trip as a wrong `Number`. `id` is the ledger
-# entry id, so a consumer that has already applied a message can drop the
-# redelivery — which is what makes Queues' at-least-once semantics safe for
-# money.
-#
-# What breaks without it: the publisher falls back to
-# `InMemoryBillingReportPublisher`, so a charge is still priced and still
-# persisted to `BILLING_DB`, but nothing downstream is ever told about it. The
-# outbox row is deleted on that in-isolate "delivery", so the report is lost —
-# hence this binding lands together with the D1 one, not after it.
-#
-# `queue` is a DOCUMENTED PLACEHOLDER; the deploy step substitutes the real
-# queue (`wrangler queues create …`). Queue names are lowercase alphanumerics
-# and hyphens.
-# ---------------------------------------------------------------------------
-[[queues.producers]]
-binding = "BILLING"
-queue = "ferrogate-billing-reports"
-
-# ---------------------------------------------------------------------------
 # Queues — the request-log fan-in  (#664)
 #
 # Read as `env.REQUEST_LOG` by `requestLogBindingsFromEnv`
@@ -1212,14 +1176,7 @@ queue = "ferrogate-billing-reports"
 # (src/requestlog/middleware.ts) on `ctx.waitUntil`, i.e. never in front of a
 # client byte.
 #
-# PRODUCER **AND** CONSUMER, which is the opposite of the `BILLING` stanza
-# above, and deliberately so. `BILLING` is producer-only because settling a
-# wallet is a different Worker's job; the only thing that has to happen to a
-# request-log message is an insert into the CONTROL database, and THIS Worker
-# already binds it (`CONTROL_DB` below). Routing it to a second Worker would
-# add a deploy unit and a second set of credentials to run one statement. A
-# Worker consuming a queue it produces is a supported topology — the delivery
-# is a separate invocation with its own `env`, not a re-entrant call.
+# Produces and consumes request logs, writing to their owning DO.
 #
 # The body is `RequestLogWire` (src/requestlog/record.ts): a FLAT snake_case
 # record of primitives, because a Queue body is structured-clone encoded and a
@@ -1242,6 +1199,7 @@ queue = "ferrogate-billing-reports"
 # `queue` / `dead_letter_queue` are DOCUMENTED PLACEHOLDERS; the deploy step
 # substitutes the real queues (`wrangler queues create …`).
 # ---------------------------------------------------------------------------
+# BATCH_JOBS is retired: no batch producer, consumer, API execution, or Cron scan.
 [[queues.producers]]
 binding = "REQUEST_LOG"
 queue = "ferrogate-request-logs"
@@ -1253,107 +1211,6 @@ max_batch_timeout = 5
 max_retries = 5
 dead_letter_queue = "ferrogate-request-logs-dlq"
 
-# ---------------------------------------------------------------------------
-# Queues — the online-evaluation sample fan-in  (#692)
-#
-# Read as `env.ONLINE_EVAL` by `onlineEvalQueueFrom` (src/evals/sink.ts) and
-# produced from `onlineEvaluation()` (src/evals/middleware.ts) on
-# `ctx.waitUntil`, i.e. never in front of a client byte.
-#
-# PRODUCER **AND** CONSUMER, like `REQUEST_LOG` above and for the same reason:
-# everything the work needs — the model catalogue, the provider credentials and
-# `CONTROL_DB` — is already bound to THIS Worker, so a second deploy unit would
-# buy nothing but a second copy of the provider credentials.
-#
-# THE QUEUE IS WHAT KEEPS THE JUDGE OFF THE REQUEST PATH. A judge call is a
-# paid model inference of unbounded latency; running it inside the sampled
-# request's own `waitUntil` would hold that isolate (and charge its CPU) for
-# the length of a second inference. With this binding absent the sampler counts
-# its samples as dropped and evaluates nothing — deliberately, rather than
-# falling back to an inline judge.
-#
-# The body is `OnlineEvalSampleWire` (src/evals/record.ts), discriminated by
-# `object = "online_eval_sample"`. `src/index.ts::gatewayQueue` routes on that
-# field rather than on the queue NAME, because these names are placeholders the
-# deploy step substitutes.
-#
-# `max_batch_size` is 10, not 100: each message costs one judge inference, so a
-# batch is bounded by what one invocation can finish rather than by what one D1
-# `batch()` can write. `max_retries` is 2 for the same reason — a redelivery
-# re-judges, and the scores upsert on `(request_id, criterion_id)` so a
-# re-applied delivery corrects a row instead of doubling the sample.
-#
-# `queue` is a DOCUMENTED PLACEHOLDER; the deploy step substitutes the real
-# queues (`wrangler queues create …`).
-# ---------------------------------------------------------------------------
-[[queues.producers]]
-binding = "ONLINE_EVAL"
-queue = "ferrogate-online-eval"
-
-[[queues.consumers]]
-queue = "ferrogate-online-eval"
-max_batch_size = 10
-max_batch_timeout = 30
-max_retries = 2
-dead_letter_queue = "ferrogate-online-eval-dlq"
-
-# ---------------------------------------------------------------------------
-# Queues — tenant Durable Object schedule alarms (#856)
-#
-# TenantDataObject owns one native alarm per tenant and publishes only the
-# tenant wake-up envelope. The control-plane Worker consumes it, re-reads the
-# tenant-local schedule rows, and claims due slots in the object database.
-# ---------------------------------------------------------------------------
-[[queues.producers]]
-binding = "SCHEDULE_ALARMS"
-queue = "ferrogate-schedule-alarms"
-
-# ---------------------------------------------------------------------------
-# Queues — the batch-job executor  (#698, slices 2/3)
-#
-# Read as `env.BATCH_JOBS` by `batchJobQueueFrom` (src/batch/queue.ts). Produced
-# from `createBatch` on `ctx.waitUntil` and, for a job with work left, from the
-# consumer itself.
-#
-# PRODUCER **AND** CONSUMER, like `REQUEST_LOG` and `ONLINE_EVAL` above and for
-# the same reason: the model catalogue, the provider credentials, the tenant
-# databases and the R2 asset bucket are all already bound to THIS Worker, so a
-# second deploy unit would buy nothing but a second copy of the credentials.
-#
-# THE QUEUE IS THE THROUGHPUT LEG, NOT THE CORRECTNESS LEG. With this binding
-# absent `enqueueBatchJob` is a documented no-op and the 1-minute
-# `[triggers] crons` sweep (`sweepBatchExecution`) still advances every job — it
-# just advances one tick per minute per job instead of back-to-back. Nothing is
-# lost, which is why the producer never fails a `createBatch`.
-#
-# The body is `BatchJobWire` (src/batch/queue.ts), discriminated by
-# `object = "batch.job"`. `src/index.ts::gatewayQueue` routes on that field
-# rather than on the queue NAME, because these names are placeholders the deploy
-# step substitutes.
-#
-# `max_batch_size` is 1, and that is the point: one message is one batch job,
-# and a job tick can dispatch up to 25 paid provider calls. Batching ten of them
-# into one invocation would put 250 upstream calls behind a single Worker CPU
-# budget and lose all of them to one timeout. `max_batch_timeout` is 5 so a job
-# starts within seconds of creation. `max_retries` is 2 because the consumer
-# only ever arms a retry for a DURABLE-WRITE failure — a redelivery re-runs a
-# tick, and the `(batch_id, line_index)` results key makes that an overwrite
-# rather than a doubled bill, but it is still a paid re-dispatch of the tail of
-# one tick and must not loop.
-#
-# `queue` / `dead_letter_queue` are DOCUMENTED PLACEHOLDERS; the deploy step
-# substitutes the real queues (`wrangler queues create …`).
-# ---------------------------------------------------------------------------
-[[queues.producers]]
-binding = "BATCH_JOBS"
-queue = "ferrogate-batch-jobs"
-
-[[queues.consumers]]
-queue = "ferrogate-batch-jobs"
-max_batch_size = 1
-max_batch_timeout = 5
-max_retries = 2
-dead_letter_queue = "ferrogate-batch-jobs-dlq"
 
 # ---------------------------------------------------------------------------
 # Durable Objects — the rate-limit / quota counters

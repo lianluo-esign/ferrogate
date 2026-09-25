@@ -116,8 +116,7 @@ export {
 
 export {
   InMemoryBillingReportPublisher,
-  QueueBillingReportPublisher,
-  meteringQueueMessage,
+  SettledBillingReportPublisher,
 } from "./publisher.js";
 
 export {
@@ -176,7 +175,6 @@ export {
   executionContextOf,
   meteringBindingsFromEnv,
   meteringDatabaseFrom,
-  meteringQueueFrom,
 } from "./runtime.js";
 export type { MeteringBindingResolver, MeteringBindings } from "./runtime.js";
 

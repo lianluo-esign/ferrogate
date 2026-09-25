@@ -81,10 +81,7 @@
  * the body size and the streaming flag have all been checked.
  */
 
-import {
-  DurableObjectTenantDatabaseRouter,
-  backfillTenantConfigurationPolicy,
-} from "@ferrogate/storage";
+import { DurableObjectTenantDatabaseRouter } from "@ferrogate/storage";
 import type { TenantDataNamespace } from "@ferrogate/storage/durable-objects";
 import { controlDatabaseFrom } from "../control-data.js";
 
@@ -311,7 +308,6 @@ export function cacheGovernanceSourceFromEnv(
   return {
     async governanceFor(scopeId: string): Promise<CacheGovernanceLookup> {
       try {
-        await backfillTenantConfigurationPolicy(controlDb, router, scopeId);
         const handle = await router.forTenant(scopeId);
         return d1CacheGovernanceSource(handle.db).governanceFor(scopeId);
       } catch (error) {

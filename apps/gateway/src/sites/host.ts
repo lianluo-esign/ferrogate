@@ -165,7 +165,10 @@ export function siteDomainRouting(
     const cached = byEnv.get(env);
     if (cached !== undefined) return cached;
     const db = controlDatabase(env);
-    const built = db === null ? null : new D1SiteDomainDirectory(db);
+    const built =
+      db === null
+        ? null
+        : new D1SiteDomainDirectory(db, undefined, env.PLATFORM_CONFIG as KVNamespace | undefined);
     byEnv.set(env, built);
     return built;
   };
@@ -180,7 +183,9 @@ export function siteDomainRouting(
     const hostname = normalizeSiteHostname(new URL(c.req.url).host);
     if (hostname === "") return next();
 
-    const decision = await directory.resolve(hostname, now());
+    const decision = await directory.resolve(hostname, now(), (work) =>
+      c.executionCtx.waitUntil(work),
+    );
     if (decision.kind === "unbound") return next();
     if (decision.kind === "inactive") {
       throw new HttpError(

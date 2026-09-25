@@ -423,6 +423,40 @@ export function mergeUsage(
 /** The `[DONE]` sentinel, which carries no usage and must not be JSON-parsed. */
 const DONE_SENTINEL = "[DONE]";
 
+/** A heartbeat, role frame, or usage-only frame is not the first generated token. */
+function hasGeneratedOutput(payload: unknown): boolean {
+  const nonempty = (value: unknown): boolean => typeof value === "string" && value.length > 0;
+  const delta = member(payload, "delta");
+  const type = member(payload, "type");
+  if (
+    typeof type === "string" &&
+    /^response\.(output_text|reasoning_text|reasoning_summary_text|function_call_arguments|refusal)\.delta$/.test(type)
+  ) {
+    return nonempty(delta);
+  }
+  if (type === "content_block_delta") {
+    return ["text", "thinking", "partial_json"].some((key) => nonempty(member(delta, key)));
+  }
+  if (type === "content_block_start") {
+    const block = member(payload, "content_block");
+    return nonempty(member(block, "text")) || nonempty(member(block, "thinking"));
+  }
+  const choices = member(payload, "choices");
+  if (Array.isArray(choices) && choices.some((choice) => {
+    const part = member(choice, "delta");
+    if (["content", "reasoning_content", "reasoning", "refusal"].some((key) => nonempty(member(part, key)))) return true;
+    const tools = member(part, "tool_calls");
+    return Array.isArray(tools) && tools.some((tool) => nonempty(member(member(tool, "function"), "arguments")));
+  })) return true;
+  const candidates = member(payload, "candidates");
+  if (Array.isArray(candidates) && candidates.some((candidate) => {
+    const parts = member(member(candidate, "content"), "parts");
+    return Array.isArray(parts) && parts.some((part) => nonempty(member(part, "text")) || member(part, "functionCall") != null);
+  })) return true;
+  const bedrockDelta = member(member(payload, "contentBlockDelta"), "delta");
+  return nonempty(member(bedrockDelta, "text")) || nonempty(member(member(bedrockDelta, "toolUse"), "input"));
+}
+
 /**
  * `extract_last_provider_stream_usage` over a complete SSE body.
  *
@@ -455,6 +489,7 @@ export class SseUsageScraper {
   #sawData = false;
   #usage: ProviderUsage | undefined;
   #terminal = false;
+  #firstTokenAtMs: number | undefined;
 
   constructor(dialect: UsageDialect) {
     this.#dialect = dialect;
@@ -495,6 +530,10 @@ export class SseUsageScraper {
     return this.#terminal;
   }
 
+  get firstTokenAtMs(): number | undefined {
+    return this.#firstTokenAtMs;
+  }
+
   #line(rawLine: string): void {
     const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
     if (line.length === 0) {
@@ -526,6 +565,9 @@ export class SseUsageScraper {
         payload = undefined;
       }
       if (payload !== undefined) {
+        if (this.#firstTokenAtMs === undefined && hasGeneratedOutput(payload)) {
+          this.#firstTokenAtMs = Date.now();
+        }
         const observed = extractUsage(this.#dialect, payload);
         if (observed !== undefined) {
           this.#usage = mergeUsage(this.#usage, observed);
@@ -558,7 +600,7 @@ export class SseUsageScraper {
  */
 export function sseUsageTap(
   dialect: UsageDialect,
-  onUsage: (usage: ProviderUsage | undefined) => void,
+  onUsage: (usage: ProviderUsage | undefined, firstTokenAtMs?: number) => void,
 ): TransformStream<Uint8Array, Uint8Array> {
   const scraper = new SseUsageScraper(dialect);
   const decoder = new TextDecoder("utf-8");
@@ -566,7 +608,8 @@ export function sseUsageTap(
   const report = (): void => {
     if (!reported) {
       reported = true;
-      onUsage(scraper.finish());
+      const usage = scraper.finish();
+      onUsage(usage, scraper.firstTokenAtMs);
     }
   };
   return new TransformStream<Uint8Array, Uint8Array>({

@@ -7,6 +7,7 @@
  */
 import { ledgerEntryId } from "@ferrogate/billing";
 import { describe, expect, it } from "vitest";
+import { sseUsageTap } from "../../src/inference/usage.js";
 import {
   SINGLE_PROVIDER_ATTEMPT_INDEX,
   billingEventFromUsage,
@@ -206,6 +207,50 @@ describe("billingEventFromUsage", () => {
       provider_cost_multiplier: "0.5",
       provider_cost_usd: "0.125",
     });
+  });
+
+  it("records a trusted first-token observation and ignores a caller-supplied one", () => {
+    const event = billingEventFromUsage(
+      usageFixture({ metadata: { time_to_first_token_ms: "1" }, timeToFirstTokenMs: 500.4 }),
+      { nowUnixSeconds: 1 },
+    );
+    expect(event.metadata?.time_to_first_token_ms).toBe("500");
+    const settled = billingEventFromUsage(
+      usageFixture({
+        providerCostCurrency: "CNY",
+        providerCostFxRate: 7,
+        metadata: { provider_cost_currency: "USD", provider_cost_version: "9" },
+      }),
+      { nowUnixSeconds: 1, providerCostOriginal: 0.14 },
+    );
+    expect(settled.metadata).toMatchObject({
+      provider_cost_version: "2",
+      provider_cost_currency: "CNY",
+      provider_cost_fx_rate: "7",
+      provider_cost_original: "0.14",
+    });
+    const missing = billingEventFromUsage(usageFixture(), { nowUnixSeconds: 1 });
+    expect(missing.metadata).not.toHaveProperty("time_to_first_token_ms");
+  });
+});
+
+describe("sse first-token observation", () => {
+  it("stamps the first generated delta and ignores a usage-only frame", async () => {
+    const started = Date.now();
+    let observed: number | undefined;
+    const tap = sseUsageTap("openai.chat", (_usage, firstTokenAtMs) => {
+      observed = firstTokenAtMs;
+    });
+    const body = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{"role":"assistant"}}]}\n\n'));
+        controller.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{"content":"Hi"}}]}\n\n'));
+        controller.enqueue(new TextEncoder().encode("data: [DONE]\n\n"));
+        controller.close();
+      },
+    });
+    await new Response(body.pipeThrough(tap)).text();
+    expect(observed).toBeGreaterThanOrEqual(started);
   });
 });
 

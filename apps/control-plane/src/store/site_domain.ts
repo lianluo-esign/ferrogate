@@ -139,3 +139,49 @@ export function documentTenantId(record: Record<string, unknown>): string | null
   const tenantId = record.tenant_id;
   return typeof tenantId === "string" && tenantId.trim() !== "" ? tenantId.trim() : null;
 }
+
+/** Publish only the five fields the hostname router needs. Challenges and
+ * verification diagnostics remain in the tenant's authoritative document. */
+export async function publishSiteDomainRouteState(
+  db: D1Database,
+  record: import("@ferrogate/storage").StoredSiteDomainVerification,
+): Promise<void> {
+  const columns = await db
+    .prepare("PRAGMA table_info(site_domain_verifications)")
+    .all<{ name: string }>();
+  if (columns.results.some((column) => column.name === "challenge_token")) {
+    // Compatibility until the gateway applies the column-removal migration.
+    await db
+      .prepare(`INSERT INTO site_domain_verifications
+      (tenant_id,hostname,site,state,challenge_token,issued_at_unix,token_expires_at_unix,
+       verified_at_unix,verification_expires_at_unix,last_checked_at_unix,last_failure_reason,attempt_count,updated_at_unix)
+      VALUES(?,?,'',?,'',0,?,NULL,?,NULL,NULL,0,0)
+      ON CONFLICT(tenant_id,hostname) DO UPDATE SET site='',state=excluded.state,
+       challenge_token='',issued_at_unix=0,token_expires_at_unix=excluded.token_expires_at_unix,
+       verified_at_unix=NULL,verification_expires_at_unix=excluded.verification_expires_at_unix,
+       last_checked_at_unix=NULL,last_failure_reason=NULL,attempt_count=0,updated_at_unix=0`)
+      .bind(
+        record.tenantId,
+        record.hostname,
+        record.state,
+        record.tokenExpiresAtUnix,
+        record.verificationExpiresAtUnix ?? null,
+      )
+      .run();
+    return;
+  }
+  await db
+    .prepare(`INSERT INTO site_domain_verifications
+    (tenant_id,hostname,state,token_expires_at_unix,verification_expires_at_unix) VALUES(?,?,?,?,?)
+    ON CONFLICT(tenant_id,hostname) DO UPDATE SET state=excluded.state,
+    token_expires_at_unix=excluded.token_expires_at_unix,
+    verification_expires_at_unix=excluded.verification_expires_at_unix`)
+    .bind(
+      record.tenantId,
+      record.hostname,
+      record.state,
+      record.tokenExpiresAtUnix,
+      record.verificationExpiresAtUnix ?? null,
+    )
+    .run();
+}

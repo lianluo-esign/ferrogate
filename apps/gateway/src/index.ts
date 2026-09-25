@@ -16,28 +16,10 @@
  * `GATEWAY_ROUTE_MODULES` below; they need no change to the router, the guard,
  * or the contract table.
  */
-import {
-  assetDepsFromEnv,
-  assetRouteModule,
-  sweepAssetRetentionForTenants,
-} from "./assets/index.js";
+import { assetDepsFromEnv, assetRouteModule } from "./assets/index.js";
 import { attributionTags } from "./attribution/index.js";
-import {
-  batchJobFromWire,
-  batchRouteModule,
-  consumeBatchJobBatch,
-  sweepBatchExecution,
-} from "./batch/index.js";
-import type { BatchJobMessageBatch } from "./batch/index.js";
+import { retiredBatchRouteModule } from "./batch/retired.js";
 import { delegationChain } from "./delegation/index.js";
-import {
-  consumeOnlineEvalBatch,
-  createOnlineEvalSink,
-  onlineEvalSampleFromWire,
-  onlineEvaluation,
-  sweepAllOnlineEvalRegressions,
-} from "./evals/index.js";
-import type { OnlineEvalMessageBatch } from "./evals/index.js";
 import { guardrailDepsFromEnv, guardrails, sweepGuardrailEvidence } from "./guardrails/index.js";
 import {
   defaultAnthropicTranslator,
@@ -162,7 +144,6 @@ const requestLogs = createRequestLogSink(requestLogBindingsFromEnv);
  * isolate — and its CPU budget — alive for the length of a model call on every
  * sampled request.
  */
-const onlineEvals = createOnlineEvalSink();
 
 /**
  * The route modules THIS Worker mounts — the single source of truth for what
@@ -227,7 +208,7 @@ export const GATEWAY_ROUTE_MODULES: readonly RouteModule[] = [
     limits: { inferenceBodyMaxBytes: 64 * 1024 * 1024 },
   }),
   assetRouteModule({ depsFromEnv: assetDepsFromEnv }),
-  batchRouteModule(),
+  retiredBatchRouteModule(),
   // The static-site serve mode (issue #737), wired to the SAME `env.ASSETS`
   // bucket and the same tenant D1 bundle index the asset module is: it serves
   // published `static_site` bundles through `AssetService.pullAsset`, so a site
@@ -428,34 +409,6 @@ export const GATEWAY_MIDDLEWARE = [
   // `GATEWAY_ATTRIBUTION_POLICIES` var): with no policy for the calling tenant
   // it is one cached lookup and `next()`.
   attributionTags(),
-  // #692 — online evaluation of SAMPLED traffic, on `ctx.waitUntil`.
-  //
-  // AFTER `residency()`, and that edge is the whole reason it is here rather
-  // than anywhere else: `residency()` is what resolves and publishes the
-  // tenant's zero-data-retention posture for this request, and this middleware
-  // must be able to read it BEFORE it clones a body. A ZDR
-  // tenant is never sampled (evaluating a prompt means copying it), and a
-  // sampler mounted ahead of the resolver would have no way to know.
-  //
-  // Nothing it does is in front of a client byte: before `next()` it takes one
-  // in-memory policy peek, one hash and — only for a request already SELECTED
-  // — one `Request.clone()`, which tees a stream and reads nothing. The judge
-  // does not run here at all; it runs in the queue consumer below, in a
-  // different Worker invocation.
-  //
-  // Being INSIDE `guardrails()` would also have worked (it only reads the
-  // final response), and outside is preferred for one reason: a request a
-  // guardrail blocks answers 403, and this middleware then declines it as
-  // not-evaluable and COUNTS the skip, so a deployment whose traffic is mostly
-  // being blocked can see that in the sampler's own diagnostics.
-  //
-  // It sits ABOVE `responseStateCommit()` rather than below it because that is
-  // the only order satisfying BOTH adjacency claims — this one's "immediately
-  // after `residency()`" and the next one's "immediately above `guardrails()`,
-  // with nothing in between that touches a response body". Either order is
-  // safe for THIS middleware (it only clones a request, never rewrites a
-  // response), so the stricter claim wins the slot next to the screener.
-  onlineEvaluation(onlineEvals),
   // #689 — the `/v1/responses` conversation-state WRITE.
   //
   // IMMEDIATELY ABOVE `guardrails()`, and the position is the entire security
@@ -539,10 +492,9 @@ export async function gatewayScheduled(
   env: unknown,
   ctx: { waitUntil(work: Promise<unknown>): void },
 ): Promise<void> {
-  let tenantRouter: ReturnType<typeof resolverForEnv>["router"] | undefined;
   let tenantIds: readonly string[] | undefined;
   try {
-    tenantRouter = resolverForEnv(env as TenancyBindings).router;
+    const tenantRouter = resolverForEnv(env as TenancyBindings).router;
     tenantIds = await tenantRouter.provisionedTenants();
     await usage.sweep({ env, ctx }, undefined, tenantIds);
     // The usage/presence → control-D1 projection repair sweep is intentionally
@@ -588,9 +540,7 @@ export async function gatewayScheduled(
       }`,
     );
   }
-  if (tenantRouter !== undefined && tenantIds !== undefined) {
-    await sweepAssetRetentionForTenants(env, tenantRouter, tenantIds);
-  }
+  // Asset retention and orphan GC are retired: no scheduled asset/ R2 scans.
   await gatewayRequestLogRetention(env, tenantIds ?? []);
   // Track A hard-cut: unattributed billing now settles directly into the
   // PLATFORM_DATA object, so its crash-stranded outbox rows are recovered by the
@@ -610,31 +560,6 @@ export async function gatewayScheduled(
   // eviction there needs a per-object alarm — which is #765, where MCP sessions
   // are never evicted because nothing walks the namespace. Never throws.
   await sweepResponseConversations(env, Math.floor(Date.now() / 1000));
-  // #692 — compare the last day of judge scores against the last week's
-  // baseline and record the drops that clear each tenant's own threshold. On
-  // the SAME tick as the other two sweeps and after them, because it is the
-  // one that can be skipped without consequence: it never throws, and a
-  // quality measurement must not be able to delay money recovery.
-  //
-  // Tenant DISCOVERY is the provisioned-tenant roster (`tenantIds`, from
-  // `provisionedTenants()`), threaded in exactly like `sweepBatchExecution`
-  // below. It used to `SELECT DISTINCT tenant` over the shared-control
-  // `online_eval_scores` mirror — a Track A red line that migration `0043` has
-  // since DROPped — so the roster is now the only discovery source, and each
-  // tenant's scores are read from its own object. An unresolved registry
-  // (degraded fallback) yields an empty roster and the sweep is a clean no-op.
-  await sweepAllOnlineEvalRegressions(env, tenantIds ?? [], Math.floor(Date.now() / 1000));
-  // #698 slice 2/3 — advance every tenant's claimable batch jobs.
-  //
-  // LAST on the tick, and only when the tenant registry resolved, for the same
-  // reason the eval regression sweep is next-to-last: it is the most expensive
-  // thing here (it can dispatch paid provider calls) and it must never be able
-  // to delay money recovery. `sweepBatchExecution` never throws and takes a
-  // per-tenant lease, so overlapping with the Queue consumer is safe by
-  // construction rather than by scheduling luck.
-  if (tenantIds !== undefined) {
-    await sweepBatchExecution(env, tenantIds, { usage });
-  }
 }
 
 /**
@@ -652,10 +577,7 @@ export async function gatewayScheduled(
  * resolves zero scopes and touches nothing, because keeping evidence is the
  * only safe default.
  */
-async function gatewayRequestLogRetention(
-  env: unknown,
-  tenants: readonly string[],
-): Promise<void> {
+async function gatewayRequestLogRetention(env: unknown, tenants: readonly string[]): Promise<void> {
   const nowUnix = Math.floor(Date.now() / 1000);
   // Track A: request-log retention no longer touches any shared-CONTROL mirror.
   // It fans the fleet default over the PROVISIONED ROSTER (each tenant's own
@@ -682,63 +604,20 @@ async function gatewayRequestLogRetention(
  * dead-letter with nothing consuming it.
  */
 export async function gatewayQueue(batch: RequestLogMessageBatch, env: unknown): Promise<void> {
-  // TWO queues now arrive at this one entry point (#692), so the delivery is
-  // routed on the message body's `object` discriminator rather than on the
-  // queue NAME: the names in `wrangler.toml` are documented placeholders that
-  // the deploy step substitutes, so a name comparison would be a routing rule
-  // that works on one account and silently misroutes on another.
-  //
-  // Discriminating BEFORE decoding is the rule `requestlog/queue.ts` already
-  // states: `requestLogFromWire` is permissive and would turn an
-  // online-evaluation sample into a plausible, wrong `request_logs` row rather
-  // than an error. A Cloudflare batch never mixes queues, so in production this
-  // partition is all-or-nothing; it is written as a partition anyway so the
-  // code is honest about what it does with a mixed batch.
-  // The view is BUILT rather than spread: `MessageBatch.retryAll` lives on the
-  // platform object's PROTOTYPE, so `{ ...batch }` would silently produce a
-  // batch with no `retryAll` — and a consumer that cannot arm a retry loses
-  // every message in a delivery D1 rejected, quietly, which is the worst
-  // available failure here.
-  const view = (
-    messages: readonly { readonly body: unknown; ack?(): void }[],
-  ): OnlineEvalMessageBatch => ({
+  // Only request logs remain. Unknown/retired messages must
+  // never reach the permissive request-log decoder.
+  const view = (messages: typeof batch.messages): RequestLogMessageBatch => ({
     queue: batch.queue,
     messages,
     retryAll: (options?: unknown) => batch.retryAll?.(options),
   });
-
-  const evalMessages = batch.messages.filter(
-    (message) => onlineEvalSampleFromWire(message.body) !== undefined,
-  );
-  if (evalMessages.length > 0) {
-    // A judge score is tenant data: it lands in the owning object and is NOT
-    // mirrored to the shared control store (#859/#881 red line). The control
-    // projection that once dual-wrote beside it has been retired end to end and
-    // its mirror table DROPped (0043); the consumer is now tenant-object
-    // single-source, so there is no projection flag left to pass.
-    await consumeOnlineEvalBatch(view(evalMessages), env);
-  }
-  // #698 — the THIRD queue on this entry point. Same rule as the second: the
-  // partition is on the body's `object` discriminator (`batch.job`), not on
-  // `batch.queue`, because the queue names in `wrangler.toml` are placeholders
-  // the deploy step substitutes per account.
-  const batchJobs = batch.messages.filter(
-    (message) => batchJobFromWire(message.body) !== undefined,
-  );
-  if (batchJobs.length > 0) {
-    await consumeBatchJobBatch(view(batchJobs) as BatchJobMessageBatch, env, { usage });
-  }
-  const rest = batch.messages.filter(
-    (message) =>
-      onlineEvalSampleFromWire(message.body) === undefined &&
-      batchJobFromWire(message.body) === undefined,
-  );
-  if (rest.length > 0) {
-    // Track A: request_logs AND guardrail evidence are tenant data — each lands
-    // in the owning TenantDataObject (and PLATFORM_DATA for unscoped) and is NOT
-    // mirrored to any shared control store. The control projections were DROPped
-    // (0045), so the consumer is single-source with no projection leg to gate.
-    await consumeRequestLogBatch(view(rest) as RequestLogMessageBatch, env);
+  const logs = batch.messages.filter((message) => {
+    const body = message.body as { object?: unknown } | null;
+    return body?.object === "request_log" || body?.object === "guardrail_evaluation";
+  });
+  if (logs.length > 0) await consumeRequestLogBatch(view(logs), env);
+  for (const message of batch.messages) {
+    if (!logs.includes(message)) message.ack?.();
   }
 }
 

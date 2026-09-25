@@ -158,6 +158,31 @@ function errorDetail(error: unknown): string {
  * reverse dependency (the store already imports FROM gateway); the predicate is
  * byte-identical to `PlatformModelCatalogStore.isMissingPlatformCatalogError`.
  */
+export async function attachProviderCostSettlement(
+  db: D1Database,
+  rows: CatalogJoinRow[],
+): Promise<CatalogJoinRow[]> {
+  try {
+    const costs = await db
+      .prepare("SELECT id, cost_currency, cost_fx_rate FROM platform_provider_channels")
+      .all<{ id: string; cost_currency: string | null; cost_fx_rate: number | null }>();
+    const byId = new Map(costs.results.map((row) => [row.id, row]));
+    return rows.map((row) => {
+      const cost = byId.get(row.provider_id);
+      if (cost?.cost_currency !== "CNY" && cost?.cost_currency !== "USD") return row;
+      return {
+        ...row,
+        provider_cost_currency: cost.cost_currency,
+        provider_cost_fx_rate: typeof cost.cost_fx_rate === "number" ? cost.cost_fx_rate : undefined,
+      };
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/no such column:\s*(cost_currency|cost_fx_rate)/i.test(message)) return rows;
+    throw error;
+  }
+}
+
 function isMissingPlatformCatalogError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return (
@@ -294,6 +319,7 @@ export class ControlDataPlatformModelCatalogSource implements PlatformModelCatal
     try {
       const result = await db.prepare(PLATFORM_CATALOG_ROWS_SQL).all<CatalogJoinRow>();
       rows = result.results;
+      rows = await attachProviderCostSettlement(db, rows);
     } catch (error) {
       if (isMissingPlatformCatalogError(error)) {
         return { ok: true, models: input.fallback, inputs: EMPTY_INPUTS };

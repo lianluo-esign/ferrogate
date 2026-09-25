@@ -438,19 +438,13 @@ describe("the env-var drift gate itself", () => {
       // because it holds no secret BY CONSTRUCTION — a sink's credential is an
       // `env://` REFERENCE and `src/siem/config.ts` refuses an inline literal,
       // which is what makes this list safe to commit.
-      // Track A G2: the `tenants.document_json` tenant-account write/read source.
-      // `"control"` (default) mirrors the whole admin document into the shared
-      // control object and serves the operator LIST from it; `"tenant_object"`
-      // NULLs the mirror and fans the LIST out across each tenant object. A plain
-      // `[vars]` entry — names a topology, holds no secret. Read by
-      // `tenantAccountWritesTenantObjectOnly` in `store/quota_registry.ts`.
-      "CONTROL_TENANT_ACCOUNT_SOURCE",
       "SIEM_EXPORT_SINKS",
       "SPEND_ANOMALY_WEBHOOK_TIMEOUT_SECS",
       "SPEND_ANOMALY_WEBHOOK_URL",
       "TENANCY_LIFECYCLE",
       "TENANT_DEFAULT_LOCATION_HINT",
       "TENANT_RBAC_ACTIONS",
+      "VEGA_PASSKEY_ORIGIN",
     ]);
     // `PROMPT_LABELS` is the KV namespace the prompt deployment labels (#694)
     // write their edge pointer into; `apps/gateway` binds the same name and
@@ -657,6 +651,7 @@ describe("which committed [vars] values this runner can actually observe", () =>
     // Track A HARD-CUT DELETED both `CONTROL_SPEND_THROTTLE_SOURCE` and
     // `CONTROL_QUOTA_POLICY_SOURCE` (the two mirror tables are now object-only,
     // so there is no control write leg to gate) ⇒ 11.
+    // Passkey origin added one var; removing the account mirror switch removes one.
     expect(rows.length).toBe(11);
   });
 

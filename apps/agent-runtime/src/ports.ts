@@ -1611,7 +1611,7 @@ export function resolveDeps(env: AgentRuntimeBindings): AgentRuntimeDeps | undef
 
   const workerIdentities: WorkerIdentityPort | undefined =
     controlDb !== undefined
-      ? d1WorkerIdentityPort(controlDb)
+      ? d1WorkerIdentityPort(controlDb, tenantRouter)
       : dev
         ? inMemoryWorkerIdentityPort(
             parseJsonVar<DevSelfHostedWorker[]>(env.FG_DEV_SELF_HOSTED_WORKERS, []),

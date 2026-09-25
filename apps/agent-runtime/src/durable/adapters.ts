@@ -37,6 +37,7 @@ import {
   D1TwoHopApiKeyDirectory,
   type TenantDatabaseRouter,
   type TwoHopApiKeyDirectory,
+  readTenantWorkerIdentity,
 } from "@ferrogate/storage";
 import { normalizedCapabilities } from "../capabilities.js";
 import { timingSafeEqualStrings } from "../crypto.js";
@@ -275,8 +276,6 @@ interface RegistryRow extends RegisteredSelfHostedWorker {
  * primary-key point lookup, not a scan. The tenancy triple is then checked
  * against the DOCUMENT — see {@link rowFor}.
  */
-const FIND_REGISTRATION_SQL =
-  "SELECT registration_json FROM self_hosted_worker_registrations WHERE id = ?";
 
 function asString(value: unknown): string | null {
   return typeof value === "string" && value.trim() !== "" ? value : null;
@@ -369,26 +368,19 @@ function identityShapeError(identity: SelfHostedWorkerIdentity): string | null {
  *
  * A D1 failure is `unavailable` (503), never an admission.
  */
-export function d1WorkerIdentityPort(db: D1Database): WorkerIdentityPort {
+export function d1WorkerIdentityPort(
+  _db: D1Database,
+  tenantRouter?: TenantDatabaseRouter,
+): WorkerIdentityPort {
   /** Load the row for a tenancy triple. `undefined` = no usable row. */
   async function rowFor(
     tenantId: string,
     workspaceId: string,
     workerId: string,
   ): Promise<RegistryRow | undefined> {
-    const record = await db
-      .prepare(FIND_REGISTRATION_SQL)
-      .bind(workerId)
-      .first<{ registration_json: string | null }>();
-    if (record === null || record.registration_json === null) return undefined;
-    let document: RegistrationDocument;
-    try {
-      const parsed: unknown = JSON.parse(record.registration_json);
-      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return undefined;
-      document = parsed as RegistrationDocument;
-    } catch {
-      return undefined;
-    }
+    if (tenantRouter === undefined) throw new Error("tenant worker identity router is unavailable");
+    const document = await readTenantWorkerIdentity(tenantRouter, tenantId, workerId);
+    if (document === null) return undefined;
     const row = registryRowFromDocument(document);
     if (row === null) return undefined;
     // The tenancy triple is the registry key (Rust `worker_key`). A row whose

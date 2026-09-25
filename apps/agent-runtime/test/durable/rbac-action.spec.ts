@@ -187,10 +187,7 @@ beforeEach(async () => {
     db.prepare("DELETE FROM roles"),
     db.prepare("DELETE FROM permissions"),
   ]);
-  await privilegedTenantBatch(TENANT_A, [
-    { sql: "DELETE FROM tenant_role_bindings", params: [] },
-    { sql: "DELETE FROM tenant_role_catalog", params: [] },
-  ]);
+  await privilegedTenantBatch(TENANT_A, [{ sql: "DELETE FROM tenant_role_bindings", params: [] }]);
 });
 
 describe("FC-7 — the deployed bearer ladder consults the durable role graph", () => {

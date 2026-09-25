@@ -92,7 +92,6 @@ import {
   StorageError,
   type TenantDatabaseHandle,
   type TenantDatabaseRouter,
-  backfillTenantConfigurationPolicy,
 } from "@ferrogate/storage";
 
 import type { AuthContext, AuthError, AuthPort } from "./ports.js";
@@ -524,7 +523,6 @@ export class D1McpAuth implements AuthPort {
           .bind(tenantId)
           .all();
         if ((registered.results ?? []).length === 0) return INVALID_KEY;
-        await backfillTenantConfigurationPolicy(this.#db, this.#router, tenantId);
         const handle = await this.#router.forTenant(tenantId);
         const rows = await handle.db
           .prepare(TENANT_ROLE_PERMISSIONS_SQL)

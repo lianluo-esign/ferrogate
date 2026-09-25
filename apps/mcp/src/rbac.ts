@@ -75,11 +75,7 @@
  * An operation with no `rbac_action` never reaches this port at all, so an
  * unbound deployment serves exactly what it served before.
  */
-import {
-  DurableObjectTenantDatabaseRouter,
-  type TenantDatabaseRouter,
-  backfillTenantConfigurationPolicy,
-} from "@ferrogate/storage";
+import { DurableObjectTenantDatabaseRouter, type TenantDatabaseRouter } from "@ferrogate/storage";
 import type { TenantDataNamespace } from "@ferrogate/storage/durable-objects";
 import type { AuthContext } from "./ports.js";
 
@@ -217,7 +213,6 @@ export class D1RbacAuthorizer implements RbacAuthorizerPort {
   async #tenantRoleGrants(tenantId: string): Promise<{ results: unknown[] }> {
     const router = this.#tenantDatabases;
     if (router === undefined) throw new Error("tenant object router is not configured");
-    await backfillTenantConfigurationPolicy(this.#db as unknown as D1Database, router, tenantId);
     const handle = await router.forTenant(tenantId);
     const local = await handle.db
       .prepare(

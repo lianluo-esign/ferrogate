@@ -251,7 +251,8 @@ export function routeEstimatedCost(
 /** A missing/invalid supplier multiplier cannot make a route look free. */
 function providerCostFactor(route: PhysicalRoute): number {
   const value = route.providerCostMultiplier;
-  return value !== undefined && Number.isFinite(value) && value >= 0 ? value : 1;
+  const multiplier = value !== undefined && Number.isFinite(value) && value >= 0 ? value : 1;
+  return multiplier / (route.providerCostCurrency === "CNY" ? (route.providerCostFxRate ?? 7.2) : 1);
 }
 
 /**

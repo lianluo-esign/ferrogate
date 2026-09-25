@@ -1,47 +1,12 @@
-/**
- * THE SHADOW ARM CARRIES AN EVAL SCORE (#693, closing the last Done-when).
- *
- * ## The gap this file closes
- *
- * `attribution.test.ts` proves the shadow arm reaches `experiment_shadow_legs`
- * — cost, latency, error rate. `scored-arms.test.ts` proves the CANARY arm
- * reaches `online_eval_scores`. Between them the shadow arm had every
- * operational number and no quality number, so `compareExperimentQuality` on a
- * control+shadow split could only ever answer `variant_arm_not_scored`: an
- * operator running a shadow experiment learned what the variant COST and never
- * whether it was BETTER, which is the only question the feature exists for.
- *
- * The mirror's response is discarded by design (`inference/shadow.ts` lists the
- * five mechanisms). Scoring it therefore means RETAINING it exactly as long as
- * it takes to build one eval sample, and only for a request the tenant's own
- * eval policy already authorised content capture on.
- *
- * ## The comparability rule is INHERITED, never re-decided
- *
- * The shadow sample is derived from the SERVED sample object
- * (`evals/shadow-leg.ts::shadowArmSampleFrom`), so `judge_model`, `criteria`,
- * `sampling_key`, `sample_rate` and the prompt are the SAME VALUES, not a second
- * resolution that could disagree. That is what the assertions below check
- * directly: two rows, one instrument. If the shadow path ever grew its own
- * policy lookup, these would still be two scores — and
- * `compareExperimentQuality` would silently start comparing two instruments.
- *
- * ## What is real
- *
- * The deployed middleware chain (`GATEWAY_MIDDLEWARE`), the real sampler, the
- * real shadow dispatch, the real queue wire, the DEPLOYED queue entry point
- * (`gatewayQueue`), the real judge dispatch with only the outbound `fetch`
- * intercepted, and the real `CONTROL_DB` with the committed migrations. Nothing
- * here seeds a score row.
- */
+// Optional evaluation library coverage. These fixtures explicitly mount the retired sampler.
 import { createExecutionContext, env as poolEnv, waitOnExecutionContext } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { shadowEvalLegFor } from "../../src/evals/index.js";
-import { GATEWAY_MIDDLEWARE, gatewayQueue } from "../../src/index.js";
 import type { PhysicalRoute, RequestIdFactory } from "../../src/inference/index.js";
 import { InMemoryModelResolver, inferenceRouteModule } from "../../src/inference/index.js";
 import { createGatewayApp } from "../../src/routes/index.js";
 import { controlDb, resetOnlineEvalTables, storedTenantScores } from "../evals/harness.js";
+import { GATEWAY_MIDDLEWARE, gatewayQueue } from "../evals/optional-chain.js";
 import {
   type ProviderInterceptor,
   interceptProviderFetch,

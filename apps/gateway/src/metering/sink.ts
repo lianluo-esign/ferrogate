@@ -107,8 +107,8 @@ import {
   type LedgerStore,
   type MeteredCharge,
   type MeteringClock,
-  type MeteringDiagnostics,
   type MeteringDatabase,
+  type MeteringDiagnostics,
   type MeteringOutbox,
   type MeteringScheduler,
   type MeteringStats,
@@ -118,7 +118,7 @@ import {
   executionContextScheduler,
   systemClock,
 } from "./ports.js";
-import { InMemoryBillingReportPublisher, QueueBillingReportPublisher } from "./publisher.js";
+import { SettledBillingReportPublisher } from "./publisher.js";
 import type { MeteringBindingResolver } from "./runtime.js";
 import {
   type MeteringAttribution,
@@ -356,7 +356,7 @@ export class MeteringUsageSink implements UsageSink {
    * A `WeakMap` keyed by `env` — never a plain field — is what keeps this
    * concurrency-safe: two in-flight requests each resolve through their OWN
    * bindings and neither can observe the other's, while the `D1LedgerStore` /
-   * `QueueBillingReportPublisher` wrappers are still built once per isolate
+   * database wrappers are still built once per isolate
    * instead of once per request. It is the same device `modelsFromEnv` uses.
    */
   readonly #backends = new WeakMap<object, Map<string, MeteringBackend>>();
@@ -374,7 +374,7 @@ export class MeteringUsageSink implements UsageSink {
         : configuredPriceBook;
     this.#ledger = options.ledger ?? new InMemoryLedgerStore();
     this.#outbox = options.outbox ?? new InMemoryMeteringOutbox();
-    this.#publisher = options.publisher ?? new InMemoryBillingReportPublisher();
+    this.#publisher = options.publisher ?? new SettledBillingReportPublisher();
     this.#scheduler = options.scheduler ?? new TrackingScheduler();
     this.#clock = options.clock ?? systemClock;
     this.#diagnostics = options.diagnostics ?? {};
@@ -515,7 +515,6 @@ export class MeteringUsageSink implements UsageSink {
       return cached;
     }
     const database = this.#bindings.database(env, tenantId);
-    const queue = this.#bindings.queue(env);
     const usageDatabase = this.#bindings.usageDatabase?.(env, tenantId);
     const budgetAlerts = budgetAlertPortsFrom(env);
     const resolved: MeteringBackend = {
@@ -523,7 +522,7 @@ export class MeteringUsageSink implements UsageSink {
         database === undefined
           ? fallback.ledger
           : new D1LedgerStore(database, tenantId === undefined ? {} : { tenantId }),
-      publisher: queue === undefined ? fallback.publisher : new QueueBillingReportPublisher(queue),
+      publisher: fallback.publisher,
       ...(usageDatabase === undefined ? {} : { usageDatabase }),
       ...(budgetAlerts === undefined ? {} : { budgetAlerts }),
     };
@@ -553,10 +552,15 @@ export class MeteringUsageSink implements UsageSink {
     // an absent settled cost stays absent so the rate-card path is unchanged.
     const offerCostUsd = this.#settledCostUsd?.(usage);
     const candidateSettledCostUsd = applyBillingMultiplier(offerCostUsd, usage.billingMultiplier);
-    const providerCostUsd =
+    const providerCostOriginal =
       usage.providerCostMultiplier === undefined
         ? undefined
         : applyBillingMultiplier(offerCostUsd, usage.providerCostMultiplier);
+    const providerCostUsd =
+      providerCostOriginal === undefined
+        ? undefined
+        : providerCostOriginal /
+          (usage.providerCostCurrency === "CNY" ? (usage.providerCostFxRate ?? 7.2) : 1);
     const settledCostUsd =
       this.#settlementMode === "serving_offering"
         ? usableSettledCostUsd(candidateSettledCostUsd)
@@ -571,6 +575,11 @@ export class MeteringUsageSink implements UsageSink {
       ...(settledCostUsd !== undefined ? { settledCostUsd } : {}),
       ...(offerCostUsd !== undefined ? { offerCostUsd } : {}),
       ...(providerCostUsd !== undefined ? { providerCostUsd } : {}),
+      ...(usage.providerCostCurrency === undefined
+        ? {}
+        : { providerCostCurrency: usage.providerCostCurrency }),
+      ...(usage.providerCostFxRate === undefined ? {} : { providerCostFxRate: usage.providerCostFxRate }),
+      ...(providerCostOriginal === undefined ? {} : { providerCostOriginal }),
       ...(this.#clusterId !== undefined ? { clusterId: this.#clusterId } : {}),
       ...(this.#nodeId !== undefined ? { nodeId: this.#nodeId } : {}),
       diagnostics: this.#diagnostics,
@@ -839,6 +848,7 @@ export class MeteringUsageSink implements UsageSink {
           // verified replay.
           this.#stats.duplicates += 1;
           await this.#accumulate(backend, charge, attribution, rc, false);
+          await this.#reap(backend, id);
           this.#outbox.delete(id);
           return;
         }

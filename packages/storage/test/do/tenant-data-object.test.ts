@@ -28,12 +28,10 @@ import {
 import { beforeAll, beforeEach, describe, expect, test } from "vitest";
 import {
   TENANT_AGGREGATE_FLUSH_CALLBACK,
-  TENANT_SCHEDULE_ALARM_CALLBACK,
   type TenantAggregateFlushAlarmCallback,
   type TenantDataBatchRequest,
   type TenantDataNamespace,
   type TenantDataObject,
-  type TenantScheduleAlarmCallback,
   sqlStatements,
 } from "../../src/tenant-data-object.js";
 import type { TenantAggregateFlushAlarmMessage } from "../../src/tenant-data-object.js";
@@ -81,7 +79,6 @@ const TENANT_TABLES = [
   "agent_schedule_fires",
   "agent_schedules",
   "agent_worker_instances",
-  "api_keys",
   "asset_bundle_files",
   "asset_channels",
   "audit_events",
@@ -113,12 +110,10 @@ const TENANT_TABLES = [
   "managed_worker_templates",
   "mcp_identity_generations",
   "mcp_oauth_credentials",
-  "mcp_servers",
   "observed_agent_presence",
   "online_eval_leg_quality",
   "online_eval_regressions",
   "online_eval_scores",
-  "payment_methods",
   "projects",
   "provider_channels",
   // `0033_quota_policies` — the effective-quota chain (tenant/project/workspace/
@@ -136,12 +131,6 @@ const TENANT_TABLES = [
   "self_hosted_worker_identities",
   "self_hosted_worker_telemetry_events",
   "semantic_cache_policies",
-  // #948 — the read-only shared-config mirror the control plane pushes into.
-  // `0027_shared_config_mirror` added billing groups + the cursor;
-  // `0028_shared_announcements_mirror` added announcements. Plans next.
-  "shared_announcements",
-  "shared_billing_groups",
-  "shared_config_cursor",
   "spend_anomaly_episodes",
   // `0032_spend_throttles` — the auto-throttle table, moved off the removed
   // control database into the tenant object (the detector only ever writes
@@ -156,7 +145,6 @@ const TENANT_TABLES = [
   "tenant_provisioning_marks",
   "tenant_resources",
   "tenant_role_bindings",
-  "tenant_role_catalog",
   "tenant_write_fences",
   "usage_aggregate_rollups",
   "usage_event_claims",
@@ -378,13 +366,13 @@ describe("the statement splitter", () => {
       // (#894, Track A single-source) gives the recomputed leg-quality
       // projection its tenant-object home so its shared-control mirror can be
       // dropped (+1 `CREATE TABLE`, +1 `CREATE INDEX`).
-      files: 34,
-      statements: 456,
-      createTable: 83,
-      createIndex: 105,
-      createUniqueIndex: 6,
+      files: 40,
+      statements: 497,
+      createTable: 84,
+      createIndex: 108,
+      createUniqueIndex: 9,
       alterTable: 26,
-      insert: 6,
+      insert: 13,
     });
 
     // The other half of the argument: the comment lines that carry a `;`, which
@@ -418,13 +406,15 @@ describe("the statement splitter", () => {
       "0027_shared_config_mirror": 4,
       "0029_shared_billing_group_type": 1,
       "0034_online_eval_leg_quality": 2,
+      "0037_canonical_api_key_documents": 1,
+      "0039_canonical_payment_method_documents": 1,
     });
-    expect(Object.values(commentSemicolons).reduce((total, n) => total + n, 0)).toBe(47);
+    expect(Object.values(commentSemicolons).reduce((total, n) => total + n, 0)).toBe(49);
 
     // Ordinary statements still have their terminator removed, while each
     // trigger stays whole because its body contains internal terminators.
     const triggers = all.filter((statement) => /CREATE\s+TRIGGER/i.test(statement));
-    expect(triggers).toHaveLength(229);
+    expect(triggers).toHaveLength(238);
     expect(
       all.filter((statement) => !/CREATE\s+TRIGGER/i.test(statement) && statement.includes(";")),
     ).toEqual([]);
@@ -441,7 +431,7 @@ describe("a fresh tenant object", () => {
     expect(status.latest).toBe(TENANT_SCHEMA_VERSION);
     // A guard on the fixture: if `TENANT_MIGRATIONS` were ever empty the
     // version assertions above would both read 0 and pass vacuously.
-    expect(TENANT_MIGRATIONS.length).toBe(34);
+    expect(TENANT_MIGRATIONS.length).toBe(40);
     expect(status.appliedThisWake).toEqual(TENANT_MIGRATIONS.map((m) => m.name));
 
     const tables = await object.query({
@@ -574,10 +564,10 @@ describe("tenant configuration and policy state", () => {
   test("rejects alternate SQLite write forms for protected role tables", async () => {
     const statements = [
       "UPDATE OR REPLACE tenant_role_bindings SET role_id = 'role_operator'",
-      "DELETE FROM main.tenant_role_catalog",
+      "DELETE FROM main.tenant_role_bindings",
       "WITH candidate AS (SELECT 1) INSERT INTO tenant_role_bindings (id) SELECT 'binding' FROM candidate",
-      "CREATE TRIGGER role_projection_trigger AFTER INSERT ON projects BEGIN INSERT INTO tenant_role_catalog (role_id) VALUES ('role'); END",
-      "CREATE TRIGGER role_projection_guard AFTER INSERT ON projects WHEN '--' = '--' BEGIN INSERT INTO tenant_role_catalog (role_id) VALUES ('role'); END",
+      "CREATE TRIGGER role_projection_trigger AFTER INSERT ON projects BEGIN INSERT INTO tenant_role_bindings (role_id) VALUES ('role'); END",
+      "CREATE TRIGGER role_projection_guard AFTER INSERT ON projects WHEN '--' = '--' BEGIN INSERT INTO tenant_role_bindings (role_id) VALUES ('role'); END",
     ];
     for (const [index, sql] of statements.entries()) {
       const tenantId = `tenant_privileged_syntax_${index}`;
@@ -585,18 +575,11 @@ describe("tenant configuration and policy state", () => {
     }
   });
 
-  test("accepts a role snapshot and binding only through the privileged RPC", async () => {
+  test("accepts a role binding only through the privileged RPC", async () => {
     const tenantId = "tenant_privileged_role";
     await privilegedObjectFor(tenantId).privilegedBatch({
       tenantId,
       statements: [
-        {
-          sql:
-            "INSERT INTO tenant_role_catalog " +
-            "(role_id, name, slug, description, permission_keys_json, created_at_unix, updated_at_unix) " +
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-          params: ["role_operator", "Operator", "operator", "", '["tenant.read"]', 100, 100],
-        },
         {
           sql:
             "INSERT INTO tenant_role_bindings (id, tenant_id, role_id, created_at_unix) " +
@@ -609,15 +592,12 @@ describe("tenant configuration and policy state", () => {
     const rows = await objectFor(tenantId).query({
       tenantId,
       sql:
-        "SELECT b.tenant_id, b.role_id, c.permission_keys_json " +
+        "SELECT b.tenant_id, b.role_id " +
         "FROM tenant_role_bindings AS b " +
-        "JOIN tenant_role_catalog AS c ON c.role_id = b.role_id " +
         "WHERE b.tenant_id = ?",
       params: [tenantId],
     });
-    expect(rows.results).toEqual([
-      { tenant_id: tenantId, role_id: "role_operator", permission_keys_json: '["tenant.read"]' },
-    ]);
+    expect(rows.results).toEqual([{ tenant_id: tenantId, role_id: "role_operator" }]);
   });
 
   test("keeps configuration and policy rows physically isolated per tenant", async () => {
@@ -1564,187 +1544,46 @@ describe("tenant-owned worker and schedule state", () => {
 });
 
 describe("tenant schedule alarms", () => {
-  test("sets and clears the native alarm through an admitted tenant RPC", async () => {
-    const tenantId = "tenant_schedule_alarm_lifecycle";
+  test("refuses new schedule alarms while preserving tenant admission", async () => {
+    const tenantId = "tenant_retired_schedule";
     const object = scheduleAlarmObjectFor(tenantId);
-    const scheduledAtUnix = 1_800_000_123;
-
-    await object.setScheduleAlarm({ tenantId, scheduledAtUnix });
-    expect(await runInDurableObject(object, (_instance, state) => state.storage.getAlarm())).toBe(
-      scheduledAtUnix * 1000,
-    );
-
-    await object.clearScheduleAlarm({ tenantId });
+    expect(
+      await refusal(object.setScheduleAlarm({ tenantId, scheduledAtUnix: 1_800_000_123 })),
+    ).toMatch(/retired/);
     expect(
       await runInDurableObject(object, (_instance, state) => state.storage.getAlarm()),
     ).toBeNull();
+    expect(await refusal(object.clearScheduleAlarm({ tenantId: "another_tenant" }))).toMatch(
+      /another tenant|holds tenant/,
+    );
   });
 
-  test("keeps the alarm and callback isolated to one tenant object", async () => {
-    type AlarmHookSeam = {
-      alarmCallbackRuns: number;
-      alarmCallbackActive: boolean;
-      alarmCallbackMessage: TenantScheduleAlarmMessage | null;
-      [TENANT_SCHEDULE_ALARM_CALLBACK]: TenantScheduleAlarmCallback;
-    };
-    const tenantA = "tenant_schedule_alarm_a";
-    const tenantB = "tenant_schedule_alarm_b";
-    const objectA = scheduleAlarmObjectFor(tenantA);
-    const objectB = scheduleAlarmObjectFor(tenantB);
-    const seam = async (instance: DurableObjectStub<TenantDataObject>) => {
-      await runInDurableObject(instance, (current) => {
-        const target = current as unknown as AlarmHookSeam;
-        target.alarmCallbackRuns = 0;
-        target.alarmCallbackActive = false;
-        target.alarmCallbackMessage = null;
-        target[TENANT_SCHEDULE_ALARM_CALLBACK] = async function (
-          this: AlarmHookSeam,
-          message: TenantScheduleAlarmMessage,
-        ) {
-          expect(this.alarmCallbackActive).toBe(false);
-          this.alarmCallbackActive = true;
-          await Promise.resolve();
-          this.alarmCallbackMessage = message;
-          this.alarmCallbackRuns += 1;
-          this.alarmCallbackActive = false;
-        };
-      });
-    };
-
-    await seam(objectA);
-    await seam(objectB);
-    const scheduledAtUnixA = Math.floor(Date.now() / 1000) + 10;
-    const scheduledAtUnixB = scheduledAtUnixA + 100;
-    await objectA.setScheduleAlarm({ tenantId: tenantA, scheduledAtUnix: scheduledAtUnixA });
-    await objectB.setScheduleAlarm({ tenantId: tenantB, scheduledAtUnix: scheduledAtUnixB });
-
-    expect(await refusal(objectA.clearScheduleAlarm({ tenantId: tenantB }))).toMatch(
-      /holds tenant tenant_schedule_alarm_a|another tenant/,
-    );
-    expect(await runInDurableObject(objectA, (_instance, state) => state.storage.getAlarm())).toBe(
-      scheduledAtUnixA * 1000,
-    );
-    expect(await runDurableObjectAlarm(objectA)).toBe(true);
-    expect(
-      await runInDurableObject(objectA, (instance) => {
-        const target = instance as unknown as AlarmHookSeam;
-        return {
-          runs: target.alarmCallbackRuns,
-          active: target.alarmCallbackActive,
-          message: target.alarmCallbackMessage,
-        };
-      }),
-    ).toEqual({
-      runs: 1,
-      active: false,
-      message: {
+  test("clears a legacy wakeup without publishing or rearming it", async () => {
+    const tenantId = "tenant_retired_wakeup";
+    const object = scheduleAlarmObjectFor(tenantId);
+    await object.query({ tenantId, sql: "SELECT 1" });
+    await runInDurableObject(object, async (_instance, state) => {
+      await state.storage.put("tenant_data:schedule_alarm", {
         kind: "tenant-schedule-alarm",
         version: 1,
-        tenant_id: tenantA,
-        scheduled_at_unix: scheduledAtUnixA,
-      },
-    });
-    expect(
-      await runInDurableObject(objectB, (instance) => {
-        const target = instance as unknown as AlarmHookSeam;
-        return {
-          runs: target.alarmCallbackRuns,
-          active: target.alarmCallbackActive,
-          message: target.alarmCallbackMessage,
-        };
-      }),
-    ).toEqual({ runs: 0, active: false, message: null });
-    expect(await runDurableObjectAlarm(objectB)).toBe(true);
-
-    expect(
-      await runInDurableObject(objectA, (_instance, state) => state.storage.getAlarm()),
-    ).toBeNull();
-  });
-
-  test("multiplexes schedule and aggregate deadlines independently", async () => {
-    type AlarmHookSeam = {
-      scheduleRuns: number;
-      flushRuns: number;
-      [TENANT_SCHEDULE_ALARM_CALLBACK]: TenantScheduleAlarmCallback;
-      [TENANT_AGGREGATE_FLUSH_CALLBACK]: TenantAggregateFlushAlarmCallback;
-    };
-    const now = Math.floor(Date.now() / 1000);
-    const scheduleOnly = aggregateAlarmObjectFor("tenant_alarm_schedule_only");
-    const flushOnly = aggregateAlarmObjectFor("tenant_alarm_flush_only");
-    const bothDue = aggregateAlarmObjectFor("tenant_alarm_both_due");
-
-    const installHooks = async (instance: DurableObjectStub<TenantDataObject>) => {
-      await runInDurableObject(instance, (current) => {
-        const target = current as unknown as AlarmHookSeam;
-        target.scheduleRuns = 0;
-        target.flushRuns = 0;
-        target[TENANT_SCHEDULE_ALARM_CALLBACK] = async function (this: AlarmHookSeam) {
-          this.scheduleRuns += 1;
-        };
-        target[TENANT_AGGREGATE_FLUSH_CALLBACK] = async function (
-          this: AlarmHookSeam,
-          _message: TenantAggregateFlushAlarmMessage,
-        ) {
-          this.flushRuns += 1;
-        };
+        tenant_id: tenantId,
+        scheduled_at_unix: 1,
       });
-    };
-
-    await Promise.all([installHooks(scheduleOnly), installHooks(flushOnly), installHooks(bothDue)]);
-
-    await scheduleOnly.setScheduleAlarm({
-      tenantId: "tenant_alarm_schedule_only",
-      scheduledAtUnix: now + 10,
+      await state.storage.setAlarm(Date.now() + 60_000);
     });
-    await scheduleOnly.setAggregateFlushAlarm({
-      tenantId: "tenant_alarm_schedule_only",
-      scheduledAtUnix: now + 120,
-    });
-    await runDurableObjectAlarm(scheduleOnly);
+    expect(await runDurableObjectAlarm(object)).toBe(true);
     expect(
-      await runInDurableObject(scheduleOnly, (current) => {
-        const target = current as unknown as AlarmHookSeam;
-        return { scheduleRuns: target.scheduleRuns, flushRuns: target.flushRuns };
-      }),
-    ).toEqual({ scheduleRuns: 1, flushRuns: 0 });
+      await runInDurableObject(object, (_instance, state) =>
+        state.storage.get("tenant_data:schedule_alarm"),
+      ),
+    ).toBeUndefined();
     expect(
-      await runInDurableObject(scheduleOnly, (_instance, state) => state.storage.getAlarm()),
-    ).toBe((now + 120) * 1000);
-
-    await flushOnly.setScheduleAlarm({
-      tenantId: "tenant_alarm_flush_only",
-      scheduledAtUnix: now + 120,
-    });
-    await flushOnly.setAggregateFlushAlarm({
-      tenantId: "tenant_alarm_flush_only",
-      scheduledAtUnix: now + 10,
-    });
-    await runDurableObjectAlarm(flushOnly);
+      await runInDurableObject(object, (_instance, state) => state.storage.getAlarm()),
+    ).toBeNull();
+    await object.rearmScheduleAlarm({ tenantId });
     expect(
-      await runInDurableObject(flushOnly, (current) => {
-        const target = current as unknown as AlarmHookSeam;
-        return { scheduleRuns: target.scheduleRuns, flushRuns: target.flushRuns };
-      }),
-    ).toEqual({ scheduleRuns: 0, flushRuns: 1 });
-    expect(
-      await runInDurableObject(flushOnly, (_instance, state) => state.storage.getAlarm()),
-    ).toBeGreaterThanOrEqual((now + 60) * 1000);
-
-    await bothDue.setScheduleAlarm({
-      tenantId: "tenant_alarm_both_due",
-      scheduledAtUnix: now + 10,
-    });
-    await bothDue.setAggregateFlushAlarm({
-      tenantId: "tenant_alarm_both_due",
-      scheduledAtUnix: now + 10,
-    });
-    await runDurableObjectAlarm(bothDue);
-    expect(
-      await runInDurableObject(bothDue, (current) => {
-        const target = current as unknown as AlarmHookSeam;
-        return { scheduleRuns: target.scheduleRuns, flushRuns: target.flushRuns };
-      }),
-    ).toEqual({ scheduleRuns: 1, flushRuns: 1 });
+      await runInDurableObject(object, (_instance, state) => state.storage.getAlarm()),
+    ).toBeNull();
   });
 
   /**
@@ -1891,5 +1730,113 @@ describe("two tenants", () => {
     const status = await fresh.schemaVersion();
     expect(status.appliedThisWake.length).toBe(TENANT_MIGRATIONS.length);
     expect(status.version).toBe(TENANT_SCHEMA_VERSION);
+  });
+});
+
+describe("retiring platform catalog replicas", () => {
+  test("cleans legacy copies, retains custom routes and grants, and can replay safely", async () => {
+    const tenantId = "tenant_platform_replica_cleanup";
+    const stub = objectFor(tenantId);
+    await stub.query({ tenantId, sql: "SELECT 1" });
+    await runInDurableObject(stub, (_instance, state) => {
+      const sql = state.storage.sql;
+      // Recreate the old role snapshot and seed graph on the real DO SQLite.
+      sql.exec("CREATE TABLE tenant_role_catalog (role_id TEXT PRIMARY KEY)");
+      sql.exec("INSERT INTO tenant_role_catalog VALUES ('shared-role')");
+      sql.exec(
+        "INSERT INTO tenant_role_bindings (id, tenant_id, role_id) VALUES ('grant', ?, 'shared-role')",
+        tenantId,
+      );
+      sql.exec(
+        "INSERT INTO tenant_provisioning_marks (tenant_id, mark, detail, applied_at_unix) VALUES (?, 'model_catalog_seed', 'revision=1', 100)",
+        tenantId,
+      );
+      for (const id of ["default", "edited", "shared", "unused", "custom"]) {
+        const created = id === "custom" ? 200 : 100;
+        sql.exec(
+          "INSERT INTO provider_channels (id, tenant_id, name, kind, base_url, created_at_unix, updated_at_unix) VALUES (?, ?, ?, 'openai', 'https://provider.example.test', ?, ?)",
+          id,
+          tenantId,
+          id,
+          created,
+          created,
+        );
+        sql.exec(
+          "INSERT INTO catalog_models (id, tenant_id, name, created_at_unix, updated_at_unix) VALUES (?, ?, ?, ?, ?)",
+          id,
+          tenantId,
+          id,
+          created,
+          created,
+        );
+        if (id === "unused") continue;
+        sql.exec(
+          "INSERT INTO catalog_model_offerings (id, tenant_id, model_id, provider_id, upstream_model_id, source, created_at_unix, updated_at_unix) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+          id,
+          tenantId,
+          id,
+          id === "custom" ? "shared" : id,
+          id,
+          id === "custom" ? "admin" : "platform_seed",
+          created,
+          id === "edited" ? 101 : created,
+        );
+      }
+      // Replay only the cleanup under test: later destructive migrations already
+      // ran when this object was initialized and must not be re-applied.
+      for (const statement of sqlStatements(TENANT_MIGRATIONS.find((m) => m.version === 36)!.sql))
+        sql.exec(statement);
+    });
+    await evict(tenantId);
+    const reopened = objectFor(tenantId);
+    const status = await reopened.schemaVersion();
+    expect(status.version).toBe(40);
+    expect(status.appliedThisWake).toEqual([]);
+    await runInDurableObject(reopened, (_instance, state) => {
+      const sql = state.storage.sql;
+      const migration = TENANT_MIGRATIONS.find((entry) => entry.version === 36);
+      if (migration === undefined) throw new Error("cleanup migration missing");
+      for (let replay = 0; replay < 2; replay++) {
+        state.storage.transactionSync(() => {
+          for (const statement of sqlStatements(migration.sql)) sql.exec(statement);
+        });
+      }
+      expect(
+        sql.exec("SELECT id, source FROM catalog_model_offerings ORDER BY id").toArray(),
+      ).toEqual([
+        { id: "custom", source: "admin" },
+        { id: "edited", source: "admin" },
+      ]);
+      expect(sql.exec("SELECT id FROM catalog_models ORDER BY id").toArray()).toEqual([
+        { id: "custom" },
+        { id: "edited" },
+      ]);
+      expect(sql.exec("SELECT id FROM provider_channels ORDER BY id").toArray()).toEqual([
+        { id: "custom" },
+        { id: "edited" },
+        { id: "shared" },
+      ]);
+      expect(
+        sql.exec("SELECT name FROM sqlite_master WHERE name = 'tenant_role_catalog'").toArray(),
+      ).toEqual([]);
+      expect(sql.exec("SELECT role_id FROM tenant_role_bindings").toArray()).toEqual([
+        { role_id: "shared-role" },
+      ]);
+      expect(
+        sql
+          .exec("SELECT mark FROM tenant_provisioning_marks WHERE mark = 'model_catalog_seed'")
+          .toArray(),
+      ).toEqual([]);
+    });
+    // Read again through the normal tenant RPC, outside the migration callback.
+    expect(
+      (
+        await reopened.query({
+          tenantId,
+          sql: "SELECT source FROM catalog_model_offerings WHERE tenant_id = ? ORDER BY id",
+          params: [tenantId],
+        })
+      ).results,
+    ).toEqual([{ source: "admin" }, { source: "admin" }]);
   });
 });

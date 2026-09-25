@@ -32,12 +32,12 @@
 import { SELF, env } from "cloudflare:test";
 import {
   ControlDatabaseTenantRegistry,
-  DEFAULT_TENANT_MODEL_CATALOG,
   listTenantModelCatalog,
   resolveTenantModel,
 } from "@ferrogate/storage";
 import { Hono } from "hono";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { seedCatalogOverride } from "../../../packages/storage/test/support/catalog-override.js";
 import { resolveDeps, resolveTenantStorage } from "../src/adapters.js";
 import { contractAuth } from "../src/middleware/auth.js";
 import { adminCorsPreflight, corsResponseHeaders } from "../src/middleware/cors.js";
@@ -179,12 +179,9 @@ describe("POST /admin/v1/tenant-accounts", () => {
     // (4) a non-empty catalog, read back through the same router the data plane
     // would use. No manual step and no deploy happened between (1) and here.
     const handle = await router().forTenant(tenantId);
-    expect(await listTenantModelCatalog(handle.db, tenantId)).toHaveLength(
-      DEFAULT_TENANT_MODEL_CATALOG.length,
-    );
+    expect(await listTenantModelCatalog(handle.db, tenantId)).toHaveLength(0);
     const model = await resolveTenantModel(handle.db, tenantId, "gpt-4o");
-    expect(model?.providerModel).toBe("gpt-4o");
-    expect(model?.inputPricePer1m).toBe(2.5);
+    expect(model).toBeUndefined();
   });
 
   it("puts the tenant on the fleet roster, which is the only enumeration there is", async () => {
@@ -207,7 +204,7 @@ describe("POST /admin/v1/tenant-accounts", () => {
     expect(await router().provisionedTenants()).toContain(tenantId);
   });
 
-  it("populates the control document mirror so the operator LIST serves it without a DO fan-out", async () => {
+  it("keeps account documents out of control while the operator LIST reads the tenant object", async () => {
     const tenantId = freshTenantId("mirror");
     await SELF.fetch(`${BASE}/admin/v1/tenant-accounts`, {
       method: "POST",
@@ -222,20 +219,15 @@ describe("POST /admin/v1/tenant-accounts", () => {
       }),
     });
 
-    // The write-through hook filled `tenants.document_json` with the full admin
-    // document as part of the create — no backfill, no deploy, no second write.
-    const mirrorRow = await db()
-      .prepare("SELECT document_json FROM tenants WHERE id = ?")
+    const columns = await db().prepare("PRAGMA table_info(tenants)").all<{ name: string }>();
+    expect(columns.results.map((column) => column.name)).not.toContain("document_json");
+    const registry = await db()
+      .prepare("SELECT id FROM tenants WHERE id = ?")
       .bind(tenantId)
-      .first<{ document_json: string | null }>();
-    expect(mirrorRow?.document_json).not.toBeNull();
-    expect(JSON.parse(mirrorRow?.document_json ?? "null")).toMatchObject({
-      id: tenantId,
-      name: "Mirror",
-    });
+      .first<{ id: string }>();
+    expect(registry?.id).toBe(tenantId);
 
-    // The operator LIST is now served from that single control-DO query. The
-    // onboarded tenant appears in it, end to end through the real route stack.
+    // The onboarded tenant appears through the real route stack without a mirror.
     const listed = await SELF.fetch(`${BASE}/admin/v1/tenant-accounts`, {
       headers: { authorization: `Bearer ${OPERATOR}` },
     });
@@ -260,6 +252,7 @@ describe("POST /admin/v1/tenant-accounts", () => {
     });
 
     const handle = await router().forTenant(tenantId);
+    await seedCatalogOverride(handle.db, tenantId);
     await handle.db
       .prepare("DELETE FROM catalog_models WHERE tenant_id = ? AND name = ?")
       .bind(tenantId, "gpt-5")
@@ -279,9 +272,7 @@ describe("POST /admin/v1/tenant-accounts", () => {
     // means they re-run it — so a tenant that removed a model must not find it
     // reinstated by renaming its account.
     expect(await resolveTenantModel(handle.db, tenantId, "gpt-5")).toBeUndefined();
-    expect(await listTenantModelCatalog(handle.db, tenantId)).toHaveLength(
-      DEFAULT_TENANT_MODEL_CATALOG.length - 1,
-    );
+    expect(await listTenantModelCatalog(handle.db, tenantId)).toHaveLength(2);
   });
 
   it("two tenants created in sequence get two DISTINCT objects with independent data", async () => {
@@ -300,6 +291,8 @@ describe("POST /admin/v1/tenant-accounts", () => {
 
     const a = await router().forTenant(first);
     const b = await router().forTenant(second);
+    await seedCatalogOverride(a.db, first);
+    await seedCatalogOverride(b.db, second);
     await a.db
       .prepare(
         "UPDATE catalog_model_offerings SET input_price_per_1m = 42.0 " +
@@ -359,9 +352,7 @@ describe("POST /v1/admin/register (console self-service)", () => {
     expect(state?.storageBackend).toBe("durable_object");
 
     const handle = await router().forTenant(tenantId);
-    expect(await listTenantModelCatalog(handle.db, tenantId)).toHaveLength(
-      DEFAULT_TENANT_MODEL_CATALOG.length,
-    );
+    expect(await listTenantModelCatalog(handle.db, tenantId)).toHaveLength(0);
   });
 });
 
@@ -406,39 +397,25 @@ async function seedPlatformCatalog(revision: number): Promise<void> {
   ]);
 }
 
-async function assertSeededFromPlatform(tenantId: string, revision: number): Promise<void> {
+async function assertNoPlatformCopies(tenantId: string, revision: number): Promise<void> {
   const handle = await router().forTenant(tenantId);
-
-  // A real `openai` channel with its base_url carried across — not the card's
-  // `platform`-kind indirection channel.
-  const channel = await handle.db
-    .prepare("SELECT kind, base_url FROM provider_channels WHERE tenant_id = ? AND kind = 'openai'")
-    .bind(tenantId)
-    .first<{ kind: string; base_url: string }>();
-  expect(channel?.base_url).toBe("https://api.openai.com/v1");
-
-  // The copied graph, not the 16-entry card.
-  const catalog = await listTenantModelCatalog(handle.db, tenantId);
-  expect(catalog).toHaveLength(1);
-  expect(catalog.length).not.toBe(DEFAULT_TENANT_MODEL_CATALOG.length);
-
-  const model = await resolveTenantModel(handle.db, tenantId, "gpt-4o");
-  expect(model?.inputPricePer1m).toBe(2.5);
-  expect(model?.provider).toBe("OpenAI");
-  expect(model?.source).toBe("platform_seed");
-
-  // The mark records WHICH platform catalog seeded the tenant.
-  const mark = await handle.db
-    .prepare(
-      "SELECT detail FROM tenant_provisioning_marks WHERE tenant_id = ? AND mark = 'model_catalog_seed'",
-    )
-    .bind(tenantId)
-    .first<{ detail: string }>();
-  expect(mark?.detail).toBe(`revision=${revision};providers=1;models=1;offerings=1`);
+  for (const table of ["provider_channels", "catalog_models", "catalog_model_offerings"]) {
+    expect(await handle.db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).first()).toEqual({
+      count: 0,
+    });
+  }
+  expect(
+    await handle.db
+      .prepare("SELECT mark FROM tenant_provisioning_marks WHERE mark = 'model_catalog_seed'")
+      .first(),
+  ).toBeNull();
+  expect(
+    await db().prepare("SELECT revision FROM platform_catalog_revisions WHERE id = 1").first(),
+  ).toEqual({ revision });
 }
 
-describe("seeding from the platform catalog (#891)", () => {
-  it("POST /admin/v1/tenant-accounts seeds the platform graph, not the card", async () => {
+describe("platform catalogs remain shared", () => {
+  it("POST /admin/v1/tenant-accounts does not copy the platform graph", async () => {
     await seedPlatformCatalog(5);
     const tenantId = freshTenantId("platformcrud");
 
@@ -456,7 +433,7 @@ describe("seeding from the platform catalog (#891)", () => {
     });
     expect(created.status).toBe(201);
 
-    await assertSeededFromPlatform(tenantId, 5);
+    await assertNoPlatformCopies(tenantId, 5);
   });
 
   it("serves the current platform catalog to a tenant dashboard after its snapshot is stale", async () => {
@@ -503,7 +480,7 @@ describe("seeding from the platform catalog (#891)", () => {
     const snapshotBody = (await snapshot.json()) as {
       data: Array<{ name: string }>;
     };
-    expect(snapshotBody.data.map((model) => model.name)).toEqual(["gpt-4o"]);
+    expect(snapshotBody.data.map((model) => model.name)).toEqual([]);
 
     const current = await SELF.fetch(
       `${BASE}/admin/v1/models?tenant_id=${encodeURIComponent(tenantId)}&catalog_scope=platform&limit=1000`,
@@ -518,7 +495,7 @@ describe("seeding from the platform catalog (#891)", () => {
     expect(currentBody.data.map((model) => model.name).sort()).toEqual(["gpt-4o", "gpt-current"]);
   });
 
-  it("the self-service register path also seeds the platform graph", async () => {
+  it("the self-service register path does not copy the platform graph either", async () => {
     await seedPlatformCatalog(9);
 
     const response = await consoleApp.request(
@@ -537,10 +514,10 @@ describe("seeding from the platform catalog (#891)", () => {
     expect(response.status).toBe(201);
     const body = (await response.json()) as { tenant: { id: string } };
 
-    await assertSeededFromPlatform(body.tenant.id, 9);
+    await assertNoPlatformCopies(body.tenant.id, 9);
   });
 
-  it("a NON-missing-table platform read fault falls back to the card, it does not fail onboarding", async () => {
+  it("onboarding does not depend on platform catalog reads", async () => {
     // The regression this guards: `exportForSeed` tolerates a missing platform
     // TABLE (the d1_compat migration window), but the SAME window can raise
     // `no such column` when a new Worker's PROVIDER_SELECT references a column a
@@ -603,9 +580,7 @@ describe("seeding from the platform catalog (#891)", () => {
 
     const handle = await router().forTenant(tenantId);
     // The CARD, not the platform graph — the fault degraded to the fallback.
-    expect(await listTenantModelCatalog(handle.db, tenantId)).toHaveLength(
-      DEFAULT_TENANT_MODEL_CATALOG.length,
-    );
+    expect(await listTenantModelCatalog(handle.db, tenantId)).toHaveLength(0);
     // The card's `platform`-kind indirection channel is present; the graph's real
     // `openai` channel (which a healthy read of the seeded catalog would have
     // copied) is absent — proof the graph read was skipped, not merely empty.
@@ -613,7 +588,7 @@ describe("seeding from the platform catalog (#891)", () => {
       .prepare("SELECT kind FROM provider_channels WHERE tenant_id = ? AND kind = 'platform'")
       .bind(tenantId)
       .first<{ kind: string }>();
-    expect(platformChannel?.kind).toBe("platform");
+    expect(platformChannel).toBeNull();
     const openaiChannel = await handle.db
       .prepare("SELECT kind FROM provider_channels WHERE tenant_id = ? AND kind = 'openai'")
       .bind(tenantId)
@@ -621,7 +596,7 @@ describe("seeding from the platform catalog (#891)", () => {
     expect(openaiChannel).toBeNull();
   });
 
-  it("with ZERO platform rows the legacy card seed still runs (pinned)", async () => {
+  it("an empty platform catalog does not seed defaults into the tenant", async () => {
     // No `seedPlatformCatalog` — `resetD1` left the platform tables empty, so
     // this is the bootstrap fallback and it must be the 16-entry card.
     const tenantId = freshTenantId("nocatalog");
@@ -640,15 +615,13 @@ describe("seeding from the platform catalog (#891)", () => {
     expect(created.status).toBe(201);
 
     const handle = await router().forTenant(tenantId);
-    expect(await listTenantModelCatalog(handle.db, tenantId)).toHaveLength(
-      DEFAULT_TENANT_MODEL_CATALOG.length,
-    );
+    expect(await listTenantModelCatalog(handle.db, tenantId)).toHaveLength(0);
     // The card's `platform`-kind indirection channel, never a real `openai` one.
     const platformChannel = await handle.db
       .prepare("SELECT kind FROM provider_channels WHERE tenant_id = ? AND kind = 'platform'")
       .bind(tenantId)
       .first<{ kind: string }>();
-    expect(platformChannel?.kind).toBe("platform");
+    expect(platformChannel).toBeNull();
   });
 });
 

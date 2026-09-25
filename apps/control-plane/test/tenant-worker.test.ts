@@ -378,7 +378,7 @@ describe("tenant worker repository", () => {
     ).toBeNull();
   });
 
-  test("hydrates a legacy worker identity before child evidence writes", async () => {
+  test("refuses to recreate a missing tenant identity from the control directory", async () => {
     const tenantId = freshTenant("legacy-child");
     const workerId = `worker-${crypto.randomUUID().slice(0, 8)}`;
     await provisionObjectTenant(tenantId);
@@ -400,13 +400,13 @@ describe("tenant worker repository", () => {
       `${BASE}/admin/v1/self-hosted-workers/${workerId}/artifacts`,
       jsonRequest(operatorKey.secret, "POST", { artifact_id: "artifact-legacy" }),
     );
-    expect(artifact.status, await artifact.clone().text()).toBe(201);
+    expect(artifact.status, await artifact.clone().text()).toBe(503);
     expect(
       await tenantDb(tenantId)
         .prepare("SELECT worker_id FROM self_hosted_worker_identities WHERE worker_id = ?")
         .bind(workerId)
         .first(),
-    ).toEqual({ worker_id: workerId });
+    ).toBeNull();
   });
 
   test("a tenant schedule dispatch is recorded in the tenant object queue", async () => {

@@ -42,6 +42,7 @@ import { OPENAI_ROUTE } from "../inference/fixtures.js";
 import { interceptProviderFetch, providerJson } from "../inference/provider-mock.js";
 import { resetTenantBillingState, tenantObjectDb } from "../tenant-object.js";
 import { RecordingQueue, resetMeteringTables } from "./d1-harness.js";
+import { recordingPublisher } from "./fixtures.js";
 import { FIXTURE_COST_USD, chargeFixture, pricedBook, usageFixture } from "./fixtures.js";
 
 const db = (env as unknown as { DB: D1Database }).DB;
@@ -205,6 +206,7 @@ describe("the loop: the metering drain accumulates into the tenant database", ()
     return createMeteringUsageSink({
       priceBook: pricedBook(),
       bindings: meteringBindingsFromEnv,
+      publisher: recordingPublisher(queue),
     });
   }
 

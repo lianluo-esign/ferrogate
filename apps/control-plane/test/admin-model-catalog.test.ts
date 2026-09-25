@@ -209,7 +209,7 @@ describe("tenant model catalog CRUD", () => {
 
     const status = await request(OPERATOR, "GET", "/admin/v1/status");
     expect(status.status).toBe(200);
-    expect(Number(status.body.providers)).toBe(6);
+    expect(Number(status.body.providers)).toBe(5);
 
     const offerings = await request(
       tenantSecret,

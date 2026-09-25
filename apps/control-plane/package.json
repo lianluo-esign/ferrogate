@@ -9,6 +9,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@simplewebauthn/server": "14.0.0",
     "hono": "^4.6.0",
     "zod": "^3.25.76",
     "@ferrogate/core": "workspace:*",

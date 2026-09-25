@@ -96,6 +96,8 @@ import {
   verifyAdminAccessToken,
 } from "./tokens.js";
 
+import { passkeyHandlers } from "./passkeys.js";
+
 type Ctx = Context<ControlPlaneEnv>;
 
 // ---------------------------------------------------------------------------
@@ -142,7 +144,7 @@ interface ConsoleContext {
  * every session on isolate eviction. Without the control database there are no
  * `admin_users` rows to authenticate against at all.
  */
-function consoleOf(c: Ctx): ConsoleContext {
+export function consoleOf(c: Ctx): ConsoleContext {
   const deps = c.get("deps") as ControlPlaneDeps;
   const secret = (c.env as unknown as Record<string, unknown>)[ADMIN_CONSOLE_JWT_SECRET_BINDING];
   const jwtSecret = typeof secret === "string" ? secret.trim() : "";
@@ -227,7 +229,7 @@ function unprocessable(message: string): HttpError {
  * with a different verifier, and accepting one here would let an
  * `admin.read` virtual key be presented where a session JWT is expected.
  */
-function bearerToken(c: Ctx): string {
+export function bearerToken(c: Ctx): string {
   const authorization = c.req.header("authorization")?.trim() ?? "";
   if (!authorization.startsWith("Bearer ")) {
     throw new HttpError(401, "unauthorized", "missing bearer token");
@@ -320,7 +322,7 @@ function userView(user: AdminUserRow): Record<string, unknown> {
  *     suspended tenant's console session kept working for its full TTL and
  *     could keep re-issuing itself through `POST /v1/admin/refresh`.
  */
-async function currentAdminSession(
+export async function currentAdminSession(
   console_: ConsoleContext,
   token: string,
 ): Promise<{ user: AdminUserRow; membership: AdminMembershipRow }> {
@@ -418,8 +420,7 @@ async function handleRegister(c: Ctx): Promise<Response> {
   // rather than left to the generic path this handler does not take.
   const controlDb = console_.deps.controlDatabase;
   if (controlDb !== null) {
-    // Self-registration bypasses `crudGroup`, so pass `c.env` explicitly to honour
-    // `CONTROL_TENANT_ACCOUNT_SOURCE` (Track A G2) the spec hook would apply.
+    // Self-registration also publishes the updated platform plan cache.
     await projectTenantAccount(controlDb, tenantAccount, now, c.env);
   }
   await provisionTenantStorageFor(console_.deps, tenantId, c.req.raw);
@@ -883,6 +884,31 @@ async function mintConsoleSessionResponse(
   );
 }
 
+/** Passkey login resolves its original user and tenant from authority, bypassing identity KV. */
+export async function mintPasskeySession(
+  c: Ctx,
+  console_: ConsoleContext,
+  userId: string,
+  tenantId: string,
+): Promise<Response> {
+  const [user, memberships] = await Promise.all([
+    console_.store.getUserById(userId),
+    console_.store.listMembershipsByUser(userId),
+  ]);
+  const membership = memberships.find((row) => row.tenantId === tenantId);
+  if (!user || user.disabledAtUnix !== null || !membership) {
+    throw new HttpError(401, "unauthorized", "Passkey account or membership is unavailable");
+  }
+  await requireUsableConsoleTenancy(console_.deps, { tenantId, userId });
+  const [tenantAccount, workspace] = await Promise.all([
+    console_.deps.store.get(TENANT_ACCOUNTS_COLLECTION, PLATFORM, tenantId),
+    resolveDefaultWorkspace(console_.deps, tenantId),
+  ]);
+  if (!tenantAccount || !workspace)
+    throw new HttpError(401, "unauthorized", "Passkey tenancy is unavailable");
+  return mintConsoleSessionResponse(c, console_, { user, membership, tenantAccount, workspace });
+}
+
 /** Rust `resolve_default_workspace`: the tenant's first workspace. */
 async function resolveDefaultWorkspace(
   deps: ControlPlaneDeps,
@@ -1207,6 +1233,10 @@ export interface AdminConsoleSessionRoute {
 
 /** Every route {@link mountAdminConsoleSession} mounts, in mount order. */
 export const ADMIN_CONSOLE_SESSION_ROUTES: readonly AdminConsoleSessionRoute[] = [
+  ...Object.keys(passkeyHandlers).map((key) => {
+    const [method, path] = key.split(" ");
+    return { method: method as "GET" | "POST" | "DELETE", path: path as string };
+  }),
   { method: "POST", path: "/v1/admin/register" },
   { method: "POST", path: "/v1/admin/login" },
   // Trusted server-to-server leg: mints a session for a provider-verified email
@@ -1257,6 +1287,7 @@ export function mountAdminConsoleSession(
   app.use("/v1/admin/*", consoleCsrf);
 
   const handlers: Record<string, (c: Ctx) => Promise<Response>> = {
+    ...passkeyHandlers,
     "POST /v1/admin/register": handleRegister,
     "POST /v1/admin/login": handleLogin,
     "POST /v1/admin/oauth-bridge-login": handleOAuthBridgeLogin,

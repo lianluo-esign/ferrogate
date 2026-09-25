@@ -308,7 +308,34 @@ export async function setupDurablePorts(): Promise<void> {
   ];
   for (const [identity, overrides] of registrations) {
     await env.CONTROL_DB.prepare(INSERT_REGISTRATION_SQL)
-      .bind(identity.worker_id, FAR_FUTURE, registrationDocument(identity, overrides))
+      .bind(
+        identity.worker_id,
+        FAR_FUTURE,
+        JSON.stringify({
+          worker_id: identity.worker_id,
+          tenant_id: identity.tenant_id,
+          workspace_id: identity.workspace_id,
+        }),
+      )
+      .run();
+    const { token_secret: _secret, ...document } = JSON.parse(
+      registrationDocument(identity, overrides),
+    );
+    await (await tenantResourceDb(identity.tenant_id))
+      .prepare(`INSERT OR REPLACE INTO self_hosted_worker_identities
+      (worker_id,tenant_id,workspace_id,token_id,token_secret,status,identity_json,registered_at_unix,updated_at_unix)
+      VALUES(?,?,?,?,?,?,?,?,?)`)
+      .bind(
+        identity.worker_id,
+        identity.tenant_id,
+        identity.workspace_id,
+        identity.token_id,
+        identity.token_secret,
+        overrides.active === false ? "inactive" : "active",
+        JSON.stringify(document),
+        FAR_FUTURE,
+        FAR_FUTURE,
+      )
       .run();
   }
   prepared = true;

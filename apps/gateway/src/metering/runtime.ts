@@ -1,40 +1,6 @@
-/**
- * The PER-REQUEST half of metering: turning a Worker's `env` into the durable
- * backend, and owning the `ctx.waitUntil` that keeps the write alive past the
- * flushed response.
- *
- * ## The problem this module exists to solve
- *
- * `UsageSink` is a construction-time dependency of the inference route module,
- * which is built ONCE at module scope (`src/index.ts`). Worker bindings and the
- * `ExecutionContext` are PER REQUEST. So the sink cannot hold `env.BILLING_DB`,
- * `env.BILLING` or `ctx` as construction state, and it may not read them from a
- * module-scoped "current request" slot either: workerd refuses I/O started on
- * behalf of a different request, so a last-write-wins slot is a correctness bug
- * that only appears under concurrency — the worst possible failure shape for a
- * billing path.
- *
- * The seam is therefore widened instead (`src/inference/ports.ts`:
- * `record(u, rc?)` where `rc` is `{ env, ctx }`), and everything derived from
- * `env` is memoized on the ENV OBJECT ITSELF via a `WeakMap`. That is the same
- * device `modelsFromEnv` already uses for the model registry: no ambient state,
- * no cross-request leakage, and the D1/Queue wrapper objects are still built
- * once per isolate rather than once per request.
- *
- * ## Structural bindings, no adapters
- *
- * `MeteringDatabase` and `MeteringQueue` (`./ports.ts`) are deliberately shaped
- * so a live `D1Database` / `Queue` satisfies them with no cast — the same trick
- * `src/assets/ports.ts` plays with `R2Bucket`. `test/metering/d1.test.ts` holds
- * that at COMPILE time (`_bindingsSatisfyThePorts`), and it plus
- * `test/metering/durable.test.ts` hold it at RUNTIME against the real
- * `BILLING_DB` / `BILLING` bindings vitest-pool-workers provisions from
- * `wrangler.toml`.
- */
-
 import { platformDatabaseFrom } from "../control-data.js";
 import type { UsageRecordContext } from "../inference/ports.js";
-import type { MeteringDatabase, MeteringQueue } from "./ports.js";
+import type { MeteringDatabase } from "./ports.js";
 import { usageDatabaseFrom } from "./usage-ledger.js";
 
 /**
@@ -65,8 +31,6 @@ export interface MeteringBindings {
   readonly CONTROL_DATA?: unknown;
   /** CONTROL storage posture; absent/empty defaults to CONTROL_DATA. */
   readonly GATEWAY_CONTROL_STORAGE?: string;
-  /** `[[queues.producers]] binding = "BILLING"` — the billing report fan-out. */
-  readonly BILLING?: MeteringQueue | undefined;
 }
 
 /** Structural check for a live `D1Database`. */
@@ -76,15 +40,6 @@ function isMeteringDatabase(value: unknown): value is MeteringDatabase {
   }
   const candidate = value as Partial<MeteringDatabase>;
   return typeof candidate.prepare === "function" && typeof candidate.batch === "function";
-}
-
-/** Structural check for a live `Queue`. */
-function isMeteringQueue(value: unknown): value is MeteringQueue {
-  if (typeof value !== "object" || value === null) {
-    return false;
-  }
-  const candidate = value as Partial<MeteringQueue>;
-  return typeof candidate.send === "function" && typeof candidate.sendBatch === "function";
 }
 
 /**
@@ -114,15 +69,6 @@ export function meteringDatabaseFrom(
   return isMeteringDatabase(candidate) ? candidate : undefined;
 }
 
-/** `env.BILLING`, when it is really a Queue producer binding. */
-export function meteringQueueFrom(env: unknown): MeteringQueue | undefined {
-  if (typeof env !== "object" || env === null) {
-    return undefined;
-  }
-  const candidate = (env as MeteringBindings).BILLING;
-  return isMeteringQueue(candidate) ? candidate : undefined;
-}
-
 /**
  * How the sink resolves its durable backend from a request's bindings.
  *
@@ -133,7 +79,6 @@ export function meteringQueueFrom(env: unknown): MeteringQueue | undefined {
 export interface MeteringBindingResolver {
   /** Resolve tenant authority when `tenantId` is supplied, or control compatibility otherwise. */
   database(env: unknown, tenantId?: string): MeteringDatabase | undefined;
-  queue(env: unknown): MeteringQueue | undefined;
   /**
    * `env.DB`/`TENANT_DATA` — the tenant database the committed-token /
    * monthly-spend aggregates accumulate into (`./usage-ledger.ts`).
@@ -147,8 +92,8 @@ export interface MeteringBindingResolver {
 }
 
 /**
- * The production resolver: `TENANT_DATA`/`env.DB` + `env.BILLING_DB` fallback +
- * `env.BILLING`.
+ * The production resolver uses only the authoritative DO storage.
+ * No environment binding can re-enable billing report fan-out.
  *
  * `usageDatabase` is what mounts `@ferrogate/storage`'s `D1UsageLedger` on the
  * drain, which is the only thing that makes `usage_monthly_rollups` (the
@@ -158,7 +103,6 @@ export interface MeteringBindingResolver {
  */
 export const meteringBindingsFromEnv: MeteringBindingResolver = {
   database: meteringDatabaseFrom,
-  queue: meteringQueueFrom,
   usageDatabase: usageDatabaseFrom,
 };
 

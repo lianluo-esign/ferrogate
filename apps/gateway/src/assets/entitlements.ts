@@ -41,11 +41,7 @@
  * and the config leg never widens a durable decision).
  */
 
-import {
-  DurableObjectTenantDatabaseRouter,
-  type TenantDatabaseRouter,
-  backfillTenantConfigurationPolicy,
-} from "@ferrogate/storage";
+import { DurableObjectTenantDatabaseRouter, type TenantDatabaseRouter } from "@ferrogate/storage";
 import type { TenantDataNamespace } from "@ferrogate/storage/durable-objects";
 import { controlDatabaseFrom } from "../control-data.js";
 import type { AssetEntitlements, AssetEntitlementsPort } from "./handlers.js";
@@ -220,7 +216,6 @@ export class D1AssetEntitlements implements AssetEntitlementsPort {
   ): Promise<{ results: { role_id: string; permission_keys_json: string | null }[] }> {
     const router = this.#tenantDatabases;
     if (router === undefined) throw new Error("tenant object router is not configured");
-    await backfillTenantConfigurationPolicy(this.#db as unknown as D1Database, router, tenantId);
     const handle = await router.forTenant(tenantId);
     const local = await handle.db
       .prepare(

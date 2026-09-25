@@ -422,9 +422,7 @@ async function runProjection(
   const deps = depsOf(c);
   const db = deps.controlDatabase;
   if (spec.project !== null && db !== null) {
-    // `c.env` reaches the projector so the tenant-account hook can honour
-    // `CONTROL_TENANT_ACCOUNT_SOURCE` (Track A G2). Every other project hook
-    // ignores the 4th arg — a 3-param function is assignable to the 4-param type.
+    // Pass the shared KV binding for publishing updated platform configuration.
     await spec.project(db, record, Math.floor(Date.now() / 1000), c.env);
   }
   if (spec.tenantProject !== null) {

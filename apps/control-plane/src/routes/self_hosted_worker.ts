@@ -38,6 +38,7 @@ import {
   type TransportCredential,
   mintTransportCredential,
   projectWorkerRegistration,
+  readWorkerDirectory,
   readWorkerRegistration,
   registrationBlocker,
   stripCredentialFields,
@@ -179,7 +180,7 @@ async function visibleWorker(
   if (direct !== null || scope.kind !== "platform_operator") return direct;
   if (db === null) return null;
 
-  const registration = await readWorkerRegistration(db, workerId);
+  const registration = await readWorkerDirectory(db, workerId);
   const tenantId = registration?.tenant_id?.trim();
   if (tenantId === undefined || tenantId === "") return null;
   return deps.store.get(WORKERS, { kind: "tenant", tenantId }, workerId);
@@ -223,50 +224,19 @@ function tenantWorkerIdentity(
   };
 }
 
-/**
- * Backfill the tenant identity for a worker created before #856.
- *
- * The control registry remains the bootstrap directory, so it has the
- * credential needed to reconstruct the object row. Refuse a missing or
- * mismatched directory entry before creating the child projection; otherwise a
- * child could be visible in the compatibility collection while its authoritative
- * tenant row was rejected.
- */
-async function hydrateTenantWorkerIdentity(
-  db: D1Database | null,
+async function requireTenantIdentity(
   repository: TenantWorkerRepository,
-  record: StoreRecord,
-  nowUnix: number,
+  workerId: string,
 ): Promise<void> {
-  if (db === null) {
+  try {
+    await repository.assertIdentity(workerId);
+  } catch {
     throw new HttpError(
       503,
-      "control_database_unavailable",
-      "tenant worker identity hydration requires the control database",
+      "worker_identity_unavailable",
+      "worker identity is unavailable in its tenant object; rotate its credential to repair",
     );
   }
-  const registration = await readWorkerRegistration(db, record.id);
-  const tenantId = tenantIdOf(record);
-  const workspaceId = typeof record.workspace_id === "string" ? record.workspace_id.trim() : "";
-  if (
-    registration === null ||
-    registration.tenant_id !== tenantId ||
-    registration.workspace_id !== workspaceId
-  ) {
-    throw new HttpError(
-      409,
-      "conflict",
-      `self-hosted worker ${record.id} has no matching bootstrap identity`,
-    );
-  }
-  await repository.upsertIdentity(
-    tenantWorkerIdentity(
-      record,
-      { token_id: registration.token_id, token_secret: registration.token_secret },
-      nowUnix,
-      registration.registered_at_unix,
-    ),
-  );
 }
 
 const WORKER_SPEC = resolveSpec(SELF_HOSTED_WORKER_SPEC);
@@ -304,7 +274,7 @@ export const registerSelfHostedWorkerHandler: Handler = async (c) => {
   };
   const blocker = registrationBlocker(record);
   if (blocker !== null) throw new HttpError(400, "invalid_request_body", blocker);
-  const existingRegistration = await readWorkerRegistration(db, id);
+  const existingRegistration = await readWorkerDirectory(db, id);
   const workspaceId = typeof record.workspace_id === "string" ? record.workspace_id.trim() : "";
   if (
     existingRegistration !== null &&
@@ -318,6 +288,13 @@ export const registerSelfHostedWorkerHandler: Handler = async (c) => {
     );
   }
 
+  const requiredRepository = await tenantWorkerRepository(c, record);
+  if (requiredRepository === null)
+    throw new HttpError(
+      503,
+      "worker_identity_unavailable",
+      "worker registration requires its tenant object",
+    );
   let stored: StoreRecord;
   try {
     stored = await deps.store.create(WORKER_SPEC.collection, scopeOf(c), record);
@@ -328,10 +305,7 @@ export const registerSelfHostedWorkerHandler: Handler = async (c) => {
     throw error;
   }
   const now = Math.floor(Date.now() / 1000);
-  const tenantRepository = await tenantWorkerRepository(c, stored);
-  if (tenantRepository !== null) {
-    await tenantRepository.upsertIdentity(tenantWorkerIdentity(stored, credential, now));
-  }
+  await requiredRepository.upsertIdentity(tenantWorkerIdentity(stored, credential, now));
   await provision(db, stored, credential);
   return json(c, 201, {
     ...adminItem(WORKER_SPEC.object, stored),
@@ -367,7 +341,7 @@ export const rotateSelfHostedWorkerIdentityHandler: Handler = async (c) => {
     scope.kind === "platform_operator" && tenantIdOf(existing) !== null
       ? { kind: "tenant" as const, tenantId: tenantIdOf(existing) as string }
       : scope;
-  const previous = await readWorkerRegistration(db, id);
+  const previous = await readWorkerRegistration(db, id, deps.tenantDatabases);
   const now = Math.floor(Date.now() / 1000);
   const credential = mintTransportCredential();
   const stored = await deps.store.merge(WORKER_SPEC.collection, workerScope, id, {
@@ -430,12 +404,29 @@ export const heartbeatSelfHostedWorkerHandler: Handler = async (c) => {
   if (stored === null) {
     throw new HttpError(404, "not_found", `self-hosted worker ${id} not found`);
   }
-  const registration = await readWorkerRegistration(db, id);
+  const registration = await readWorkerRegistration(db, id, deps.tenantDatabases);
   const tenantRepository = await tenantWorkerRepository(c, stored);
   if (tenantRepository !== null) {
     // A typed tenant worker cannot acknowledge a heartbeat until its bootstrap
     // directory can reconstruct the authoritative object identity.
-    await hydrateTenantWorkerIdentity(db, tenantRepository, stored, now);
+    await requireTenantIdentity(tenantRepository, stored.id);
+    if (registration === null)
+      throw new HttpError(
+        503,
+        "worker_identity_unavailable",
+        "tenant worker credential is unavailable",
+      );
+    await tenantRepository.upsertIdentity(
+      tenantWorkerIdentity(
+        stored,
+        {
+          token_id: registration.token_id,
+          token_secret: registration.token_secret,
+        },
+        now,
+        registration.registered_at_unix,
+      ),
+    );
     await tenantRepository.recordHeartbeat(
       id,
       { id: crypto.randomUUID(), worker_id: id, status: "active", last_heartbeat_at: now },
@@ -484,7 +475,7 @@ function appendChild(
         : scope;
     const tenantRepository = await tenantWorkerRepository(c, parent);
     if (tenantRepository !== null) {
-      await hydrateTenantWorkerIdentity(db, tenantRepository, parent, now);
+      await requireTenantIdentity(tenantRepository, parent.id);
     }
     const stored = await deps.store.create(collection, childScope, {
       ...body,

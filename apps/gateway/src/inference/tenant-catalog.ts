@@ -129,6 +129,8 @@ export interface CatalogJoinRow {
   readonly provider_base_url: string;
   readonly provider_upstream_protocol?: string | null;
   readonly provider_cost_multiplier?: number | null;
+  readonly provider_cost_currency?: string | null;
+  readonly provider_cost_fx_rate?: number | null;
   readonly provider_api_key_var: string | null;
   readonly provider_byok_alias: string | null;
   readonly provider_auth_scheme: string | null;
@@ -172,7 +174,9 @@ function withPublicModelPrices(
   prices: readonly PublicModelPriceRow[],
   platformCosts: ReadonlyMap<string, number>,
   tenantId: string,
+  costRows: readonly PlatformProviderCostRow[] = [],
 ): CatalogJoinRow[] {
+  const settlements = new Map(costRows.map((row) => [row.id, row]));
   const byId = new Map(prices.map((price) => [price.id, price]));
   const byModelKey = new Map<string, PublicModelPriceRow>();
   for (const price of prices) {
@@ -203,6 +207,16 @@ function withPublicModelPrices(
     const multiplier = providerCostMultiplier(row, platformCosts, tenantId);
     const projected = { ...row } as Record<string, unknown>;
     projected.provider_cost_multiplier = multiplier;
+    if (row.offering_source === "platform_seed") {
+      const prefix = `${tenantId}:`;
+      const settlement = settlements.get(
+        row.provider_id.startsWith(prefix) ? row.provider_id.slice(prefix.length) : row.provider_id,
+      );
+      if (settlement?.cost_currency === "CNY" || settlement?.cost_currency === "USD") {
+        projected.provider_cost_currency = settlement.cost_currency;
+        projected.provider_cost_fx_rate = Number(settlement.cost_fx_rate);
+      }
+    }
     for (const field of PUBLIC_PRICE_FIELDS) {
       const value = price.enabled === 1 || price.enabled === "1" ? price[field] : null;
       projected[field] = value;
@@ -239,6 +253,7 @@ async function resolvePublicModelPrices(
         snapshot.prices,
         platformProviderCostMap(snapshot.provider_costs),
         tenantId,
+        snapshot.provider_costs,
       );
     }
   }
@@ -246,15 +261,23 @@ async function resolvePublicModelPrices(
   const control = controlDatabaseFrom(env);
   if (control === undefined) return rows;
   try {
-    const [priceResult, providerResult] = await Promise.all([
-      control.prepare(PUBLIC_MODEL_PRICE_SQL).all<PublicModelPriceRow>(),
-      control.prepare(PLATFORM_PROVIDER_COST_SQL).all<PlatformProviderCostRow>(),
-    ]);
+    const priceResult = await control.prepare(PUBLIC_MODEL_PRICE_SQL).all<PublicModelPriceRow>();
+    let providerResult: { results: PlatformProviderCostRow[] };
+    try {
+      providerResult = await control.prepare(PLATFORM_PROVIDER_COST_SQL).all<PlatformProviderCostRow>();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/no such column:\s*(cost_currency|cost_fx_rate)/i.test(message)) throw error;
+      providerResult = await control
+        .prepare("SELECT id, cost_multiplier FROM platform_provider_channels")
+        .all<PlatformProviderCostRow>();
+    }
     return withPublicModelPrices(
       rows,
       priceResult.results,
       platformProviderCostMap(providerResult.results),
       tenantId,
+      providerResult.results,
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -354,6 +377,12 @@ function dbProvider(
     ...(row.provider_cost_multiplier === null
       ? {}
       : { cost_multiplier: row.provider_cost_multiplier }),
+    ...(row.provider_cost_currency === "CNY" || row.provider_cost_currency === "USD"
+      ? { cost_currency: row.provider_cost_currency }
+      : {}),
+    ...(typeof row.provider_cost_fx_rate === "number" && row.provider_cost_fx_rate > 0
+      ? { cost_fx_rate: row.provider_cost_fx_rate }
+      : {}),
     ...(row.provider_upstream_protocol === "openai.chat.completions" ||
     row.provider_upstream_protocol === "openai.responses"
       ? { upstream_protocol: row.provider_upstream_protocol }
@@ -686,6 +715,23 @@ export class D1TenantModelCatalogSource implements TenantModelCatalogSource {
     platformInputs?: ModelCatalogInputs;
     platformRevision?: number;
   }): Promise<TenantModelCatalogLoadResult> {
+    const envKey = input.env as unknown as object;
+    let entries = this.#byEnv.get(envKey);
+    if (entries === undefined) {
+      entries = new Map<string, CacheEntry>();
+      this.#byEnv.set(envKey, entries);
+    }
+    const now = this.#now();
+    const cached = entries.get(input.tenantId);
+    // Tenant overrides have a bounded TTL. Shared-config revision changes still
+    // invalidate immediately; a warm default tenant needs no catalog DO RPC.
+    if (
+      cached !== undefined &&
+      cached.platformRevision === input.platformRevision &&
+      cached.expiresAt > now
+    ) {
+      return { ok: true, models: cached.resolver, revision: cached.revision };
+    }
     let revision: number;
     try {
       const row = await input.db.prepare(REVISION_SQL).bind(input.tenantId).first<{
@@ -699,26 +745,21 @@ export class D1TenantModelCatalogSource implements TenantModelCatalogSource {
       return failure(`tenant ${input.tenantId} catalog revision read failed`, error);
     }
 
-    const envKey = input.env as unknown as object;
-    let entries = this.#byEnv.get(envKey);
-    if (entries === undefined) {
-      entries = new Map<string, CacheEntry>();
-      this.#byEnv.set(envKey, entries);
+    if (revision === 0) {
+      entries.set(input.tenantId, {
+        revision,
+        platformRevision: input.platformRevision,
+        resolver: input.fallback,
+        expiresAt: now + this.#ttlMs,
+      });
+      return { ok: true, models: input.fallback, revision };
     }
-    const now = this.#now();
-    const cached = entries.get(input.tenantId);
-    // The cache key folds in the platform revision: a `platform`-kind leg is
-    // resolved against `platformInputs`, so a platform-catalog edit (which bumps
-    // the platform revision) must invalidate this entry even when the tenant's
-    // own revision is unchanged — otherwise a tenant using a platform-default
-    // model keeps routing to the old provider until the tenant's TTL expires
-    // (#890 revision-gate: visible immediately on a revision bump).
     if (
       cached !== undefined &&
       cached.revision === revision &&
-      cached.platformRevision === input.platformRevision &&
-      cached.expiresAt > now
+      cached.platformRevision === input.platformRevision
     ) {
+      entries.set(input.tenantId, { ...cached, expiresAt: now + this.#ttlMs });
       return { ok: true, models: cached.resolver, revision };
     }
 

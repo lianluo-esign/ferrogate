@@ -59,8 +59,10 @@ import {
 } from "@ferrogate/storage";
 import { z } from "zod";
 import { HttpError } from "../middleware/errors.js";
+import type { ControlPlaneDeps } from "../ports.js";
 import { type CallerScope, StoreConflictError, type StoreRecord } from "../ports.js";
 import { adminDeleted, adminItem, listResponse, parseListQuery } from "../responses.js";
+import { pageOf } from "../store/query.js";
 import { tenantDatabaseFor, tenantOf } from "../store/tenancy.js";
 import {
   openingCreditsOf,
@@ -364,7 +366,14 @@ function movement(options: {
           kind: "merge",
           collection: WALLETS,
           id: tenantId,
-          patch: walletMirrorFields(nextCredits, now),
+          patch:
+            handle === null
+              ? walletMirrorFields(nextCredits, now)
+              : {
+                  balance_cents: undefined,
+                  balance_credits: undefined,
+                  updated_at: now,
+                },
         },
       ]);
       // `null` means the wallet went away between the read and the write. It is
@@ -393,21 +402,94 @@ function movement(options: {
     // are repaired by re-submitting with the same `reference`.
     if (deltaCredits < 0n) {
       await tenantLeg(handle);
-      return json(c, 200, adminItem("wallet", await controlLeg()));
+      const stored = await controlLeg();
+      return json(
+        c,
+        200,
+        adminItem("wallet", {
+          ...stored,
+          ...walletMirrorFields(
+            (await new D1WalletStore(handle).balanceCreditsExact(tenantId)) ?? 0n,
+            now,
+          ),
+        }),
+      );
     }
     const stored = await controlLeg();
     await tenantLeg(handle);
-    return json(c, 200, adminItem("wallet", stored));
+    return json(
+      c,
+      200,
+      adminItem("wallet", {
+        ...stored,
+        ...walletMirrorFields(
+          (await new D1WalletStore(handle).balanceCreditsExact(tenantId)) ?? 0n,
+          now,
+        ),
+      }),
+    );
   };
+}
+
+async function walletBalances(
+  deps: ControlPlaneDeps,
+  records: readonly StoreRecord[],
+): Promise<StoreRecord[]> {
+  const result: StoreRecord[] = [];
+  for (let offset = 0; offset < records.length; offset += 6) {
+    result.push(
+      ...(await Promise.all(
+        records.slice(offset, offset + 6).map(async (record) => {
+          const handle = await tenantDatabaseFor(
+            deps.tenantDatabases,
+            String(record.tenant_id ?? record.id),
+          );
+          if (handle === null) return record;
+          const balance = await new D1WalletStore(handle).balanceCreditsExact(handle.tenantId);
+          return balance === undefined
+            ? record
+            : {
+                ...record,
+                balance_cents: Number(creditsToCents(balance)),
+                balance_credits: bindCredits(balance),
+              };
+        }),
+      )),
+    );
+  }
+  return result;
 }
 
 export const walletsRoutes: GroupModule = crudGroup(
   "wallets",
   [
-    { segment: WALLETS, object: "wallet", idField: "tenant_id", body: walletSchema },
+    {
+      segment: WALLETS,
+      object: "wallet",
+      idField: "tenant_id",
+      body: walletSchema,
+      enrichList: walletBalances,
+    },
     { segment: "payment-methods", object: "payment_method", body: paymentMethodSchema },
   ],
   {
+    listWallets: async (c) => {
+      const deps = c.get("deps");
+      const query = parseListQuery(new URL(c.req.url), deps.listDefaultLimit, deps.listMaxLimit);
+      const { balance_cents, balance_credits, ...filters } = query.filters;
+      const filtersBalance = balance_cents !== undefined || balance_credits !== undefined;
+      const page = await deps.store.list(
+        WALLETS,
+        scopeOf(c),
+        filtersBalance ? { ...query, filters, paginate: false } : query,
+      );
+      const items = await walletBalances(deps, page.items);
+      return json(
+        c,
+        200,
+        listResponse(filtersBalance ? pageOf(items, query) : { ...page, items }, query),
+      );
+    },
     /**
      * `POST /admin/v1/wallets` — a wallet is keyed by `tenant_id`, so that field is REQUIRED here
      * even though the schema leaves it optional for the merge legs (#965).
@@ -432,9 +514,33 @@ export const walletsRoutes: GroupModule = crudGroup(
         );
       }
       authorizeWalletTenant(scope, tenantId);
-      const record: StoreRecord = { ...body, tenant_id: tenantId, id: tenantId };
+      const record: { id: string; tenant_id: string; [key: string]: unknown } = {
+        ...body,
+        tenant_id: tenantId,
+        id: tenantId,
+      };
+      const handle = await tenantDatabaseFor(deps.tenantDatabases, tenantId);
+      const balance =
+        handle === null ? undefined : await new D1WalletStore(handle).balanceCreditsExact(tenantId);
+      if (balance !== undefined) {
+        record.balance_cents = undefined;
+        record.balance_credits = undefined;
+      }
       const stored = await deps.store.create(WALLETS, scope, record);
-      return json(c, 201, adminItem("wallet", stored));
+      return json(
+        c,
+        201,
+        adminItem(
+          "wallet",
+          balance === undefined
+            ? stored
+            : {
+                ...stored,
+                balance_cents: Number(creditsToCents(balance)),
+                balance_credits: bindCredits(balance),
+              },
+        ),
+      );
     },
 
     getWallet: async (c) => {
@@ -467,10 +573,10 @@ export const walletsRoutes: GroupModule = crudGroup(
       const body = await readJson(c, walletSchema);
       // A balance only ever moves through `adjust`/`charge`, which write the
       // ledger entry that explains the movement.
-      const { balance_cents: _rejected, ...fields } = body;
+      const { balance_cents: _rejected, balance_credits: _rejectedCredits, ...fields } = body;
       const stored = await deps.store.merge(WALLETS, scope, tenantId, fields);
       if (stored === null) throw new HttpError(404, "not_found", `wallet ${tenantId} not found`);
-      return json(c, 200, adminItem("wallet", stored));
+      return json(c, 200, adminItem("wallet", (await walletBalances(deps, [stored]))[0]!));
     },
 
     adjustWallet: movement({

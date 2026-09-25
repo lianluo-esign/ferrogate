@@ -1,83 +1,12 @@
-/**
- * Tenant onboarding on the Durable-Object backend (#820).
- *
- * ## What onboarding used to be, and what is left of it
- *
- * Before the Durable Object backend it required creating a D1 database,
- * writing a `[[d1_databases]]` stanza, deploying, and applying migrations.
- * Every one of those steps is gone. A
- * Durable Object materialises the instant `idFromName(tenantId)` is addressed,
- * and `TenantDataObject` applies `sql/d1-ts/tenant/*.sql` to itself under
- * `blockConcurrencyWhile` on every cold start (#822). There is no database to
- * create, no deploy, and no migration runner to write.
- *
- * What is left is the part the old design never had to think about, because a
- * human ran it:
- *
- *  1. **Refusing.** First touch is now the provisioning event. An object exists
- *     the moment anyone calls `idFromName` and writes a byte — a typo, a probe,
- *     a deleted tenant. A namespace that accumulates junk objects bills for
- *     their storage forever and cannot be enumerated to find them. So this
- *     module checks the `tenants` row FIRST, and refuses BEFORE the object is
- *     addressed. That ordering is the whole guard: checking afterwards creates
- *     exactly the object it was meant to prevent.
- *  2. **Recording.** A DO namespace cannot be listed in production, so
- *     `tenant_databases` is the only roster there is, and
- *     `provisionedTenants()` — which `apps/control-plane/src/store/asset_fleet.ts`
- *     fans out over — reads it. Nothing wrote it. A tenant created today would
- *     be invisible to every fleet view.
- *  3. **Seeding.** The tenant's own `catalog_models` and priced offerings, so per-tenant visibility
- *     and per-tenant pricing have rows to read when the reader lands, rather
- *     than needing a backfill over objects a namespace cannot enumerate. This
- *     list used to say an unseeded tenant answers `400 model_not_found` on
- *     every inference request; it does not, and `./tenant-model-catalog.ts`
- *     records what was actually true.
- *
- * ## Two stores, one operation, and therefore no transaction
- *
- * Steps 2 and 3 land in DIFFERENT stores — the control D1 and the tenant's own
- * object — and there is no cross-store transaction anywhere on this platform. So
- * a crash between them is not an edge case, it is a matter of time, and the only
- * question that matters is whether the result is DISTINGUISHABLE from a healthy
- * tenant. The ordering here makes it so:
- *
- * | order | a crash right after leaves | detected by |
- * |---|---|---|
- * | 1. verify the `tenants` row | nothing; no object addressed, no row written | — |
- * | 2. write `pending` | a roster row that says "started, never finished" | `listUnfinished()` |
- * | 3. observe the schema version | the same | `listUnfinished()` |
- * | 4. seed the catalog | a tenant marked `incomplete` with the seed error | `listUnfinished()`; the resume re-reads the object's own seed mark and does NOT re-seed |
- * | 5. write `ready` | a healthy tenant | — |
- *
- * The inverse ordering is the tempting one and it is wrong: writing `ready`
- * first and provisioning afterwards makes a crashed onboarding
- * indistinguishable from a finished one, which is precisely the shape of "some
- * tenants mysteriously have no models".
- *
- * Every failure is also RECORDED. Structural failures write `failed` with the
- * refusal's own message before re-raising; a catalog-only failure writes
- * `incomplete` and returns normally because the gateway's current env catalog
- * remains usable. A tenant that failed because it had no `tenants` row, one that
- * failed because schema apply threw, and one waiting for a seed retry get
- * different fixes.
- *
- * ## Idempotent, by construction rather than by convention
- *
- * Re-running is a no-op that cannot clobber: the catalog seed is gated on a mark
- * inside the tenant's OWN storage (not on the control row, which this slice's
- * own migration rebuilds), and the roster write is an upsert whose
- * `provisioned_at_unix` is not re-stamped. So "resume the unfinished tenants" is
- * safe to run over the whole fleet, including the healthy ones.
- */
 import { StorageError } from "./errors.js";
 import { parseLifecycleStatus } from "./lifecycle-status.js";
-import {
-  DEFAULT_TENANT_MODEL_CATALOG,
-  type TenantModelCatalogEntry,
-  type TenantModelCatalogSeedGraph,
-  listTenantModelCatalog,
-  seedTenantCatalogPreferringGraph,
-} from "./tenant-model-catalog.js";
+/**
+ * Provision tenant storage after verifying its platform registration.
+ * The roster records pending/ready/failed so interrupted provisioning can resume.
+ * Platform models, routing and prices stay in the platform configuration DO/KV;
+ * onboarding never copies a catalog into the tenant object.
+ */
+import { listTenantModelCatalog } from "./tenant-model-catalog.js";
 import type {
   TenantJurisdiction,
   TenantLocationHint,
@@ -94,15 +23,15 @@ import {
 /** What one provisioning run did. Every field is an observation, not a plan. */
 export interface TenantProvisioningOutcome {
   readonly tenantId: string;
-  /** `ready` on success; `incomplete` when only catalog seeding needs a retry. */
+  /** `ready` after the tenant schema has been verified. */
   readonly status: TenantProvisioningStatus;
   /** Where this tenant's data physically lives, taken from the resolved handle. */
   readonly storageBackend: TenantDatabaseSource;
   /** The version the tenant's own `storage_schema_migrations` ledger reported. */
   readonly schemaVersion: number;
-  /** `true` when THIS call seeded the catalog; `false` when it was already seeded. */
+  /** Legacy response field; always false because platform seeding is retired. */
   readonly catalogSeeded: boolean;
-  /** Rows in the tenant's catalog after this call — the "non-empty" evidence. */
+  /** Catalog rows created by provisioning; always zero. */
   readonly catalogEntries: number;
   /**
    * `true` when a roster row already existed in a non-`ready` state, i.e. this
@@ -115,24 +44,6 @@ export interface TenantProvisioningOutcome {
 export interface TenantProvisioningOptions {
   /** Unix SECONDS. Injected so a test can pin the timestamps it asserts on. */
   readonly nowUnix?: number;
-  /** Seed content. Defaults to the platform card in `./tenant-model-catalog.ts`. */
-  readonly catalog?: readonly TenantModelCatalogEntry[];
-  /**
-   * A LAZY loader for the MANAGED platform catalog graph (#889) to seed from (#891).
-   *
-   * It is a loader rather than the graph itself so the (unbounded) platform
-   * catalog READ happens ONLY when a seed will actually run — an already-seeded
-   * tenant, which is every PUT/PATCH repair point and every provision-hook
-   * re-run, short-circuits inside the seed-once gate before this is ever called.
-   * When it resolves to a graph with offerings that graph is copied verbatim in
-   * preference to {@link catalog}; when it is absent, resolves to `undefined`, or
-   * yields no offerings, the seed falls back to the compiled-in card, so a
-   * deployment that has never adopted the platform catalog — or one whose catalog
-   * read failed — still onboards. The control plane reads this graph through the
-   * CONTROL_DATA facade and passes it DOWN as data — `@ferrogate/storage` never
-   * names a `platform_*` table, which keeps the Zero-D1 seam intact.
-   */
-  readonly catalogGraphLoader?: () => Promise<TenantModelCatalogSeedGraph | undefined>;
   /**
    * The `locationHint` the object was addressed with, recorded for audit. A
    * Durable Object is homed near its first `get()` and CANNOT be moved
@@ -255,11 +166,8 @@ export async function assertTenantRegistered(
 /**
  * Provision (or resume, or re-run) one tenant's storage. Idempotent.
  *
- * Returns the observed state on success. A catalog seed failure records
- * `incomplete` and returns normally because the gateway's current model source
- * is independent of this future per-tenant catalog. Schema, routing, and
- * control-database failures still record `failed` and re-raise, so onboarding
- * cannot report storage as ready when the object itself is unavailable.
+ * Returns ready after verifying the tenant schema. Shared catalog availability
+ * does not affect provisioning. Storage failures record failed and re-raise.
  *
  * @throws {@link StorageError} `notFound` for an unregistered tenant (nothing is
  *   written and no object is addressed), or whatever the storage layer raised
@@ -364,81 +272,28 @@ export async function provisionTenantStorage(
     const handle = await router.forTenant(tenantId, address);
     const schemaVersion = await observedSchemaVersion(handle.db, tenantId);
 
-    // (4) Seed, at most once ever, gated inside the tenant's own storage. A
-    // catalog failure is recoverable and must not turn a tenant creation into a
-    // failed document write.
-    let catalogStepComplete = false;
-    try {
-      // Prefer the managed platform graph (#891) when it carries offerings; an
-      // empty, absent, or unreadable graph falls back to the compiled-in card,
-      // so this lands independently of the platform-catalog import. The loader is
-      // resolved inside the shared seed-once gate, so an already-seeded tenant
-      // never triggers the platform-catalog read at all.
-      const seed = await seedTenantCatalogPreferringGraph(
-        handle.db,
-        tenantId,
-        nowUnix,
-        options.catalog ?? DEFAULT_TENANT_MODEL_CATALOG,
-        options.catalogGraphLoader,
-      );
-      const catalog = await listTenantModelCatalog(handle.db, tenantId);
-      if (catalog.length === 0) {
-        // The seed helper repairs only the known legacy empty-seed mark. Keep
-        // the roster incomplete if a tenant-owned catalog is still empty after
-        // a rerun; reseeding would resurrect models the tenant deleted.
-        throw StorageError.runtime(
-          [
-            `tenant ${tenantId} catalog seeding completed without any rows; retry provisioning`,
-          ].join(" "),
-        );
-      }
-      catalogStepComplete = true;
-
-      // (5) Only now is the tenant healthy.
-      const ready: TenantDatabaseRegistration = {
+    // Platform catalogs are shared configuration, never an onboarding seed.
+    // An empty tenant catalog is healthy and inherits the platform KV catalog.
+    await registry.upsert(
+      {
         ...base,
         schemaVersion,
         storageBackend: handle.source,
         status: "ready",
-        catalogSeededAtUnix: seed.seededAtUnix,
+        catalogSeededAtUnix: undefined,
         lastError: undefined,
-      };
-      await registry.upsert(ready, nowUnix);
-
-      return {
-        tenantId,
-        status: "ready",
-        storageBackend: handle.source,
-        schemaVersion,
-        catalogSeeded: seed.seeded,
-        catalogEntries: catalog.length,
-        resumed,
-      };
-    } catch (error) {
-      if (catalogStepComplete) throw error;
-      const message = error instanceof Error ? error.message : String(error);
-      const incompleteBase: TenantDatabaseRegistration = { ...base };
-      incompleteBase.catalogSeededAtUnix = undefined;
-      await registry.upsert(
-        {
-          ...incompleteBase,
-          schemaVersion,
-          storageBackend: handle.source,
-          status: "incomplete",
-          lastError: message,
-        },
-        nowUnix,
-      );
-      return {
-        tenantId,
-        status: "incomplete",
-        storageBackend: handle.source,
-        schemaVersion,
-        catalogSeeded: false,
-        catalogEntries: 0,
-        resumed,
-      };
-    }
+      },
+      nowUnix,
+    );
+    return {
+      tenantId,
+      status: "ready",
+      storageBackend: handle.source,
+      schemaVersion,
+      catalogSeeded: false,
+      catalogEntries: 0,
+      resumed,
+    };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     // Structural failures are recorded, then re-raised. Catalog failures are
@@ -546,14 +401,6 @@ export async function describeTenantStorage(
   try {
     const handle = await router.forTenant(tenantId);
     catalogEntries = (await listTenantModelCatalog(handle.db, tenantId)).length;
-    if (catalogEntries === 0) {
-      problems.push(
-        "the model catalog is EMPTY: the seed step either never ran or ran against a mark " +
-          "that suppressed it, so per-tenant model visibility and pricing have no rows. " +
-          "Inference falls back to GATEWAY_MODELS / GATEWAY_PROVIDERS until this catalog " +
-          "is populated",
-      );
-    }
   } catch (error) {
     problems.push(
       `the tenant's storage could not be read: ${

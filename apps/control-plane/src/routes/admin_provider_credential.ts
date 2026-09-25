@@ -45,7 +45,6 @@ import {
 } from "@ferrogate/secrets";
 import {
   type D1TenantProviderCredentialStore,
-  backfillTenantConfigurationPolicy,
   credentialLast4,
   tenantProviderCredentialStoreFor,
 } from "@ferrogate/storage";
@@ -109,7 +108,6 @@ async function storeOf(
         "deployment",
     );
   }
-  await backfillTenantConfigurationPolicy(control, deps.tenantDatabases, tenantId);
   const handle = await deps.tenantDatabases.forTenant(tenantId);
   return tenantProviderCredentialStoreFor(handle);
 }

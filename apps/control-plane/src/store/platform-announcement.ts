@@ -1,11 +1,9 @@
 /**
  * Platform announcements (公告) — operator-authored notices shared to tenants
- * (#948, shared-config channel).
+ * stored only in the platform configuration singleton, CONTROL_DATA.
  *
- * The structural sibling of {@link PlatformBillingGroupStore}, trimmed: an
- * announcement is a single flat row (no provider junction, no multiplier), so
- * this store is just the guarded CRUD + monotone revision the shared-config
- * fan-out compares. It follows the same two rules the platform stores share:
+ * Reads and mutations use that same database. The revision remains available
+ * for disposable KV caches if a frequently-read publication surface needs one.
  *
  *  1. **The audit row is IN the mutation batch.** `#commit` batches the revision
  *     init, the mutation, the revision bump and the audit INSERT together, so a

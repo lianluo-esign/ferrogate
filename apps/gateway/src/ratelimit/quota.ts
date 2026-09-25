@@ -38,6 +38,7 @@ import {
   resolveEffectiveQuota,
 } from "@ferrogate/policy";
 import {
+  DurableObjectD1Database,
   WALLET_RESERVATION_ACTIVE,
   boolFromSqlite,
   optionalNumber,
@@ -46,6 +47,7 @@ import {
 import { controlDatabaseFrom } from "../control-data.js";
 import { tenantQuotaPolicyDbFrom } from "../tenancy/quota-policy-source.js";
 import { type CounterWindow, counterKeyForScope, requestWindows, tpmWindow } from "./keys.js";
+import { platformPlanFromKv } from "./plan-source.js";
 
 /**
  * Everything the limiter needs about one caller, projected out of the resolved
@@ -75,10 +77,17 @@ export interface QuotaPolicySource {
   policiesFor(subject: QuotaSubject): Promise<QuotaPolicySnapshot>;
 }
 
+export interface KeyTokenBudget {
+  readonly apiKeyId: string;
+  readonly limit: number | undefined;
+}
+
 export type QuotaPolicySnapshot =
   | {
       readonly ok: true;
       /** Rust's `lookup` closure. `undefined` = that scope does not restrict. */
+      readonly expiresAtMs?: number;
+      readonly keyTokenBudget?: KeyTokenBudget;
       readonly lookup: (kind: QuotaScopeKind, id: string) => StoredQuotaPolicy | undefined;
       /** The tenant's plan, if any — the merge FLOOR (issue #168). */
       readonly plan?: StoredPlan | undefined;
@@ -90,6 +99,7 @@ export type QuotaResolution =
   | {
       readonly ok: true;
       readonly quota: EffectiveQuota;
+      readonly keyTokenBudget?: KeyTokenBudget;
       readonly rpm: CounterWindow[];
       readonly tpm: CounterWindow | null;
     }
@@ -120,6 +130,7 @@ export async function resolveQuotaWindows(
     quota,
     rpm: requestWindows(subject.apiKeyId, quota, subject.requestLimitPerMinute),
     tpm: tpmWindow(subject.apiKeyId, quota),
+    ...(snapshot.keyTokenBudget === undefined ? {} : { keyTokenBudget: snapshot.keyTokenBudget }),
   };
 }
 
@@ -487,7 +498,7 @@ function rowToStoredPolicy(row: Record<string, unknown>): StoredQuotaPolicy {
 }
 
 /** One `plans` row → `StoredPlan`. */
-function rowToStoredPlan(row: Record<string, unknown>): StoredPlan {
+export function rowToStoredPlan(row: Record<string, unknown>): StoredPlan {
   const id = String(row.id ?? "");
   const allowlist = row.default_model_allowlist_json;
   let defaultModelAllowlist: string[] = [];
@@ -530,41 +541,11 @@ function rowToStoredPlan(row: Record<string, unknown>): StoredPlan {
 }
 
 /**
- * The durable {@link QuotaPolicySource}: the CONTROL database's `quota_policies`
- * chain plus the tenant's `plans` floor.
- *
- * ## One `batch()`, not five queries
- *
- * `resolveEffectiveQuota` walks tenant → project → workspace → key, so up to
- * four policy rows and one plan row are needed BEFORE the request is admitted —
- * i.e. on the hot path of every authenticated call. They go out as a single
- * `db.batch()`: D1 runs a batch as one round trip inside one implicit
- * transaction, so the five reads cost one hop and cannot interleave with a
- * control-plane write that would let the chain be read half-updated.
- *
- * The policy leg is ONE statement with an OR-ed `(scope_type, scope_id)`
- * predicate rather than four statements, because `(scope_type, scope_id)` is
- * `UNIQUE` and indexed (`idx_quota_policies_scope`): SQLite satisfies the whole
- * disjunction from that index.
- *
- * ## Why every failure is 503, never "no policies"
- *
- * A `QuotaPolicySource` that answered `{ ok: true, lookup: () => undefined }` on
- * a database error would turn an outage into UNLIMITED traffic for every caller
- * — the exact opposite of what a limiter is for. So a rejected query, a row with
- * an unknown `scope_type`, and a malformed JSON column all become
- * `{ ok: false, detail }`, which `rateLimit` renders as the Rust
- * `503 quota_resolution_unavailable`.
- *
- * The plan lookup joins `tenants.plan_id → plans.id`; a tenant row that names a
- * plan that does not exist yields NO plan (no floor), which is the Rust
- * behavior for a dangling `plan_id` — the join simply misses.
- *
- * ## The auto-throttle overlay (#697)
- *
- * A third statement joins the batch: the unexpired `spend_throttles` rows for
- * the same scopes. See {@link applySpendThrottles} for what it may and may not
- * do to the resolved quota.
+ * Tenant policies/throttles (and optional key budget config) use one batch in
+ * the owning tenant database. Platform plan definitions and assignments use a
+ * bounded KV snapshot, with the authoritative control join as fallback. No
+ * platform data is copied into tenant storage. Native D1 compatibility probes
+ * its schema; DOs finish the committed tenant migrations before serving RPCs.
  */
 export function d1QuotaPolicySource(
   db: D1Database,
@@ -590,6 +571,8 @@ export function d1QuotaPolicySource(
    * control mirror no longer exists to fall through to.
    */
   tenantPolicyDb?: (tenantId: string) => Promise<D1Database>,
+  platformKv?: KVNamespace,
+  includeKeyBudget = false,
 ): QuotaPolicySource {
   return {
     async policiesFor(subject: QuotaSubject): Promise<QuotaPolicySnapshot> {
@@ -602,6 +585,8 @@ export function d1QuotaPolicySource(
 
       const index = new Map<string, StoredQuotaPolicy>();
       let plan: StoredPlan | undefined;
+      let expiresAtMs: number | undefined;
+      let keyTokenBudget: KeyTokenBudget | undefined;
 
       // The tenant-scoped legs (`quota_policies` + the #697 `spend_throttles`
       // overlay) read ONLY the tenant's OWN object — never the shared control
@@ -630,12 +615,15 @@ export function d1QuotaPolicySource(
             .bind(...bindings),
         ];
         // #697 — the auto-throttle overlay, in the SAME batch as its sibling
-        // `quota_policies` (both are tenant-scoped and read the tenant object),
-        // so it costs one extra statement and no extra round trip. The probe is
-        // per-handle, not per-request; see {@link spendThrottlesProvisioned}.
+        // `quota_policies` (both are tenant-scoped and read the tenant object).
+        // The DO schema is guaranteed at startup. Native D1 compatibility alone
+        // needs the per-handle probe; it must not cost a DO RPC per request.
         let throttleIndex = -1;
         try {
-          if (await spendThrottlesProvisioned(policyDb)) {
+          if (
+            policyDb instanceof DurableObjectD1Database ||
+            (await spendThrottlesProvisioned(policyDb))
+          ) {
             throttleIndex = statements.length;
             statements.push(
               policyDb
@@ -655,6 +643,14 @@ export function d1QuotaPolicySource(
           return { ok: false, detail: `cloudflare d1: spend throttle probe failed: ${detail}` };
         }
 
+        const keyBudgetIndex = includeKeyBudget ? statements.length : -1;
+        if (includeKeyBudget) {
+          statements.push(
+            policyDb
+              .prepare("SELECT monthly_token_budget FROM api_keys WHERE id = ?")
+              .bind(subject.apiKeyId),
+          );
+        }
         let results: { results?: unknown[] }[];
         try {
           results = (await policyDb.batch(statements)) as unknown as { results?: unknown[] }[];
@@ -664,6 +660,22 @@ export function d1QuotaPolicySource(
         }
 
         try {
+          if (includeKeyBudget) {
+            if (
+              results.length !== statements.length ||
+              !Array.isArray(results[keyBudgetIndex]?.results)
+            ) {
+              throw new QuotaRowError("incomplete key token-budget snapshot");
+            }
+            const row = results[keyBudgetIndex]?.results?.[0] as
+              | { monthly_token_budget?: number | null }
+              | undefined;
+            const value = row?.monthly_token_budget;
+            const limit = value === null || value === undefined ? undefined : Number(value);
+            if (limit !== undefined && (!Number.isFinite(limit) || limit < 0))
+              throw new QuotaRowError("invalid key token budget");
+            keyTokenBudget = { apiKeyId: subject.apiKeyId, limit };
+          }
           for (const row of (results[0]?.results ?? []) as Record<string, unknown>[]) {
             const policy = rowToStoredPolicy(row);
             index.set(`${policy.scopeType}:${policy.scopeId}`, policy);
@@ -681,7 +693,13 @@ export function d1QuotaPolicySource(
 
       // The plan floor joins `tenants.plan_id → plans.id`, both control-owned, so
       // it stays on the control `db` in its own round trip.
-      if (tenantId !== undefined) {
+      const cachedPlan =
+        tenantId === undefined ? undefined : await platformPlanFromKv(platformKv, tenantId);
+      if (cachedPlan !== undefined) {
+        plan = cachedPlan.plan;
+        expiresAtMs = cachedPlan.expiresAtMs;
+      }
+      if (tenantId !== undefined && cachedPlan === undefined) {
         let planResults: { results?: unknown[] }[];
         try {
           planResults = (await db.batch([
@@ -711,6 +729,8 @@ export function d1QuotaPolicySource(
         lookup: (kind: QuotaScopeKind, id: string): StoredQuotaPolicy | undefined =>
           index.get(`${kind}:${id}`),
         ...(plan === undefined ? {} : { plan }),
+        ...(expiresAtMs === undefined ? {} : { expiresAtMs }),
+        ...(keyTokenBudget === undefined ? {} : { keyTokenBudget }),
       };
     },
   };
@@ -728,34 +748,52 @@ export const DEFAULT_QUOTA_POLICY_CACHE_MAX_ENTRIES = 1_000;
  * lookup; a failure is never cached so an outage cannot become a TTL-long
  * "no policies" / unlimited-traffic window.
  */
+type QuotaCacheEntries = Map<string, { expiresAtMs: number; snapshot: QuotaPolicySnapshot }>;
+const sharedQuotaEntries = new WeakMap<object, QuotaCacheEntries>();
+
+/** Simulate an isolate recycle after tests replace durable fixture rows. */
+export function resetSharedQuotaPolicyCache(env: object): void {
+  sharedQuotaEntries.delete(env);
+}
+
 export function cachedQuotaPolicySource(
   inner: QuotaPolicySource,
   options: {
     readonly ttlMs?: number;
     readonly maxEntries?: number;
     readonly now?: () => number;
+    readonly entries?: QuotaCacheEntries;
+    readonly keyPrefix?: string;
   } = {},
 ): QuotaPolicySource {
   const ttlMs = options.ttlMs ?? DEFAULT_QUOTA_POLICY_CACHE_TTL_MS;
   const maxEntries = options.maxEntries ?? DEFAULT_QUOTA_POLICY_CACHE_MAX_ENTRIES;
   const now = options.now ?? Date.now;
-  const entries = new Map<string, { expiresAtMs: number; snapshot: QuotaPolicySnapshot }>();
+  const entries = options.entries ?? new Map();
   return {
     async policiesFor(subject: QuotaSubject): Promise<QuotaPolicySnapshot> {
-      const key = [
+      const key = JSON.stringify([
+        options.keyPrefix ?? "",
         subject.apiKeyId,
         subject.chain.tenantId ?? "",
         subject.chain.projectId ?? "",
         subject.chain.workspaceId ?? "",
         subject.chain.keyId ?? "",
-      ].join("\0");
+      ]);
       const hit = entries.get(key);
       if (hit !== undefined && now() < hit.expiresAtMs) return hit.snapshot;
       if (hit !== undefined) entries.delete(key);
+      const startedAtMs = now();
       const snapshot = await inner.policiesFor(subject);
       if (snapshot.ok) {
         entries.delete(key);
-        entries.set(key, { expiresAtMs: now() + ttlMs, snapshot });
+        entries.set(key, {
+          expiresAtMs: Math.min(
+            startedAtMs + ttlMs,
+            snapshot.expiresAtMs ?? Number.POSITIVE_INFINITY,
+          ),
+          snapshot,
+        });
         while (entries.size > maxEntries) {
           const oldest = entries.keys().next();
           if (oldest.done === true) break;
@@ -791,12 +829,36 @@ export function quotaPolicySourceFromEnv(
    * pass its own resolver. See {@link d1QuotaPolicySource}.
    */
   tenantPolicyDb?: (tenantId: string) => Promise<D1Database>,
+  // Explicit request address supplied by the gateway. Other callers retain a
+  // local cache because an arbitrary resolver does not establish an identity.
+  cacheScope?: string,
 ): QuotaPolicySource {
   const db = controlDatabaseFrom(env);
+  if (db === undefined) return quotaPolicySourceFromVars(env);
   const resolver = tenantPolicyDb ?? tenantQuotaPolicyDbFrom(env);
-  return db === undefined
-    ? quotaPolicySourceFromVars(env)
-    : cachedQuotaPolicySource(d1QuotaPolicySource(db, undefined, resolver));
+  const kv = (env as QuotaBindings & { PLATFORM_CONFIG?: KVNamespace }).PLATFORM_CONFIG;
+  const inner = d1QuotaPolicySource(db, undefined, resolver, kv, cacheScope !== undefined);
+  if (cacheScope === undefined) return cachedQuotaPolicySource(inner);
+  let entries = sharedQuotaEntries.get(env);
+  if (entries === undefined) {
+    entries = new Map();
+    sharedQuotaEntries.set(env, entries);
+  }
+  const cached = cachedQuotaPolicySource(inner, { entries, keyPrefix: cacheScope });
+  return {
+    async policiesFor(subject) {
+      // Resolve and validate in THIS request even on a cache hit. Resolution
+      // does no I/O in DO mode; failures must not be hidden by cached policy.
+      if (subject.chain.tenantId !== undefined) {
+        try {
+          await resolver(subject.chain.tenantId);
+        } catch (error) {
+          return { ok: false, detail: String(error) };
+        }
+      }
+      return cached.policiesFor(subject);
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------

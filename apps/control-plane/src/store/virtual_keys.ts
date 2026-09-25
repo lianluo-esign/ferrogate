@@ -100,6 +100,7 @@ import {
 } from "@ferrogate/storage";
 import type { StoreRecord } from "../ports.js";
 import { API_KEY_DIRECTORY_TABLE, TENANT_API_KEY_TABLE } from "./api_keys.js";
+import { writeCanonicalResourceIfView } from "./canonical-resource.js";
 
 /**
  * Which way a write moves the credential's authority, and therefore which leg
@@ -242,6 +243,8 @@ export async function projectVirtualKey(
   };
 
   const tenantLeg = async (): Promise<void> => {
+    if (await writeCanonicalResourceIfView(handle.db, "api_keys", "virtual-keys", record, nowUnix))
+      return;
     await handle.db
       .prepare(
         `INSERT INTO ${TENANT_API_KEY_TABLE} (
